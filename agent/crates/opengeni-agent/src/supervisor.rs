@@ -146,8 +146,10 @@ async fn publish_bulk_lane(
                         return;
                     }
                 }
-                // This connection's inventory, until every page is answered:
-                // Opengeni names what it no longer recognises (inventory.rs).
+                // This connection's inventory, until every page is answered,
+                // and again while completed output goes unreleased: Opengeni
+                // names the ops to end and collects what it has not stored
+                // (inventory.rs). The runner starts every such exchange.
                 for page in engine.inventory_pages(&scope) {
                     let event = crate::ops::inventory_event(page);
                     if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
@@ -3651,6 +3653,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || {
                 let mut command = tokio::process::Command::new("/bin/sh");
                 command.arg("-c").arg("printf synthetic-result");
@@ -3868,6 +3871,7 @@ mod tests {
                             ticket,
                             Vec::new(),
                             None,
+                            0,
                             || {
                                 let mut command = tokio::process::Command::new("/bin/sh");
                                 command.arg("-c").arg("sleep 30");
@@ -4085,6 +4089,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Err(std::io::Error::other("synthetic spawn failure")),
             |_| {},
             |_| Vec::new(),
@@ -6053,6 +6058,7 @@ mod tests {
                 window_bytes: 0,
                 deadline_ms: 0,
                 origin_id: "session-e2e".to_string(),
+                connection_generation: 0,
             })),
         };
         let reply = tokio::time::timeout(
@@ -6265,6 +6271,7 @@ mod tests {
                 window_bytes: 1 << 20,
                 deadline_ms: 0,
                 origin_id: "example-session".into(),
+                connection_generation: 0,
             })),
         };
         let started = client
@@ -7179,6 +7186,7 @@ mod tests {
                 window_bytes: 0,
                 deadline_ms: 0,
                 origin_id: "session-handover".to_string(),
+                connection_generation: 0,
             })),
         };
         let reply = tokio::time::timeout(

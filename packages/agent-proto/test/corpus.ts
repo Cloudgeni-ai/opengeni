@@ -75,6 +75,7 @@ export function canonicalControlRequest(): ControlRequest {
         windowBytes: "65536",
         deadlineMs: "1800000000000",
         originId: "session-abc",
+        connectionGeneration: "0",
       },
     },
   };

@@ -17,6 +17,7 @@ import {
   AgentEventAck,
   ControlRequest,
   ControlResponse,
+  ErrorCode,
   Hello,
   OpLostReason,
   OpState,
@@ -41,7 +42,7 @@ import {
   recordConnectedCommandOutputConsumption,
 } from "@opengeni/db/session-background-commands";
 import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
-import { NatsControlRpc, type ControlRpc } from "@opengeni/runtime/sandbox";
+import { NatsControlRpc } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -717,10 +718,10 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
     }
   }, 60_000);
 
-  test("a finished command's output is released in one exchange through the link, and housekeeping never reaches the sleeping sandbox", async () => {
+  test("a finished command's output is released in one exchange through the link, housekeeping never reaches the sleeping sandbox, and the agent's own inventory recovers the rest", async () => {
     if (!available) return;
-    // The release where the output is stored, and the reaper's recovery, over
-    // the real NATS bus.
+    // The release where the output is stored, housekeeping, and the agent's
+    // inventory answered by the API's event ingestion, over the real NATS bus.
     const bus = await createNatsEventBus(nats.url);
     const stops: Array<() => void> = [];
     try {
@@ -823,7 +824,19 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
               headers: [["Opengeni-Control-Replay", "1"]],
             };
           requests.push(request.op?.$case ?? "none");
-          if (request.op?.$case !== "opRelease") return null;
+          // This agent cannot replay output: any other request is refused.
+          if (request.op?.$case !== "opRelease")
+            return {
+              payload: ControlResponse.encode(
+                ControlResponse.fromPartial({
+                  requestId: request.requestId,
+                  result: {
+                    $case: "error",
+                    error: { code: ErrorCode.ERROR_CODE_OS, message: "refused", retryable: false },
+                  },
+                }),
+              ).finish(),
+            };
           const { opId, exitSeq } = request.op.opRelease;
           if (exitSeq === "2") released.add(opId);
           return {
@@ -854,7 +867,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       // Background commands that exited, their output durably stored.
       const stored = async (commandId: string) =>
         (await shared!.admin`select * from session_background_commands where id=${commandId}`)[0]!;
-      const consumed = async () => {
+      const exited = async () => {
         const commandId = crypto.randomUUID();
         const identity = {
           accountId,
@@ -875,11 +888,17 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
           exitCode: 0,
           reason: "op_exit",
         });
+        return identity;
+      };
+      const store = async (identity: Awaited<ReturnType<typeof exited>>) =>
         await recordConnectedCommandOutputConsumption(db, {
           ...identity,
           receipt: { exitSeq: "2", attachGeneration: "1" },
           exitCode: 0,
         });
+      const consumed = async () => {
+        const identity = await exited();
+        await store(identity);
         return identity;
       };
       const due = async () =>
@@ -916,10 +935,65 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const acks = () =>
         link.frames.filter((frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8);
 
+      // The API's agent-event ingestion, answering on the op-stream
+      // connection exactly as the API process does.
+      const events = controlPlane.subscribe(`${scope}.events`);
+      void (async () => {
+        for await (const message of events)
+          await handleAgentEventPayload(db, undefined, message.data, message.subject, bus);
+      })();
+      stops.push(() => events.unsubscribe());
+      /** The agent reports completed ops (with how long ago they completed)
+       * and reads the answer off its ack subscription. */
+      let reportId = 0;
+      const report = async (operations: Array<[opId: string, completedAgeMs: number]>) => {
+        reportId += 1;
+        const answered = link.next(
+          (frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8,
+          5_000,
+        );
+        link.send({
+          t: "pub",
+          s: 1,
+          subject: `${scope}.events`,
+          payload: AgentEvent.encode({
+            agentId: "",
+            event: {
+              $case: "operationInventory",
+              operationInventory: {
+                reportId: String(reportId),
+                page: 0,
+                pages: 1,
+                operations: operations.map(([opId, completedAgeMs]) => ({
+                  opId,
+                  connectionGeneration: "1",
+                  complete: true,
+                  completedAgeMs: String(completedAgeMs),
+                })),
+              },
+            },
+          }).finish(),
+        });
+        const frame = (await answered) as Extract<GatewayFrame, { t: "msg" }>;
+        expect(frame.reply).toBeUndefined();
+        const ack = AgentEventAck.decode(frame.payload).ack;
+        if (ack?.$case !== "operationInventory") throw new Error("not an inventory answer");
+        expect(ack.operationInventory.reportId).toBe(String(reportId));
+        return ack.operationInventory.endOpIds;
+      };
+      const passesSendNothing = async () => {
+        for (let pass = 0; pass < 3; pass++) {
+          await due();
+          const mark = link.frames.length;
+          await reaper();
+          await Bun.sleep(100);
+          expect(forwarded(mark)).toEqual([]);
+        }
+      };
+
       // Where the output is stored, while the agent is live from the command:
       // one OpRelease, answered, and the release is settled from that answer.
       const live = await consumed();
-      let mark = link.frames.length;
       expect(
         await releaseStoredConnectedCommandOutput(db, {
           command: live,
@@ -935,12 +1009,20 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       expect(settled.reconcile_attempts).toBe(0);
       expect(settled.reconcile_claim_id).toBeNull();
 
-      // A housekeeping pass between storing an output and releasing it takes
-      // nothing: the release is the storing process's, which then sends it.
+      // A housekeeping pass claims an obligation, the storing process releases
+      // it, the sandbox sleeps, and the pass goes on with its claim: it sends
+      // nothing, as housekeeping never sends a compute sandbox anything.
       const raced = await consumed();
+      await due();
+      const reaperClaim = (
+        await claimConnectedCommandOutputReleases(db, {
+          claimId: crypto.randomUUID(),
+          limit: 100,
+          claimTtlMs: CONNECTED_COMMAND_CLAIM_TTL_MS,
+        })
+      ).find((claim) => claim.commandId === raced.commandId);
+      expect(reaperClaim).toBeDefined();
       requests.length = 0;
-      await reaper();
-      expect(requests).toEqual([]);
       expect(
         await releaseStoredConnectedCommandOutput(db, {
           command: raced,
@@ -950,128 +1032,77 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         }),
       ).toBe("released");
       expect(requests).toEqual(["opRelease"]);
-
-      // While the reaper holds an obligation (its grace passed), the storing
-      // process sends nothing for it; the reaper's one release settles it.
-      const held = await consumed();
-      await due();
-      const reaperHeld = (
-        await claimConnectedCommandOutputReleases(db, {
-          claimId: crypto.randomUUID(),
-          limit: 100,
-          claimTtlMs: CONNECTED_COMMAND_CLAIM_TTL_MS,
-        })
-      ).find((claim) => claim.commandId === held.commandId);
-      expect(reaperHeld).toBeDefined();
-      requests.length = 0;
-      expect(
-        await releaseStoredConnectedCommandOutput(db, {
-          command: held,
-          exitSeq: "2",
-          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
-          controlTimeoutMs: 2_000,
-        }),
-      ).toBe("claimed_elsewhere");
-      expect(requests).toEqual([]);
-      await releaseClaimedConnectedCommandOutput(
-        {
-          db,
-          settings: reaperSettings,
-          observability: reaperObservability,
-          bus: bus as never,
-          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
-        },
-        reaperHeld!,
-      );
-      expect(requests).toEqual(["opRelease"]);
-      expect((await stored(held.commandId)).output_release_observed_at).toBeInstanceOf(Date);
-
-      // One owner per release: the storing process's claim outlives its TTL
-      // while its release is in flight, so the reaper takes the obligation
-      // over. The release is answered and recorded, the sandbox sleeps, and
-      // the reaper, finding the obligation settled, sends it nothing.
-      const slow = await consumed();
-      const liveRpc = new NatsControlRpc(async () => bus.getRequestConnection());
-      let takenOver: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>> = [];
-      const slowRpc: ControlRpc = {
-        request: async (subject, request, options) => {
-          await shared!
-            .admin`update session_background_commands set reconcile_claimed_at=now() - interval '10 minutes', reconcile_after='2000-01-01T00:00:00Z'::timestamptz where id=${slow.commandId}`;
-          takenOver = await claimConnectedCommandOutputReleases(db, {
-            claimId: crypto.randomUUID(),
-            limit: 100,
-            claimTtlMs: CONNECTED_COMMAND_CLAIM_TTL_MS,
-          });
-          return await liveRpc.request(subject, request, options);
-        },
-      };
-      requests.length = 0;
-      expect(
-        await releaseStoredConnectedCommandOutput(db, {
-          command: slow,
-          exitSeq: "2",
-          controlRpc: slowRpc,
-          controlTimeoutMs: 2_000,
-        }),
-      ).toBe("released");
-      const reaperClaim = takenOver.find((claim) => claim.commandId === slow.commandId);
-      expect(reaperClaim).toBeDefined();
-      expect(requests).toEqual(["opRelease"]);
       await power("asleep");
-      mark = link.frames.length;
+      const mark = link.frames.length;
       await releaseClaimedConnectedCommandOutput(
         {
           db,
           settings: reaperSettings,
           observability: reaperObservability,
           bus: bus as never,
-          controlRpc: liveRpc,
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
         },
         reaperClaim!,
       );
       await Bun.sleep(100);
       expect(forwarded(mark)).toEqual([]);
-      expect(requests).toEqual(["opRelease"]);
-      const slowRow = await stored(slow.commandId);
-      expect(slowRow.output_release_observed_at).toBeInstanceOf(Date);
-      expect(slowRow.reconcile_claim_id).toBeNull();
+      expect((await stored(raced.commandId)).output_release_observed_at).toBeInstanceOf(Date);
 
-      // The sandbox sleeps: housekeeping passes send it nothing at all.
-      for (let pass = 0; pass < 3; pass++) {
-        await due();
-        mark = link.frames.length;
-        await reaper();
-        await Bun.sleep(100);
-        expect(forwarded(mark)).toEqual([]);
-      }
-      expect((await stored(live.commandId)).reconcile_attempts).toBe(0);
-
-      // A process died between storing an output and releasing it: the reaper
-      // recovers that release once. Reaching the sleeping sandbox is real work
-      // (one wake), and the answer settles it in that one exchange.
+      // One process died between storing an output and releasing it, another
+      // between a command's exit and storing its output. While the sandbox
+      // sleeps, housekeeping passes send it nothing at all.
       const orphan = await consumed();
-      // Past the storing process's grace period.
-      await due();
+      const unstored = await exited();
       requests.length = 0;
-      mark = link.frames.length;
-      await reaper();
-      expect(requests).toEqual(["opRelease"]);
+      await passesSendNothing();
+      expect(requests).toEqual([]);
+      expect((await stored(orphan.commandId)).output_release_observed_at).toBeNull();
+      expect((await stored(unstored.commandId)).output_consumed_at).toBeNull();
+
+      // The agent wakes for its own work and, holding completed output nobody
+      // released for a while, reports its inventory again. In that same
+      // exchange the answer ends the stored output (and the release is
+      // recorded) and keeps the output Opengeni never stored, which it starts
+      // collecting while the agent talks (this agent refuses to replay it).
+      await power("awake");
+      expect(
+        await report([
+          [orphan.opId, 60_000],
+          [unstored.opId, 60_000],
+        ]),
+      ).toEqual([orphan.opId]);
       const recovered = await stored(orphan.commandId);
       expect(recovered.output_release_observed_at).toBeInstanceOf(Date);
       expect(recovered.output_unavailable_at).toBeNull();
       expect(recovered.last_reconcile_outcome).toBe("output_released");
-      expect(recovered.reconcile_attempts).toBe(1);
-
-      // Nothing is left to poll: later passes send nothing.
-      for (let pass = 0; pass < 3; pass++) {
-        await due();
-        mark = link.frames.length;
-        await reaper();
-        await Bun.sleep(100);
-        expect(forwarded(mark)).toEqual([]);
+      const collectDeadline = Date.now() + 10_000;
+      while (
+        requests.length === 0 ||
+        (await stored(unstored.commandId)).reconcile_claim_id !== null
+      ) {
+        if (Date.now() > collectDeadline) throw new Error("the collection did not finish");
+        await Bun.sleep(50);
       }
-      // No final ACK was ever sent: the release needs none.
-      expect(acks()).toEqual([]);
+      expect(requests).not.toContain("opRelease");
+      const kept = await stored(unstored.commandId);
+      expect(kept.output_consumed_at).toBeNull();
+      expect(kept.output_unavailable_at).toBeNull();
+      expect(kept.output_release_observed_at).toBeNull();
+
+      // Once that output is stored, the next report ends it too.
+      await store(unstored);
+      expect(await report([[unstored.opId, 120_000]])).toEqual([unstored.opId]);
+      expect((await stored(unstored.commandId)).output_release_observed_at).toBeInstanceOf(Date);
+
+      // Nothing is left: later passes send nothing, awake or asleep, and
+      // Opengeni never sent a final ACK (the agent's ack subscription carried
+      // only the two inventory answers).
+      requests.length = 0;
+      await passesSendNothing();
+      await power("asleep");
+      await passesSendNothing();
+      expect(requests).toEqual([]);
+      expect(acks()).toHaveLength(2);
       link.close();
     } finally {
       for (const stop of stops) stop();
@@ -1136,7 +1167,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
     }
   }, 30_000);
 
-  test("a returning agent's operation inventory is answered through the link with what Opengeni no longer recognises, and the answer never wakes the sandbox", async () => {
+  test("a returning agent's operation inventory is answered through the link with what it should end, and the answer never wakes the sandbox", async () => {
     if (!available) return;
     // The API's agent-event ingestion over the real NATS bus, answering on
     // the op-stream connection exactly as the API process does.
@@ -1174,7 +1205,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         s: number,
         scope: string,
         reportId: string,
-        operations: Array<[string, number]>,
+        operations: Array<[opId: string, startedOn: number]>,
       ) => {
         const answered = link.next(
           (frame) => frame.t === "msg" && frame.s === s && frame.sid === 8,
@@ -1195,6 +1226,8 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
                 operations: operations.map(([opId, startedOn]) => ({
                   opId,
                   connectionGeneration: String(startedOn),
+                  complete: false,
+                  completedAgeMs: "0",
                 })),
               },
             },
@@ -1214,11 +1247,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const oldInstance = crypto.randomUUID();
       const oldScope = await open(1, oldInstance);
       expect(await generation()).toBe(1);
-      expect(await report(1, oldScope, "1", [["old-op", 0]])).toEqual({
+      // Each op carries the generation its OpStart was dispatched under.
+      expect(await report(1, oldScope, "1", [["old-op", 1]])).toEqual({
         reportId: "1",
         page: 0,
-        connectionGeneration: "1",
-        stopOpIds: [],
+        endOpIds: [],
       });
 
       // new: another process holds the sandbox's connection (generation 2).
@@ -1226,10 +1259,10 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const newInstance = crypto.randomUUID();
       const newScope = await open(2, newInstance);
       expect(await generation()).toBe(2);
-      expect((await report(2, newScope, "1", [["new-op", 0]])).stopOpIds).toEqual([]);
+      expect((await report(2, newScope, "1", [["new-op", 2]])).endOpIds).toEqual([]);
 
-      // old again (generation 3): what it started on generation 1 is no
-      // longer recognised; what it started now, or never learned, is kept.
+      // old again (generation 3): what it started on generation 1 is ended;
+      // what it started now, or what an older Opengeni started, is kept.
       link.send({ t: "close", s: 2 });
       const returned = await open(3, oldInstance);
       expect(await generation()).toBe(3);
@@ -1237,15 +1270,15 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         await report(3, returned, "2", [
           ["old-op", 1],
           ["current-op", 3],
-          ["unlearned-op", 0],
+          ["older-opengeni-op", 0],
         ]),
-      ).toEqual({ reportId: "2", page: 0, connectionGeneration: "3", stopOpIds: ["old-op"] });
+      ).toEqual({ reportId: "2", page: 0, endOpIds: ["old-op"] });
 
       // The sandbox falls asleep right after reporting: the answer still
       // reaches the host as a plain message, and no request is ever sent.
       link.send({ t: "state", s: 3, state: "asleep" });
       await Bun.sleep(100);
-      expect((await report(3, returned, "3", [["old-op", 1]])).stopOpIds).toEqual(["old-op"]);
+      expect((await report(3, returned, "3", [["old-op", 1]])).endOpIds).toEqual(["old-op"]);
       expect(link.frames.filter((frame) => frame.t === "msg" && frame.reply !== undefined)).toEqual(
         [],
       );

@@ -24,14 +24,16 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
-import { unrecognisedOperations } from "../src/sandbox/operation-inventory";
+import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/operation-inventory";
+import { OP_START_RESEND_HORIZON_MS } from "@opengeni/runtime/sandbox";
 
-// A runner process whose connection another process took keeps running what
-// it ran: Opengeni settled those commands without reaching it. When the same
-// process holds the connection again (old -> new -> old), it reports what it
-// still runs or retains, and the answer to that report names what Opengeni no
-// longer recognises, whatever happened to the chats in between. Nothing is
-// recorded and nothing is sent unless the runner reports.
+// A runner reports what it still runs or retains, on each connection and while
+// it holds output nobody released; Opengeni answers in the same exchange which
+// ops to end. A command row of that exact process decides by custody: output
+// is ended only once Opengeni stored it, and output it never stored is
+// collected instead. Without a row, the connection generation the op's OpStart
+// carried decides: work from an earlier generation is ended, whatever happened
+// to its chat. Nothing is sent to a runner that is not reporting.
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -102,8 +104,16 @@ async function insertCommand(
   machine: Machine,
   connectionInstanceId: string,
   opId: string,
-  state: "running" | "lost" = "running",
+  state: "running" | "lost" | "exited" = "running",
 ): Promise<void> {
+  if (state === "exited") {
+    await insertCommand(machine, connectionInstanceId, opId);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update session_background_commands set state = 'exited', exit_code = 0, settled_at = now() where op_id = ${opId}`;
+    });
+    return;
+  }
   await shared.admin`insert into session_background_commands(account_id, workspace_id, session_id, provider, state, control_workspace_id, enrollment_id, connection_instance_id, op_id, reconcile_after, settlement_reason, settled_at)
     values (${machine.accountId}, ${machine.workspaceId}, ${machine.sessionId}, 'connected_machine', ${state}, ${machine.workspaceId}, ${machine.enrollment.id}, ${connectionInstanceId}, ${opId}, '2000-01-01T00:00:00Z'::timestamptz,
       ${state === "lost" ? "op_lost_unknown" : null}, ${state === "lost" ? new Date() : null})`;
@@ -149,12 +159,15 @@ function answerChannel() {
   return { bus, sent };
 }
 
-/** One inventory page, delivered exactly as the events subscription does. */
+type Reported = [opId: string, generation: number, completedAgeMs?: number];
+
+/** One inventory page, delivered exactly as the events subscription does. An
+ * op with a completion age has completed. */
 async function report(
   machine: Machine,
   bus: EventBus,
   connectionInstanceId: string,
-  operations: Array<[opId: string, generation: number]>,
+  operations: Reported[],
   reportId = "7",
 ): Promise<void> {
   const payload = AgentEvent.encode({
@@ -166,9 +179,11 @@ async function report(
         page: 0,
         pages: 1,
         operations: operations.map(
-          ([opId, generation]): InventoryOperation => ({
+          ([opId, generation, completedAgeMs]): InventoryOperation => ({
             opId,
             connectionGeneration: String(generation),
+            complete: completedAgeMs !== undefined,
+            completedAgeMs: String(completedAgeMs ?? 0),
           }),
         ),
       },
@@ -190,12 +205,12 @@ function answers(sent: Array<{ subject: string; payload: Uint8Array }>) {
     return {
       subject,
       ...ack.operationInventory,
-      stopOpIds: ack.operationInventory.stopOpIds.toSorted(),
+      endOpIds: [...ack.operationInventory.endOpIds].sort(),
     };
   });
 }
 
-test("old -> new -> old: the returning runner's report is answered with what Opengeni settled while it was replaced", async () => {
+test("old -> new -> old: the returning runner ends what was settled or orphaned while it was replaced", async () => {
   const machine = await seedMachine();
   const { bus, sent } = answerChannel();
   const oldInstance = crypto.randomUUID();
@@ -203,7 +218,9 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
   const ack = (instance: string) =>
     `agent.${machine.workspaceId}.${machine.enrollment.id}.connection.${instance}.ack`;
 
-  // old (generation 1): two background commands and foreground work.
+  // old (generation 1): two background commands and foreground work, each
+  // admitted with the generation its OpStart carried. The answer to this
+  // first report is lost; nothing about the ops depends on it.
   expect(await claim(machine, oldInstance)).toBe(1);
   const orphan = `orphan-${crypto.randomUUID()}`;
   const deleted = `deleted-${crypto.randomUUID()}`;
@@ -211,18 +228,12 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
   await insertCommand(machine, oldInstance, orphan);
   await insertCommand(machine, oldInstance, deleted);
   await report(machine, bus, oldInstance, [
-    [orphan, 0],
-    [deleted, 0],
-    [foreground, 0],
+    [orphan, 1],
+    [deleted, 1],
+    [foreground, 1],
   ]);
   expect(answers(sent)).toEqual([
-    {
-      subject: ack(oldInstance),
-      reportId: "7",
-      page: 0,
-      connectionGeneration: "1",
-      stopOpIds: [],
-    },
+    { subject: ack(oldInstance), reportId: "7", page: 0, endOpIds: [] },
   ]);
   sent.length = 0;
 
@@ -233,27 +244,23 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
   await shared.admin`delete from session_background_commands where op_id = ${deleted}`;
 
   // Negative controls while new holds the connection: old's report is not
-  // answered (it does not hold the connection), and new's own report of the
-  // same ids stops nothing (they are not its commands and it is current).
+  // answered (it does not hold the connection), and new's own report of its
+  // current work ends nothing.
   await report(machine, bus, oldInstance, [[orphan, 1]]);
   expect(sent).toEqual([]);
-  await report(machine, bus, newInstance, [[orphan, 0]]);
+  const newWork = `new-${crypto.randomUUID()}`;
+  await report(machine, bus, newInstance, [[newWork, 2]]);
   expect(answers(sent)).toEqual([
-    {
-      subject: ack(newInstance),
-      reportId: "7",
-      page: 0,
-      connectionGeneration: "2",
-      stopOpIds: [],
-    },
+    { subject: ack(newInstance), reportId: "7", page: 0, endOpIds: [] },
   ]);
   sent.length = 0;
 
-  // old again (generation 3): a command it started now is current.
+  // old again (generation 3): what it started now is current; an op an older
+  // Opengeni admitted (generation 0) is kept.
   expect(await claim(machine, oldInstance)).toBe(3);
   const current = `current-${crypto.randomUUID()}`;
   const freshForeground = `fresh-${crypto.randomUUID()}`;
-  const unlearned = `unlearned-${crypto.randomUUID()}`;
+  const olderOpengeni = `older-${crypto.randomUUID()}`;
   await insertCommand(machine, oldInstance, current);
   const settled = await commandRows(machine);
   await report(
@@ -266,7 +273,7 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
       [foreground, 1],
       [current, 3],
       [freshForeground, 3],
-      [unlearned, 0],
+      [olderOpengeni, 0],
     ],
     "9",
   );
@@ -275,12 +282,11 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
       subject: ack(oldInstance),
       reportId: "9",
       page: 0,
-      connectionGeneration: "3",
-      stopOpIds: [orphan, deleted, foreground].toSorted(),
+      endOpIds: [orphan, deleted, foreground].sort(),
     },
   ]);
-  // Answering changed no record: the settled ones stay as they were, also
-  // after the runner pushes the completion of the op it then cancelled.
+  // Answering changed no settled record, also after the runner pushes the
+  // completion of the op it then cancelled.
   expect(await commandRows(machine)).toEqual(settled);
   await ingestConnectedCommandCompletion(
     client.db,
@@ -294,7 +300,7 @@ test("old -> new -> old: the returning runner's report is answered with what Ope
   expect(await commandRows(machine)).toEqual(settled);
 });
 
-test("a plain reconnect of the same process keeps its generation, so nothing it runs is stopped", async () => {
+test("a plain reconnect of the same process keeps its generation, so nothing it runs is ended, however long it runs", async () => {
   const machine = await seedMachine();
   const { bus, sent } = answerChannel();
   const instance = crypto.randomUUID();
@@ -303,9 +309,45 @@ test("a plain reconnect of the same process keeps its generation, so nothing it 
   await shared.admin`update enrollments set connection_lease_expires_at = now() - interval '1 second' where id = ${machine.enrollment.id}`;
   expect(await claim(machine, instance)).toBe(1);
   await report(machine, bus, instance, [[opId, 1]]);
-  expect(answers(sent).map((answer) => [answer.connectionGeneration, answer.stopOpIds])).toEqual([
-    ["1", []],
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
+});
+
+test("output Opengeni has not stored is never ended: it is collected, and ended once stored", async () => {
+  const machine = await seedMachine();
+  const { bus, sent } = answerChannel();
+  const instance = crypto.randomUUID();
+  expect(await claim(machine, instance)).toBe(1);
+  const unstored = `unstored-${crypto.randomUUID()}`;
+  const running = `running-${crypto.randomUUID()}`;
+  const lost = `lost-${crypto.randomUUID()}`;
+  await insertCommand(machine, instance, unstored, "exited");
+  await insertCommand(machine, instance, running);
+  await insertCommand(machine, instance, lost, "lost");
+
+  // Same generation, all completed: the exited command whose output was
+  // never stored is kept (its collection is attempted while the runner talks;
+  // this test transport cannot replay, so nothing is stored), the running one
+  // is kept, the lost one is ended.
+  await report(machine, bus, instance, [
+    [unstored, 1, 5_000],
+    [running, 1, 5_000],
+    [lost, 1, 5_000],
   ]);
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[lost]]);
+  sent.length = 0;
+  const [kept] = await shared.admin<
+    Array<{ consumed: Date | null; released: Date | null; claim: string | null }>
+  >`select output_consumed_at as consumed, output_release_observed_at as released, reconcile_claim_id as claim from session_background_commands where op_id = ${unstored}`;
+  expect(kept).toEqual({ consumed: null, released: null, claim: null });
+
+  // Once stored, the same report ends it and records the release.
+  await shared.admin`update session_background_commands set output_consumed_at = now(), output_exit_seq = '5', output_attach_generation = '1' where op_id = ${unstored}`;
+  await report(machine, bus, instance, [[unstored, 1, 6_000]]);
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[unstored]]);
+  const [stored] = await shared.admin<
+    Array<{ released: Date | null }>
+  >`select output_release_observed_at as released from session_background_commands where op_id = ${unstored}`;
+  expect(stored?.released).toBeInstanceOf(Date);
 });
 
 test("a malformed or oversized page, or an inactive enrollment, gets no answer", async () => {
@@ -313,13 +355,16 @@ test("a malformed or oversized page, or an inactive enrollment, gets no answer",
   const { bus, sent } = answerChannel();
   const instance = crypto.randomUUID();
   expect(await claim(machine, instance)).toBe(1);
-  await report(machine, bus, instance, [["bad.op", 0]]);
-  await report(machine, bus, instance, [["", 0]]);
+  await report(machine, bus, instance, [["bad.op", 1]]);
+  await report(machine, bus, instance, [["", 1]]);
   await report(
     machine,
     bus,
     instance,
-    Array.from({ length: CONNECTED_COMMAND_CLASSIFY_LIMIT + 1 }, (_, n) => [`op-${n}`, 0]),
+    Array.from(
+      { length: CONNECTED_COMMAND_CLASSIFY_LIMIT + 1 },
+      (_, n): Reported => [`op-${n}`, 1],
+    ),
   );
   expect(sent).toEqual([]);
   // At the limit it is answered.
@@ -327,41 +372,57 @@ test("a malformed or oversized page, or an inactive enrollment, gets no answer",
     machine,
     bus,
     instance,
-    Array.from({ length: CONNECTED_COMMAND_CLASSIFY_LIMIT }, (_, n) => [`op-${n}`, 0]),
+    Array.from({ length: CONNECTED_COMMAND_CLASSIFY_LIMIT }, (_, n): Reported => [`op-${n}`, 1]),
   );
   expect(sent).toHaveLength(1);
   sent.length = 0;
   await shared.admin`update enrollments set status = 'revoked', revoked_at = now() where id = ${machine.enrollment.id}`;
-  await report(machine, bus, instance, [["op-1", 0]]);
+  await report(machine, bus, instance, [["op-1", 1]]);
   expect(sent).toEqual([]);
 });
 
-test("classification is exact to the runner process and says whether each command is settled", async () => {
+test("classification is exact to the runner process and carries each command's output custody", async () => {
   const machine = await seedMachine();
   const instance = crypto.randomUUID();
   const other = crypto.randomUUID();
   const running = `running-${crypto.randomUUID()}`;
   const lost = `lost-${crypto.randomUUID()}`;
   const exited = `exited-${crypto.randomUUID()}`;
+  const stored = `stored-${crypto.randomUUID()}`;
   const elsewhere = `elsewhere-${crypto.randomUUID()}`;
   await insertCommand(machine, instance, running);
   await insertCommand(machine, instance, lost, "lost");
-  await insertCommand(machine, instance, exited, "lost");
-  await shared.admin.begin(async (sql) => {
-    await sql`set local session_replication_role = replica`;
-    await sql`update session_background_commands set state = 'exited', exit_code = 0, settlement_reason = null where op_id = ${exited}`;
-  });
+  await insertCommand(machine, instance, exited, "exited");
+  await insertCommand(machine, instance, stored, "exited");
+  await shared.admin`update session_background_commands set output_consumed_at = now(), output_exit_seq = '9', output_attach_generation = '1' where op_id = ${stored}`;
   await insertCommand(machine, other, elsewhere, "lost");
   const classified = await classifyConnectedCommandOps(client.db, {
     controlWorkspaceId: machine.workspaceId,
     enrollmentId: machine.enrollment.id,
     connectionInstanceId: instance,
-    opIds: [running, lost, exited, elsewhere, "unknown"],
+    opIds: [running, lost, exited, stored, elsewhere, "unknown"],
   });
-  expect(Object.fromEntries(classified)).toEqual({
-    [running]: { terminal: false },
-    [lost]: { terminal: true },
-    [exited]: { terminal: true },
+  const custody = Object.fromEntries(
+    [...classified].map(([opId, rows]) => [
+      opId,
+      rows.map((row) => ({
+        state: row.state,
+        exitSeq: row.outputExitSeq,
+        consumed: row.outputConsumed,
+        released: row.outputReleased,
+        unavailable: row.outputUnavailable,
+        session: row.sessionId === machine.sessionId,
+      })),
+    ]),
+  );
+  const row = (state: string, consumed = false, exitSeq: string | null = null) => [
+    { state, exitSeq, consumed, released: false, unavailable: false, session: true },
+  ];
+  expect(custody).toEqual({
+    [running]: row("running"),
+    [lost]: row("lost"),
+    [exited]: row("exited"),
+    [stored]: row("exited", true, "9"),
   });
   await expect(
     classifyConnectedCommandOps(client.db, {
@@ -373,37 +434,102 @@ test("classification is exact to the runner process and says whether each comman
   ).rejects.toThrow("At most");
 });
 
-test("what to stop: settled commands, and row-less work from an earlier generation", () => {
+test("the decision: custody for a command, the OpStart generation and age for anything else", () => {
+  const command = (
+    state: "running" | "stopping" | "exited" | "lost",
+    custody: { consumed?: boolean; released?: boolean; unavailable?: boolean } = {},
+  ) => ({
+    opId: "",
+    accountId: "a",
+    workspaceId: "w",
+    sessionId: "s",
+    commandId: "c",
+    controlWorkspaceId: "w",
+    enrollmentId: "e",
+    connectionInstanceId: "i",
+    state,
+    outputExitSeq: custody.consumed ? "4" : null,
+    outputConsumed: custody.consumed ?? false,
+    outputReleased: custody.released ?? false,
+    outputUnavailable: custody.unavailable ?? false,
+  });
+  const op = (opId: string, generation: string, completedAgeMs?: number): ReportedOperation => ({
+    opId,
+    connectionGeneration: generation,
+    complete: completedAgeMs !== undefined,
+    completedAgeMs: String(completedAgeMs ?? 0),
+  });
   const decide = (
-    operations: Array<[string, string]>,
-    commands: Record<string, boolean>,
+    operations: ReportedOperation[],
+    commands: Record<string, ReturnType<typeof command>[]> = {},
     connectionGeneration = "3",
-  ) =>
-    unrecognisedOperations({
-      operations: operations.map(([opId, generation]) => ({
-        opId,
-        connectionGeneration: generation,
-      })),
-      commands: new Map(Object.entries(commands).map(([opId, terminal]) => [opId, { terminal }])),
+  ) => {
+    const decision = decideInventoryPage({
+      operations,
+      commands: new Map(Object.entries(commands)),
       connectionGeneration,
     });
-  // A command row decides, whatever generation the runner reports.
-  expect(decide([["settled", "3"]], { settled: true })).toEqual(["settled"]);
-  expect(decide([["live", "1"]], { live: false })).toEqual([]);
-  // Without a row: an earlier generation is stopped, the current one and an
-  // unlearned one are kept.
+    return {
+      end: decision.end,
+      released: decision.released.map((row) => row.commandId),
+      collectCompletions: decision.collectCompletions,
+      collectOutputs: decision.collectOutputs.map((row) => row.commandId),
+    };
+  };
+  const none = { end: [], released: [], collectCompletions: [], collectOutputs: [] };
+
+  // A command row decides by custody, whatever generation the op reports.
+  expect(decide([op("x", "1")], { x: [command("running")] })).toEqual(none);
+  expect(decide([op("x", "3", 10)], { x: [command("stopping")] })).toEqual({
+    ...none,
+    collectCompletions: ["x"],
+  });
+  expect(decide([op("x", "3", 10)], { x: [command("exited")] })).toEqual({
+    ...none,
+    collectOutputs: ["c"],
+  });
+  // Not stored: kept even when the op is long past the resend horizon.
   expect(
-    decide(
-      [
-        ["earlier", "1"],
-        ["current", "3"],
-        ["unlearned", "0"],
-        ["empty", ""],
-      ],
-      {},
-    ),
+    decide([op("x", "1", OP_START_RESEND_HORIZON_MS * 2)], { x: [command("exited")] }),
+  ).toEqual({ ...none, collectOutputs: ["c"] });
+  expect(decide([op("x", "3")], { x: [command("exited")] })).toEqual(none);
+  expect(decide([op("x", "3", 10)], { x: [command("exited", { consumed: true })] })).toEqual({
+    ...none,
+    end: ["x"],
+    released: ["c"],
+  });
+  expect(
+    decide([op("x", "3", 10)], { x: [command("exited", { consumed: true, released: true })] }),
+  ).toEqual({ ...none, end: ["x"] });
+  expect(decide([op("x", "3", 10)], { x: [command("exited", { unavailable: true })] })).toEqual({
+    ...none,
+    end: ["x"],
+  });
+  expect(decide([op("x", "3")], { x: [command("lost")] })).toEqual({ ...none, end: ["x"] });
+  // With several rows, one in flight or one still owed its output decides.
+  expect(decide([op("x", "3", 10)], { x: [command("lost"), command("exited")] })).toEqual({
+    ...none,
+    collectOutputs: ["c"],
+  });
+
+  // Without a row: an earlier generation is ended; the current one, an older
+  // Opengeni's 0 and an empty value are kept while running.
+  expect(
+    decide([op("earlier", "1"), op("current", "3"), op("older", "0"), op("empty", "")]).end,
   ).toEqual(["earlier"]);
+  // A completed one also ends once no OpStart can still reach it.
+  expect(
+    decide([
+      op("young", "3", OP_START_RESEND_HORIZON_MS - 1),
+      op("old", "3", OP_START_RESEND_HORIZON_MS),
+      op("older", "0", OP_START_RESEND_HORIZON_MS),
+      op("earlier", "2", 1),
+    ]).end,
+  ).toEqual(["old", "older", "earlier"]);
   // Generations compare as 64-bit integers, not strings.
-  expect(decide([["big", "18446744073709551615"]], {}, "18446744073709551615")).toEqual([]);
-  expect(decide([["ten", "10"]], {}, "9")).toEqual(["ten"]);
+  expect(decide([op("big", "18446744073709551614")], {}, "18446744073709551615").end).toEqual([
+    "big",
+  ]);
+  expect(decide([op("ten", "10")], {}, "9").end).toEqual([]);
+  expect(decide([op("nine", "9")], {}, "10").end).toEqual(["nine"]);
 });

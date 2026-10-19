@@ -282,6 +282,9 @@ export interface SelfhostedOpStreamDeps {
    * every compute agent does): stored output is released in one answered
    * exchange instead of a final ACK. */
   outputReleaseSupported?: boolean;
+  /** The enrollment's connection generation, from the same snapshot as the
+   * connection instance; sent in every OpStart. */
+  connectionGeneration?: string;
 }
 
 export interface SelfhostedOperationResourcePolicy {
@@ -1002,6 +1005,7 @@ export class SelfhostedSession {
     const key = JSON.stringify([
       admission.controlWorkspaceId,
       admission.connectionInstanceId,
+      stream.connectionGeneration ?? null,
       admission.resourcePolicy?.memoryMaxBytes ?? null,
       admission.resourcePolicy?.memoryHighBytes ?? null,
       admission.resourcePolicy?.cpuMaxMillicores ?? null,
@@ -1037,6 +1041,9 @@ export class SelfhostedSession {
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
       ...(connectionCurrent ? { connectionCurrent } : {}),
       ...(stream.outputReleaseSupported === true ? { outputReleaseSupported: true } : {}),
+      ...(stream.connectionGeneration !== undefined
+        ? { connectionGeneration: stream.connectionGeneration }
+        : {}),
     });
     this.opStreamClients.set(key, client);
     return client;

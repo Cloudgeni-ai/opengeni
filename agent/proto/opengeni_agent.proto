@@ -222,8 +222,11 @@ message Capabilities {
   // runners MUST NOT receive a non-empty run_as.
   bool run_as = 19;
   // The runner serves OpRelease: it confirms an output release in its answer
-  // and forgets the op at once. False (absent) runners keep the fire-and-forget
-  // final OpAck, which they apply at their next housekeeping pass.
+  // and forgets the op at once. It also reports its OperationInventory, on
+  // every connection and while it holds completed output nobody released, and
+  // stores each op's OpStart.connection_generation. False (absent) runners
+  // keep the fire-and-forget final OpAck, which they apply at their next
+  // housekeeping pass.
   bool op_release = 20;
 }
 
@@ -1267,6 +1270,11 @@ message OpStart {
   int64 deadline_ms = 11;
   // The originating session id, for per-origin fair admission.
   string origin_id = 12;
+  // The generation of the connection Opengeni dispatches this start under
+  // (it increments each time a different runner process claims the
+  // enrollment's connection). The runner stores it with the op at admission
+  // and reports it in its OperationInventory. 0 from an older Opengeni.
+  uint64 connection_generation = 13;
 }
 
 message OpStarted {
@@ -1532,13 +1540,17 @@ message OperationCompleted {
   OpExit exit = 2;
 }
 
-// The operations one runner process still runs or retains, reported on every
-// connection of a link so Opengeni can name the ones it no longer recognises
-// (their commands were settled, or another process held the connection when
-// they started and every requester was already answered). Sent in pages until
-// each page is answered on the ack subject; the authenticated events subject
-// supplies the exact connection identity. A runner that never sends it keeps
-// every operation until its own retention ends it.
+// The operations one runner process still runs or retains. It reports them on
+// every connection of a link, and again while that connection lasts whenever
+// it holds a completed op whose output nobody released for a while (about a
+// minute after completion, then with backoff). Opengeni answers each page in
+// that same exchange: which ops to end, and it collects completed output it
+// has not stored yet. It is the runner's own recovery of output releases and
+// of ops Opengeni settled without reaching it, so nothing about them is ever
+// sent to a runner that is not talking. Sent in pages until each page is
+// answered on the ack subject; the authenticated events subject supplies the
+// exact connection identity. Runners advertising Capabilities.op_release send
+// it; others keep every op until their own retention ends it.
 message OperationInventory {
   // Identifies this connection's report (unique within the runner process).
   uint64 report_id = 1;
@@ -1550,10 +1562,13 @@ message OperationInventory {
 
 message InventoryOperation {
   string op_id = 1;
-  // The connection generation (OperationInventoryAck.connection_generation)
-  // of the connection the operation started on; 0 when the runner never
-  // learned it.
+  // The OpStart.connection_generation the op was admitted under; 0 when an
+  // older Opengeni started it.
   uint64 connection_generation = 2;
+  // The op exited and its output is retained, unreleased.
+  bool complete = 3;
+  // For a complete op, the time since it exited, in milliseconds.
+  uint64 completed_age_ms = 4;
 }
 
 // The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).
@@ -1565,16 +1580,15 @@ message AgentEventAck {
   }
 }
 
-// Answers one OperationInventory page. The runner stops each listed operation
-// (cancels it if it runs, drops it if it is retained) and never reports it
-// again. Sent only while the reporting process holds its enrollment's
-// connection, so `connection_generation` is the generation of that connection.
+// Answers one OperationInventory page, only while the reporting process holds
+// its enrollment's connection. The runner ends each listed op and never
+// reports it again: a running one is cancelled and dropped when it exits, a
+// completed one is released as OpRelease would release it. Every other op is
+// kept.
 message OperationInventoryAck {
   uint64 report_id = 1;
   uint32 page = 2;
-  // Increments each time a different runner process claims the connection.
-  uint64 connection_generation = 3;
-  repeated string stop_op_ids = 4;
+  repeated string end_op_ids = 3;
 }
 
 // The server durably owns exit reconciliation. This acknowledges notification

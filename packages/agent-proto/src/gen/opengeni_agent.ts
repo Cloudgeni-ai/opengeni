@@ -1152,8 +1152,11 @@ export interface Capabilities {
   runAs: boolean;
   /**
    * The runner serves OpRelease: it confirms an output release in its answer
-   * and forgets the op at once. False (absent) runners keep the fire-and-forget
-   * final OpAck, which they apply at their next housekeeping pass.
+   * and forgets the op at once. It also reports its OperationInventory, on
+   * every connection and while it holds completed output nobody released, and
+   * stores each op's OpStart.connection_generation. False (absent) runners
+   * keep the fire-and-forget final OpAck, which they apply at their next
+   * housekeeping pass.
    */
   opRelease: boolean;
 }
@@ -2193,6 +2196,13 @@ export interface OpStart {
   deadlineMs: string;
   /** The originating session id, for per-origin fair admission. */
   originId: string;
+  /**
+   * The generation of the connection Opengeni dispatches this start under
+   * (it increments each time a different runner process claims the
+   * enrollment's connection). The runner stores it with the op at admission
+   * and reports it in its OperationInventory. 0 from an older Opengeni.
+   */
+  connectionGeneration: string;
 }
 
 export interface OpStarted {
@@ -2494,13 +2504,17 @@ export interface OperationCompleted {
 }
 
 /**
- * The operations one runner process still runs or retains, reported on every
- * connection of a link so Opengeni can name the ones it no longer recognises
- * (their commands were settled, or another process held the connection when
- * they started and every requester was already answered). Sent in pages until
- * each page is answered on the ack subject; the authenticated events subject
- * supplies the exact connection identity. A runner that never sends it keeps
- * every operation until its own retention ends it.
+ * The operations one runner process still runs or retains. It reports them on
+ * every connection of a link, and again while that connection lasts whenever
+ * it holds a completed op whose output nobody released for a while (about a
+ * minute after completion, then with backoff). Opengeni answers each page in
+ * that same exchange: which ops to end, and it collects completed output it
+ * has not stored yet. It is the runner's own recovery of output releases and
+ * of ops Opengeni settled without reaching it, so nothing about them is ever
+ * sent to a runner that is not talking. Sent in pages until each page is
+ * answered on the ack subject; the authenticated events subject supplies the
+ * exact connection identity. Runners advertising Capabilities.op_release send
+ * it; others keep every op until their own retention ends it.
  */
 export interface OperationInventory {
   /** Identifies this connection's report (unique within the runner process). */
@@ -2514,11 +2528,14 @@ export interface OperationInventory {
 export interface InventoryOperation {
   opId: string;
   /**
-   * The connection generation (OperationInventoryAck.connection_generation)
-   * of the connection the operation started on; 0 when the runner never
-   * learned it.
+   * The OpStart.connection_generation the op was admitted under; 0 when an
+   * older Opengeni started it.
    */
   connectionGeneration: string;
+  /** The op exited and its output is retained, unreleased. */
+  complete: boolean;
+  /** For a complete op, the time since it exited, in milliseconds. */
+  completedAgeMs: string;
 }
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
@@ -2531,17 +2548,16 @@ export interface AgentEventAck {
 }
 
 /**
- * Answers one OperationInventory page. The runner stops each listed operation
- * (cancels it if it runs, drops it if it is retained) and never reports it
- * again. Sent only while the reporting process holds its enrollment's
- * connection, so `connection_generation` is the generation of that connection.
+ * Answers one OperationInventory page, only while the reporting process holds
+ * its enrollment's connection. The runner ends each listed op and never
+ * reports it again: a running one is cancelled and dropped when it exits, a
+ * completed one is released as OpRelease would release it. Every other op is
+ * kept.
  */
 export interface OperationInventoryAck {
   reportId: string;
   page: number;
-  /** Increments each time a different runner process claims the connection. */
-  connectionGeneration: string;
-  stopOpIds: string[];
+  endOpIds: string[];
 }
 
 /**
@@ -14029,7 +14045,7 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
 };
 
 function createBaseOpStart(): OpStart {
-  return { op: undefined, windowBytes: "0", deadlineMs: "0", originId: "" };
+  return { op: undefined, windowBytes: "0", deadlineMs: "0", originId: "", connectionGeneration: "0" };
 }
 
 export const OpStart: MessageFns<OpStart> = {
@@ -14053,6 +14069,9 @@ export const OpStart: MessageFns<OpStart> = {
     }
     if (message.originId !== "") {
       writer.uint32(98).string(message.originId);
+    }
+    if (message.connectionGeneration !== "0") {
+      writer.uint32(104).uint64(message.connectionGeneration);
     }
     return writer;
   },
@@ -14112,6 +14131,14 @@ export const OpStart: MessageFns<OpStart> = {
           message.originId = reader.string();
           continue;
         }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.connectionGeneration = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14149,6 +14176,11 @@ export const OpStart: MessageFns<OpStart> = {
         : isSet(object.origin_id)
         ? globalThis.String(object.origin_id)
         : "",
+      connectionGeneration: isSet(object.connectionGeneration)
+        ? globalThis.String(object.connectionGeneration)
+        : isSet(object.connection_generation)
+        ? globalThis.String(object.connection_generation)
+        : "0",
     };
   },
 
@@ -14169,6 +14201,9 @@ export const OpStart: MessageFns<OpStart> = {
     }
     if (message.originId !== "") {
       obj.originId = message.originId;
+    }
+    if (message.connectionGeneration !== "0") {
+      obj.connectionGeneration = message.connectionGeneration;
     }
     return obj;
   },
@@ -14201,6 +14236,7 @@ export const OpStart: MessageFns<OpStart> = {
     message.windowBytes = object.windowBytes ?? "0";
     message.deadlineMs = object.deadlineMs ?? "0";
     message.originId = object.originId ?? "";
+    message.connectionGeneration = object.connectionGeneration ?? "0";
     return message;
   },
 };
@@ -17685,7 +17721,7 @@ export const OperationInventory: MessageFns<OperationInventory> = {
 };
 
 function createBaseInventoryOperation(): InventoryOperation {
-  return { opId: "", connectionGeneration: "0" };
+  return { opId: "", connectionGeneration: "0", complete: false, completedAgeMs: "0" };
 }
 
 export const InventoryOperation: MessageFns<InventoryOperation> = {
@@ -17695,6 +17731,12 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     }
     if (message.connectionGeneration !== "0") {
       writer.uint32(16).uint64(message.connectionGeneration);
+    }
+    if (message.complete !== false) {
+      writer.uint32(24).bool(message.complete);
+    }
+    if (message.completedAgeMs !== "0") {
+      writer.uint32(32).uint64(message.completedAgeMs);
     }
     return writer;
   },
@@ -17722,6 +17764,22 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
           message.connectionGeneration = reader.uint64().toString();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.complete = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.completedAgeMs = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -17743,6 +17801,12 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
         : isSet(object.connection_generation)
         ? globalThis.String(object.connection_generation)
         : "0",
+      complete: isSet(object.complete) ? globalThis.Boolean(object.complete) : false,
+      completedAgeMs: isSet(object.completedAgeMs)
+        ? globalThis.String(object.completedAgeMs)
+        : isSet(object.completed_age_ms)
+        ? globalThis.String(object.completed_age_ms)
+        : "0",
     };
   },
 
@@ -17754,6 +17818,12 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     if (message.connectionGeneration !== "0") {
       obj.connectionGeneration = message.connectionGeneration;
     }
+    if (message.complete !== false) {
+      obj.complete = message.complete;
+    }
+    if (message.completedAgeMs !== "0") {
+      obj.completedAgeMs = message.completedAgeMs;
+    }
     return obj;
   },
 
@@ -17764,6 +17834,8 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     const message = createBaseInventoryOperation();
     message.opId = object.opId ?? "";
     message.connectionGeneration = object.connectionGeneration ?? "0";
+    message.complete = object.complete ?? false;
+    message.completedAgeMs = object.completedAgeMs ?? "0";
     return message;
   },
 };
@@ -17904,7 +17976,7 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
 };
 
 function createBaseOperationInventoryAck(): OperationInventoryAck {
-  return { reportId: "0", page: 0, connectionGeneration: "0", stopOpIds: [] };
+  return { reportId: "0", page: 0, endOpIds: [] };
 }
 
 export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
@@ -17915,11 +17987,8 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
     if (message.page !== 0) {
       writer.uint32(16).uint32(message.page);
     }
-    if (message.connectionGeneration !== "0") {
-      writer.uint32(24).uint64(message.connectionGeneration);
-    }
-    for (const v of message.stopOpIds) {
-      writer.uint32(34).string(v!);
+    for (const v of message.endOpIds) {
+      writer.uint32(26).string(v!);
     }
     return writer;
   },
@@ -17948,19 +18017,11 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
           continue;
         }
         case 3: {
-          if (tag !== 24) {
+          if (tag !== 26) {
             break;
           }
 
-          message.connectionGeneration = reader.uint64().toString();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.stopOpIds.push(reader.string());
+          message.endOpIds.push(reader.string());
           continue;
         }
       }
@@ -17980,15 +18041,10 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
         ? globalThis.String(object.report_id)
         : "0",
       page: isSet(object.page) ? globalThis.Number(object.page) : 0,
-      connectionGeneration: isSet(object.connectionGeneration)
-        ? globalThis.String(object.connectionGeneration)
-        : isSet(object.connection_generation)
-        ? globalThis.String(object.connection_generation)
-        : "0",
-      stopOpIds: globalThis.Array.isArray(object?.stopOpIds)
-        ? object.stopOpIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.stop_op_ids)
-        ? object.stop_op_ids.map((e: any) => globalThis.String(e))
+      endOpIds: globalThis.Array.isArray(object?.endOpIds)
+        ? object.endOpIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.end_op_ids)
+        ? object.end_op_ids.map((e: any) => globalThis.String(e))
         : [],
     };
   },
@@ -18001,11 +18057,8 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
     if (message.page !== 0) {
       obj.page = Math.round(message.page);
     }
-    if (message.connectionGeneration !== "0") {
-      obj.connectionGeneration = message.connectionGeneration;
-    }
-    if (message.stopOpIds?.length) {
-      obj.stopOpIds = message.stopOpIds;
+    if (message.endOpIds?.length) {
+      obj.endOpIds = message.endOpIds;
     }
     return obj;
   },
@@ -18017,8 +18070,7 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
     const message = createBaseOperationInventoryAck();
     message.reportId = object.reportId ?? "0";
     message.page = object.page ?? 0;
-    message.connectionGeneration = object.connectionGeneration ?? "0";
-    message.stopOpIds = object.stopOpIds?.map((e) => e) || [];
+    message.endOpIds = object.endOpIds?.map((e) => e) || [];
     return message;
   },
 };

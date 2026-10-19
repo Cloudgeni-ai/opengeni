@@ -160,8 +160,8 @@ pub struct OpHandoverTag {
     /// The send window granted at OpStart.
     #[serde(default)]
     pub window_bytes: u64,
-    /// The connection generation the op started on, 0 when never learned
-    /// (see [`crate::inventory`]).
+    /// The connection generation the op was admitted under, 0 when an older
+    /// Opengeni started it (see [`crate::inventory`]).
     #[serde(default)]
     pub connection_generation: u64,
 }
@@ -571,6 +571,7 @@ impl Engine {
         ticket: AdmissionTicket,
         stdin: Vec<u8>,
         deadline: Option<tokio::time::Instant>,
+        generation: u64,
         spawn: impl FnOnce() -> Result<ContainedExec, E>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
@@ -597,7 +598,7 @@ impl Engine {
         self.inventory
             .lock()
             .expect("inventory lock")
-            .note_started(op_id);
+            .note_started(op_id, generation);
 
         let child = match spawn() {
             Ok(child) => child,
@@ -786,7 +787,7 @@ impl Engine {
         self.inventory
             .lock()
             .expect("inventory lock")
-            .note_handed_over(&op_id, tag.connection_generation);
+            .note_started(&op_id, tag.connection_generation);
         let carried_exit = match job.state.exit() {
             Ok(carried) => carried,
             Err(error) => {
@@ -1094,18 +1095,20 @@ impl Engine {
         }
     }
 
-    /// A new connection of a link: its operation inventory is reported
-    /// afresh, and ops started from now on carry this connection's
-    /// generation once an answer teaches it (see [`crate::inventory`]).
-    pub fn begin_link_connection(&self, scope: &str) -> u64 {
+    /// A new connection of a link: its operation inventory is due at once
+    /// (see [`crate::inventory`]).
+    pub fn begin_link_connection(&self, scope: &str) {
         self.inventory
             .lock()
             .expect("inventory lock")
-            .begin_connection(scope)
+            .begin_connection(scope);
     }
 
-    /// The unanswered pages of a link's operation inventory for its current
-    /// connection: every op of the link that still runs or retains output.
+    /// The pages of a link's operation inventory to send now: the unanswered
+    /// pages of its current report, or a new report when the connection has
+    /// none yet or completed output has gone unreleased (see
+    /// [`crate::inventory`]). A report lists every op of the link that still
+    /// runs or retains unreleased output.
     pub fn inventory_pages(
         &self,
         scope: &str,
@@ -1117,25 +1120,30 @@ impl Engine {
                 .lock()
                 .expect("registry lock")
                 .live()
-                .filter(|(_, entry)| {
-                    !matches!(
-                        entry,
+                .filter_map(|(op, entry)| {
+                    let completed_at_ms = match entry {
+                        OpEntry::Running { .. } => None,
                         OpEntry::Complete {
-                            final_acked: true,
-                            ..
-                        }
-                    )
-                })
-                .filter_map(|(op, _)| {
+                            final_acked: true, ..
+                        } => return None,
+                        OpEntry::Complete {
+                            completed_at_ms, ..
+                        } => Some(*completed_at_ms),
+                    };
                     let wire = op.as_str().strip_prefix(&prefix)?.to_string();
-                    Some((op.clone(), wire))
+                    Some(crate::inventory::LiveOp {
+                        op: op.clone(),
+                        wire,
+                        completed_at_ms,
+                    })
                 })
                 .collect()
         };
+        let now_ms = self.now_ms();
         self.inventory
             .lock()
             .expect("inventory lock")
-            .pending_pages(scope, live)
+            .pending_pages(scope, now_ms, live)
     }
 
     /// Applies Opengeni's answer to one inventory page of a link: each op it
@@ -1453,6 +1461,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || {
                 Ok::<_, std::io::Error>(sh(
                     "i=0; while [ $i -lt 200 ]; do printf '%08d' $i; i=$((i+1)); sleep 0.005; done",
@@ -1627,6 +1636,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Ok::<_, std::io::Error>(sh("printf out; exit 4")),
             |_frame| {},
             |exit| format!("{exit:?}").into_bytes(),
@@ -1668,6 +1678,7 @@ mod tests {
             ticket2,
             Vec::new(),
             None,
+            0,
             || -> Result<ContainedExec, std::io::Error> { panic!("a known op id must not spawn") },
             |_| {},
             |_| Vec::new(),
@@ -1734,6 +1745,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Err(std::io::Error::other("no such program")),
             |_| {},
             |_| Vec::new(),
@@ -1772,6 +1784,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || -> Result<ContainedExec, std::io::Error> {
                 panic!("a tombstoned op must not spawn")
             },
@@ -1798,6 +1811,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Ok::<_, std::io::Error>(sh("printf boom")),
             |_frame| panic!("emit hook panic (deliberate)"),
             |_| Vec::new(),
@@ -1845,6 +1859,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Ok::<_, std::io::Error>(sh("printf done")),
             |_frame| {},
             |_| Vec::new(),

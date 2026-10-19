@@ -115,6 +115,9 @@ export async function transferEditorFile(input: {
         windowBytes: "0",
         deadlineMs: "0",
         originId: "",
+        // A transactional upload is not an operation the runner reports in
+        // its operation inventory.
+        connectionGeneration: "0",
       },
     });
     if (

@@ -1147,35 +1147,96 @@ test("a request to a replaced connection ends without a wake when another proces
   }
 }, 20_000);
 
-test("a runner serving OpRelease settles a recovered output release in one exchange, and no later pass reaches it", async () => {
-  // The storing process died before releasing: the reaper recovers the
-  // release once, and the runner's answer settles it.
-  const fixture = await terminalOutputFixture({ kind: "sandbox" });
-  try {
-    await shared.admin`update enrollments set agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
-    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
-    const row = await fixture.stored();
-    expect(row.output_exit_seq).toBe("2");
-    expect(row.output_consumed_at).toBeInstanceOf(Date);
-    expect(row.output_release_observed_at).toBeInstanceOf(Date);
-    expect(row.output_unavailable_at).toBeNull();
-    expect(row.last_reconcile_outcome).toBe("output_released");
-    expect(fixture.operations).toEqual(["opQuery", "opAttach", "opRelease"]);
-    expect(fixture.runner.releasedOps.has(fixture.identity.opId)).toBe(true);
-    // The release needs no final ACK and no later look.
-    expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
-    for (let pass = 0; pass < 3; pass++) {
-      await fixture.due();
-      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+test("the reaper sends nothing to a runner that reports its own inventory, in any pass", async () => {
+  // Every compute sandbox agent reports its inventory, and so does a
+  // Connected Machine whose live connection advertised op_release. Whatever
+  // the output's custody, the reaper rechecks the obligation in the database
+  // alone; the runner's own report, answered while it talks, collects and
+  // releases it. So no pass can reach a sleeping sandbox.
+  for (const [kind, captured] of [
+    ["sandbox", false],
+    ["sandbox", true],
+    ["machine", false],
+    ["machine", true],
+  ] as const) {
+    const fixture = await terminalOutputFixture({ kind });
+    try {
+      if (kind === "machine")
+        await shared.admin`update enrollments set agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
+      if (captured)
+        await recordConnectedCommandOutputConsumption(client.db, {
+          ...fixture.identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+      const before = await fixture.stored();
+      let attempts = before.reconcile_attempts;
+      for (let pass = 0; pass < 3; pass++) {
+        await fixture.due();
+        await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+        const row = await fixture.stored();
+        expect(row.reconcile_attempts).toBe(attempts + 1);
+        attempts = row.reconcile_attempts;
+        expect(row.last_reconcile_outcome).toBe("output_retry");
+        expect(row.reconcile_claim_id).toBeNull();
+        expect(row.reconcile_after.getTime()).toBeGreaterThan(Date.now());
+      }
+      expect(fixture.operations).toEqual([]);
+      expect(fixture.transport.decodedAcks()).toEqual([]);
+      const row = await fixture.stored();
+      expect(row.output_release_observed_at).toBeNull();
+      expect(row.output_unavailable_at).toBeNull();
+      expect(row.output_consumed_at?.getTime() ?? null).toBe(
+        before.output_consumed_at?.getTime() ?? null,
+      );
+    } finally {
+      await parkSession(fixture.identity.sessionId);
     }
-    expect(fixture.operations).toEqual(["opQuery", "opAttach", "opRelease"]);
-    expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
-  } finally {
-    await parkSession(fixture.identity.sessionId);
   }
 });
 
-test("a release recorded where the output was stored settles a racing reaper claim, and only for its exact frontier", async () => {
+test("a retired compute sandbox's output obligation settles once, with no request", async () => {
+  for (const [change, captured] of [
+    ["revoked", false],
+    ["revoked", true],
+    ["replaced", false],
+    ["replaced", true],
+  ] as const) {
+    const fixture = await terminalOutputFixture({ kind: "sandbox" });
+    try {
+      if (captured)
+        await recordConnectedCommandOutputConsumption(client.db, {
+          ...fixture.identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+      if (change === "revoked")
+        await shared.admin`update enrollments set status='revoked',revoked_at=now(),connection_instance_id=null,connection_lease_expires_at=null where id=${fixture.identity.enrollmentId}`;
+      else
+        await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+      await fixture.due();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      const row = await fixture.stored();
+      if (captured) {
+        expect(row.output_release_observed_at).toBeInstanceOf(Date);
+        expect(row.output_unavailable_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_released");
+      } else {
+        expect(row.output_unavailable_at).toBeInstanceOf(Date);
+        expect(row.output_release_observed_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_unavailable");
+      }
+      await fixture.due();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
+      expect(fixture.operations).toEqual([]);
+    } finally {
+      await parkSession(fixture.identity.sessionId);
+    }
+  }
+});
+
+test("a release recorded where the output was stored ends the obligation, only for its exact frontier", async () => {
   const fixture = await terminalOutputFixture();
   await recordConnectedCommandOutputConsumption(client.db, {
     ...fixture.identity,
@@ -1197,30 +1258,23 @@ test("a release recorded where the output was stored settles a racing reaper cla
     await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "3" }),
   ).toBe(false);
   expect((await fixture.stored()).output_release_observed_at).toBeNull();
-  // The storing process records the runner's confirmed release while the
-  // reaper holds its claim; recording it twice changes nothing.
+  // The runner's confirmed release is recorded once; twice changes nothing.
   expect(
     await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
   ).toBe(true);
   expect(
     await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
   ).toBe(false);
-  // A publish is no release: the claim does not settle as one.
-  expect(
-    await settleConnectedCommandOutputReleaseClaim(client.db, {
-      claim: claim!,
-      outcome: "published",
-      retryAfterMs: 0,
-    }),
-  ).toBe(false);
-  // The reaper's own confirmed release settles its claim without error.
-  expect(
-    await settleConnectedCommandOutputReleaseClaim(client.db, {
-      claim: claim!,
-      outcome: "released",
-      retryAfterMs: 0,
-    }),
-  ).toBe(true);
+  // A claim taken before the release no longer settles anything.
+  for (const outcome of ["published", "retry", "not_retained"] as const) {
+    expect(
+      await settleConnectedCommandOutputReleaseClaim(client.db, {
+        claim: claim!,
+        outcome,
+        retryAfterMs: 0,
+      }),
+    ).toBe(false);
+  }
   const row = await fixture.stored();
   expect(row.output_release_observed_at).toBeInstanceOf(Date);
   expect(row.last_reconcile_outcome).toBe("output_released");

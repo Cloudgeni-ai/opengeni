@@ -28,6 +28,8 @@ export interface ComputeAgentConnection {
   /** Control-plane workspace segment of the agent subject. */
   workspaceId: string;
   connectionInstanceId: string;
+  /** The enrollment's connection generation, from the same snapshot. */
+  connectionGeneration: string;
   /** The workspace root the agent reported in its Hello. */
   workspaceRoot: string | null;
   /** The agent advertised the op-stream exec protocol. */

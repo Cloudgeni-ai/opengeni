@@ -1273,6 +1273,7 @@ export function registerComputerSessionRoutes(
                 ...(enrollment.agentCapabilities.opRelease === true
                   ? { outputReleaseSupported: true }
                   : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),

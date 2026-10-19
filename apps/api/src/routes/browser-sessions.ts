@@ -3495,6 +3495,7 @@ export function registerBrowserSessionRoutes(
                 ...(enrollment.agentCapabilities.opRelease === true
                   ? { outputReleaseSupported: true }
                   : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),

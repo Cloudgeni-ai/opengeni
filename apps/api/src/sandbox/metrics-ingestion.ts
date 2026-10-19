@@ -129,6 +129,8 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
  * while GoingOffline and update-progress events remain ordered barriers. Exit
  * collectors use a separate exact-operation lane: draining retained output must
  * not hold that machine's heartbeats or unrelated command completions hostage.
+ * Operation inventory pages share that lane, in their own FIFO queue per
+ * runner process, because answering one can collect retained output too.
  */
 export function createAgentEventIngestionScheduler(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
@@ -142,7 +144,8 @@ export function createAgentEventIngestionScheduler(
     enqueue(payload, subject) {
       let completion = false;
       try {
-        completion = AgentEvent.decode(payload).event?.$case === "operationCompleted";
+        const kind = AgentEvent.decode(payload).event?.$case;
+        completion = kind === "operationCompleted" || kind === "operationInventory";
       } catch {
         /* The control handler owns malformed-event diagnostics. */
       }
@@ -230,6 +233,9 @@ function createAgentEventIngestionLane(
         if (event?.$case === "operationCompleted") {
           completion = true;
           queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+        } else if (event?.$case === "operationInventory") {
+          // Every page is answered, in order: never coalesced.
+          queueKey = `${subject}:inventory`;
         }
       } catch {
         /* The handler owns malformed payload diagnostics. */

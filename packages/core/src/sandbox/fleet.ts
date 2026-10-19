@@ -1419,6 +1419,7 @@ export async function runOnSandbox(
               ...(enrollment.agentCapabilities.opRelease === true
                 ? { outputReleaseSupported: true }
                 : {}),
+              connectionGeneration: String(enrollment.connectionGeneration),
             },
           }
         : {}),

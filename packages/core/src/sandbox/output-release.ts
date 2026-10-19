@@ -1,9 +1,5 @@
 import { getEnrollment, type Database } from "@opengeni/db";
-import {
-  claimConnectedCommandOutputRelease,
-  recordConnectedCommandOutputRelease,
-  returnConnectedCommandOutputReleaseClaim,
-} from "@opengeni/db/session-background-commands";
+import { recordConnectedCommandOutputRelease } from "@opengeni/db/session-background-commands";
 import { releaseSelfhostedOpOutput, subjectFor, type ControlRpc } from "@opengeni/runtime/sandbox";
 
 /** The exact background command whose stored output is released. */
@@ -19,34 +15,49 @@ export type StoredConnectedCommandOutput = {
 };
 
 /**
- * Whether the exact runner process a command ran on serves `OpRelease`. Every
- * compute sandbox agent does (a compute agent without it is refused as an
- * incompatible image). A Connected Machine's does when it advertised
- * `capabilities.op_release` in the Hello of that same connection instance;
- * one without it keeps the reconciler's attach and final-ACK release.
+ * How the runner process a command ran on gets the output Opengeni stored
+ * released:
+ * - `"inventory"`: it serves `OpRelease` and reports its own operation
+ *   inventory. Every compute sandbox agent does (one without it is refused as
+ *   an incompatible image), and so does a Connected Machine whose live
+ *   connection instance is this one and advertised `capabilities.op_release`.
+ *   Output is released where it is stored, and the runner's inventory, which
+ *   Opengeni answers while the runner is talking, recovers the rest: Opengeni
+ *   never sends it anything to recover a release.
+ * - `"retired"`: a compute sandbox whose enrollment is revoked or whose
+ *   connection another agent process holds. That runner retains nothing.
+ * - `"legacy"`: any other Connected Machine runner. The reconciler releases
+ *   its output with an attach and a final ACK, as before.
  */
-export async function connectedRunnerReleasesOutput(
+export type ConnectedRunnerReleaseMode = "inventory" | "retired" | "legacy";
+
+export async function connectedRunnerReleaseMode(
   db: Database,
   runner: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
-): Promise<boolean> {
+): Promise<ConnectedRunnerReleaseMode> {
   const enrollment = await getEnrollment(db, runner.controlWorkspaceId, runner.enrollmentId);
-  if (enrollment?.kind === "sandbox") return true;
-  return (
-    enrollment?.connectionInstanceId === runner.connectionInstanceId &&
+  if (enrollment?.kind === "sandbox") {
+    return enrollment.status === "revoked" ||
+      (enrollment.connectionInstanceId !== null &&
+        enrollment.connectionInstanceId !== runner.connectionInstanceId)
+      ? "retired"
+      : "inventory";
+  }
+  return enrollment?.connectionInstanceId === runner.connectionInstanceId &&
     enrollment.agentCapabilities.opRelease === true
-  );
+    ? "inventory"
+    : "legacy";
 }
 
 /**
  * Release a command's output on its runner right where it was durably stored,
  * while that runner is live from the command: one answered `OpRelease`, then
  * the release is recorded, so nothing about the command is left for a later
- * maintenance pass to send the runner. It first takes the obligation's one
- * claim; when another owner holds it (the reconciler already recovering it),
- * this sends nothing ("claimed_elsewhere"). "unsupported" when the runner
- * does not serve `OpRelease`: the reconciler releases it as before, at once.
- * A failure returns the claim and throws, leaving the reconciler to recover
- * the release once.
+ * pass to send the runner. `OpRelease` is idempotent, so an inventory answer
+ * releasing the same output meanwhile is harmless. "unsupported" when the
+ * runner does not report its inventory: the reconciler releases it with an
+ * attach and a final ACK. A failure throws; the runner's own inventory then
+ * recovers the release while it is talking.
  */
 export async function releaseStoredConnectedCommandOutput(
   db: Database,
@@ -56,36 +67,21 @@ export async function releaseStoredConnectedCommandOutput(
     controlRpc: ControlRpc;
     controlTimeoutMs: number;
   },
-): Promise<"released" | "not_retained" | "unsupported" | "claimed_elsewhere"> {
+): Promise<"released" | "not_retained" | "unsupported" | "retired"> {
   const { command } = input;
-  const claimId = crypto.randomUUID();
-  if (
-    !(await claimConnectedCommandOutputRelease(db, { ...command, exitSeq: input.exitSeq, claimId }))
-  )
-    return "claimed_elsewhere";
-  if (!(await connectedRunnerReleasesOutput(db, command))) {
-    await returnConnectedCommandOutputReleaseClaim(db, { ...command, claimId, afterMs: 0 });
-    return "unsupported";
-  }
-  let outcome: "released" | "not_retained";
-  try {
-    outcome = await releaseSelfhostedOpOutput({
-      controlRpc: input.controlRpc,
-      rpcSubject: subjectFor(
-        command.controlWorkspaceId,
-        command.enrollmentId,
-        command.connectionInstanceId,
-      ),
-      opId: command.opId,
-      exitSeq: input.exitSeq,
-      controlTimeoutMs: input.controlTimeoutMs,
-    });
-  } catch (error) {
-    await returnConnectedCommandOutputReleaseClaim(db, { ...command, claimId, afterMs: 0 }).catch(
-      () => undefined,
-    );
-    throw error;
-  }
+  const mode = await connectedRunnerReleaseMode(db, command);
+  if (mode !== "inventory") return mode === "retired" ? "retired" : "unsupported";
+  const outcome = await releaseSelfhostedOpOutput({
+    controlRpc: input.controlRpc,
+    rpcSubject: subjectFor(
+      command.controlWorkspaceId,
+      command.enrollmentId,
+      command.connectionInstanceId,
+    ),
+    opId: command.opId,
+    exitSeq: input.exitSeq,
+    controlTimeoutMs: input.controlTimeoutMs,
+  });
   await recordConnectedCommandOutputRelease(db, { ...command, exitSeq: input.exitSeq });
   return outcome;
 }

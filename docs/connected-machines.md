@@ -128,19 +128,36 @@ passed), and a start re-admitted to a new connection is sent only the time
 left. A start that timeout or deadline ended before any OpStart was sent fails
 as never sent, so nothing keeps custody of it or waits on its agent.
 
-A runner process whose connection another process took keeps running what it
-ran; Opengeni settled those commands without reaching it. On every connection,
-the agent therefore reports the operations it still runs or retains, each with
-the connection generation it started on (the enrollment's generation moves only
-when a different process claims the connection). The API answers each page of
-that report, in the same exchange and only to the process that holds the
-connection, with the operations it no longer recognises: one whose command is
-settled, and one without a command (foreground work, or a command deleted with
-its chat) that started on an earlier generation. The agent cancels those that
-run and drops those that retain output; none of them runs again or writes into
-a settled record. Nothing is recorded for this and nothing is sent to an agent
-that is not talking, so it never wakes a sleeping compute sandbox. An agent
-that does not report keeps the earlier behaviour.
+A runner reports what it still runs or retains, and Opengeni answers which of
+those to end. Every OpStart carries the connection generation Opengeni
+dispatched it under (the enrollment's generation moves only when a different
+process claims the connection), and the agent stores it with the operation when
+it admits it, so no operation's generation is ever inferred later. On every
+connection, and again while it holds a completed operation whose output nobody
+released (about a minute after completion, then backing off to ten minutes,
+and only while such output remains), the agent reports its operations. The API
+answers each page in the same exchange, and only to the process that holds the
+connection:
+
+- An operation with a command of that exact process is decided by the command.
+  One in flight is kept. One that exited is ended once Opengeni has stored its
+  output (the release is recorded before the answer is sent) or recorded it
+  unavailable, and a lost one is ended. Output Opengeni has not stored is never
+  ended: the API keeps it and collects it while the agent is talking, and
+  collecting releases it in the same exchange.
+- An operation without a command (foreground work, or a command deleted with
+  its chat) is ended when it started under an earlier generation than the
+  current one. A completed one is also ended once it completed longer ago than
+  any start can still reach the agent (`OP_START_RESEND_HORIZON_MS`). A running
+  one is never ended for its age. One an older Opengeni started carries
+  generation 0 and is kept.
+
+The agent cancels what it runs and drops what it retains; none of it runs again
+or writes into a settled record. So a process that comes back after another
+process took its connection stops what Opengeni settled meanwhile, whatever
+happened to the chats. The agent starts every such exchange, so none reaches an
+agent that is not talking, such as a sleeping compute sandbox. An agent that
+does not report keeps the earlier behaviour.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
@@ -915,18 +932,20 @@ substituted. Already captured output takes priority over full replay, so older
 uncaptured results cannot delay final acknowledgements for saved results. Publish
 success leaves the obligation pending until an exact runner
 observation establishes that output is no longer retained. A runner that
-advertises `capabilities.op_release` in the Hello of that same connection is
-instead sent one `OpRelease` for the stored exit frame right where the output
-is stored; it drops the operation at once and confirms the release in its
-answer (LOST, reason RELEASED, which also answers any duplicate), so the
-release settles in that exchange and the reaper only recovers a release whose
-storing process died first. A different exit frame or a running operation
-releases nothing. Foreground command output is released the same way at its
-durability point when the runner advertises the capability, and by a final ACK
-when it does not. A runner without the capability keeps the attach, final ACK
-and later observation; Connected Machines do not sleep, so that exchange is
-answered on the first pass. Compute sandboxes have no such path (see
-[compute-backend.md](compute-backend.md)). Completion input to
+advertises `capabilities.op_release` in the Hello of that same connection also
+reports its own operation inventory (above). It is instead sent one
+`OpRelease` for the stored exit frame right where the output is stored; it
+drops the operation at once and confirms the release in its answer (LOST,
+reason RELEASED, which also answers any duplicate), so the release settles in
+that exchange. A different exit frame or a running operation releases nothing.
+Foreground command output is released the same way at its durability point
+when the runner advertises the capability, and by a final ACK when it does not.
+When the storing process dies before it releases or stores the output, that
+runner's own inventory recovers it; the reaper sends such a runner nothing and
+only rechecks the obligation in the database. A runner without the capability
+keeps the attach, final ACK and later observation from the reaper; Connected
+Machines do not sleep, so that exchange is answered on the first pass. Compute
+sandboxes have no such path (see [compute-backend.md](compute-backend.md)). Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.

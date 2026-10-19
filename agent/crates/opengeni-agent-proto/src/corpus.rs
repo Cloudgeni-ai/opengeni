@@ -75,6 +75,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
             window_bytes: 65_536,
             deadline_ms: 1_800_000_000_000,
             origin_id: "session-abc".to_string(),
+            connection_generation: 0,
         })),
     }
 }

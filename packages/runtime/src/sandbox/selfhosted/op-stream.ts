@@ -161,6 +161,10 @@ export interface OpStreamExecClientDeps {
    * agent does): a durably stored op is released in one answered exchange.
    * Without it the op is released by a final ACK. */
   outputReleaseSupported?: boolean;
+  /** The connection generation of the pinned connection instance, from the
+   * same enrollment snapshot. Sent in every OpStart: the runner stores it
+   * with the op and reports it in its operation inventory. */
+  connectionGeneration?: string;
 }
 
 /** A completed op-stream exec: the SDK-facing response plus the healing
@@ -1105,6 +1109,7 @@ class OpConsumer {
               // budget; host clock skew shifts it — a known wire caveat).
               deadlineMs: absoluteDeadline,
               originId: this.deps.rpcSubject,
+              connectionGeneration: this.deps.connectionGeneration ?? "0",
             },
           },
           this.opId,

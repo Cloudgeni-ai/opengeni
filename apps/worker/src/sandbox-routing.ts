@@ -1680,6 +1680,7 @@ function opStreamDepsFor(
   services: RoutingWiringServices,
   machineAdvertisesOpStream: boolean,
   outputReleaseSupported = false,
+  connectionGeneration?: number,
 ): SelfhostedOpStreamDeps | undefined {
   const { settings, bus, opJournal } = services;
   if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
@@ -1689,6 +1690,9 @@ function opStreamDepsFor(
     transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
     ...(opJournal !== undefined ? { journal: opJournal } : {}),
     ...(outputReleaseSupported ? { outputReleaseSupported: true } : {}),
+    ...(connectionGeneration !== undefined
+      ? { connectionGeneration: String(connectionGeneration) }
+      : {}),
   };
 }
 
@@ -1703,6 +1707,7 @@ export function connectionBindingFor(
     services,
     enrollment.opStream === true,
     enrollment.agentCapabilities.opRelease === true,
+    enrollment.connectionGeneration,
   );
   return {
     workspaceId: enrollment.workspaceId,

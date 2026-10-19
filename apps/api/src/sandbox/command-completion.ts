@@ -9,8 +9,12 @@ import {
 import {
   locateConnectedCommandCompletion,
   claimPushedConnectedCommandCompletion,
+  claimConnectedCommandOutputCollection,
   deferConnectedMachineBackgroundCommandReconciliation,
   connectedCommandReconciliationRetryMs,
+  recordConnectedCommandOutputConsumption,
+  returnConnectedCommandOutputCollection,
+  type ConnectedCommandInventoryRow,
   type ConnectedCommandStopTarget,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
@@ -129,6 +133,50 @@ async function deliverStop(
   }
 }
 
+/** How long a collection waits on one control request to the runner. */
+const CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS = 10_000;
+
+/** Collection deps: the bus carries replay and release; tests inject both. */
+export type ConnectedCommandCollectionDeps = {
+  bus?: EventBus | undefined;
+  reader?: Pick<OpStreamExecClient, "readExisting"> | undefined;
+  /** Injected for tests: the control transport of the output release. */
+  releaseRpc?: ControlRpc | undefined;
+};
+
+function connectedCommandOutputReader(
+  identity: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
+  deps: ConnectedCommandCollectionDeps,
+): Pick<OpStreamExecClient, "readExisting"> {
+  if (deps.reader) return deps.reader;
+  const bus = deps.bus;
+  if (!bus?.getOpStreamConnection)
+    throw new Error("Connected command output transport unavailable");
+  return new OpStreamExecClient({
+    workspaceId: identity.controlWorkspaceId,
+    agentId: identity.enrollmentId,
+    connectionInstanceId: identity.connectionInstanceId,
+    epoch: 0,
+    controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+    rpcSubject: subjectFor(
+      identity.controlWorkspaceId,
+      identity.enrollmentId,
+      identity.connectionInstanceId,
+    ),
+    transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection!()),
+    controlTimeoutMs: CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS,
+    retryClock: defaultSelfhostedRetryClock,
+    journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
+  });
+}
+
+function connectedCommandReleaseRpc(deps: ConnectedCommandCollectionDeps): ControlRpc | null {
+  const bus = deps.bus;
+  return (
+    deps.releaseRpc ?? (bus ? new NatsControlRpc(async () => bus.getRequestConnection()) : null)
+  );
+}
+
 /** The authenticated process subject, never the payload, supplies machine
  * identity. Historical routes are intentional: changing a session's current
  * route does not change the daemon that owns its already-started command. */
@@ -142,23 +190,46 @@ export async function ingestConnectedCommandCompletion(
   releaseRpc?: ControlRpc,
 ): Promise<void> {
   if (!completed.exit || !completed.opId || /[\s.*>]/u.test(completed.opId)) return;
+  await collectConnectedCommandCompletion(
+    db,
+    ids,
+    completed.opId,
+    { bus, reader, releaseRpc },
+    { acknowledge: true },
+  );
+}
+
+/**
+ * Collect the exit of a command its runner reports completed: from the
+ * completion push (which is acknowledged), or from the runner's operation
+ * inventory. Replays and stores its output, settles it, and releases it on
+ * the runner in the same exchange.
+ */
+export async function collectConnectedCommandCompletion(
+  db: Database,
+  ids: { workspaceId: string; agentId: string; connectionInstanceId: string },
+  opId: string,
+  deps: ConnectedCommandCollectionDeps,
+  options: { acknowledge: boolean },
+): Promise<void> {
+  const { bus, reader, releaseRpc } = deps;
   const identity = {
     controlWorkspaceId: ids.workspaceId,
     enrollmentId: ids.agentId,
     connectionInstanceId: ids.connectionInstanceId,
-    opId: completed.opId,
+    opId,
   };
   const command = await locateConnectedCommandCompletion(db, identity);
   // Foreground operations and exits before adoption have no background row.
   // Their attached consumer still owns terminal proof and the adoption race.
   if (!command) return;
   const acknowledgeDelivery = async () => {
-    if (!bus?.getOpStreamConnection) return;
+    if (!options.acknowledge || !bus?.getOpStreamConnection) return;
     const connection = await bus.getOpStreamConnection();
     connection.publish(
       `agent.${ids.workspaceId}.${ids.agentId}.connection.${ids.connectionInstanceId}.ack`,
       AgentEventAck.encode({
-        ack: { $case: "operationCompleted", operationCompleted: { opId: completed.opId } },
+        ack: { $case: "operationCompleted", operationCompleted: { opId } },
       }).finish(),
     );
   };
@@ -169,7 +240,7 @@ export async function ingestConnectedCommandCompletion(
   if (!reader && !bus?.getOpStreamConnection)
     throw new Error("Connected command output transport unavailable");
   const claimTtlMs = 5 * 60_000;
-  const controlTimeoutMs = 10_000;
+  const controlTimeoutMs = CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS;
   // Finish or relinquish collection before the existing claim can be stolen.
   // Reserve the bounded replay window plus control timeout for the last read.
   const replayDeadlineAt = Date.now() + claimTtlMs - controlTimeoutMs - 5_000;
@@ -183,24 +254,7 @@ export async function ingestConnectedCommandCompletion(
   await acknowledgeDelivery().catch(() => undefined); // A lost receipt is healed by the runner's retry.
   if (!claim) return;
   try {
-    const client =
-      reader ??
-      new OpStreamExecClient({
-        workspaceId: identity.controlWorkspaceId,
-        agentId: identity.enrollmentId,
-        connectionInstanceId: identity.connectionInstanceId,
-        epoch: 0,
-        controlRpc: new NatsControlRpc(async () => bus!.getRequestConnection()),
-        rpcSubject: subjectFor(
-          identity.controlWorkspaceId,
-          identity.enrollmentId,
-          identity.connectionInstanceId,
-        ),
-        transport: new NatsOpStreamTransport(async () => bus!.getOpStreamConnection!()),
-        controlTimeoutMs,
-        retryClock: defaultSelfhostedRetryClock,
-        journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
-      });
+    const client = connectedCommandOutputReader(identity, deps);
     const capture = createConnectedCommandOutputCapture(
       db,
       command,
@@ -238,11 +292,11 @@ export async function ingestConnectedCommandCompletion(
     });
     // All bytes are durable before terminal fanout. Release them on the runner
     // now, while it is live from this command: one answered exchange, so no
-    // later maintenance pass reaches it. A runner without OpRelease, or a
-    // failed release, leaves the release to the reconciler, which recovers it
-    // once; the model's observation never depends on it.
-    const controlRpc =
-      releaseRpc ?? (bus ? new NatsControlRpc(async () => bus.getRequestConnection()) : null);
+    // later maintenance pass reaches it. A runner without OpRelease is
+    // released by the reconciler; a failed release is recovered by the
+    // runner's own operation inventory. The model's observation never
+    // depends on it.
+    const controlRpc = connectedCommandReleaseRpc({ bus, releaseRpc });
     if (controlRpc)
       await releaseStoredConnectedCommandOutput(db, {
         command: claim,
@@ -257,5 +311,65 @@ export async function ingestConnectedCommandCompletion(
       retryAfterMs: connectedCommandReconciliationRetryMs(claim.reconcileAttempts),
     });
     throw error;
+  }
+}
+
+/**
+ * Collect the output of a command that is settled exited but whose output
+ * was never stored, when its runner reports the op completed in its
+ * operation inventory (the runner is talking, so this reaches no sleeping
+ * sandbox): replay and store it, then release it on the runner in the same
+ * exchange. One claim on the output makes this the only collector; `false`
+ * when another holds it. A failure gives the claim back and throws: the
+ * runner reports the op again.
+ */
+export async function collectExitedConnectedCommandOutput(
+  db: Database,
+  row: ConnectedCommandInventoryRow,
+  deps: ConnectedCommandCollectionDeps,
+): Promise<boolean> {
+  const claimId = crypto.randomUUID();
+  if (!(await claimConnectedCommandOutputCollection(db, { ...row, claimId }))) return false;
+  try {
+    const client = connectedCommandOutputReader(row, deps);
+    const capture = createConnectedCommandOutputCapture(
+      db,
+      row,
+      deps.bus
+        ? async (events) => {
+            await deps.bus!.publish(row.workspaceId, row.sessionId, events);
+          }
+        : undefined,
+    );
+    const replay = await replayConnectedCommandOutput(
+      client,
+      row.opId,
+      true,
+      async (frames) => capture(row.commandId, frames),
+      Date.now() + 2 * 60_000,
+    );
+    const terminal = replay.status === "completed" ? replay : replay.terminal;
+    const receipt =
+      replay.outputReceipt ??
+      (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
+    if (!terminal || !receipt)
+      throw new Error("Connected command output replay has no complete custody receipt");
+    await recordConnectedCommandOutputConsumption(db, {
+      ...row,
+      receipt,
+      exitCode: terminal.outcome.response.exitCode,
+    });
+    const controlRpc = connectedCommandReleaseRpc(deps);
+    if (controlRpc)
+      await releaseStoredConnectedCommandOutput(db, {
+        command: row,
+        exitSeq: receipt.exitSeq,
+        controlRpc,
+        controlTimeoutMs: CONNECTED_COMMAND_COLLECTION_TIMEOUT_MS,
+      });
+    return true;
+  } finally {
+    // Recording the release already dropped the claim; otherwise give it back.
+    await returnConnectedCommandOutputCollection(db, { ...row, claimId }).catch(() => undefined);
   }
 }

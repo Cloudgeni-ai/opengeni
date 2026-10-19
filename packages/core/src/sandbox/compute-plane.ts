@@ -94,6 +94,7 @@ export function createComputeAgentPlane(deps: {
       return {
         workspaceId: enrollment.workspaceId,
         connectionInstanceId: enrollment.connectionInstanceId,
+        connectionGeneration: String(enrollment.connectionGeneration),
         workspaceRoot: enrollment.workspaceRoot,
         opStream: enrollment.opStream === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,

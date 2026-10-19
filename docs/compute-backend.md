@@ -49,19 +49,24 @@ attempt fails.
 A finished command's output, foreground or background, is released where it
 is stored, while the agent is live from the command: one `OpRelease` for the
 stored exit frame, which the agent answers once it has dropped the command
-(LOST, reason RELEASED), so the release is settled from that answer. Each
-background release obligation has one owner at a time. The process that stores
-the output claims it and sends the release; the reaper claims only an
-obligation nobody holds (or whose claim expired), and only a grace period
-after the output was stored. Right before sending anything the reaper checks
-that its claim is still open and still its own, so an obligation settled
-meanwhile sends nothing to a sandbox that has gone to sleep since. Nothing
-about a released command is left for a later pass, so housekeeping has no
-reason to reach an idle sandbox. The reaper only recovers a release whose
-storing process died first; reaching a sleeping sandbox for that is real work
-and wakes it once, and the answer settles it in that one exchange.
+(LOST, reason RELEASED), so the release is settled from that answer. Nothing
+about a released command is left for a later pass.
 
-Every compute agent serves `OpRelease` (`capabilities.op_release`). A compute
+The agent recovers what the storing process could not finish. When that
+process dies before it releases an output, or before it stores it, the agent
+still holds the completed operation, and while it does it reports its operation
+inventory again (about a minute after completion, then backing off). The API
+answers in that same exchange: it ends what Opengeni stored and collects what
+it did not, which releases it too (see
+[connected-machines.md](connected-machines.md)). The agent starts that
+exchange, so a sleeping sandbox neither sends nor receives anything for it.
+Housekeeping never sends a compute agent anything to release output: the
+reaper only rechecks the obligation in the database, and settles it there once
+the sandbox's enrollment is revoked or another agent process holds its
+connection, because that agent retains nothing.
+
+Every compute agent serves `OpRelease` and reports its operation inventory
+(`capabilities.op_release`). A compute
 sandbox runs the agent from its image and never updates it in place, and
 compute images are built with an agent from this release or later, so compute
 has no attach-and-final-ACK release path. A compute agent whose Hello lacks the

@@ -631,6 +631,7 @@ export async function withFormerConnectedMachine<T>(
             ...(enrollment.agentCapabilities.opRelease === true
               ? { outputReleaseSupported: true }
               : {}),
+            connectionGeneration: String(enrollment.connectionGeneration),
           },
         }
       : {}),
@@ -893,6 +894,7 @@ async function withChannelAOperation<T>(
                 ...(enrollment.agentCapabilities.opRelease === true
                   ? { outputReleaseSupported: true }
                   : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),

@@ -322,6 +322,7 @@ async function resolveSelfhostedConnection(
           ...(enrollment.agentCapabilities.opRelease === true
             ? { outputReleaseSupported: true }
             : {}),
+          connectionGeneration: String(enrollment.connectionGeneration),
         }
       : undefined;
   return {

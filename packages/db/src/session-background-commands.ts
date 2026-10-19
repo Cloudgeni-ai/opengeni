@@ -115,15 +115,9 @@ function connectedOutputIdentityWhere(input: ConnectedCommandOutputIdentity) {
 }
 
 /** How long a claim on a command's reconciliation lasts before another owner
- * may take it over: the reconciler's, and the release claim of the process
- * that stored the command's output. */
+ * may take it over: the reconciler's, and the collection claim of an
+ * inventory answer that stores a command's output. */
 export const CONNECTED_COMMAND_CLAIM_TTL_MS = 5 * 60_000;
-
-/** How long after a command's output is stored the reconciler leaves its
- * release to the process that stored it, which releases it at once while the
- * runner is live from the command. Past it, an unreleased output is a crash
- * the reconciler recovers. */
-export const CONNECTED_OUTPUT_RELEASE_GRACE_MS = 60_000;
 
 /** Record full output custody only after the caller's verified, awaited capture.
  * Terminal observation is insufficient. The persisted receipt is the retry
@@ -165,9 +159,7 @@ export async function recordConnectedCommandOutputConsumption(
         outputExitSeq: input.receipt.exitSeq,
         outputAttachGeneration: input.receipt.attachGeneration,
         outputConsumedAt: new Date(),
-        // The process storing it releases it now; the reconciler only
-        // recovers a release that process did not finish.
-        reconcileAfter: new Date(Date.now() + CONNECTED_OUTPUT_RELEASE_GRACE_MS),
+        reconcileAfter: new Date(),
         updatedAt: new Date(),
       })
       .where(connectedOutputIdentityWhere(input));
@@ -234,14 +226,14 @@ export async function claimConnectedCommandOutputReleases(
   );
 }
 
-/** Take the one claim on a stored output's release obligation, so exactly one
- * owner sends its release: the process that stored it, or the reconciler
- * recovering it. Only an open obligation of exactly that stored exit frontier
- * that nobody holds (or whose claim expired) is taken. Returns whether this
- * caller now holds it. */
-export async function claimConnectedCommandOutputRelease(
+/** Claim an exited command's output that was never stored, so exactly one
+ * owner collects it: the answer to its runner's operation inventory, which
+ * collects it while the runner is talking. Only an open, unconsumed output
+ * nobody holds (or whose claim expired) is taken. Returns whether this caller
+ * now holds it. */
+export async function claimConnectedCommandOutputCollection(
   db: Database,
-  input: ConnectedCommandOutputIdentity & { exitSeq: string; claimId: string },
+  input: ConnectedCommandOutputIdentity & { claimId: string },
 ): Promise<boolean> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
@@ -260,8 +252,7 @@ export async function claimConnectedCommandOutputRelease(
       .where(
         and(
           connectedOutputIdentityWhere(input),
-          eq(command.outputExitSeq, input.exitSeq),
-          sql`${command.outputConsumedAt} is not null`,
+          sql`${command.outputConsumedAt} is null and ${command.outputExitSeq} is null`,
           sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
           sql`(${command.reconcileClaimId} is null or ${command.reconcileClaimedAt} <= now() - make_interval(secs => ${CONNECTED_COMMAND_CLAIM_TTL_MS / 1000}))`,
         ),
@@ -271,14 +262,12 @@ export async function claimConnectedCommandOutputRelease(
   });
 }
 
-/** Give up a held release claim without releasing: the obligation stays open
- * and is due to the reconciler `afterMs` from now. */
-export async function returnConnectedCommandOutputReleaseClaim(
+/** Give up a collection claim that did not finish: the output stays open for
+ * the runner's next inventory. */
+export async function returnConnectedCommandOutputCollection(
   db: Database,
-  input: ConnectedCommandOutputIdentity & { claimId: string; afterMs: number },
+  input: ConnectedCommandOutputIdentity & { claimId: string },
 ): Promise<void> {
-  if (!Number.isSafeInteger(input.afterMs) || input.afterMs < 0)
-    throw new Error("Connected command output retry delay is invalid");
   await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.workspaceId,
@@ -288,52 +277,17 @@ export async function returnConnectedCommandOutputReleaseClaim(
     const command = schema.sessionBackgroundCommands;
     await tx
       .update(command)
-      .set({
-        reconcileClaimId: null,
-        reconcileClaimedAt: null,
-        reconcileAfter: new Date(Date.now() + input.afterMs),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          connectedOutputIdentityWhere(input),
-          eq(command.reconcileClaimId, input.claimId),
-          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
-        ),
-      );
+      .set({ reconcileClaimId: null, reconcileClaimedAt: null, updatedAt: new Date() })
+      .where(and(connectedOutputIdentityWhere(input), eq(command.reconcileClaimId, input.claimId)));
   });
 }
 
-/** Whether a reconciler claim on a command's output is still open and still
- * its own. Checked immediately before anything is sent to the runner, so an
- * owner that lost the obligation (it was released by the process that stored
- * the output, or its claim expired and was taken over) sends nothing. */
-export async function connectedCommandOutputClaimCurrent(
-  db: Database,
-  claim: ConnectedCommandOutputClaim,
-): Promise<boolean> {
-  return await withSessionActivityRlsContext(db, claim, async (tx) => {
-    const command = schema.sessionBackgroundCommands;
-    const rows = await tx
-      .select({ id: command.id })
-      .from(command)
-      .where(
-        and(
-          connectedOutputIdentityWhere(claim),
-          eq(command.reconcileClaimId, claim.claimId),
-          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
-        ),
-      )
-      .limit(1);
-    return rows.length === 1;
-  });
-}
-
-/** Record a release the runner confirmed in its answer (`OpRelease`). It
- * settles the release obligation of exactly the stored exit frontier, whoever
- * holds its claim, and drops that claim, so no later pass reaches the runner
- * for it. Returns whether this call recorded it; false when it was already
- * recorded, or the row is not that exact consumed output. */
+/** Record a release of exactly the stored exit frontier: one the runner
+ * confirmed in its answer (`OpRelease`), or one its operation inventory
+ * answer told it to make. It settles the release obligation, whoever holds
+ * its claim, and drops that claim. Returns whether this call recorded it;
+ * false when it was already recorded, or the row is not that exact consumed
+ * output. */
 export async function recordConnectedCommandOutputRelease(
   db: Database,
   input: ConnectedCommandOutputIdentity & { exitSeq: string },
@@ -368,21 +322,19 @@ export async function recordConnectedCommandOutputRelease(
 }
 
 /** Publish success is only a retry milestone. Stop retrying only after an exact
- * native absence observation or a confirmed release, or record pre-capture loss
- * explicitly as missing output. Neither outcome is a model-completion
- * acknowledgement. A release already recorded where the output was persisted
- * also settles a racing claim. */
+ * native absence observation, or record pre-capture loss explicitly as missing
+ * output. Neither outcome is a model-completion acknowledgement. */
 export async function settleConnectedCommandOutputReleaseClaim(
   db: Database,
   input: {
     claim: ConnectedCommandOutputClaim;
-    outcome: "published" | "released" | "not_retained" | "unavailable" | "retry";
+    outcome: "published" | "not_retained" | "unavailable" | "retry";
     retryAfterMs: number;
   },
 ): Promise<boolean> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
     throw new Error("Connected command output retry delay is invalid");
-  const released = input.outcome === "released" || input.outcome === "not_retained";
+  const released = input.outcome === "not_retained";
   return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.claim.workspaceId,
@@ -420,22 +372,7 @@ export async function settleConnectedCommandOutputReleaseClaim(
         ),
       )
       .returning({ id: command.id });
-    if (rows.length === 1) return true;
-    if (!released) return false;
-    // Released and recorded by another owner while this claim was out: the
-    // obligation is settled (recording it dropped the claim).
-    const settled = await tx
-      .select({ id: command.id })
-      .from(command)
-      .where(
-        and(
-          connectedOutputIdentityWhere(input.claim),
-          sql`(${command.reconcileClaimId} is null or ${command.reconcileClaimId} = ${input.claim.claimId})`,
-          sql`${command.outputReleaseObservedAt} is not null`,
-        ),
-      )
-      .limit(1);
-    return settled.length === 1;
+    return rows.length === 1;
   });
 }
 
@@ -1598,11 +1535,21 @@ export async function locateConnectedCommandCompletion(
 /** The most operations one inventory classification reads. */
 export const CONNECTED_COMMAND_CLASSIFY_LIMIT = 1_000;
 
+/** A command row of an operation a runner reports, with its output custody. */
+export type ConnectedCommandInventoryRow = ConnectedCommandOutputIdentity & {
+  state: "running" | "stopping" | "exited" | "lost";
+  outputExitSeq: string | null;
+  /** Opengeni stored all of its output (`output_consumed_at`). */
+  outputConsumed: boolean;
+  outputReleased: boolean;
+  outputUnavailable: boolean;
+};
+
 /**
  * For the operations a runner process reports it still runs or retains, the
- * ones with a command row of that exact enrollment and connection instance,
- * and whether that command is settled. Operations without a row (foreground
- * work, or commands deleted with their chat) are absent. Read-only.
+ * command rows of that exact enrollment and connection instance, with their
+ * state and output custody. Operations without a row (foreground work, or
+ * commands deleted with their chat) are absent. Read-only.
  */
 export async function classifyConnectedCommandOps(
   db: Database,
@@ -1612,25 +1559,38 @@ export async function classifyConnectedCommandOps(
     connectionInstanceId: string;
     opIds: readonly string[];
   },
-): Promise<Map<string, { terminal: boolean }>> {
+): Promise<Map<string, ConnectedCommandInventoryRow[]>> {
   if (input.opIds.length > CONNECTED_COMMAND_CLASSIFY_LIMIT) {
     throw new Error(
       `At most ${CONNECTED_COMMAND_CLASSIFY_LIMIT} operations are classified at once`,
     );
   }
-  const classified = new Map<string, { terminal: boolean }>();
+  const classified = new Map<string, ConnectedCommandInventoryRow[]>();
   if (input.opIds.length === 0) return classified;
-  const rows = await db.execute<{ opId: string; terminal: boolean }>(sql`
-    select op_id as "opId", terminal
+  type Row = Omit<
+    ConnectedCommandInventoryRow,
+    "controlWorkspaceId" | "enrollmentId" | "connectionInstanceId"
+  >;
+  const rows = await db.execute<Row>(sql`
+    select op_id as "opId", account_id as "accountId", workspace_id as "workspaceId",
+      session_id as "sessionId", command_id as "commandId", state,
+      output_exit_seq as "outputExitSeq", output_consumed as "outputConsumed",
+      output_released as "outputReleased", output_unavailable as "outputUnavailable"
     from opengeni_private.classify_connected_command_ops(
       ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
       ${input.connectionInstanceId}::text,
       array(select jsonb_array_elements_text(${JSON.stringify(input.opIds)}::jsonb))
     )`);
-  for (const row of rows as Array<{ opId: string; terminal: boolean }>) {
-    // A command still in flight wins over any settled row for the same id.
-    const known = classified.get(row.opId);
-    classified.set(row.opId, { terminal: (known?.terminal ?? true) && row.terminal });
+  for (const row of rows as Row[]) {
+    if (!["running", "stopping", "exited", "lost"].includes(row.state))
+      throw new Error("Connected command inventory row has an unknown state");
+    const entry: ConnectedCommandInventoryRow = {
+      ...row,
+      controlWorkspaceId: input.controlWorkspaceId,
+      enrollmentId: input.enrollmentId,
+      connectionInstanceId: input.connectionInstanceId,
+    };
+    classified.set(row.opId, [...(classified.get(row.opId) ?? []), entry]);
   }
   return classified;
 }

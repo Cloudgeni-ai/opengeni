@@ -468,9 +468,11 @@ export class ComputeSandboxSession extends SelfhostedSession {
               opStream: {
                 transport,
                 ...(turn.opJournal !== undefined ? { journal: turn.opJournal } : {}),
-                // Every compute agent serves OpRelease; one that does not is
-                // refused when its connection resolves.
+                // Every compute agent serves OpRelease and reports its
+                // operation inventory; one that does not is refused when its
+                // connection resolves.
                 outputReleaseSupported: true,
+                connectionGeneration: connection.connectionGeneration,
               },
             }
           : {}),

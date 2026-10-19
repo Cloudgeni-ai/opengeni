@@ -679,6 +679,7 @@ export {
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  OP_START_RESEND_HORIZON_MS,
   querySelfhostedOp,
   releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
