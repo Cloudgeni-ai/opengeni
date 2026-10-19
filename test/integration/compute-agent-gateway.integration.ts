@@ -12,17 +12,23 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, OpAck, OpState } from "@opengeni/agent-proto";
 import { verifyRelayToken } from "@opengeni/contracts";
 import {
+  acquireLease,
+  bootstrapWorkspace,
+  commitWarmingToWarm,
   createDb,
   createSandboxEnrollment,
+  createSession,
+  settleConnectedMachineSessionBackgroundCommand,
   getLiveEnrollmentConnection,
   revokeSandboxEnrollment,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { connect, type NatsConnection } from "@opengeni/events";
+import { recordConnectedCommandOutputConsumption } from "@opengeni/db/session-background-commands";
+import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
 import { NatsControlRpc } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
@@ -31,6 +37,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
+import { reconcileConnectedCommandOutputReleases } from "../../apps/worker/src/activities/sandbox-lease";
 import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
 import { dispatchApiWebSocketUpgrade } from "../../apps/api/src/http/websocket-upgrade-dispatch";
 import {
@@ -685,6 +692,236 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       for (const stop of stops) stop();
       await second.close().catch(() => undefined);
       secondApi.stop(true);
+    }
+  }, 60_000);
+
+  test("a finished command's output is released through the link only while its sandbox is awake", async () => {
+    if (!available) return;
+    // The worker's release, as the reaper runs it, over the real NATS bus.
+    const bus = await createNatsEventBus(nats.url);
+    const stops: Array<() => void> = [];
+    try {
+      const id = crypto.randomUUID();
+      const access = await bootstrapWorkspace(db, {
+        accountExternalSource: "test",
+        accountExternalId: id,
+        accountName: "Release",
+        workspaceExternalSource: "test",
+        workspaceExternalId: id,
+        workspaceName: "Release",
+        subjectId: `subject-${id}`,
+      });
+      const { accountId, workspaceId } = access.workspaceGrants[0]!;
+      const session = await createSession(db, {
+        accountId,
+        workspaceId: workspaceId!,
+        initialMessage: "Release",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "compute",
+      });
+      const agent = {
+        workspaceId: workspaceId!,
+        agentId: crypto.randomUUID(),
+        sandbox: `sbx-${id.slice(0, 8)}`,
+      };
+      const group = {
+        accountId,
+        workspaceId: workspaceId!,
+        sandboxGroupId: session.sandboxGroupId,
+      };
+      await acquireLease(db, {
+        ...group,
+        kind: "turn",
+        holderId: `turn-${id}`,
+        backend: "compute",
+        leaseTtlMs: 45_000,
+      });
+      await commitWarmingToWarm(db, {
+        ...group,
+        expectedEpoch: 0,
+        instanceId: agent.sandbox,
+        leaseTtlMs: 45_000,
+      });
+      await createSandboxEnrollment(db, {
+        accountId,
+        workspaceId: workspaceId!,
+        enrollmentId: agent.agentId,
+        sandboxGroupId: session.sandboxGroupId,
+        hasDisplay: false,
+        workspaceRoot: "/workspace",
+      });
+      const instance = crypto.randomUUID();
+      const scope = `agent.${agent.workspaceId}.${agent.agentId}.connection.${instance}`;
+      const link = await linkAs("h1");
+      expect(
+        await link.open({
+          s: 1,
+          sandbox: agent.sandbox,
+          ticket: await ticketFor(agent, { host: "h1", epoch: 1 }),
+          connection: instance,
+        }),
+      ).toMatchObject({ t: "opened" });
+      // The runner's subscriptions: its RPC subject, replayable deliveries under
+      // it, and final ACKs.
+      link.send({ t: "sub", s: 1, sid: 7, subject: `${scope}.rpc` });
+      link.send({ t: "sub", s: 1, sid: 8, subject: `${scope}.ack` });
+      link.send({ t: "sub", s: 1, sid: 9, subject: `${scope}.rpc.>` });
+      await Bun.sleep(100);
+
+      // A background command that exited, its output already consumed: what
+      // is left is releasing the agent's retained copy (frames up to seq 2).
+      const commandId = crypto.randomUUID();
+      const identity = {
+        accountId,
+        workspaceId: workspaceId!,
+        sessionId: session.id,
+        commandId,
+        controlWorkspaceId: workspaceId!,
+        enrollmentId: agent.agentId,
+        connectionInstanceId: instance,
+        opId: `op-${commandId}`,
+      };
+      await shared!
+        .admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+        values (${commandId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${agent.agentId},${instance},${identity.opId},'2000-01-01T00:00:00Z'::timestamptz)`;
+      await settleConnectedMachineSessionBackgroundCommand(db, {
+        ...identity,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "op_exit",
+      });
+      await recordConnectedCommandOutputConsumption(db, {
+        ...identity,
+        receipt: { exitSeq: "2", attachGeneration: "1" },
+        exitCode: 0,
+      });
+      const stored = async () =>
+        (await shared!.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+      const due = async () =>
+        shared!
+          .admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z'::timestamptz,reconcile_claim_id=null,reconcile_claimed_at=null where id=${commandId}`;
+      const asleepSince = async () =>
+        (
+          await shared!.admin<{ compute_asleep_since: Date | null }[]>`
+            select compute_asleep_since from sandbox_leases
+            where workspace_id=${workspaceId!} and sandbox_group_id=${session.sandboxGroupId}`
+        )[0]!.compute_asleep_since;
+      const power = async (state: "asleep" | "awake") => {
+        link.send({ t: "state", s: 1, state });
+        const deadline = Date.now() + 5_000;
+        while (((await asleepSince()) === null) !== (state === "awake")) {
+          if (Date.now() > deadline) throw new Error(`the gateway did not record ${state}`);
+          await Bun.sleep(20);
+        }
+      };
+      const release = () =>
+        reconcileConnectedCommandOutputReleases(
+          db,
+          { sandboxLeaseReaperPeriodMs: 30_000, sandboxSelfhostedControlTimeoutMs: 2_000 } as never,
+          { incrementCounter: () => {}, warn: () => {} } as never,
+          bus as never,
+        );
+      const forwarded = (from: number) =>
+        link.frames.slice(from).filter((frame) => frame.t === "msg" && frame.s === 1);
+      let retained: OpState = OpState.OP_STATE_COMPLETE;
+      stops.push(
+        answerRequests(link, 1, (frame) => {
+          if (frame.sid !== 7 && frame.sid !== 9) return null;
+          const request = ControlRequest.decode(frame.payload);
+          // The transport's replay negotiation.
+          if (request.op?.$case === "ping")
+            return {
+              payload: ControlResponse.encode(
+                ControlResponse.fromPartial({
+                  requestId: request.requestId,
+                  result: { $case: "ping", ping: {} },
+                }),
+              ).finish(),
+              headers: [["Opengeni-Control-Replay", "1"]],
+            };
+          if (request.op?.$case !== "opAttach") return null;
+          const complete = retained === OpState.OP_STATE_COMPLETE;
+          return {
+            payload: ControlResponse.encode(
+              ControlResponse.fromPartial({
+                requestId: request.requestId,
+                result: {
+                  $case: "opStatus",
+                  opStatus: {
+                    opId: request.op.opAttach.opId,
+                    state: retained,
+                    nextSeq: complete ? "3" : "0",
+                    ...(complete
+                      ? { exit: { exitCode: 0, durationMs: "5", digests: {}, totals: {} } }
+                      : {}),
+                  },
+                },
+              }),
+            ).finish(),
+          };
+        }),
+      );
+
+      // Asleep: the release sends the sandbox nothing (a message would wake
+      // it) and leaves the obligation untouched.
+      await power("asleep");
+      let mark = link.frames.length;
+      await release();
+      await Bun.sleep(200);
+      expect(forwarded(mark)).toEqual([]);
+      expect((await stored()).reconcile_attempts).toBe(0);
+      expect((await stored()).output_release_observed_at).toBeNull();
+
+      // Awake: the attach and the final ACK reach the agent through the link,
+      // on the subjects its runner subscribes to.
+      await power("awake");
+      mark = link.frames.length;
+      await release();
+      expect((await stored()).last_reconcile_outcome).toBe("output_ack_published");
+      const ack = await link.next(
+        (frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8,
+        5_000,
+        mark,
+      );
+      if (ack.t !== "msg") throw new Error("not a msg");
+      expect(ack.subject).toBe(`${scope}.ack`);
+      expect(OpAck.decode(ack.payload)).toMatchObject({
+        opId: identity.opId,
+        ackedSeq: "2",
+        final: true,
+      });
+
+      // It falls asleep before its agent forgot the op: nothing more is sent.
+      await power("asleep");
+      await due();
+      mark = link.frames.length;
+      await release();
+      await Bun.sleep(200);
+      expect(forwarded(mark)).toEqual([]);
+      expect((await stored()).output_release_observed_at).toBeNull();
+
+      // Awake again, its agent has forgotten the acknowledged op, and the next
+      // pass observes the release; later passes send nothing.
+      await power("awake");
+      retained = OpState.OP_STATE_LOST;
+      await due();
+      await release();
+      const released = await stored();
+      expect(released.output_release_observed_at).toBeInstanceOf(Date);
+      expect(released.output_unavailable_at).toBeNull();
+      await due();
+      mark = link.frames.length;
+      await release();
+      await Bun.sleep(200);
+      expect(forwarded(mark)).toEqual([]);
+      link.close();
+    } finally {
+      for (const stop of stops) stop();
+      await bus.close().catch(() => undefined);
     }
   }, 60_000);
 

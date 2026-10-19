@@ -104,7 +104,9 @@ once the ledger has recorded that stop. A turn records it through its own
 adoption; a direct terminal or file request records it in the same ledger
 without a turn. If recording fails, the caller keeps custody and goes on
 stopping it, as for a machine that stopped answering, and the text claims no
-stop. The reconciler alone decides the outcome: it delivers the stop if the old
+stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+same answer, not exit 124: it reports 124 only when its deadline provably ended
+the command. The reconciler alone decides the outcome: it delivers the stop if the old
 runner answers again, and settles the command as lost once the enrollment
 retires that runner (revoked, a different connection instance, or a stopped
 connection). The exec's own timeout also covers its

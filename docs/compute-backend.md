@@ -46,6 +46,18 @@ sends the cancellation from the API at once, so the process ends without
 waiting for the next maintenance pass; the claim delivers it when that
 attempt fails.
 
+A finished background command's output is released in two reconciler passes:
+the first sends the agent its final ACK, and a later one sees that the agent no
+longer keeps the command. Each pass sends a request, which wakes a sleeping
+sandbox, and the agent forgets an acknowledged command only at its next
+housekeeping pass, on its own clock, which stands still while the sandbox
+sleeps. So that work is due and claimed only while the sandbox's lease does not
+record it asleep (0849): a sleeping sandbox's release waits, untouched, and
+completes on later passes once something else has woken it. Only a pass that
+races the sandbox falling asleep, before the gateway has recorded the sleep,
+can still wake it, once. A retired runner's release reaches no agent, so it is
+not held back.
+
 The only timers that message an agent are the op stream's credit acks and
 silence probes, and they run only while a call is attached to a running
 command; they stop when the call returns or yields. Screen-control renewal
@@ -152,7 +164,9 @@ skips sandbox enrollments, and machine routes list machines only.
   agent is gone. Abandoned work therefore neither keeps the lease warm nor
   holds up deleting the chat: a command already asked to stop on the chat's
   own sandbox does not hold the deletion, because ending the group deletes
-  the sandbox and the deletion waits for that.
+  the sandbox and the deletion waits for that. A terminal exec whose own
+  deadline passes meanwhile gives that same unknown outcome: it reports exit
+  124 only when its deadline provably ended the command.
 - **Host loss**: the fabric never brings an agent back rewound. After a host
   loss the sandbox boots fresh on another host from its newest stored copy's
   files (programs end; the guest flushes its disk before each capture, so the

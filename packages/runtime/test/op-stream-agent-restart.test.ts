@@ -20,6 +20,7 @@ import type { OpStreamTransport } from "../src/sandbox/selfhosted/op-transport";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import { runWithToolCallCorrelation } from "../src/sandbox/op-correlation";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import { SandboxChannelAService } from "../src/sandbox/channel-a";
 
 const WORKSPACE = "ws-restart";
 const AGENT = "agent-restart";
@@ -826,5 +827,73 @@ describe("an exec whose start is held by a link that ends", () => {
         (caught: unknown) => caught,
       );
     expectOutcomeUnknown(error, { startConfirmed: false, stopRequested: false });
+  });
+});
+
+describe("a terminal exec whose deadline passes while its agent is unreachable", () => {
+  // A terminal exec's deadline cancels its command. Exit 124 says the deadline
+  // ended it, so it needs proof that it did; past the deadline, a command whose
+  // agent was replaced before that proof came gets the same unknown outcome as
+  // any request on a replaced connection.
+  const holding = (exec: ExecRequest): FakeOpScript =>
+    exec.command.join(" ").includes("sleep 600")
+      ? { frames: [], live: true, holdUntilCancel: true }
+      : { frames: [], exit: { exitCode: 0 } };
+
+  for (const unreachable of ["host lost", "agent offline"] as const) {
+    test(`${unreachable}, then replaced: the outcome is unknown, not exit 124`, async () => {
+      const context = rig({
+        // A lost host holds requests; an offline agent has no responders.
+        goneHolds: unreachable === "host lost",
+        controlTimeoutMs: 30_000,
+        execTimeoutMs: 60_000,
+        defaultScript: holding,
+      });
+      const { session, runners, adoptions } = context;
+      const response = new SandboxChannelAService({ session }).terminalExec({
+        command: "sleep 600",
+        cwd: "",
+        timeoutMs: 300,
+        emitStream: false,
+      });
+      const started = () =>
+        runners
+          .get(OLD)!
+          .starts.find((start) => start.exec.command.join(" ").includes("sleep 600"));
+      await until(() => started() !== undefined);
+      const opId = started()!.opId;
+      context.loseHost();
+      // The deadline passes; its cancellation cannot reach the agent.
+      await Bun.sleep(600);
+      context.restart();
+      const startedAt = Date.now();
+      const error = await response.then(
+        (made) => made,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(SelfhostedControlError);
+      expect(String(error)).not.toMatch(/exceeded/);
+      expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: true });
+      expect(adoptions).toEqual([
+        expect.objectContaining({ connectionInstanceId: OLD, opId, abandoned: true }),
+      ]);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(runners.get(NEW)!.runs.has(opId)).toBe(false);
+    });
+  }
+
+  test("a deadline that provably ended the command is exit 124", async () => {
+    const { session, runners, adoptions } = rig({ defaultScript: holding });
+    const made = await new SandboxChannelAService({ session }).terminalExec({
+      command: "sleep 600",
+      cwd: "",
+      timeoutMs: 300,
+      emitStream: false,
+    });
+    expect(made).toMatchObject({ exitCode: 124, running: false });
+    expect(made.stderr).toBe("Terminal command exceeded 300ms");
+    const run = [...runners.get(OLD)!.runs.values()].find((entry) => entry.exit.cancelled);
+    expect(run).toBeDefined();
+    expect(adoptions).toEqual([]);
   });
 });

@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  acquireLease,
   bootstrapWorkspace,
+  commitWarmingToWarm,
   createDb,
   createEnrollment,
   createSandboxEnrollment,
@@ -53,7 +55,9 @@ afterAll(async () => {
   await shared?.release();
 }, 60000);
 
-async function seed(count = 25) {
+/** `count` running commands on one runner "launch": a Connected Machine, or
+ * a warm compute sandbox's agent. */
+async function seed(count = 25, kind: "machine" | "sandbox" = "machine") {
   const id = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -74,13 +78,39 @@ async function seed(count = 25) {
     model: "scripted-model",
     reasoningEffort: "medium",
     latencyMode: "standard",
-    sandboxBackend: "none",
+    sandboxBackend: kind === "sandbox" ? "compute" : "none",
   });
-  const enrollment = await createEnrollment(client.db, {
-    accountId,
-    workspaceId: workspaceId!,
-    pubkey: `ed25519:${id}`,
-  });
+  let enrollment: { id: string };
+  if (kind === "sandbox") {
+    const group = { accountId, workspaceId: workspaceId!, sandboxGroupId: session.sandboxGroupId };
+    await acquireLease(client.db, {
+      ...group,
+      kind: "turn",
+      holderId: `turn-${id}`,
+      backend: "compute",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(client.db, {
+      ...group,
+      expectedEpoch: 0,
+      instanceId: `box-${id}`,
+      leaseTtlMs: 45_000,
+    });
+    enrollment = await createSandboxEnrollment(client.db, {
+      accountId,
+      workspaceId: workspaceId!,
+      enrollmentId: crypto.randomUUID(),
+      sandboxGroupId: session.sandboxGroupId,
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+  } else {
+    enrollment = await createEnrollment(client.db, {
+      accountId,
+      workspaceId: workspaceId!,
+      pubkey: `ed25519:${id}`,
+    });
+  }
   await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
   // The sweep freezes a JavaScript millisecond due frontier. The database's
   // clock_timestamp() default is evaluated per row at finer precision, so a
@@ -252,8 +282,10 @@ test("offline commands remain tracked while one sweep shares failed connection o
   expect(row!.max_attempts).toBe(1);
 });
 
-async function terminalOutputFixture(fixtureOptions: { cancelledBeforeStart?: boolean } = {}) {
-  const sessionId = await seed(1);
+async function terminalOutputFixture(
+  fixtureOptions: { cancelledBeforeStart?: boolean; kind?: "machine" | "sandbox" } = {},
+) {
+  const sessionId = await seed(1, fixtureOptions.kind);
   const [row] =
     await shared.admin`select * from session_background_commands where session_id=${sessionId}`;
   const identity = {
@@ -334,8 +366,24 @@ async function terminalOutputFixture(fixtureOptions: { cancelledBeforeStart?: bo
     (
       await shared.admin`select * from session_background_commands where id=${identity.commandId}`
     )[0]!;
+  // The gateway's record of the compute sandbox's power state.
+  const asleep = async (value: boolean) => shared.admin`update sandbox_leases lease
+    set compute_asleep_since=${value ? new Date() : null} from enrollments enrollment
+    where enrollment.id=${identity.enrollmentId} and lease.workspace_id=enrollment.workspace_id
+      and lease.sandbox_group_id=enrollment.sandbox_group_id and lease.backend='compute'`;
   await due();
-  return { identity, transport, runner, operations, rpc, connection, outputBus, due, stored };
+  return {
+    identity,
+    transport,
+    runner,
+    operations,
+    rpc,
+    connection,
+    outputBus,
+    due,
+    stored,
+    asleep,
+  };
 }
 
 test("output capture and ACK retry survive publisher failure and a fresh reconciler without model observation", async () => {
@@ -1098,3 +1146,83 @@ test("a request to a replaced connection ends without a wake when another proces
     await parkSession(fixture.session.id);
   }
 }, 20_000);
+
+test("a sleeping compute sandbox's output release waits, without a request, until it is awake", async () => {
+  // The release is two passes: a final ACK, then a later look that finds the
+  // op forgotten. The agent forgets it on its own clock, which stops while
+  // the sandbox sleeps, so a pass to a sleeping sandbox would only wake it.
+  const fixture = await terminalOutputFixture({ kind: "sandbox" });
+  const eligible = async () =>
+    (
+      await shared.admin`select opengeni_private.connected_output_runner_eligible_v1(
+        ${fixture.identity.controlWorkspaceId}::uuid, ${fixture.identity.enrollmentId}::uuid,
+        ${fixture.identity.connectionInstanceId}) ok`
+    )[0]!.ok;
+  const releaseDue = async () =>
+    (await shared.admin`select opengeni_private.connected_command_output_release_due_v1() due`)[0]!
+      .due;
+  try {
+    // Asleep before the first pass: nothing is sent, nothing is attempted.
+    await fixture.asleep(true);
+    expect(await eligible()).toBe(false);
+    expect(await releaseDue()).toBe(false);
+    const quiet = noRunnerRpc();
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, quiet);
+    expect(quiet.requests()).toBe(0);
+    let row = await fixture.stored();
+    expect(row.reconcile_attempts).toBe(0);
+    expect(row.output_consumed_at).toBeNull();
+
+    // Awake: the first pass captures the output and sends the final ACK.
+    await fixture.asleep(false);
+    expect(await eligible()).toBe(true);
+    expect(await releaseDue()).toBe(true);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    row = await fixture.stored();
+    expect(row.last_reconcile_outcome).toBe("output_ack_published");
+    expect(fixture.runner.runs.get(fixture.identity.opId)!.finalAcked).toBe(true);
+    const attempts = row.reconcile_attempts;
+
+    // It falls asleep before the agent forgets the op: later passes leave it
+    // asleep and the obligation untouched.
+    await fixture.asleep(true);
+    for (let pass = 0; pass < 3; pass++) {
+      await fixture.due();
+      expect(await releaseDue()).toBe(false);
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, quiet);
+    }
+    expect(quiet.requests()).toBe(0);
+    row = await fixture.stored();
+    expect(row.reconcile_attempts).toBe(attempts);
+    expect(row.output_release_observed_at).toBeNull();
+
+    // Woken by something else, its agent forgets the acknowledged op, and the
+    // next pass observes the release.
+    await fixture.asleep(false);
+    fixture.runner.lostOps.add(fixture.identity.opId);
+    await fixture.due();
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    row = await fixture.stored();
+    expect(row.output_release_observed_at).toBeInstanceOf(Date);
+    expect(row.output_unavailable_at).toBeNull();
+    expect(fixture.operations.filter((op) => op === "opStart" || op === "opCancel")).toEqual([]);
+  } finally {
+    await parkSession(fixture.identity.sessionId);
+  }
+});
+
+test("a sleeping compute sandbox's retired runner still settles its output", async () => {
+  // The settlement reaches no agent, so sleep does not hold it back.
+  const fixture = await terminalOutputFixture({ kind: "sandbox" });
+  try {
+    await fixture.asleep(true);
+    await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.identity.enrollmentId}`;
+    const rpc = noRunnerRpc();
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+    const row = await fixture.stored();
+    expect(row.output_unavailable_at).toBeInstanceOf(Date);
+    expect(row.last_reconcile_outcome).toBe("output_unavailable");
+  } finally {
+    await parkSession(fixture.identity.sessionId);
+  }
+});
