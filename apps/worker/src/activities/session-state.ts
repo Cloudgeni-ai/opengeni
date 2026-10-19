@@ -503,7 +503,7 @@ export function createSessionStateActivities(
       observability.error("session-attempt quiescence event fanout failed", {
         "opengeni.session_id": input.sessionId,
         "opengeni.attempt_id": input.attemptId,
-        error: error instanceof Error ? error.message : String(error),
+        error,
       });
     }
   }

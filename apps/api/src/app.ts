@@ -595,6 +595,7 @@ export function createAppComposition(deps: AppDependencies): {
         reapExpiredManagedAuthSessionSets(deps.db, 100),
       ]).catch((error) => {
         observability.error("Managed isolated-auth orphan reap failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
@@ -1136,6 +1137,7 @@ export function createAppComposition(deps: AppDependencies): {
     } finally {
       await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
         observability.error("Managed actor mutation lease release failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
