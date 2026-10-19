@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Tests compute-host-certificate against a stand-in for the control service
+# and the metadata server (a curl shim that signs requests with a test
+# authority), on Linux with openssl, jq and flock:
+#
+#   compute/deploy/host/test-compute-host-certificate
+#
+# - a current, matching pair is left alone (no request);
+# - a pair whose key is not the certificate's, as an interrupted renewal
+#   of the old layout left it, or whose certificate does not verify against
+#   ca.pem, is not current and is renewed;
+# - each renewal publishes key and certificate together: host.pem and
+#   host.key point through one symlink, switched in one rename;
+# - a run waits for another one's lock;
+# - off GCP, with no certificate, the request is left in request/, and the
+#   certificate put back there is installed by the next run.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/compute-host-certificate"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+failures=0
+ok() { echo "ok: $*"; }
+bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+# The test authority, and a second one no pair here verifies against.
+authority() {
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+    -subj "/CN=$2" -keyout "$1.key" -out "$1.pem" 2>/dev/null
+}
+authority "$work/ca" "test hosts"
+authority "$work/other" "other hosts"
+
+# A certificate of authority `$1` for the request `$2`, valid `$3` days.
+sign() {
+  openssl x509 -req -in "$2" -CA "$1.pem" -CAkey "$1.key" -CAcreateserial -days "$3" \
+    -extfile <(printf 'subjectAltName=DNS:host-1\nextendedKeyUsage=serverAuth,clientAuth\n') 2>/dev/null
+}
+
+# The shims: curl answers the metadata server (when $work/gce exists) and
+# the certificate route, logging each call; systemctl does nothing.
+mkdir -p "$work/bin"
+cat >"$work/bin/curl" <<EOF
+#!/usr/bin/env bash
+out= data= url=
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    --data-binary) data=\${2#@}; shift 2 ;;
+    -H | --cacert | --cert | --key | --max-time | --retry | --data-urlencode) shift 2 ;;
+    -*) shift ;;
+    *) url=\$1; shift ;;
+  esac
+done
+echo "\$url" >>"$work/calls"
+case "\$url" in
+  *computeMetadata*/instance/id) [ -e "$work/gce" ] && echo 123 ;;
+  *computeMetadata*/identity*) [ -e "$work/gce" ] && echo a.b.c ;;
+  */v1/hosts/certificate)
+    [ -e "$work/slow" ] && sleep 3
+    jq -r .csr "\$data" >"$work/asked.csr"
+    certificate=\$(openssl x509 -req -in "$work/asked.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" \
+      -CAcreateserial -days 7 2>/dev/null)
+    jq -n --arg certificate "\$certificate" --rawfile authorities "$work/ca.pem" \
+      '{name: "host-1", certificate: \$certificate, authorities: \$authorities, not_after_ms: 0}' >"\$out" ;;
+  *) exit 22 ;;
+esac
+EOF
+printf '#!/bin/sh\nexit 1\n' >"$work/bin/systemctl"
+chmod +x "$work/bin/curl" "$work/bin/systemctl"
+export PATH="$work/bin:$PATH"
+
+etc="$work/etc"
+mkdir -p "$etc"
+cp "$work/ca.pem" "$etc/ca.pem"
+printf 'COMPUTE_CONTROL=https://control.example:8443\nCOMPUTE_NAME=host-1\n' >"$etc/host.env"
+run() {
+  : >"$work/calls"
+  COMPUTE_CERTIFICATE_DIR="$etc" COMPUTE_METADATA_URL=http://metadata.invalid/computeMetadata/v1 \
+    "$script" --config "$etc/host.env" "$@"
+}
+requests() { grep -c '/v1/hosts/certificate' "$work/calls" || true; }
+matches() {
+  [ "$(openssl x509 -in "$etc/host.pem" -noout -pubkey)" = "$(openssl pkey -in "$etc/host.key" -pubout)" ]
+}
+
+# The old layout: plain files, a current matching pair.
+touch "$work/gce"
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=host-1 \
+  -keyout "$etc/host.key" -out "$work/old.csr" 2>/dev/null
+sign "$work/ca" "$work/old.csr" 7 >"$etc/host.pem"
+run >/dev/null
+[ "$(requests)" = 0 ] && ok "a current matching pair is left alone" || bad "a current pair was renewed"
+
+# An interrupted renewal of the old layout: the new key, the old certificate.
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$etc/host.key" 2>/dev/null
+run >/dev/null
+if [ "$(requests)" = 1 ] && matches && [ -L "$etc/host.pem" ] && [ -L "$etc/host.key" ] &&
+  [ "$(readlink "$etc/host.pem")" = certificate/host.pem ] &&
+  [ "$(readlink "$etc/host.key")" = certificate/host.key ] && [ -L "$etc/certificate" ]; then
+  ok "a mismatched pair is renewed, and the pair published through one symlink"
+else
+  bad "a mismatched pair: requests $(requests), matches $(matches && echo yes || echo no)"
+fi
+first=$(readlink "$etc/certificate")
+run >/dev/null
+[ "$(requests)" = 0 ] && ok "the published pair is current" || bad "the published pair was renewed"
+
+# A pair that does not verify against ca.pem.
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=host-1 \
+  -keyout "$work/foreign.key" -out "$work/foreign.csr" 2>/dev/null
+dir=$etc/$(readlink "$etc/certificate")
+sign "$work/other" "$work/foreign.csr" 7 >"$dir/host.pem"
+cp "$work/foreign.key" "$dir/host.key"
+run >/dev/null
+if [ "$(requests)" = 1 ] && matches && openssl verify -CAfile "$etc/ca.pem" "$etc/host.pem" >/dev/null 2>&1 &&
+  [ "$(readlink "$etc/certificate")" != "$first" ] && [ "$(find "$etc/certificates" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
+  ok "a pair of another authority is renewed; one pair is kept"
+else
+  bad "a foreign pair: requests $(requests)"
+fi
+
+# --force renews a current pair; a second run waits for the first's lock.
+touch "$work/slow"
+start=$(date +%s)
+run --force >/dev/null &
+sleep 1
+run >/dev/null
+wait
+rm -f "$work/slow"
+elapsed=$(($(date +%s) - start))
+if [ "$elapsed" -ge 3 ] && matches; then
+  ok "a run waits for another's lock (${elapsed} s)"
+else
+  bad "a run did not wait for the lock (${elapsed} s)"
+fi
+
+# Off GCP with nothing current: the request is left, and the certificate
+# put back is installed.
+rm -f "$work/gce"
+rm -rf "$etc/certificates" "$etc/certificate" "$etc/host.pem" "$etc/host.key"
+if run >/dev/null 2>&1; then
+  bad "off GCP with no certificate, the run succeeded"
+elif [ -s "$etc/request/host.csr" ] && [ -s "$etc/request/host.key" ]; then
+  ok "off GCP with no certificate, the request is left in request/"
+else
+  bad "no request left"
+fi
+sign "$work/ca" "$etc/request/host.csr" 7 >"$etc/request/host.pem"
+run >/dev/null
+if [ "$(requests)" = 0 ] && matches && [ ! -e "$etc/request" ]; then
+  ok "the certificate issued for the request is installed"
+else
+  bad "the issued certificate was not installed"
+fi
+# And then renews by itself, with that certificate.
+run --force >/dev/null
+[ "$(requests)" = 1 ] && matches && ok "it renews by its certificate" || bad "no renewal by certificate"
+
+[ "$failures" = 0 ] || { echo "$failures failed" >&2; exit 1; }
+echo "all passed"

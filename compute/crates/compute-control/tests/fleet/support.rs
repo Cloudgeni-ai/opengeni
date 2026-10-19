@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use compute_control::api::key_digest;
-use compute_control::authority::Authority;
+use compute_control::authority::{Authority, Proven};
 use compute_control::leader::Scaling;
 use compute_control::service::Settings;
 use compute_control::store::{MemoryStore, Store as _};
@@ -100,6 +100,11 @@ impl Pki {
     /// The same, valid until `not_after` if given.
     fn issue_until(&self, name: &str, not_after: Option<time::OffsetDateTime>) -> (String, String) {
         let mut params = CertificateParams::new(vec![name.to_owned()]).unwrap();
+        // As a host off GCP holds it: proven by a certificate, so it renews
+        // by presenting it.
+        params
+            .distinguished_name
+            .push(DnType::OrganizationalUnitName, Proven::Certificate.unit());
         if let Some(not_after) = not_after {
             params.not_before = not_after - time::Duration::days(2);
             params.not_after = not_after;

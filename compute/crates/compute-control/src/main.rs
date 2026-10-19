@@ -274,8 +274,18 @@ fn host_names(url: &str, extra: &[String]) -> anyhow::Result<Vec<String>> {
         .with_context(|| format!("--host-url {url:?} names no host"))?
         .trim_start_matches('[')
         .trim_end_matches(']');
+    // "control.example." is another name than "control.example" to a host
+    // checking the certificate, so one form is configured, never both.
+    anyhow::ensure!(
+        !host.ends_with('.'),
+        "--host-url {url:?}: give the host without its trailing dot"
+    );
     let mut names = vec![host.to_owned()];
     for name in extra {
+        anyhow::ensure!(
+            !name.ends_with('.'),
+            "--host-name {name:?}: give the name without its trailing dot"
+        );
         if !names.contains(name) {
             names.push(name.clone());
         }
@@ -534,7 +544,12 @@ async fn main() -> anyhow::Result<()> {
                 reserved: Vec::new(),
             };
             let issued = certificates
-                .issue(&name, &csr, std::time::SystemTime::now())
+                .issue(
+                    &name,
+                    &csr,
+                    std::time::SystemTime::now(),
+                    authority::Proven::Certificate,
+                )
                 .map_err(|(_, message)| anyhow::anyhow!(message))?;
             print!("{}", issued.certificate);
             Ok(())
@@ -596,6 +611,12 @@ mod tests {
         );
         assert!(host_names("http://control.example:8443", &[]).is_err());
         assert!(host_names("control.example", &[]).is_err());
+        // A trailing dot, in the URL or an extra name, is refused at start.
+        let error = host_names("https://control.example.:8443", &[]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+        let error =
+            host_names("https://control.example:8443", &["extra.example.".into()]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
     }
 
     #[test]
@@ -620,7 +641,12 @@ mod tests {
             reserved: Vec::new(),
         };
         let issued = certificates
-            .issue("host-9", &csr, std::time::SystemTime::now())
+            .issue(
+                "host-9",
+                &csr,
+                std::time::SystemTime::now(),
+                authority::Proven::Certificate,
+            )
             .unwrap();
         assert_eq!(issued.name, "host-9");
         let der = rustls::pki_types::CertificateDer::from_pem_slice(issued.certificate.as_bytes())
