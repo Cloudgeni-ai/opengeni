@@ -712,6 +712,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   cloud maps a public address onto the host, the host can also be reached
   through that address: pass it with `--block`, and check from a guest that
   it is refused.
+- **Hosts on an overlay network.** Where the control service and Opengeni
+  are reached only over an overlay network (a WireGuard mesh such as
+  Tailscale), the GCP root joins hosts to it at boot with
+  `host_startup_prelude`, a script run before anything else on every
+  attempt, and `advertise_interface` (such as `tailscale0`) makes each host
+  give the service that interface's address to dial. Keep the join key in
+  Secret Manager and list it in `host_readable_secrets` rather than in the
+  prelude, which is instance metadata. Overlay addresses in the shared
+  range (100.64.0.0/10) are blocked to sandboxes like any local network,
+  unless the host is trusted; do not accept routes or use an exit node on
+  hosts, and give hosts an overlay identity that may reach only the
+  service's host endpoint and Opengeni's agent gateway.
 
 ## Capacity and cost
 

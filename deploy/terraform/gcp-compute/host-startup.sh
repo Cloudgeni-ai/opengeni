@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A compute host's startup script on Google Cloud, run as root at every
-# boot from the instance template's metadata (main.tf). It prepares the
-# state volume, fetches and checks the host bundle the template names,
+# boot from the instance template's metadata (main.tf). It runs the
+# deployment's prelude if it has one, prepares the state volume, fetches and checks the host bundle the template names,
 # writes /etc/compute/host.env and runs the bundle's install.sh with the
 # hosts' authority from the metadata, which gets the host its certificate
 # from the control service and starts the guard and the agent. A new
@@ -29,8 +29,29 @@ if [ -z "${COMPUTE_STARTUP_ATTEMPT:-}" ]; then
   exit 0
 fi
 
+# --- The deployment's own prelude (host_startup_prelude), such as joining
+# an overlay network, before anything else reaches the network.
+prelude=$(attr compute-prelude || true)
+if [ -n "$prelude" ]; then
+  log "running the prelude"
+  bash -euo pipefail -c "$prelude"
+fi
+
 NAME=$(meta instance/name)
-ADDRESS=$(meta instance/network-interfaces/0/ip)
+# The address the control service dials: the VPC's, or that of the
+# interface advertise_interface names once it has one.
+interface=$(attr compute-advertise || true)
+if [ -n "$interface" ]; then
+  ADDRESS=
+  for _ in $(seq 120); do
+    ADDRESS=$(ip -4 -o addr show dev "$interface" 2>/dev/null | awk '{ sub("/.*", "", $4); print $4; exit }')
+    [ -n "$ADDRESS" ] && break
+    sleep 1
+  done
+  [ -n "$ADDRESS" ] || { log "$interface has no IPv4 address"; exit 1; }
+else
+  ADDRESS=$(meta instance/network-interfaces/0/ip)
+fi
 ZONE=$(meta instance/zone)
 ZONE=${ZONE##*/}
 BUNDLE_URL=$(attr compute-bundle-url)
