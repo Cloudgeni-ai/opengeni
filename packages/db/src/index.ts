@@ -1299,6 +1299,7 @@ import {
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceUsageLock,
+  WorkspaceNotFoundError,
   type Database,
   type SessionActivityDatabase,
 } from "./database";
@@ -60280,19 +60281,26 @@ export async function getEnrollment(
     );
   }
   const workspaceId = access;
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.enrollments)
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.id, enrollmentId),
-        ),
-      )
-      .limit(1);
-    return row ? mapEnrollment(row) : null;
-  });
+  try {
+    return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, workspaceId),
+            eq(schema.enrollments.id, enrollmentId),
+          ),
+        )
+        .limit(1);
+      return row ? mapEnrollment(row) : null;
+    });
+  } catch (error) {
+    // A signed credential can outlive its workspace. Treat that as an absent
+    // enrollment, not an outage, without swallowing database/RLS failures.
+    if (error instanceof WorkspaceNotFoundError && error.workspaceId === workspaceId) return null;
+    throw error;
+  }
 }
 
 /** Read an enrollment only while its exact runner claim is live according to

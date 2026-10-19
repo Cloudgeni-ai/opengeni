@@ -145,6 +145,57 @@ afterAll(async () => {
 
 describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCredentials", () => {
   test.each(["test", "production"] as const)(
+    "renewal in %s returns reconnect-required for a deleted workspace",
+    async (environment) => {
+      if (!available) throw new Error("renewal acceptance requires PostgreSQL");
+      const { accountId, workspaceId } = await freshWorkspace();
+      const keys = generateKeyPairSync("ed25519");
+      const enrollment = await createEnrollment(db, {
+        accountId,
+        workspaceId,
+        pubkey: Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
+          "base64",
+        ),
+        exposure: "whole-machine",
+        hasDisplay: false,
+        os: "linux",
+        arch: "x86_64",
+      });
+      const now = Math.floor(Date.now() / 1000);
+      const token = await signEnrollmentBearer(SIGNING_SECRET, {
+        workspaceId,
+        agentId: enrollment.id,
+        enrollmentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+        subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
+        exp: now + 3600,
+      });
+      await admin`delete from workspaces where id = ${workspaceId}`;
+      const response = await appFor({ settings: { ...settings, environment } }).request(
+        "/v1/enrollments/renew",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bearer: token,
+            signedAt: now,
+            signature: sign(
+              null,
+              Buffer.from(enrollmentRenewalProof(token, now)),
+              keys.privateKey,
+            ).toString("base64"),
+          }),
+        },
+      );
+      expect(response.status).toBe(401);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect((await response.json()).code).toBe("enrollment_reconnect_required");
+      expect(await getEnrollment(db, workspaceId, enrollment.id)).toBeNull();
+    },
+    180_000,
+  );
+
+  test.each(["test", "production"] as const)(
     "renewal in %s recovers expired credentials only with the current install key and live grant",
     async (environment) => {
       if (!available) throw new Error("renewal acceptance requires PostgreSQL");
