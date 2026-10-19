@@ -34,6 +34,7 @@ export class ControlReplyRecovery {
   ): Promise<{ data: Uint8Array }> {
     if (!conn.supportsHeaders) return conn.request(subject, payload, { timeout: timeoutMs });
     const deadline = Date.now() + timeoutMs + this.recoveryMs;
+    const readySubject = subject.endsWith(".rpc") ? `${subject.slice(0, -4)}.hello` : undefined;
     let supported = this.supported.get(subject);
     if (!supported) {
       const probe = ControlRequest.encode(
@@ -42,7 +43,7 @@ export class ControlReplyRecovery {
           op: { $case: "ping", ping: { nonce: "0" } },
         }),
       ).finish();
-      supported = this.retry(conn, subject, probe, timeoutMs, deadline).then(
+      supported = this.retry(conn, subject, probe, timeoutMs, deadline, readySubject).then(
         (reply) => reply.headers?.get(REPLAY_HEADER) === "1",
       );
       this.supported.set(subject, supported);
@@ -52,7 +53,7 @@ export class ControlReplyRecovery {
     }
     if (!(await supported)) return conn.request(subject, payload, { timeout: timeoutMs });
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
-    return this.retry(conn, delivery, payload, timeoutMs, deadline);
+    return this.retry(conn, delivery, payload, timeoutMs, deadline, readySubject);
   }
 
   private async retry(
@@ -61,14 +62,20 @@ export class ControlReplyRecovery {
     payload: Uint8Array,
     timeoutMs: number,
     deadline: number,
+    readySubject: string | undefined,
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
     for (;;) {
       try {
         return await conn.request(subject, payload, {
           timeout: Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+          ...(readySubject ? { resendOn: readySubject } : {}),
         });
       } catch (error) {
+        // A transport-level resend may already have an uncertain first delivery.
+        // Keep that uncertainty, but do not retry a permanent refusal underneath it.
+        const cause = (error as { cause?: unknown } | null)?.cause;
+        if (cause && !transient(cause)) throw error;
         // Even a definitive refusal of THIS attempt says nothing about a prior
         // attempt whose reply was lost. Stop, but preserve its uncertain outcome.
         if (!transient(error)) throw uncertain ?? error;

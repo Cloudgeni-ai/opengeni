@@ -24,7 +24,9 @@ import {
   type Msg,
   type NatsConnection,
   type Subscription,
+  type Status,
 } from "nats";
+import { recoveringRequest } from "./recovering-request";
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent | WorkspaceControlEvent>();
 
@@ -178,12 +180,12 @@ function logConnectionStatus(
   nc: NatsConnection,
   label: string,
   logger: EventLogger = silentLogger,
-  onStatus?: (type: string) => void,
+  onStatus?: (type: string, status: Status) => void,
 ): void {
   void (async () => {
     try {
       for await (const status of nc.status()) {
-        onStatus?.(status.type);
+        onStatus?.(status.type, status);
         const attributes = { label, status: status.type, data: status.data };
         if (isWarnNatsStatus(status.type)) {
           (logger.warn ?? silentLogger.warn)("NATS connection status", attributes);
@@ -523,7 +525,13 @@ export type RequestReply = { data: Uint8Array; headers?: { get(name: string): st
  */
 export interface RequestConnection {
   supportsHeaders?: boolean;
-  request(subject: string, payload: Uint8Array, opts: { timeout: number }): Promise<RequestReply>;
+  request(
+    subject: string,
+    payload: Uint8Array,
+    /** resendOn opts into identical redelivery on that subject's notifications
+     * and local reconnect. Only safe reads or journaled deliveries may opt in. */
+    opts: { timeout: number; resendOn?: string },
+  ): Promise<RequestReply>;
 }
 
 /**
@@ -705,7 +713,9 @@ export async function createNatsEventBus(
   let connected = true;
   let reconnectGeneration = 0;
   const reconnectSubscribers = new Set<(generation: number) => void>();
-  logConnectionStatus(nc, "event-bus", options.logger, (type) => {
+  const requestObservers = new Set<(status: Status) => void>();
+  logConnectionStatus(nc, "event-bus", options.logger, (type, status) => {
+    for (const observer of requestObservers) observer(status);
     if (
       type === "disconnect" ||
       type === "reconnecting" ||
@@ -733,7 +743,13 @@ export async function createNatsEventBus(
   });
   const requestConnection: RequestConnection = {
     supportsHeaders: true,
-    request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
+    request: async (subject, payload, opts) =>
+      opts.resendOn
+        ? recoveringRequest(nc, subject, payload, opts, (observer) => {
+            requestObservers.add(observer);
+            return () => requestObservers.delete(observer);
+          })
+        : requestReply(nc, subject, payload, opts.timeout),
   };
   const opStreamConnection: OpStreamConnection = {
     subscribe: (subject) => nc.subscribe(subject),

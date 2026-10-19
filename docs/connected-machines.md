@@ -58,7 +58,17 @@ machine clocks must be synchronized, as for absolute command deadlines.
 
 The requester retries transient transport failures within the operation's request
 timeout plus a two-minute recovery allowance, preserving the delivery identity
-and bytes. It never retries a received tool error. A later no-responder cannot
+and bytes. It subscribes to the exact process's existing `.hello` subject before
+sending a journaled delivery (or its safe negotiation ping). A hello, or recovery
+of the requester's own NATS connection, immediately resends that same delivery to
+the same reply inbox, without waiting for the operation timeout or resetting its
+deadline. The supervisor sends hello only after both transport lanes and its
+subscriptions are established. Resend observers and reply subscriptions are
+removed when the request settles. This continuity requires the runtime deployment
+and agent readiness ordering; older agents remain wire-compatible, and mutations
+without negotiated journal support remain one-shot.
+
+It never retries a received tool error. A later no-responder cannot
 erase uncertainty from an earlier send. Accepted physical work and any unflushed
 reply retain the existing update-drain reservation until a successful socket
 publication; expiry without that proof remains unsettled. This is transport proof,
