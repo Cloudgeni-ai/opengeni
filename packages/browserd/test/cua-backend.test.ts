@@ -29,6 +29,7 @@ class Fixture implements CuaDesktopRuntime {
   live = true;
   stopped = false;
   applyLabel = "Apply";
+  fieldLabel = "Password";
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -77,7 +78,7 @@ class Fixture implements CuaDesktopRuntime {
               element_index: 1,
               element_token: `s${snapshot}:1`,
               role: "AXSecureTextField",
-              label: "Password",
+              label: this.fieldLabel,
               value: "must-not-leak",
               actions: [],
             },
@@ -766,24 +767,32 @@ describe("CUA desktop boundary", () => {
           action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
         }),
       ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
-      // A ref whose element changed since is refused before any input.
-      fixture.applyLabel = "Apply all";
-      const changed = await backend.observe(target.id);
+      // Once anything in the window changed, even another element (a row's
+      // Delete button can look the same for a different row), an earlier ref
+      // is refused before any input, without quoting any label.
       const clicks = fixture.calls.filter((call) => call.name === "click").length;
-      await expect(
-        backend.dispatch({
-          ...command(changed),
-          action: {
-            type: "semantic",
-            locator: { kind: "ref", ref: again.roots[0]!.ref },
-            action: "invoke",
-          },
-        }),
-      ).rejects.toMatchObject({
-        code: "observation_stale",
-        dispatched: false,
-        message: `CUA ref ${again.roots[0]!.ref} (button "Apply") is from an earlier observation, and that element has changed or moved since; use a ref from the latest observation (${changed.observationId.split(":").pop()})`,
-      });
+      for (const change of [
+        () => (fixture.fieldLabel = "Password again"),
+        () => (fixture.applyLabel = "Apply all"),
+      ]) {
+        const before = await backend.observe(target.id);
+        change();
+        const changed = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(changed),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: before.roots[0]!.ref },
+              action: "invoke",
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: "observation_stale",
+          dispatched: false,
+          message: `CUA ref ${before.roots[0]!.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${changed.observationId.split(":").pop()})`,
+        });
+      }
       expect(fixture.calls.filter((call) => call.name === "click").length).toBe(clicks);
       // CUA's own stale refusal says what the caller does, not CUA's tool names.
       fixture.mutation = result(
@@ -796,7 +805,9 @@ describe("CUA desktop boundary", () => {
         },
         true,
       );
-      await expect(backend.dispatch(command(changed))).rejects.toMatchObject({
+      await expect(
+        backend.dispatch(command(await backend.observe(target.id))),
+      ).rejects.toMatchObject({
         code: "observation_stale",
         dispatched: false,
         message:
@@ -804,6 +815,7 @@ describe("CUA desktop boundary", () => {
       });
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       fixture.applyLabel = "Apply";
+      fixture.fieldLabel = "Password";
       const latest = await backend.observe(target.id);
       await expect(
         backend.dispatch({

@@ -863,11 +863,11 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** The element a locator names. A ref from an earlier observation of the
-   * same window names the same element in the latest one: CUA honours only
-   * the tokens of its latest reading of a window, so the ref is rebased to the
-   * one element there with the same role, name and bounds, and refused when
-   * that element changed or moved. A ref seen nowhere says which observation
-   * is current. */
+   * same window names the same element in the latest one only while the
+   * window is unchanged: CUA honours only the tokens of its latest reading,
+   * so when every element still reads the same, in the same order, the ref
+   * acts through its element's current token. Otherwise it is refused. A ref
+   * seen nowhere says which observation is current. */
   private locateObserved(
     targetId: string,
     observed: ComputerBackendObservation,
@@ -888,17 +888,12 @@ export class CuaComputerBackend implements ComputerBackend {
         const node = earlier.roots.find((candidate) => candidate.ref === locator.ref);
         if (!node) continue;
         if (earlier === latest) return node;
-        const same = latest!.roots.filter(
-          (candidate) =>
-            !candidate.ref.startsWith("read-only:") &&
-            candidate.role === node.role &&
-            candidate.name === node.name &&
-            sameBounds(candidate.bounds, node.bounds),
-        );
-        if (same.length === 1) return same[0]!;
+        if (!locator.ref.startsWith("read-only:") && sameContent(earlier, latest!))
+          return latest!.roots[earlier.roots.indexOf(node)]!;
+        // Names no label: one could be a typed secret.
         throw new ComputerBackendError(
           "observation_stale",
-          `CUA ref ${locator.ref} (${node.role}${node.name ? ` "${node.name.slice(0, 80)}"` : ""}) is from an earlier observation, and that element has changed or moved since; use a ref from the latest observation (${latest!.observationId.split(":").pop()})`,
+          `CUA ref ${locator.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${latest!.observationId.split(":").pop()})`,
           false,
           false,
         );
@@ -926,17 +921,19 @@ export class CuaComputerBackend implements ComputerBackend {
 
 const RECENT_OBSERVATIONS = 4;
 
-/** Whether two element frames are the same place on screen. */
-function sameBounds(
-  a: InteractionSemanticNodeValue["bounds"],
-  b: InteractionSemanticNodeValue["bounds"],
+/** Whether two readings of a window show the same elements in the same order:
+ * everything but the snapshot-bound tokens. Then an element's position is
+ * its identity. */
+function sameContent(
+  earlier: ComputerBackendObservation,
+  latest: ComputerBackendObservation,
 ): boolean {
-  if (!a || !b) return a === b;
+  const content = (node: InteractionSemanticNodeValue) =>
+    JSON.stringify({ ...node, ref: node.ref.startsWith("read-only:") ? node.ref : null });
   return (
-    Math.abs(a.x - b.x) < 0.5 &&
-    Math.abs(a.y - b.y) < 0.5 &&
-    Math.abs(a.width - b.width) < 0.5 &&
-    Math.abs(a.height - b.height) < 0.5
+    earlier.roots.length === latest.roots.length &&
+    (earlier.incomplete === undefined) === (latest.incomplete === undefined) &&
+    earlier.roots.every((node, index) => content(node) === content(latest.roots[index]!))
   );
 }
 /** A Linux process's parent from /proc, or null when it cannot be read. */
