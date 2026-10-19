@@ -43,7 +43,7 @@ resource "google_project_service" "apis" {
 resource "google_service_account" "host" {
   account_id   = "${var.name_prefix}-host"
   display_name = "Opengeni compute host"
-  description  = "Compute hosts: the archive bucket's objects, nothing else."
+  description  = "Compute hosts: the archive bucket's objects and the secrets in host_readable_secrets, nothing else."
 }
 
 resource "google_service_account" "control" {
