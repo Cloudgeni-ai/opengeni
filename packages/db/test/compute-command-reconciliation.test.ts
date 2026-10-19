@@ -15,7 +15,7 @@ import {
   requestSessionBackgroundCommandCancellation,
 } from "../src/session-background-commands";
 
-// 0846: a message to a compute sandbox's agent wakes the sandbox, so the
+// 0849: a message to a compute sandbox's agent wakes the sandbox, so the
 // connected-command reconciler never polls a running command on a sandbox
 // enrollment. It claims one only after a pushed completion, with a saved
 // proof, once the command is retired (connection replaced, enrollment

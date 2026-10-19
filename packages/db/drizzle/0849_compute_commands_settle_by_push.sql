@@ -59,14 +59,14 @@ BEGIN
   IF strpos(claim_definition, 'enrollment.kind <> ''sandbox''') = 0 THEN
     IF (length(claim_definition) - length(replace(claim_definition, claim_anchor, '')))
         / length(claim_anchor) <> 1 THEN
-      RAISE EXCEPTION '0846 connected-command claim prerequisite drift' USING ERRCODE = '55000';
+      RAISE EXCEPTION '0849 connected-command claim prerequisite drift' USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(claim_definition, claim_anchor, claim_replacement);
   END IF;
   IF strpos(due_definition, 'enrollment.kind = ''sandbox''') = 0 THEN
     IF (length(due_definition) - length(replace(due_definition, due_anchor, '')))
         / length(due_anchor) <> 1 THEN
-      RAISE EXCEPTION '0846 connected-command due probe prerequisite drift' USING ERRCODE = '55000';
+      RAISE EXCEPTION '0849 connected-command due probe prerequisite drift' USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(due_definition, due_anchor, due_replacement);
   END IF;
