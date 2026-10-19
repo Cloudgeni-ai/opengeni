@@ -485,6 +485,10 @@ export function computerActionText(
     `Action ${receipt.state} on ${receipt.targetId} (operation ${receipt.operationId}).`,
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
+  if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
+    lines.push(
+      `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
+    );
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }

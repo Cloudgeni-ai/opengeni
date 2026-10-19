@@ -196,13 +196,14 @@ export class CuaComputerBackend implements ComputerBackend {
     return this.run(async () => {
       if (command.action.type === "launch") {
         await this.target(command.targetId);
-        await this.launch(command.action.applicationId);
+        const launched = await this.launch(command.action.applicationId);
         // The app is running: the launch succeeded whatever happens next. Its
-        // windows become targets when discovery works, and the action's own
-        // target is observed as for any other action.
+        // windows become targets when discovery works. The receipt observes
+        // the launched app's window, so the caller can act on it directly,
+        // or the action's own target when no window of the app is found.
         try {
-          await this.discover();
-          return await this.observeTarget(command.targetId);
+          const windowTarget = await this.launchedWindow(launched);
+          return await this.observeTarget(windowTarget ?? command.targetId);
         } catch {
           return null;
         }
@@ -771,7 +772,7 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Start an app (or bring up its existing instance) in the background. */
-  private async launch(applicationId: string): Promise<void> {
+  private async launch(applicationId: string): Promise<LaunchedApp> {
     const id = applicationId.trim();
     const { data } = await callDesktop(
       this.runtime,
@@ -788,6 +789,28 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         true,
       );
+    const reported = Windows.safeParse({ windows: data.windows });
+    return {
+      pid: typeof data.pid === "number" ? data.pid : null,
+      windows: reported.success ? reported.data.windows : [],
+    };
+  }
+
+  /** The target of the launched app's window: one the launch reported, else
+   * the first listed window of its process. A window can appear a moment
+   * after the process starts, so discovery is retried briefly. */
+  private async launchedWindow(launched: LaunchedApp): Promise<string | null> {
+    for (let attempt = 0; ; attempt++) {
+      const targets = await this.discover();
+      for (const window of launched.windows) {
+        const id = `cua:window:${window.pid}:${window.window_id}`;
+        if (this.targetsById.has(id)) return id;
+      }
+      const owned = targets.find((target) => target.processId === launched.pid);
+      if (owned) return owned.id;
+      if (launched.pid === null || attempt >= LAUNCH_WINDOW_RETRIES) return null;
+      await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
+    }
   }
 
   /** The element a locator names. A ref from an earlier observation of the
@@ -833,6 +856,14 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+/** How long a launch waits for the app's first window: up to a second. */
+const LAUNCH_WINDOW_RETRIES = 4;
+const LAUNCH_WINDOW_RETRY_MS = 250;
+
+/** A launched app's process and the windows launch_app reported, which have
+ * list_windows' shape. */
+type LaunchedApp = { pid: number | null; windows: { pid: number; window_id: number }[] };
+
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
 const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 
