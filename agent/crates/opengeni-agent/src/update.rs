@@ -51,7 +51,7 @@ pub fn installed_executable() -> Result<&'static Path, String> {
         .map_err(Clone::clone)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn resolve_macos_install_path(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize()
 }

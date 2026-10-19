@@ -745,7 +745,9 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 
 fn launchd_environment(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
     match std::fs::metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::BTreeMap::new())
+        }
         Err(error) => return Err(format!("read {}: {error}", path.display())),
         Ok(_) => {}
     }
@@ -770,7 +772,7 @@ fn parse_launchd_environment(
     match value.get("EnvironmentVariables") {
         Some(environment) => serde_json::from_value(environment.clone())
             .map_err(|error| format!("invalid LaunchAgent environment: {error}")),
-        None => Ok(Default::default()),
+        None => Ok(std::collections::BTreeMap::new()),
     }
 }
 
@@ -1147,7 +1149,7 @@ mod tests {
         .unwrap();
         assert_eq!(env.get("PATH").unwrap(), "/opt/tools/bin:/usr/bin");
         assert_eq!(env.get("LANG").unwrap(), "en_US.UTF-8");
-        assert!(parse_launchd_environment(br#"{}"#).unwrap().is_empty());
+        assert!(parse_launchd_environment(b"{}").unwrap().is_empty());
         assert!(parse_launchd_environment(br#"{"EnvironmentVariables":{"PATH":5}}"#).is_err());
         assert!(parse_launchd_environment(b"invalid").is_err());
     }

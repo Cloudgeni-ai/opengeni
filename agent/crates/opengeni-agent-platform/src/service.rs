@@ -355,6 +355,8 @@ pub fn render_launchd_plist_with_environment(
     user_home: &Path,
     existing: &std::collections::BTreeMap<String, String>,
 ) -> PlatformResult<String> {
+    use std::fmt::Write as _;
+
     // This pure renderer is also tested on Windows; validate macOS/POSIX syntax
     // rather than the build host's interpretation of an absolute path.
     let user_home = user_home
@@ -388,16 +390,15 @@ pub fn render_launchd_plist_with_environment(
     // that bypasses it (panics during abort, allocator failures, raw prints).
     values.insert(AGENT_STDERR_LOG_ENV.to_string(), "off".to_string());
     values.extend(existing.clone());
-    let entries = values
-        .iter()
-        .map(|(key, value)| {
-            format!(
-                "    <key>{}</key>\n    <string>{}</string>\n",
-                xml_escape(key),
-                xml_escape(value)
-            )
-        })
-        .collect::<String>();
+    let mut entries = String::new();
+    for (key, value) in &values {
+        let _ = write!(
+            entries,
+            "    <key>{}</key>\n    <string>{}</string>\n",
+            xml_escape(key),
+            xml_escape(value)
+        );
+    }
     let environment = format!("  <key>EnvironmentVariables</key>\n  <dict>\n{entries}  </dict>\n");
     // Joined as a POSIX path on every build host, like the home it extends.
     let stderr_log = xml_escape(&format!(
