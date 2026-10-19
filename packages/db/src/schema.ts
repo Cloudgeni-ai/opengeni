@@ -10401,10 +10401,10 @@ export const sandboxLeases = pgTable(
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
     // A chat or workspace deletion ended this compute lease's group: its
-    // sandbox is deleted without a workspace capture (0857).
+    // sandbox is deleted without a workspace capture (0858).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
     // The agent gateway reported the current compute sandbox asleep since then;
-    // warm time does not accrue while it sleeps (0857).
+    // warm time does not accrue while it sleeps (0858).
     computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
@@ -11661,7 +11661,7 @@ export const enrollments = pgTable(
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
-    // Opengeni compute sandbox (migration 0854): bound to its sandbox group,
+    // Opengeni compute sandbox (migration 0855): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
     // listed, offered, attached or granted as a machine.
     kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),

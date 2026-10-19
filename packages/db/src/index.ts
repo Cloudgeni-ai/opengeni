@@ -50377,7 +50377,7 @@ export async function failWarmingToCold(
 }
 
 // Opengeni compute sleeps an idle sandbox itself and keeps its memory
-// and disk, so a compute lease is never drained for being idle (0855): it stays
+// and disk, so a compute lease is never drained for being idle (0856): it stays
 // warm without holders until its group ends or it rotates. A rotation or an
 // archive capture still drains it.
 function computeLeaseStaysWarmWhenIdle(
@@ -63755,7 +63755,7 @@ export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
  * not say which enrollment it runs. These are enrollments whose
  * sandbox is already gone (a delete whose revoke failed, a create that never
  * made one), which no listing from the control service shows the orphan sweep. The
- * cross-workspace inventory (migration 0858) returns ids only, one page in
+ * cross-workspace inventory (migration 0859) returns ids only, one page in
  * enrollment-id order after `after` (from the start without it), with `more`
  * when the inventory may go on past the page; revoke each with
  * {@link revokeStaleComputeSandboxEnrollment}.
