@@ -1,5 +1,11 @@
 # @opengeni/observability
 
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/contracts@4.1.2
+
 ## 4.1.1
 
 ### Patch Changes
