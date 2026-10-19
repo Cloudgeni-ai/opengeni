@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contracts";
+import {
+  parseSecretReference,
+  referenceKey,
+  type BrowserActionCommand,
+  type BrowserObservation,
+} from "@opengeni/contracts";
 import {
   AgentBrowserDriver,
   AgentBrowserJsonRunner,
@@ -24,7 +29,10 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const PAGE = `data:text/html,${encodeURIComponent(`<!doctype html><title>Dialog fixture</title>
 <button onclick="menu.hidden=false">Open menu</button>
 <div id="menu" hidden><button onclick="out.textContent = confirm('Delete this revision?') ? 'deleted' : 'kept'">Delete revision</button></div>
-<button>Other</button><p id="out">untouched</p>`)}`;
+<button onclick="others += 1">Other</button><p id="out">untouched</p>
+<button onclick="setTimeout(() => alert('Later'), 300)">Alert later</button>
+<input aria-label="Code" oninput="alert('Typed ' + this.value)">
+<script>var others = 0</script>`)}`;
 
 type Driver = Pick<AgentBrowserDriver, "dispatch" | "observe" | "captureScreenshot">;
 
@@ -83,6 +91,73 @@ async function provesDialogsReturnPromptly(driver: Driver, start: BrowserObserva
     command(paused!.observation!, { type: "handle_dialog", response: "accept" }),
   );
   expect(JSON.stringify(accepted?.semantic)).toContain("deleted");
+}
+
+/** An action a dialog cut short while it was still reading the page was
+ * reported as not run; it must never act once the page answers again. */
+async function provesCutShortActionsNeverRunLater(
+  driver: Driver,
+  bridge: ChromeDebuggerBridge,
+  start: BrowserObservation,
+) {
+  const current = await driver.observe(start.target.id);
+  await driver.dispatch(
+    command(current, {
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Alert later" },
+    }),
+  );
+  const release = bridge.holdPageReads();
+  const cutShort = await driver
+    .dispatch(
+      command(current, {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Other" },
+      }),
+    )
+    .then(
+      () => null,
+      (error: unknown) => error as Error & { code?: string; observation?: BrowserObservation },
+    );
+  expect(cutShort?.code).toBe("invalid_action");
+  expect(cutShort?.message).toContain("The action did not run");
+  expect(cutShort?.observation?.dialog?.message).toBe("Later");
+  // The page answers the held read now; the abandoned click must not follow.
+  release();
+  await Bun.sleep(300);
+  await driver.dispatch(
+    command(cutShort!.observation!, { type: "handle_dialog", response: "accept" }),
+  );
+  await Bun.sleep(500);
+  expect(await bridge.evaluate(start.target.id, "others")).toBe(0);
+}
+
+/** Dialog text is page content and can echo a secret the action typed. */
+async function provesDialogTextIsRedacted(driver: Driver, start: BrowserObservation) {
+  const current = await driver.observe(start.target.id);
+  const raw = ["{{", "secret:Desk/code", "}}"].join("");
+  const secret = "s3cret-value-42";
+  const typed = await driver
+    .dispatch({
+      ...command(current, {
+        type: "batch",
+        actions: [
+          { type: "fill", locator: { kind: "label", text: "Code" }, value: raw },
+          { type: "click", locator: { kind: "role", role: "button", name: "Other" } },
+        ],
+      } as BrowserActionCommand["action"]),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+    } as BrowserActionCommand)
+    .then(
+      () => null,
+      (error: unknown) => error as Error & { observation?: BrowserObservation },
+    );
+  expect(typed?.message).toContain("A JavaScript alert dialog is open");
+  expect(typed?.message).not.toContain(secret);
+  expect(JSON.stringify(typed?.observation)).not.toContain(secret);
+  await driver.dispatch(
+    command(typed!.observation!, { type: "handle_dialog", response: "accept" }),
+  );
 }
 
 e2e(
@@ -148,7 +223,10 @@ e2e(
       { connection, runner: new AttachedChromeRunner(bridge, connection) },
     );
     try {
-      await provesDialogsReturnPromptly(driver, await driver.start(PAGE));
+      const start = await driver.start(PAGE);
+      await provesDialogsReturnPromptly(driver, start);
+      await provesCutShortActionsNeverRunLater(driver, bridge, start);
+      await provesDialogTextIsRedacted(driver, start);
     } finally {
       await driver.close().catch(() => undefined);
       browser.close();
@@ -221,6 +299,8 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
         return { detached: true } as T;
       }
       case "debugger.command": {
+        const method = String(payload.method);
+        if (this.held && /^(DOM|Runtime|Accessibility)\./u.test(method)) await this.held;
         const sessionId =
           typeof payload.sessionId === "string"
             ? payload.sessionId
@@ -243,6 +323,38 @@ class ChromeDebuggerBridge implements AttachedBrowserBridgeTransport {
   }
 
   close(): void {}
+
+  private held: Promise<void> | null = null;
+
+  /** Holds page reads until released, as a busy page would. */
+  holdPageReads(): () => void {
+    let release!: () => void;
+    this.held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return () => {
+      this.held = null;
+      release();
+    };
+  }
+
+  /** Reads a page value outside the driver, through its own session. */
+  async evaluate(tabId: string, expression: string): Promise<unknown> {
+    const { sessionId } = await this.browser.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: this.target(tabId),
+      flatten: true,
+    });
+    try {
+      const response = await this.browser.send<{ result: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+        { sessionId },
+      );
+      return response.result.value;
+    } finally {
+      await this.browser.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
 
   private tabId(targetId: string): string {
     for (const [id, target] of this.tabIds) if (target === targetId) return id;

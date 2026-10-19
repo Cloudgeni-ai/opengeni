@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   navigateBrowserMetadataDocument,
   navigateToInterceptedMetadataDocument,
@@ -220,6 +221,29 @@ class DialogBlockedError extends InteractionControllerError {
     super("invalid_action", `${dialogSummary(dialog)} ${DIALOG_GUIDANCE}`, false);
     this.name = "DialogBlockedError";
   }
+}
+
+/** Page work a dialog cut short. Once abandoned, nothing it still runs may
+ * reach the browser: the caller was already told it did not happen. */
+type DialogWorkScope = { abandoned: boolean };
+const dialogWork = new AsyncLocalStorage<DialogWorkScope>();
+
+function dialogScopedConnection(
+  connection: BrowserCdpConnection,
+  scope: DialogWorkScope,
+): BrowserCdpConnection {
+  return new Proxy(connection, {
+    get(target, property) {
+      if (property === "send") {
+        return async (...args: Parameters<BrowserCdpConnection["send"]>) => {
+          if (scope.abandoned) throw new DialogBlockedError(null);
+          return await target.send(...args);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 /** How long work that noticed a dialog itself gets to report it. */
@@ -1724,7 +1748,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     total: number,
     completed: number,
   ): Promise<Error> {
-    const summary = dialogSummary(state.dialog);
+    // Dialog text is page content: it can echo a secret the action typed.
+    const summary = redactInteractionSecretValues(dialogSummary(state.dialog), secretValues);
     const error =
       completed === 0
         ? new InteractionDefiniteDriverError(
@@ -1815,6 +1840,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async ensureConnection(): Promise<BrowserCdpConnection> {
+    const connection = await this.openConnection();
+    const scope = dialogWork.getStore();
+    return scope ? dialogScopedConnection(connection, scope) : connection;
+  }
+
+  private async openConnection(): Promise<BrowserCdpConnection> {
     if (this.connection) return this.connection;
     if (this.connectionPromise) return await this.connectionPromise;
     this.connectionPromise = (async () => {
@@ -5839,7 +5870,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.sessionId,
       );
     });
-    const settled = work().then(
+    const scope: DialogWorkScope = { abandoned: false };
+    const settled = dialogWork.run(scope, work).then(
       (value) => ({ kind: "result" as const, value }),
       (error: unknown) => ({ kind: "error" as const, error }),
     );
@@ -5849,7 +5881,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         const dialog = outcome;
         outcome = await Promise.race([settled, delay(DIALOG_WORK_SETTLE_MS).then(() => dialog)]);
       }
-      if (outcome.kind === "dialog") throw new DialogBlockedError(state.dialog);
+      if (outcome.kind === "dialog") {
+        // The work is still blocked on the page. It must never act after
+        // its caller was told where it stopped.
+        scope.abandoned = true;
+        throw new DialogBlockedError(state.dialog);
+      }
       if (outcome.kind === "result") return outcome.value;
       const error = outcome.error;
       // A typed driver outcome already says what happened. Anything else that
