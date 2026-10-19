@@ -227,6 +227,7 @@ impl Sandbox {
             fetcher: None,
             pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
+            link_clock: None,
             untouched: false,
             unthrottle: None,
             meter: None,
@@ -616,6 +617,44 @@ async fn only_an_image_no_vmm_here_reads_is_given_up() {
             assert!(!durable.image, "the sandbox would retry the image forever");
         }
     }
+}
+
+/// A step tells the sandbox's agent-link streams before each VM process it
+/// starts, even one that fails to: the guest is a new one, which has yet
+/// to prove it runs (see `crate::resume`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_tells_the_streams_before_it_starts_a_vm_process() {
+    const RUNTIME: &str = "Firecracker snapshot format v13.0.0 on a new processor";
+    let mut sandbox = Sandbox::new().await;
+    sandbox.engine = Arc::new(Counting {
+        runtime: RUNTIME.to_owned(),
+        refuses: AtomicBool::new(true),
+        ..Counting::default()
+    });
+    let saved = sandbox.record(Change::new().image(true)).await;
+    let (state, memory) = (
+        sandbox.paths.dir.join("state"),
+        sandbox.paths.dir.join("memory"),
+    );
+    fs::write(&state, "state").unwrap();
+    fs::write(&memory, vec![7; 8192]).unwrap();
+    images_of(&sandbox.paths)
+        .publish_made_by(
+            Parts::Whole {
+                state: &state,
+                memory: &memory,
+                len: 8192,
+            },
+            Some(RUNTIME),
+        )
+        .unwrap();
+    let clock = crate::resume::RunClock::default();
+    let mut job = sandbox.job(NoStore, saved, false);
+    job.link_clock = Some(clock.clone());
+    let ran = job.run(Step::Restore).await;
+    assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+    assert_eq!(Counting::count(&sandbox.engine.restores), 1);
+    assert_eq!(clock.launches(), 1);
 }
 
 /// A save of a VM whose memory is still arriving waits for it, but a wake
