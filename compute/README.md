@@ -7,12 +7,15 @@ and gives up its memory only when the host needs the room. Using it wakes it.
 
 ## Status
 
-Opengeni runs on it natively. Its `compute` sandbox backend gives a
-session a sandbox microVM that runs Opengeni's own machine agent, reached
-through its host agent's one relayed link to Opengeni
+Opengeni runs on it natively. Opengeni's `compute` sandbox backend, which
+lives in Opengeni's runtime and API rather than here
+([docs/compute-backend.md](../docs/compute-backend.md)), gives a session a
+sandbox microVM that runs Opengeni's own machine agent, reached through its
+host agent's one relayed link to Opengeni
 ([ADR 21](docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
-The backend is selected like Modal or Daytona: Modal stays Opengeni's
-default, and nothing defaults to compute. The human security review in
+The backend is selected like Modal or Daytona. Opengeni's defaults are
+unchanged (Modal in the Helm chart, Docker for local development), and
+nothing defaults to compute. The human security review in
 [docs/operations.md](docs/operations.md#security) is the remaining
 condition before users move off Modal. The E2B front door stays for E2B
 clients.
