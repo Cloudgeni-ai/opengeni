@@ -28,7 +28,7 @@ use compute_fleet::{At, Expiry, HostId, HostState, LeaseTerms, ScaleDecision, Sc
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::group::{Fenced, GcpGroup};
+use crate::group::{Fenced, GcpGroup, Started};
 use crate::store::{self, Store};
 use crate::view::View;
 
@@ -331,12 +331,14 @@ async fn fence_and_give_up<L: Leases>(
             .give_up(host, renewals)
             .await
             .map_err(|error| error.to_string())?;
-        if given_up.is_some()
-            && fenced == Fenced::Stopped
-            && let Err(error) = group.start(&name).await
-        {
-            // The group's next look starts it.
-            tracing::warn!(%error, %name, "starting a fenced host failed");
+        if given_up.is_some() && fenced == Fenced::Stopped {
+            match group.start(&name).await {
+                Ok(Started::Asked) => {}
+                // The group deleted it to recreate it.
+                Ok(Started::Gone) => tracing::info!(%name, "a fenced host is gone"),
+                // The group's next look starts it.
+                Err(error) => tracing::warn!(%error, %name, "starting a fenced host failed"),
+            }
         }
         Ok(given_up)
     }
@@ -347,7 +349,9 @@ async fn fence_and_give_up<L: Leases>(
 /// Starts the group's stopped instances whose hosts are given up on or
 /// never registered: a fenced host stopped before the leader could start
 /// it again, or one stopped for any other reason. One still live in the
-/// view is started once it is given up on.
+/// view is started once it is given up on. One that fails to start is
+/// tried again at the next look, and keeps neither the others from
+/// starting nor the group from growing.
 async fn start_stopped(scaling: &Scaling, view: &View) -> anyhow::Result<()> {
     for name in scaling.group.stopped().await? {
         let given_up = view
@@ -355,7 +359,11 @@ async fn start_stopped(scaling: &Scaling, view: &View) -> anyhow::Result<()> {
             .is_none_or(|known| known.state == HostState::Lost);
         if given_up {
             tracing::info!(%name, "starting a stopped host");
-            scaling.group.start(&name).await?;
+            match scaling.group.start(&name).await {
+                Ok(Started::Asked) => {}
+                Ok(Started::Gone) => tracing::info!(%name, "a stopped host is gone"),
+                Err(error) => tracing::warn!(%error, %name, "starting a stopped host failed"),
+            }
         }
     }
     Ok(())

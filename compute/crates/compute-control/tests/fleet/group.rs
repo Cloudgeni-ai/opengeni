@@ -3,7 +3,7 @@
 //! (resetting it, or finding it stopped and starting it again after) before
 //! it gives up on it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,8 +31,14 @@ struct Compute {
     target_size: AtomicU32,
     /// Instances by name, with their status.
     instances: Mutex<HashMap<String, String>>,
+    /// What the group itself is doing to an instance, by name; `NONE` for
+    /// one not named.
+    actions: Mutex<HashMap<String, String>>,
+    /// Instances the group lists but has deleted: an action on one fails
+    /// as not found.
+    deleted: Mutex<HashSet<String>>,
     /// What it was asked to do, in order: `resize N`, `reset NAME`,
-    /// `start NAME`, `stop NAME`.
+    /// `start NAME`, `stop NAME`, `gone ACTION NAME`.
     asked: Mutex<Vec<String>>,
     /// Resets fail while set.
     fail_resets: AtomicBool,
@@ -79,12 +85,14 @@ async fn group_action(
         }
         "listManagedInstances" => {
             let instances = compute.instances.lock().unwrap().clone();
+            let actions = compute.actions.lock().unwrap().clone();
             let managed: Vec<Value> = instances
                 .iter()
                 .map(|(name, status)| {
                     json!({
                         "instance": format!("https://compute.example/compute/v1/projects/p/zones/z/instances/{name}"),
                         "instanceStatus": status,
+                        "currentAction": actions.get(name).map_or("NONE", String::as_str),
                     })
                 })
                 .collect();
@@ -105,6 +113,10 @@ async fn instance_action(
     State(compute): State<Arc<Compute>>,
     Path((name, action)): Path<(String, String)>,
 ) -> Response {
+    if compute.deleted.lock().unwrap().contains(&name) {
+        compute.note(format!("gone {action} {name}"));
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if action == "reset" && compute.fail_resets.load(Ordering::SeqCst) {
         compute.note(format!("failed reset {name}"));
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -170,6 +182,15 @@ async fn serve(compute: Arc<Compute>) -> String {
 /// A fleet whose leader sizes and fences the fake group, which has the
 /// instances `instances` and asks for that many.
 async fn fleet(instances: &[(&str, &str)]) -> (Fleet, Arc<Compute>) {
+    fleet_with(instances, |_| {}).await
+}
+
+/// [`fleet`], with the fake group set up further by `setup` before the
+/// leader first looks at it.
+async fn fleet_with(
+    instances: &[(&str, &str)],
+    setup: impl FnOnce(&Compute),
+) -> (Fleet, Arc<Compute>) {
     let compute = Arc::new(Compute::default());
     compute
         .target_size
@@ -178,6 +199,7 @@ async fn fleet(instances: &[(&str, &str)]) -> (Fleet, Arc<Compute>) {
         .iter()
         .map(|(name, status)| ((*name).to_owned(), (*status).to_owned()))
         .collect();
+    setup(&compute);
     let api = serve(Arc::clone(&compute)).await;
     let scaling = Scaling {
         group: Arc::new(GcpGroup::new(GROUP, &api, &api).unwrap()),
@@ -385,6 +407,70 @@ async fn a_stopped_instance_whose_host_is_gone_is_started() {
     let (_fleet, compute) = fleet(&[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "TERMINATED")]).await;
     until(Duration::from_secs(5), "it is started", async || {
         compute.asked().contains(&"start hosts-c3d4".to_owned())
+    })
+    .await;
+}
+
+/// A stopped instance the group is recreating itself, as its autohealing
+/// does, is left to the group; once the group is done with it and it is
+/// still stopped, it is started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_instance_the_group_is_recreating_is_left_to_it() {
+    let (_fleet, compute) = fleet_with(
+        &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "TERMINATED")],
+        |compute| {
+            compute
+                .actions
+                .lock()
+                .unwrap()
+                .insert("hosts-c3d4".into(), "RECREATING".into());
+        },
+    )
+    .await;
+    // Several of the group's looks.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !compute
+            .asked()
+            .iter()
+            .any(|asked| asked.contains("hosts-c3d4")),
+        "{:?}",
+        compute.asked()
+    );
+    compute.actions.lock().unwrap().remove("hosts-c3d4");
+    until(Duration::from_secs(5), "it is started", async || {
+        compute.asked().contains(&"start hosts-c3d4".to_owned())
+    })
+    .await;
+}
+
+/// A stopped instance the group deletes before the leader's start reaches
+/// it is no failure: the group still grows when its spare runs short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_instance_deleted_before_its_start_keeps_the_group_growing() {
+    let (fleet, compute) = fleet_with(
+        &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "TERMINATED")],
+        |compute| {
+            compute.deleted.lock().unwrap().insert("hosts-c3d4".into());
+            // Asks for only the live one, so the deleted one is not
+            // counted as coming.
+            compute.target_size.store(1, Ordering::SeqCst);
+        },
+    )
+    .await;
+    let host = fleet.host("hosts-a1b2").await;
+    until(Duration::from_secs(5), "its start is tried", async || {
+        compute
+            .asked()
+            .contains(&"gone start hosts-c3d4".to_owned())
+    })
+    .await;
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        ..roomy()
+    });
+    until(Duration::from_secs(5), "the group grows", async || {
+        compute.asked().contains(&"resize 2".to_owned())
     })
     .await;
 }

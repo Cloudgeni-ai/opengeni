@@ -116,7 +116,11 @@ can be built and tested.
   handed on from a host whose VMs might still run. Once given up on, a
   stopped instance is started again, and the scaling step starts any
   stopped member whose host is lost or never registered, so the group
-  keeps its size. Only zonal groups are supported, since a fence must name
+  keeps its size. A member the group is itself acting on (recreating it,
+  as its autohealing does, or deleting or starting it) is left to the
+  group, an instance already deleted is nothing to start, and one that
+  fails to start is tried at the next look without holding up the rest
+  of the step. Only zonal groups are supported, since a fence must name
   the instance's zone. Hosts outside a group rely on their deadline, guard
   and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
