@@ -6,15 +6,19 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
   applySessionTurnSettlement,
   assertPersonalMachineForAttempt,
   authorizePersonalMachineForAttempt,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSession,
   initializeSessionStartAtomically,
+  LOSSLESS_TEXT_PREFIX,
   setActiveSandbox,
   submitHumanPromptInTransaction,
+  withSessionRlsActorContext,
 } from "../src";
 import { withWorkspaceSubjectSessionActivityRls } from "../src/database";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
@@ -85,32 +89,47 @@ async function fixture(
       target?: Machine | null;
       subject?: string;
       firstPromptSubject?: string;
+      message?: string;
+      // Production shape: an agent attempt's bearer subject is the worker
+      // principal; the API sets the attempt's verified initiating human.
+      worker?: { initiatingHuman: string };
     } = {},
   ) => {
     const subject = options.subject ?? subjectId;
-    const session = await createSession(client.db, {
+    const worker = options.worker;
+    const createInput = {
       accountId,
       workspaceId,
-      initialMessage: options.firstPromptSubject ? "" : "Synthetic claim only",
+      initialMessage: options.message ?? (options.firstPromptSubject ? "" : "Synthetic claim only"),
       resources: [],
       metadata: {},
-      createdBy: { kind: "subject", subjectId: subject },
-      subjectId: subject,
+      ...(worker
+        ? { subjectId: "worker:first-party-mcp" }
+        : { createdBy: { kind: "subject" as const, subjectId: subject }, subjectId: subject }),
       ...(options.parent ? { createdByActor: options.parent } : {}),
       model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
       firstPartyMcpTools: [],
       parentSessionId: options.parent?.sessionId ?? options.parentIdOnly ?? null,
       initialPersonalResourceAttachmentIntent: options.mode
         ? {
             mode: options.mode,
             workspaceSharedAcknowledged: true,
-            sharedOutputWarningVersion: 1,
+            sharedOutputWarningVersion: 1 as const,
           }
         : null,
-    });
+    };
+    const session = worker
+      ? await withSessionRlsActorContext(
+          {
+            subjectId: "worker:first-party-mcp",
+            initiatingHumanSubjectId: worker.initiatingHuman,
+          },
+          () => createSession(client.db, createInput),
+        )
+      : await createSession(client.db, createInput);
     const target = options.target === undefined ? machine : options.target;
     // Fixture-only setup models createSessionForRequest's pre-start route seed.
     if (target)
@@ -166,6 +185,47 @@ async function fixture(
       attemptId,
       executionGeneration: result.turn.executionGeneration,
     };
+  };
+  // Settle the attempt's turn and deliver a child result for it. The next
+  // claim is the owner's service-initiated internal-update turn, which keeps
+  // the receiving turn's initiating human (the turn a real parent gets when a
+  // child finishes).
+  const internalUpdateTurn = async (attempt: Attempt): Promise<Attempt> => {
+    const [turn] =
+      await admin`select trigger_event_id from session_turns where id=${attempt.turnId}`;
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      attemptId: attempt.attemptId,
+      triggerEventId: turn!.trigger_event_id,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: attempt.sessionId,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `machine-tree-child:${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+      lineage: {
+        parentSessionId: attempt.sessionId,
+        parentTurnId: attempt.turnId,
+        childSessionId: crypto.randomUUID(),
+      },
+      personalConnectionDelegations: [],
+    });
+    if (!update.added) throw new Error(`Child result was not added: ${update.reason}`);
+    return await claim(attempt.sessionId);
   };
   const use = (attempt: Attempt, target = machine, caller = subjectId) =>
     assertPersonalMachineForAttempt(client.db, {
@@ -276,6 +336,7 @@ async function fixture(
     makeMachine,
     create,
     claim,
+    internalUpdateTurn,
     use,
     grants,
     forge,
@@ -439,6 +500,86 @@ test("a later move receipt cannot bypass revocation of an existing source sessio
       generation=generation+1 where id=${grant!.id}`;
     await denied(f.use(child));
     await denied(f.claim(pending.id));
+    // A direct root child walks only root's receipt-bound creation attempt.
+    // The revoked source grant must still block that receipt.
+    const direct = await f.create({ parent: root });
+    await denied(f.claim(direct.id));
+  } finally {
+    await f.client.close();
+  }
+}, 180_000);
+
+test("the owner's service-initiated turns cover children; another initiating human does not", async () => {
+  const f = await fixture();
+  try {
+    const root = await f.claim((await f.create({ mode: "session" })).id);
+    const serviceTurn = await f.internalUpdateTurn(root);
+    const [turn] = await f.admin`select initiator_kind,initiator_subject_id,
+      initiating_human_subject_id from session_turns where id=${serviceTurn.turnId}`;
+    expect(turn).toMatchObject({
+      initiator_kind: "service",
+      initiator_subject_id: "internal-update",
+      initiating_human_subject_id: f.subjectId,
+    });
+    const owner = { initiatingHuman: f.subjectId };
+    const childSession = await f.create({ parent: serviceTurn, worker: owner });
+    const [witness] = await f.admin`select agent_creation_attempt_id,created_by_kind,
+      created_by_subject_id from sessions where id=${childSession.id}`;
+    expect(witness).toMatchObject({
+      agent_creation_attempt_id: serviceTurn.attemptId,
+      created_by_kind: "service",
+      created_by_subject_id: "internal-update",
+    });
+    const child = await f.claim(childSession.id);
+    expect(await f.use(child)).toBe(true);
+    const grandchild = await f.claim((await f.create({ parent: child, worker: owner })).id);
+    expect(await f.use(grandchild)).toBe(true);
+
+    // A request carrying another initiating human is refused by the seam.
+    await denied(f.create({ parent: serviceTurn, worker: { initiatingHuman: f.otherSubjectId } }));
+    // A covered child's own turn initiated by another human stays refused.
+    const foreignTurnChild = await f.create({
+      parent: serviceTurn,
+      worker: owner,
+      firstPromptSubject: f.otherSubjectId,
+    });
+    await denied(f.claim(foreignTurnChild.id));
+
+    const [grant] = await f.grants();
+    await f.admin`update organization_user_resource_grants set status='revoked',revoked_at=now(),
+      generation=generation+1 where id=${grant!.id}`;
+    await denied(f.use(child));
+    await denied(f.use(grandchild));
+  } finally {
+    await f.client.close();
+  }
+}, 180_000);
+
+test("initial messages round-trip losslessly through ordinary and agent-child creation", async () => {
+  const f = await fixture();
+  try {
+    const message = `nul:\u0000 lone:\udc00 prefix:${LOSSLESS_TEXT_PREFIX}0041; end`;
+    expect(message).toContain("opengeni_lossless_text_v2_c4100a62:0041;");
+    const ordinary = await f.create({ mode: "session", message });
+    expect(ordinary.initialMessage).toBe(message);
+    const root = await f.claim(ordinary.id);
+    const children = [
+      await f.create({ parent: root, message }),
+      await f.create({ parent: root, message, worker: { initiatingHuman: f.subjectId } }),
+    ];
+    for (const session of [ordinary, ...children]) {
+      const [stored] = await f.admin`select agent_creation_attempt_id,
+        initial_message_codec_version
+        from sessions where id=${session.id}`;
+      expect(stored!.initial_message_codec_version).toBe(1);
+      expect(stored!.agent_creation_attempt_id).toBe(
+        session.id === ordinary.id ? null : root.attemptId,
+      );
+      expect(session.initialMessage).toBe(message);
+      expect((await getSession(f.client.db, f.workspaceId, session.id))!.initialMessage).toBe(
+        message,
+      );
+    }
   } finally {
     await f.client.close();
   }

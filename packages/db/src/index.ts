@@ -265,7 +265,10 @@ export {
 } from "./organization-service-accounts";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
-import { currentSessionAttachmentReadAccess } from "./database";
+import {
+  currentSessionAttachmentReadAccess,
+  currentSessionRlsActorInitiatingHumanSubjectId,
+} from "./database";
 import {
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
@@ -29738,6 +29741,44 @@ async function recordSessionSpawnDenial(
   throw new Error("Failed to record session spawn denial");
 }
 
+/**
+ * The human an agent-child create request claims: the verified initiating
+ * human of an agent-attempt request (whose subject is a worker principal), or
+ * the authenticated subject of a direct request. SQL compares the same claims
+ * with the locked parent turn; this only decides whether to try the seam.
+ */
+function agentChildCreationRequestHuman(subjectId: string | null | undefined): string | null {
+  const actorHuman = currentSessionRlsActorInitiatingHumanSubjectId();
+  return actorHuman !== undefined ? actorHuman : (subjectId ?? null);
+}
+
+/**
+ * Encode one sessions value as the ordinary Drizzle INSERT does. The atomic
+ * seam receives JSON for jsonb_populate_record, so custom column encodings
+ * (lossless text) must be applied here or NUL, lone surrogates and text that
+ * resembles the codec escape would be rejected or decoded differently.
+ */
+function agentChildCreationColumnValue(
+  column: {
+    name: string;
+    columnType: string;
+    getSQLType(): string;
+    mapToDriverValue(value: unknown): unknown;
+  },
+  value: unknown,
+): unknown {
+  if (value === null || column.columnType !== "PgCustomColumn") return value;
+  const encoded = column.mapToDriverValue(value);
+  const sqlType = column.getSQLType();
+  if (sqlType === "json" || sqlType === "jsonb") {
+    return typeof encoded === "string" ? JSON.parse(encoded) : encoded;
+  }
+  if (typeof encoded === "string" || typeof encoded === "number" || typeof encoded === "boolean") {
+    return encoded;
+  }
+  throw new Error(`Agent child creation cannot encode sessions.${column.name}`);
+}
+
 async function createSessionInTransaction(
   tx: SessionActivityDatabase,
   input: SessionCreateInput,
@@ -30119,16 +30160,23 @@ async function createSessionInTransaction(
     if (
       input.createdByActor &&
       parentTurnId &&
-      input.subjectId &&
-      frozenCreator.initiator.kind === "subject"
+      frozenCreator.initiatingHumanSubjectId &&
+      agentChildCreationRequestHuman(input.subjectId)
     ) {
       // The SQL creation seam inserts the row and immutable witness together.
       // It never upgrades a direct INSERT or an existing session's provenance.
+      // The covered human is the parent turn's recorded initiating human, so
+      // the owner's service-initiated turns (internal updates and goal
+      // continuations) are included. SQL rechecks it against the locked turn
+      // and the request's verified claims; another person never matches.
       const columns = getTableColumns(schema.sessions);
       const valuesByColumn = Object.fromEntries(
         Object.entries(insertValues)
           .filter(([, value]) => value !== undefined)
-          .map(([key, value]) => [columns[key as keyof typeof columns].name, value]),
+          .map(([key, value]) => {
+            const column = columns[key as keyof typeof columns];
+            return [column.name, agentChildCreationColumnValue(column, value)];
+          }),
       );
       const actor = input.createdByActor;
       const created = await tx.execute<{
@@ -30142,9 +30190,9 @@ async function createSessionInTransaction(
         ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
         : [];
     } else {
-      // Service-attributed, unscoped legacy and non-agent creates retain their
-      // original path. Never infer the request subject from readable parent
-      // IDs: these creates do not gain the owner-human machine-tree witness.
+      // Non-agent creates, unscoped legacy creates and turns with no initiating
+      // human retain their original path. Never infer the request subject from
+      // readable parent IDs: these creates gain no machine-tree witness.
       insertedRows = await tx
         .insert(schema.sessions)
         .values(insertValues)

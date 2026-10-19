@@ -439,17 +439,21 @@ grant snapshot. Grant-backed ancestors must have a valid grant snapshot; a move
 receipt is never a replacement for a failed snapshot check.
 
 Parent IDs alone are not delegation evidence. `create_agent_child_session`
-verifies the exact live parent turn/attempt/generation and requires the current
-request subject to match both the turn's initiating human and the child's
-subject creator. The same SQL statement inserts the child and its immutable,
+verifies the exact live parent turn/attempt/generation and requires the request's
+claimed human (the agent attempt's verified initiating human, or the subject of a
+direct request) to match the turn's recorded initiating human. The child's
+creator must be that turn's frozen initiator, so the owner's service-initiated
+turns (internal-update deliveries, goal continuations) are covered while another
+person's turns never match. The same SQL statement inserts the child and its immutable,
 owner-protected witness; there is no post-insert stamping function. Both grant
 and receipt inheritance require that witness at every edge and match the human
-to the machine's grant/receipt owner. Direct inserts, unscoped legacy or service-attributed creates
-and legacy children without it remain uncovered; migration does not backfill
-proof from readable parent IDs. Existing exact-session grants remain usable.
+to the machine's grant/receipt owner. Direct inserts, unscoped legacy creates,
+turns with no initiating human and legacy children without it remain uncovered;
+migration does not backfill proof from readable parent IDs. Existing
+exact-session grants remain usable.
 
 As with exact-session machine checks, these functions trust account, workspace
-and subject claims installed by the authenticated API. Protecting against an
+and subject/initiating-human claims installed by the authenticated API. Protecting against an
 application role that lies about those claims would require a separate
 claim-bound attempt capability; this migration does not introduce that model.
 
