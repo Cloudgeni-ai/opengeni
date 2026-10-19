@@ -376,6 +376,20 @@ What the host does, exactly (`compute-link`, its `core` module):
   agent sends, do not. The host bounds the requests a sandbox may owe
   answers to at once (1024); one past that still wakes it, but is not
   woken for again.
+- **A no-wake request never wakes.** A request with the `Opengeni-No-Wake`
+  header (any value) is housekeeping that an exchange the agent starts
+  later does anyway, such as Opengeni's release of a command's kept output.
+  It never wakes its sandbox, does not count as activity, and never waits:
+  the host delivers it only while it says the sandbox runs and the agent
+  holds the subscription. Otherwise the host answers it itself at once,
+  with an empty reply marked `Opengeni-Agent-Unanswered: asleep` (the
+  sandbox does not run) or `away` (the agent does not hold the
+  subscription), and the agent never gets it. When the sandbox goes to
+  sleep before the agent answers one it got, the host answers it `asleep`
+  then instead of waking the sandbox, and the agent may still act on it
+  when it next runs. Past 1024 such requests unanswered at once, one more
+  is answered `busy`. The host drops that header from what an agent
+  publishes, so only the host says it.
 - **Subscriptions not taken up within 10 s end.** After the agent
   reconnects, the host unsubscribes those it did not subscribe to again;
   after one of its connections ends while others stay, those it held end
@@ -396,3 +410,8 @@ it was handed off and not yet adopted) gets "no responders". Opengeni's
 compute backend then calls `POST /v1/sandboxes/{id}/wake` and retries the
 request under its replay identity until the agent answers or the request's
 deadline passes.
+
+A no-wake request is never retried that way. "No responders", the host's
+`Opengeni-Agent-Unanswered` reply and a timeout all mean the same to its
+sender: the agent has not answered, and the exchange the agent starts when
+it next connects does the work. Its sender never calls wake for it.

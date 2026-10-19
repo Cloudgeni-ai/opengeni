@@ -218,6 +218,10 @@ impl Core {
     }
 
     pub(super) fn message(&mut self, now: u64, id: &str, queued: Queued) {
+        if queued.quiet() {
+            self.quiet_request(now, id, queued);
+            return;
+        }
         if queued.reply.is_some() {
             self.asked(now, id);
         }
@@ -242,8 +246,10 @@ impl Core {
     }
 
     /// Sends a message to the connection that holds its subscription: a
-    /// request delivered is owed an answer.
+    /// request delivered is owed an answer, and a no-wake one is answered
+    /// by the host if its sandbox sleeps first.
     pub(super) fn deliver(&mut self, now: u64, id: &str, queued: Queued) {
+        let quiet = queued.quiet();
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
@@ -270,8 +276,14 @@ impl Core {
             self.remove_sub(id, queued.sid, true);
             self.save(id);
         }
-        if let Some((reply, at)) = asked {
-            self.owes(now, at, id, reply);
+        match asked {
+            Some((reply, at)) if quiet => {
+                if let Some(sandbox) = self.sandboxes.get_mut(id) {
+                    sandbox.quiet.insert(reply, at);
+                }
+            }
+            Some((reply, at)) => self.owes(now, at, id, reply),
+            None => {}
         }
     }
 

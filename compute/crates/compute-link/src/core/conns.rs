@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use compute_protocol::link::{HostFrame, RELAY_SUBJECT, may_publish, may_subscribe};
+use compute_protocol::link::{
+    HostFrame, RELAY_SUBJECT, UNANSWERED_HEADER, has_header, may_publish, may_subscribe,
+};
 
 use super::{
     CONNECTION_NAME, Conn, ConnId, Core, Effect, MAX_CONNS, MAX_SUBS, Session, Stage, Sub, Target,
@@ -433,13 +435,28 @@ impl Core {
         let Some((link, s)) = sandbox.session.on() else {
             return;
         };
+        // Only the host says a request went unanswered: an agent's own
+        // marker is dropped, so its reply reads as the reply it is.
+        let headers = if has_header(publish.headers.as_ref(), UNANSWERED_HEADER) {
+            publish
+                .headers
+                .map(|headers| {
+                    headers
+                        .into_iter()
+                        .filter(|(name, _)| !name.eq_ignore_ascii_case(UNANSWERED_HEADER))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|headers| !headers.is_empty())
+        } else {
+            publish.headers
+        };
         self.effects.push(Effect::Frame {
             link,
             frame: HostFrame::Pub {
                 s,
                 subject: publish.subject,
                 reply: publish.reply,
-                headers: publish.headers,
+                headers,
             },
             payload: publish.payload,
         });
