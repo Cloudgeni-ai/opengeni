@@ -657,6 +657,45 @@ async fn a_restore_tells_the_streams_before_it_starts_a_vm_process() {
     assert_eq!(clock.launches(), 1);
 }
 
+/// A restore whose streams cannot close the connections an earlier VM
+/// process left waiting starts no VM process, and fails for now: one left
+/// waiting would count as the new guest's (see `crate::resume`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_that_cannot_tell_the_streams_starts_no_vm_process() {
+    const RUNTIME: &str = "Firecracker snapshot format v13.0.0";
+    let mut sandbox = Sandbox::new().await;
+    sandbox.engine = Arc::new(Counting {
+        runtime: RUNTIME.to_owned(),
+        ..Counting::default()
+    });
+    let saved = sandbox.record(Change::new().image(true)).await;
+    let (state, memory) = (
+        sandbox.paths.dir.join("state"),
+        sandbox.paths.dir.join("memory"),
+    );
+    fs::write(&state, "state").unwrap();
+    fs::write(&memory, vec![7; 8192]).unwrap();
+    images_of(&sandbox.paths)
+        .publish_made_by(
+            Parts::Whole {
+                state: &state,
+                memory: &memory,
+                len: 8192,
+            },
+            Some(RUNTIME),
+        )
+        .unwrap();
+    let (clock, _door) = crate::resume::RunClock::with_broken_door();
+    let mut job = sandbox.job(NoStore, saved, false);
+    job.link_clock = Some(clock.clone());
+    let ran = job.run(Step::Restore).await;
+    assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+    assert_eq!(Counting::count(&sandbox.engine.restores), 0);
+    assert_eq!(clock.launches(), 0);
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert!(durable.image, "the saved image was given up");
+}
+
 /// A save of a VM whose memory is still arriving waits for it, but a wake
 /// or a removal meanwhile does not have to: cancelling the save ends it at
 /// once with nothing changed, however long the memory takes.

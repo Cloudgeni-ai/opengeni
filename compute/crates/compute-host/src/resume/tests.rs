@@ -279,7 +279,7 @@ async fn streams_not_taken_up_again_end_and_those_taken_up_go_on() {
     // guest is launched anew, and only its take-up starts the window.
     rig.until_uncarried(1).await;
     rig.until_uncarried(2).await;
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     let (mut kept, answer) = raw_hello(&rig, 1, 0, 0).await;
     assert_eq!(answer, "ok 0\n");
     let mut not_taken_up = ends.pop().unwrap();
@@ -315,7 +315,7 @@ async fn a_stream_seen_uncarried_after_a_take_up_ends_on_its_own() {
     let late = connections.pop().unwrap();
     drop(connections.pop().unwrap());
     rig.until_uncarried(1).await;
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     let (mut first, answer) = raw_hello(&rig, 1, 0, 0).await;
     assert_eq!(answer, "ok 0\n");
     // Past that take-up's window: only the end seen after it is left.
@@ -359,7 +359,7 @@ async fn a_guest_launched_anew_keeps_its_streams_until_it_takes_one_up() {
     connections.clear();
     rig.until_uncarried(1).await;
     rig.until_uncarried(2).await;
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     // One seen after the launch, before the new guest connects.
     drop(third);
     rig.until_uncarried(3).await;
@@ -400,7 +400,7 @@ async fn a_connection_from_an_earlier_vm_process_is_closed_unanswered() {
     let mut stale = Socket::connect(&rig.socket).unwrap();
     stale.set_read_timeout(Some(WAIT)).unwrap();
     assert_eq!(rig.next_let_in().await, Launch(0));
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     let hello = Hello {
         id: StreamId(1),
         received: 0,
@@ -449,7 +449,7 @@ async fn a_launch_closes_the_connections_still_waiting_at_the_door() {
     .unwrap();
     let mut waiting = Socket::connect(&socket).unwrap();
     waiting.set_read_timeout(Some(WAIT)).unwrap();
-    clock.launched();
+    clock.launched().unwrap();
     let read = blocking(move || waiting.read_to_end(&mut Vec::new()).unwrap()).await;
     assert_eq!(read, 0, "a waiting connection was not closed");
     let _next = Socket::connect(&socket).unwrap();
@@ -458,6 +458,16 @@ async fn a_launch_closes_the_connections_still_waiting_at_the_door() {
         .unwrap()
         .unwrap();
     assert_eq!(launch, Launch(1));
+}
+
+/// A launch that cannot close the connections waiting at the door is not
+/// counted, and fails: one left waiting would be let in as the new
+/// launch's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launch_that_cannot_close_the_waiting_connections_fails() {
+    let (clock, _door) = RunClock::with_broken_door();
+    assert!(clock.launched().is_err());
+    assert_eq!(clock.launches(), 0);
 }
 
 /// A window asked for while a sweep waits never replaces a later one, so
@@ -599,7 +609,7 @@ async fn a_sandbox_at_its_limit_still_ends_streams_its_guest_no_longer_has() {
     rig.until_uncarried(1).await;
     rig.until_uncarried(2).await;
     // Restored: past the windows begun before the launch.
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     tokio::time::sleep(take_up * 2).await;
     let (_, answer) = raw_hello(&rig, 3, 0, 0).await;
     assert_eq!(answer, "gone\n");
@@ -631,7 +641,7 @@ async fn a_guest_paused_mid_take_up_keeps_the_streams_it_has_yet_to_take_up() {
     }
     rig.until_uncarried(1).await;
     rig.until_uncarried(2).await;
-    rig.clock.launched();
+    rig.clock.launched().unwrap();
     let (_kept, answer) = raw_hello(&rig, 1, 0, 0).await;
     assert_eq!(answer, "ok 0\n");
     rig.clock.set(false);
