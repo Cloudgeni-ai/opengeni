@@ -102,6 +102,16 @@ their existing audience controls deliberately.
 
 ## API and implementation
 
+The injected browser client is the checked-in
+`packages/sdk/src/site-browser-runtime.gen.ts`, built from the SDK and shared
+Site route contracts. After changing either dependency, use the repository's
+pinned Bun to run `bun scripts/generate-site-browser-runtime.ts` and commit its
+output. `bun scripts/generate-site-browser-runtime.ts --check` verifies freshness
+without rewriting it; CI runs this before package builds, which otherwise
+regenerate the file and can hide stale committed bytes. The generated-runtime
+SDK tests execute those bytes through the real host bridge and preview transport;
+the Site conversations browser test also executes the injected script tag.
+
 `GET /v1/workspaces/:id/sessions?view=page&originSiteId=<uuid>` combines Site
 origin with ordinary project/search/date/visibility filters before pagination.
 Origin is bound into continuation cursors. Successful responses echo

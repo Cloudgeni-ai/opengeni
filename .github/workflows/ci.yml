@@ -466,6 +466,11 @@ jobs:
           bun install --frozen-lockfile --ignore-scripts
           bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
 
+      # SDK/package builds regenerate this file. Check the committed bytes first
+      # so passing consumer builds cannot hide a stale console/preview runtime.
+      - name: Check committed Site browser runtime before builds
+        run: bun scripts/generate-site-browser-runtime.ts --check
+
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
         with:
