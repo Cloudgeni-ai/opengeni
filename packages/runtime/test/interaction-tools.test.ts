@@ -3142,6 +3142,72 @@ describe("interaction attempt tools", () => {
     expect(result.structuredContent).toMatchObject({ state: "completed" });
   });
 
+  test("a launch fences on the target list and hands back the launched window", async () => {
+    const target = computerTarget();
+    const launchedWindow = { ...computerTarget(), id: "window-launched", title: "Untitled" };
+    const launched = computerObservation(launchedWindow);
+    let request: ComputerActionRequest | null = null;
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerTargets: async () => ({ computerSessionId, targets: [target] }),
+        observeComputerTarget: async () => {
+          observed += 1;
+          return computerObservation(target);
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          request = value;
+          return { ...computerReceipt(value.operationId, launched), targetId: value.targetId };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const result = await environment.callModel({
+      operationId: randomUUID(),
+      modelName: "interaction__computer_act",
+      subjectId: "model:test",
+      arguments: {
+        computerSessionId,
+        targetId: target.id,
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      },
+    });
+    // The launch reads no window: the target list gives its generation.
+    expect(observed).toBe(0);
+    expect(request).toMatchObject({
+      targetId: target.id,
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: null,
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain(
+      "This action opened window-launched; act on that target with the observation below.",
+    );
+    expect(text).toContain('window window-launched "Untitled"');
+
+    // A target missing from the list is read, as for any other action.
+    await environment.callModel({
+      operationId: randomUUID(),
+      modelName: "interaction__computer_act",
+      subjectId: "model:test",
+      arguments: {
+        computerSessionId,
+        targetId: "window-gone",
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      },
+    });
+    expect(observed).toBe(1);
+  });
+
   test("reads only the exact ComputerSession native clipboard", async () => {
     const clipboard = {
       computerSessionId,
