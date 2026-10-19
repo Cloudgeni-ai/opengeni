@@ -2587,6 +2587,18 @@ BEGIN
       EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.usage_maintenance_due') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_maintenance_due FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (data_schema,kind,workspace_id,source_id,due_at,account_id,seen_membership_revision,membership_ready) ON TABLE opengeni_private.usage_maintenance_due FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_maintenance_due FROM PUBLIC;
+      REVOKE ALL (data_schema,kind,workspace_id,source_id,due_at,account_id,seen_membership_revision,membership_ready) ON TABLE opengeni_private.usage_maintenance_due FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.usage_allowance_membership_changes') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_membership_changes FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (data_schema,account_id,revision,changed_at) ON TABLE opengeni_private.usage_allowance_membership_changes FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_allowance_membership_changes FROM PUBLIC;
+      REVOKE ALL (data_schema,account_id,revision,changed_at) ON TABLE opengeni_private.usage_allowance_membership_changes FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.session_file_attachments') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM PUBLIC;
@@ -2649,6 +2661,8 @@ BEGIN
         opengeni_private.read_organization_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'sync_usage_maintenance_due()',
+      'arm_usage_allowances_for_membership()',
       'read_sender_connection(uuid,uuid,uuid,text)',
       'validate_mcp_account_bindings(jsonb,jsonb)',
       'fence_mcp_account_bindings()',
