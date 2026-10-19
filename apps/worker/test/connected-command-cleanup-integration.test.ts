@@ -252,7 +252,7 @@ test("offline commands remain tracked while one sweep shares failed connection o
   expect(row!.max_attempts).toBe(1);
 });
 
-async function terminalOutputFixture(options: { cancelledBeforeStart?: boolean } = {}) {
+async function terminalOutputFixture(fixtureOptions: { cancelledBeforeStart?: boolean } = {}) {
   const sessionId = await seed(1);
   const [row] =
     await shared.admin`select * from session_background_commands where session_id=${sessionId}`;
@@ -269,7 +269,7 @@ async function terminalOutputFixture(options: { cancelledBeforeStart?: boolean }
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
     ...identity,
     outcome: "exited",
-    exitCode: options.cancelledBeforeStart ? -1 : 0,
+    exitCode: fixtureOptions.cancelledBeforeStart ? -1 : 0,
     reason: "op_exit",
   });
   const transport = new InMemoryOpStreamTransport();
@@ -288,7 +288,7 @@ async function terminalOutputFixture(options: { cancelledBeforeStart?: boolean }
     identity.connectionInstanceId,
   );
   // The stop reached the runner first: it refuses the start and keeps a tombstone.
-  if (options.cancelledBeforeStart) {
+  if (fixtureOptions.cancelledBeforeStart) {
     await runner.request(
       subject,
       {
