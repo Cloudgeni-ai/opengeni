@@ -154,18 +154,21 @@ impl Handle {
     }
 
     /// Takes a sandbox over from the store's latest copy as its owner under
-    /// `owner`; see [`crate::protocol::Request::Adopt`].
+    /// `owner`, from its files alone with `from_files`; see
+    /// [`crate::protocol::Request::Adopt`].
     pub async fn adopt(
         &self,
         id: Id,
         config: SandboxConfig,
         owner: OwnerEpoch,
+        from_files: bool,
     ) -> Result<(), HostError> {
         self.fleet_only("adopt")?;
         self.send_naming_owner(|reply| Command::Adopt {
             id,
             config,
             owner,
+            from_files,
             reply,
         })
         .await?

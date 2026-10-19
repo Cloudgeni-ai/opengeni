@@ -154,7 +154,12 @@ async fn respond(
             id,
             config,
             owner_epoch,
-        } => done(handle.adopt(id, config, OwnerEpoch(owner_epoch)).await),
+            from_files,
+        } => done(
+            handle
+                .adopt(id, config, OwnerEpoch(owner_epoch), from_files)
+                .await,
+        ),
         Request::HandOff { id, owner_epoch } => {
             done(handle.hand_off(id, OwnerEpoch(owner_epoch)).await)
         }

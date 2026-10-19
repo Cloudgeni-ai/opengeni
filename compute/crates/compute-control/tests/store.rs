@@ -224,6 +224,8 @@ async fn owner_lost<S: Store>(store: S) {
     assert_eq!(cleared.ownership.owner, None);
     assert!(cleared.ownership.epoch > owned.ownership.epoch);
     assert!(cleared.version > owned.version);
+    // Its next owner starts it from its stored files.
+    assert!(cleared.ownership.lost, "{cleared:?}");
 
     // Nothing can make it, or a new sandbox, the lost host's again.
     assert_eq!(
@@ -237,10 +239,15 @@ async fn owner_lost<S: Store>(store: S) {
     let mut elsewhere = owned.clone();
     elsewhere.ownership = owned.ownership.give(live).set;
     assert_eq!(store.replace(&elsewhere).await.unwrap(), Write::Done);
-    assert_eq!(
-        store.owned_by(live).await.unwrap()[0].ownership.owner,
-        Some(live)
-    );
+    let given = store.owned_by(live).await.unwrap().remove(0);
+    assert_eq!(given.ownership.owner, Some(live));
+    assert!(given.ownership.lost, "giving it on keeps that");
+    // Until an owner hands it off.
+    let mut released = given.clone();
+    released.ownership = given.ownership.clear().set;
+    assert_eq!(store.replace(&released).await.unwrap(), Write::Done);
+    let handed_off = store.sandbox(owned.id).await.unwrap().unwrap();
+    assert!(!handed_off.ownership.lost, "{handed_off:?}");
 }
 
 #[tokio::test]
@@ -737,12 +744,55 @@ async fn a_database_from_before_schema_versions_is_upgraded_keeping_its_requests
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     drop(stores);
     // Starting again changes nothing.
     let again = PostgresStore::connect(&scoped, None, 2).await.unwrap();
     assert_eq!(again.request("team", "kept").await.unwrap(), Some(kept));
     drop(again);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
+/// A database at version 1 kept no record of which releases were losses:
+/// upgraded, every sandbox nobody owns counts as left by a lost owner, so
+/// its next owner starts it from its files, and one with an owner, already
+/// taken up, keeps its copy.
+#[tokio::test]
+async fn a_database_at_version_one_counts_its_ownerless_sandboxes_as_lost() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (schema, scoped, client) = fresh_schema(&url).await;
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let (owned, ownerless) = (sandbox(HostId(1)), sandbox(HostId(1)));
+    for row in [&owned, &ownerless] {
+        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
+    }
+    drop(store);
+    client
+        .batch_execute(&format!(
+            "set search_path = {schema}; \
+             alter table compute_sandboxes drop column lost_owner; \
+             update compute_sandboxes set owner = null where id = '{}'; \
+             update compute_schema set version = 1;",
+            ownerless.id
+        ))
+        .await
+        .unwrap();
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let lost = async |id| store.sandbox(id).await.unwrap().unwrap().ownership.lost;
+    assert!(!lost(owned.id).await, "taken up already");
+    assert!(lost(ownerless.id).await);
+    let version: i32 = client
+        .query_one(&format!("select version from {schema}.compute_schema"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, 2);
+    drop(store);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
         .await

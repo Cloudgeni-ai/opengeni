@@ -8,7 +8,7 @@ use crate::store::Result;
 /// The schema, one migration for each version, applied in order by
 /// [`migrate`]. A released migration is never changed: a change to the
 /// schema is a new one at the end.
-const MIGRATIONS: &[&str] = &[MIGRATION_1];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
 
 /// Version 1: the tables, made if missing.
 const MIGRATION_1: &str = "
@@ -88,6 +88,16 @@ drop index if exists compute_create_requests_gone;
 create index if not exists compute_create_requests_id on compute_create_requests (id);
 create index if not exists compute_create_requests_gone_ms on compute_create_requests (gone_ms)
     where gone_ms is not null;
+";
+
+/// Version 2: whether a sandbox's last owner was lost rather than handing
+/// it off, for which its next owner starts it from its files. Which earlier
+/// releases were losses is not recorded, so a sandbox nobody owns counts as
+/// lost: its next owner boots it rather than restore a copy that may be
+/// stale. One with an owner has been taken up already.
+const MIGRATION_2: &str = "
+alter table compute_sandboxes add column if not exists lost_owner boolean not null default false;
+update compute_sandboxes set lost_owner = true where owner is null;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

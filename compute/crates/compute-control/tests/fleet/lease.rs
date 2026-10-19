@@ -47,12 +47,27 @@ async fn a_sandbox_of_a_host_given_up_on_wakes_elsewhere_from_its_archive() {
         .await;
     assert_eq!((status, &woken["host"]), (200, &json!("host-b.example")));
     assert!(b.holds(id(&archived)).is_some_and(|epoch| epoch > 1));
+    // Its lost owner may have run it on past the archive, so it is taken
+    // up from the archive's files alone.
+    assert_eq!(b.adopts(id(&archived)), [true]);
     // With no archive, nothing of it exists anywhere but on the lost host.
     let (status, refused) = fleet
         .post(&format!("/v1/sandboxes/{unarchived}/wake"), json!({}))
         .await;
     assert_eq!(status, 503, "{refused}");
     assert_eq!(b.holds(id(&unarchived)), None);
+
+    // Once an owner hands it off, its archive is its latest state again,
+    // memory and all.
+    let c = fleet.host("host-c.example").await;
+    let (status, moved) = fleet
+        .post(
+            &format!("/v1/sandboxes/{archived}/move"),
+            json!({ "to": "host-c.example" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(c.adopts(id(&archived)), [false]);
 }
 
 /// A host given up on that comes back lists what it holds: what went

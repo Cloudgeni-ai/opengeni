@@ -328,8 +328,12 @@ authority alone for agent links.
   its term and margin: the service fences it first (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
-  latest archived copy on its next request. Work since that copy is lost,
-  which is why sandboxes archive soon after they go idle. Nothing has to
+  latest archived copy on its next request. It boots from that copy's
+  files: its programs end and start afresh, and what it wrote since the
+  copy is lost, which is why sandboxes archive soon after they go idle
+  and are checkpointed while they run. Its memory is not brought back
+  because the lost host may have run it on past the copy (ADR 18); a
+  drain or move hands the latest state off, memory and all. Nothing has to
   be done by hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
@@ -563,6 +567,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 
 ## Upgrades
 
+- **Order.** Upgrade the hosts before the fleet service. A newer service
+  may send a host fields an older one refuses (it rejects fields it does
+  not know): the adopt after a host loss carries `from_files`, which
+  only a newer host reads. A newer host works with an older service,
+  and a host whose guest image predates the `sync` request warns and
+  saves without it.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):

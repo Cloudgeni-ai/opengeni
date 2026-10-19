@@ -166,8 +166,11 @@ and 16.1).
   - Resume: nothing to do; the next request wakes the sandbox.
   - Idle sandboxes sleep on the fabric. Opengeni never tears one down for
     being idle and never needs to capture it to keep it: the fabric keeps
-    memory and disk, archives them and brings them back after a move or
-    the loss of a host. A tar capture is taken only to carry a workspace
+    memory and disk, archives them and brings them back after a move. After
+    the loss of a host it brings back the disk of the newest copy and boots
+    it, so the agent starts afresh under a new connection instance, and
+    what ran in it has ended, never replayed from memory the lost host had
+    run past (ADR 18). A tar capture is taken only to carry a workspace
     to another backend. The sandbox is deleted, and its enrollment
     revoked (which ends its session), when its group ends.
 - **A sandbox's enrollment is not a Connected Machine.** It has kind

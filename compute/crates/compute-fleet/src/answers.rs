@@ -196,6 +196,7 @@ mod tests {
             owner: Some(host),
             epoch: E,
             taken: E,
+            lost: false,
         }
     }
 

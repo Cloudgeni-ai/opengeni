@@ -253,12 +253,28 @@ fn snapshots(lab: &Lab) -> usize {
         .sum()
 }
 
+/// A host lost while its sandbox runs on past a checkpoint leaves a copy
+/// whose memory is of a past the sandbox's programs had already left: the
+/// next owner takes the copy up from its files, deleting its memory image
+/// from the store, and the sandbox boots with its files as they were then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_running_sandbox_is_checkpointed_and_comes_back_elsewhere_as_it_was_then() {
+async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_then() {
     let Some(dir) = shared_extents() else {
         return;
     };
-    let (one, two) = hosts_in(&dir, Delays::default()).await;
+    let root = Lab::root_in(&dir);
+    let shelf = root.join("shelf");
+    let mut told = Lab::config(&root, HostPolicy::default());
+    told.restore_notice_port = Some(53);
+    let one = Lab::launch(
+        root,
+        Arc::default(),
+        Delays::default(),
+        told,
+        Directory::new(&shelf),
+    )
+    .await;
+    let two = Lab::start_stored(Lab::root_in(&dir), Arc::default(), Directory::new(&shelf)).await;
     assert!(
         one.status().await.about.checkpoints,
         "{dir:?} shares extents"
@@ -275,6 +291,10 @@ async fn a_running_sandbox_is_checkpointed_and_comes_back_elsewhere_as_it_was_th
         "it goes on running, and the copy is no longer current"
     );
     assert!(!one.image(sandbox), "the record vouches for no local copy");
+    assert!(
+        one.world.syncs.load(Ordering::Relaxed) > 0,
+        "the guest wrote its disk out before the checkpoint copied it"
+    );
     // What it does from now on is in no copy.
     assert_eq!(
         one.run(sandbox, &["set later", "write later", "get", "disk"])
@@ -282,7 +302,7 @@ async fn a_running_sandbox_is_checkpointed_and_comes_back_elsewhere_as_it_was_th
         ["ok", "ok", "later", "later"]
     );
     // The host is lost before its next checkpoint, and the fleet gives the
-    // sandbox to another.
+    // sandbox to another, to take up from the copy's files.
     one.assert_clean();
     drop(one.stop().await);
     assert_eq!(
@@ -291,6 +311,7 @@ async fn a_running_sandbox_is_checkpointed_and_comes_back_elsewhere_as_it_was_th
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
+                from_files: true,
             })
             .await
             .unwrap(),
@@ -298,11 +319,25 @@ async fn a_running_sandbox_is_checkpointed_and_comes_back_elsewhere_as_it_was_th
     );
     let adopted = two.current(sandbox).await;
     assert_eq!(adopted.level, LevelName::Remote);
-    assert!(adopted.memory_saved, "the checkpoint holds its memory");
+    assert!(!adopted.memory_saved, "its memory image is not taken up");
+    let stored = Directory::new(&shelf)
+        .claim(sandbox, OwnerEpoch(2))
+        .await
+        .unwrap();
+    assert!(
+        matches!(stored, Owned::Done(Some(Claimed { memory: false, .. }))),
+        "and is gone from the store's copy, so no later owner restores it: {stored:?}"
+    );
+    let restores = two.world.restores.load(Ordering::Relaxed);
     assert_eq!(
         two.run(sandbox, &["get", "disk"]).await,
-        ["kept", "on-disk"],
-        "programs and files as they were at the checkpoint"
+        ["", "on-disk"],
+        "programs end; files as they were at the checkpoint"
+    );
+    assert_eq!(
+        two.world.restores.load(Ordering::Relaxed),
+        restores,
+        "it boots"
     );
     two.assert_clean();
 }
@@ -336,6 +371,7 @@ async fn a_checkpoint_that_finds_a_later_owner_drops_this_hosts_copy() {
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
+                from_files: false,
             })
             .await
             .unwrap(),
@@ -517,6 +553,7 @@ async fn a_new_sandbox_that_checkpoints_is_archived_before_it_ever_runs() {
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
+                from_files: false,
             })
             .await
             .unwrap(),

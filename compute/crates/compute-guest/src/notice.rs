@@ -15,7 +15,9 @@
 //! one that does not is not acted on, rather than taken for an epoch that
 //! could order it below or above the notices before it. The host's
 //! `activity` question is answered with the count Opengeni's agent
-//! registers (see [`crate::agent`]); any other line is not answered.
+//! registers (see [`crate::agent`]), and its `sync` request with
+//! [`SYNCED`] once the guest's disks hold what it wrote; any other line is
+//! not answered.
 
 use crate::cmdline::valid_sandbox;
 
@@ -102,6 +104,10 @@ pub fn answer(seeded: bool) -> &'static [u8] {
 /// The guest's answer to a notice below the latest it applied, which it
 /// ignores.
 pub const STALE: &[u8] = b"stale\n";
+
+/// The guest's answer to `sync`, which the host sends before it saves the
+/// guest's disks: everything written to them is on them.
+pub const SYNCED: &[u8] = b"synced\n";
 
 /// The latest order applied; notices below it are stale.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

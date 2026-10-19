@@ -157,6 +157,8 @@ struct World {
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Times a guest was asked to write its disks out.
+    syncs: AtomicUsize,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -435,6 +437,10 @@ async fn guest(
                         "ok".into()
                     }
                     ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
+                    ("sync", _) => {
+                        world.syncs.fetch_add(1, Ordering::Relaxed);
+                        "synced".into()
+                    }
                     (other, _) => format!("unknown {other}"),
                 };
                 if write

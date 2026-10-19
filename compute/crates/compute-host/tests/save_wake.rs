@@ -828,6 +828,11 @@ const CHECKPOINT_UID: u32 = (1 << 30) + 4000;
 /// and the first host's next checkpoint finds itself fenced off and drops
 /// its copy.
 ///
+/// The fleet takes a lost host's sandboxes up from their files alone (see
+/// [`Request::Adopt`]), since their programs ran on past the copy; this
+/// adopt takes the checkpoint whole, as a hand-off's copy is taken, to
+/// check the image it carries, which is also the base of the next save.
+///
 /// Both hosts keep sandboxes in one store that stamps each with its owner,
 /// as a fleet's does: the bucket `COMPUTE_TEST_STORE` names, or else one
 /// in memory.
@@ -1012,6 +1017,7 @@ async fn adopt_checkpointed(
             id,
             config,
             owner_epoch: 2,
+            from_files: false,
         })
         .await
         .unwrap();

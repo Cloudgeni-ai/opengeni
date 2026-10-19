@@ -33,7 +33,8 @@ async fn a_move_to_a_named_host_hands_off_then_adopts_there_and_fences_the_old_o
     assert_eq!(a.holds(id(&sandbox)), None);
     assert_eq!(b.holds(id(&sandbox)), Some(epoch));
     assert!(a.ops().contains(&"hand_off"), "{:?}", a.ops());
-    assert!(b.ops().contains(&"adopt"), "{:?}", b.ops());
+    // Handed off, its archive is its latest state, memory and all.
+    assert_eq!(b.adopts(id(&sandbox)), [false]);
     // An archive the old owner finishes late lands nowhere.
     assert!(a.try_archive(id(&sandbox), 1).await.is_err());
     // Moving it to where it is changes nothing.

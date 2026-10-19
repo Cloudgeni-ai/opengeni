@@ -860,7 +860,7 @@ impl Sim {
                     kept.insert(*id, *epoch);
                 }
                 Verdict::Drop => {}
-                Verdict::Refetch { epoch } => refetch.push((*id, *epoch)),
+                Verdict::Refetch { epoch, .. } => refetch.push((*id, *epoch)),
                 Verdict::Reclaim { .. } => unreachable!("the store resolves reclaims"),
             }
         }
@@ -1549,7 +1549,7 @@ impl Sim {
                 .map(|(id, row)| (*id, *row))
                 .collect();
             for (id, row) in owned {
-                self.set_row(id, row.clear().set, "cleared: host lost");
+                self.set_row(id, row.lose().set, "cleared: host lost");
             }
             self.stats.recoveries += 1;
         }

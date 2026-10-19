@@ -230,7 +230,7 @@ impl MemoryStore {
         let mut cleared = 0;
         for sandbox in inner.sandboxes.values_mut() {
             if sandbox.ownership.owner == Some(host) {
-                sandbox.ownership = sandbox.ownership.clear().set;
+                sandbox.ownership = sandbox.ownership.lose().set;
                 sandbox.version += 1;
                 cleared += 1;
             }

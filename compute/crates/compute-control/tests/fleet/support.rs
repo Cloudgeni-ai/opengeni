@@ -581,6 +581,23 @@ impl FakeHost {
             .collect()
     }
 
+    /// Whether each adopt of `id` it received was to take the copy up from
+    /// its files alone, in the order received.
+    #[must_use]
+    pub fn adopts(&self, id: Id) -> Vec<bool> {
+        self.seen()
+            .iter()
+            .filter_map(|seen| match &seen.envelope.request {
+                Request::Adopt {
+                    id: adopted,
+                    from_files,
+                    ..
+                } if *adopted == id => Some(*from_files),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether it holds `id`, and under which owner epoch.
     #[must_use]
     pub fn holds(&self, id: Id) -> Option<u64> {
@@ -906,7 +923,10 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             .claim(&id.to_string(), OwnerEpoch(*owner_epoch))
             .await
         {
-            Ok(Some(_)) => {
+            Ok(Some((stamp, _))) => {
+                // Its next save goes past the copy it took up, as a real
+                // host's does.
+                inner.saves.fetch_max(stamp.save, Ordering::SeqCst);
                 inner.held.lock().unwrap().insert(*id, *owner_epoch);
                 Reply::Done
             }

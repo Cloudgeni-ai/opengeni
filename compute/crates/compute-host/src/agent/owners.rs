@@ -14,6 +14,11 @@
 //! which a restarted agent finishes. An agent that restarts before that
 //! write has handed nothing off: the sandbox is still this host's, wakes
 //! as before, and the service, which has had no answer, asks again.
+//!
+//! An adopt after the last owner was lost takes up the store's copy from
+//! its files alone: it deletes the copy's memory image as it claims it, so
+//! the next wake boots, as after a crash, and no guest is brought back at
+//! a point it had already run past (see [`crate::protocol::Request::Adopt`]).
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -28,7 +33,7 @@ use tokio::sync::oneshot;
 use crate::layout::{Images, Paths, sync_parent};
 use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
-use crate::store::{Claimed, Owned, OwnerEpoch, Store};
+use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
@@ -39,6 +44,8 @@ use crate::fleet::Admission;
 pub(super) struct Then {
     config: SandboxConfig,
     owner: OwnerEpoch,
+    /// Whether it is taken up from the copy's files alone.
+    from_files: bool,
     reply: Reply<()>,
     /// The registration the request was admitted under, for one from the
     /// fleet service: the adopt goes on only while the host still holds it
@@ -120,8 +127,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 config,
                 owner,
+                from_files,
                 reply,
-            } => self.adopt(id, config, owner, reply),
+            } => self.adopt(id, config, owner, from_files, reply),
             Command::HandOff { id, owner, reply } => self.hand_off(id, owner, reply),
             Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
             Command::Owned {
@@ -265,12 +273,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Takes sandbox `id` over from the store's latest copy as its owner
-    /// under `owner`; see [`crate::protocol::Request::Adopt`].
+    /// under `owner`, from its files alone with `from_files`; see
+    /// [`crate::protocol::Request::Adopt`].
     pub(super) fn adopt(
         &mut self,
         id: Id,
         config: SandboxConfig,
         owner: OwnerEpoch,
+        from_files: bool,
         reply: Reply<()>,
     ) {
         if self.blocked.contains_key(&id.0) {
@@ -318,6 +328,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         Some(Then {
                             config,
                             owner,
+                            from_files,
                             reply,
                             under,
                         }),
@@ -361,13 +372,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             id,
             Record::new(id, ordinal, allocation, config),
             owner,
+            from_files,
             reply,
         );
     }
 
     /// Claims the store's copy of the sandbox `record` is the new record
-    /// of, under `owner`, and makes it this host's at Remote.
-    fn claim_copy(&mut self, id: Id, mut record: Record, owner: OwnerEpoch, reply: Reply<()>) {
+    /// of, under `owner`, and makes it this host's at Remote; with
+    /// `from_files`, without the copy's memory image.
+    fn claim_copy(
+        &mut self,
+        id: Id,
+        mut record: Record,
+        owner: OwnerEpoch,
+        from_files: bool,
+        reply: Reply<()>,
+    ) {
         let ordinal = record.ordinal;
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
@@ -387,13 +407,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    let made = adopted_files(&paths, &claimed, net.clone(), link).await;
-                    match made {
-                        Ok(()) => {
-                            remote_record(&mut record, owner, &claimed);
-                            records.insert(record).await.map_err(HostError::from)
+                    match files_only(&*store, id, owner, claimed, from_files).await {
+                        Err(error) => Err(error),
+                        Ok(claimed) => {
+                            let made = adopted_files(&paths, &claimed, net.clone(), link).await;
+                            match made {
+                                Ok(()) => {
+                                    remote_record(&mut record, owner, &claimed);
+                                    records.insert(record).await.map_err(HostError::from)
+                                }
+                                Err(error) => Err(HostError::Io(error.to_string())),
+                            }
                         }
-                        Err(error) => Err(HostError::Io(error.to_string())),
                     }
                 }
             };
@@ -581,6 +606,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(Then {
             config,
             owner,
+            from_files,
             reply,
             under,
         }) = self.then_adopt.remove(&id.0)
@@ -594,7 +620,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         match result {
-            Ok(()) => self.adopt(id, config, owner, reply),
+            Ok(()) => self.adopt(id, config, owner, from_files, reply),
             Err(error) => {
                 let _ = reply.send(Err(error.clone()));
             }
@@ -665,12 +691,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         continue;
                     }
                 }
-                Verdict::Refetch { owner_epoch } => {
+                Verdict::Refetch {
+                    owner_epoch,
+                    from_files,
+                } => {
                     let mut config = record.config.clone();
                     config.link = link;
                     let then = Then {
                         config,
                         owner: OwnerEpoch(owner_epoch),
+                        from_files,
                         reply: done,
                         under: None,
                     };
@@ -724,6 +754,44 @@ async fn adopted_files(
     })
     .await
     .map_err(io::Error::other)?
+}
+
+/// The copy `claimed` names, taken up from its files alone with
+/// `from_files`: its memory image is deleted from the store first, as the
+/// claim's next save, so a later adopt or wake never restores it. A try
+/// whose answer was lost finds the change done; an adopt tried again
+/// claims the copy without the image and leaves it be.
+async fn files_only<S: Store>(
+    store: &S,
+    id: Id,
+    owner: OwnerEpoch,
+    claimed: Claimed,
+    from_files: bool,
+) -> Result<Claimed, HostError> {
+    if !from_files || !claimed.memory {
+        return Ok(claimed);
+    }
+    let change = Stamp {
+        epoch: owner,
+        save: claimed.save + 1,
+    };
+    match store.forget_memory(id, change).await {
+        Err(error) => Err(HostError::Io(error.to_string())),
+        Ok(Owned::Fenced { by }) => Err(HostError::Superseded {
+            id,
+            held: by.0,
+            asked: owner.0,
+        }),
+        Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
+        Ok(Owned::Done(Some(receipt))) => {
+            tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
+            Ok(Claimed {
+                save: change.save,
+                receipt,
+                memory: false,
+            })
+        }
+    }
 }
 
 /// Makes `record` that of a sandbox kept only in the store, as `claimed`

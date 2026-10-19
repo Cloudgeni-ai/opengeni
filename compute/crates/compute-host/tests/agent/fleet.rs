@@ -74,6 +74,7 @@ async fn adopt(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
             id,
             config: config(NEVER),
             owner_epoch,
+            from_files: false,
         })
         .await
         .unwrap()
@@ -343,7 +344,13 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
         .reconcile(vec![
             ruling(kept, Verdict::Keep { owner_epoch: 3 }),
             ruling(dropped, Verdict::Drop),
-            ruling(refetched, Verdict::Refetch { owner_epoch: 4 }),
+            ruling(
+                refetched,
+                Verdict::Refetch {
+                    owner_epoch: 4,
+                    from_files: false,
+                },
+            ),
         ])
         .await
         .unwrap();
@@ -501,7 +508,9 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
     // An adopt or hand-off names its owner itself, and is still held to
     // its admission.
     assert!(matches!(
-        stale.adopt(other, config(NEVER), OwnerEpoch(2)).await,
+        stale
+            .adopt(other, config(NEVER), OwnerEpoch(2), false)
+            .await,
         Err(HostError::NotAdmitted)
     ));
     assert!(matches!(
@@ -524,7 +533,7 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
     );
     assert!(matches!(
         admitted(3, 13)
-            .adopt(other, config(NEVER), OwnerEpoch(2))
+            .adopt(other, config(NEVER), OwnerEpoch(2), false)
             .await,
         Err(HostError::NotAdmitted)
     ));
@@ -648,7 +657,11 @@ async fn a_registering_host_lists_an_adopt_under_way_once_it_lands() {
     let owned = two.handle.owned(OwnerEpoch(2));
     let adopting = tokio::spawn({
         let owned = owned.clone();
-        async move { owned.adopt(sandbox, config(NEVER), OwnerEpoch(2)).await }
+        async move {
+            owned
+                .adopt(sandbox, config(NEVER), OwnerEpoch(2), false)
+                .await
+        }
     });
     let unsettled = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -860,7 +873,11 @@ async fn a_hand_off_during_an_adopts_removal_is_told_to_try_again() {
 
     let adopting = tokio::spawn({
         let owned = two.handle.owned(OwnerEpoch(3));
-        async move { owned.adopt(sandbox, config(NEVER), OwnerEpoch(3)).await }
+        async move {
+            owned
+                .adopt(sandbox, config(NEVER), OwnerEpoch(3), false)
+                .await
+        }
     });
     // Until the adopt is let claim the store's copy, it is still under
     // way: the earlier copy's removal, then the claim.

@@ -253,15 +253,41 @@ can be built and tested.
   places the sandbox again elsewhere.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
-  its sandboxes and clears their owner. Each comes back on its next wake,
-  from its latest archive, on another host. A sandbox never archived is
-  lost with its host; checkpoints, below, keep that window short. A lost
-  host that comes back gets back each sandbox nobody
-  adopted since, with its local state, which is at least as new as the
-  archive, and drops the rest.
+  its sandboxes and clears their owner, marking each as left by a lost
+  owner (`lost`). Each comes back on its next wake, from its latest
+  archive, on another host. A sandbox never archived is lost with its
+  host; checkpoints, below, keep that window short. A lost host that
+  comes back gets back each sandbox nobody adopted since, with its local
+  state, which is at least as new as the archive, and drops the rest.
+- **A lost owner's copy comes back from its files.** A host that releases
+  a sandbox hands its latest state off first, so its archive is the
+  sandbox as it was. A lost host hands nothing off: the archive is the
+  last copy it made, and the sandbox may have run on past it, its
+  programs answering requests and telling others what they did. A guest
+  restored from that copy's memory would run that stretch again, with
+  the same identity and connections, as if it had not happened (an
+  agent that deduplicates requests in memory would take a request it
+  already carried out for a new one). So the adopt that follows a loss
+  says `from_files`: the new owner deletes the memory image from the
+  store's copy as it claims it, under the claim's next save, and the
+  next wake boots the copy's disk, as after a crash. Programs end;
+  files are as the copy left them; a new guest agent starts and
+  connects afresh. The mark stays through any number of gives and
+  reclaims and only a release (a hand-off, whose copy is current) or a
+  new create clears it, so a refetch or a placement tried again after a
+  loss takes the copy up the same way. Before the host pauses a guest to
+  save or checkpoint it, it asks the guest to write what it holds for
+  its disks to them (`sync` on the notice port), so a disk copied while
+  its guest ran holds what the guest had written. A sandbox asleep in
+  object storage when its host was lost had not run past its copy, but
+  nothing durable says so, and it boots from its files too: telling
+  the two apart would take a mark in the stored copy that every eviction
+  sets and every wake from it clears before the guest runs, one more
+  store write on each.
 - **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
   is copied to object storage while it runs, so losing its host costs
-  only what changed since. The fleet sets it to 10 minutes for every
+  only what its files took on since, and its running programs (see the
+  previous item). The fleet sets it to 10 minutes for every
   sandbox whose create names no sleep rules. Protection starts once a
   copy is in the store, not when it was captured, and the period counts
   running time from the later of when its newest copy got there and its

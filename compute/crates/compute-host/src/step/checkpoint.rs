@@ -88,6 +88,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Some(Ok(())) => {}
         }
+        // The disk it copies must hold what the guest wrote: after a lost
+        // host the copy boots from its disk alone.
+        if !self.sync_guest().await {
+            self.untouched = true;
+            return (Outcome::Cancelled, After::Kept(live));
+        }
         notes::phase("settle");
         // A live VM's record never vouches for an image; this is a guard.
         if self.record.image

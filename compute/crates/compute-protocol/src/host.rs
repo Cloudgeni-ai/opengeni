@@ -525,6 +525,13 @@ pub enum Request {
     /// succeeds; under an earlier epoch than the one held, or than the
     /// store's, it is refused with [`ErrorCode::Stale`], and without a
     /// stored copy with [`ErrorCode::NotFound`].
+    ///
+    /// With `from_files`, sent when the sandbox's last owner was lost
+    /// rather than handing it off, the copy may be older than the sandbox
+    /// had become: its memory image would bring back programs at a point
+    /// they had already run past. The host deletes the image from the
+    /// store's copy as it claims it, and the next wake boots from the
+    /// copy's files, as after a crash.
     Adopt {
         /// Its id.
         id: Id,
@@ -532,6 +539,9 @@ pub enum Request {
         config: SandboxConfig,
         /// The owner epoch the host takes it under.
         owner_epoch: u64,
+        /// Whether to take up the copy's files alone.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_files: bool,
     },
     /// Hand a sandbox off to whichever host adopts it next: the host stops
     /// taking wakes for it (they are refused with [`ErrorCode::Busy`]),

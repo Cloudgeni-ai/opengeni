@@ -14,13 +14,21 @@
 //! - given to a host ([`Ownership::give`]): one that adopts it from its
 //!   latest archive, or another one when the first refused it outright,
 //!   holding nothing of it;
-//! - cleared when its owner released it or was lost ([`Ownership::clear`]);
+//! - cleared when its owner released it ([`Ownership::clear`]) or was lost
+//!   ([`Ownership::lose`]);
 //! - reclaimed by a host that still has the newest copy because nobody
 //!   took the sandbox since that host last ran it ([`reconcile`]).
 //!
 //! Creating and giving are takes: they start the sandbox from somewhere
 //! other than the copy its last owner kept. A host's copy is the newest
 //! only while no take happened after the epoch it last ran it under.
+//!
+//! A host that releases a sandbox hands its latest state off first, so the
+//! store's copy is the sandbox as it was. A lost host hands nothing off: the
+//! store's copy is the last one it made, and the sandbox may have run on
+//! past it. Its memory image is then of a past the sandbox's programs had
+//! already left (and told others of), so whoever takes it next starts it
+//! from the copy's files alone ([`Ownership::lost`]), as after a crash.
 
 use crate::SandboxId;
 use crate::ids::{HostId, OwnerEpoch};
@@ -34,6 +42,11 @@ pub struct Ownership {
     pub epoch: OwnerEpoch,
     /// The epoch of the last create or give.
     pub taken: OwnerEpoch,
+    /// Whether the last owner to let it go was lost rather than releasing
+    /// it: its stored copy may then be older than the sandbox had become,
+    /// and is taken up without its memory image. Only a release or a new
+    /// create sets it back.
+    pub lost: bool,
 }
 
 /// An update of a sandbox's ownership, applied only while the row still
@@ -54,6 +67,7 @@ impl Ownership {
             owner: Some(host),
             epoch: OwnerEpoch::FIRST,
             taken: OwnerEpoch::FIRST,
+            lost: false,
         }
     }
 
@@ -70,12 +84,13 @@ impl Ownership {
                 owner: Some(host),
                 epoch,
                 taken: epoch,
+                lost: self.lost,
             },
         }
     }
 
     /// Leaves the sandbox without an owner under a new epoch, once its
-    /// owner released it or was lost.
+    /// owner released it, handing its latest state off.
     #[must_use]
     pub const fn clear(self) -> Change {
         Change {
@@ -84,6 +99,23 @@ impl Ownership {
                 owner: None,
                 epoch: self.epoch.next(),
                 taken: self.taken,
+                lost: false,
+            },
+        }
+    }
+
+    /// Leaves the sandbox without an owner under a new epoch, once its
+    /// owner was lost: its stored copy is no longer known to be its latest
+    /// state.
+    #[must_use]
+    pub const fn lose(self) -> Change {
+        Change {
+            expect: self,
+            set: Self {
+                owner: None,
+                epoch: self.epoch.next(),
+                taken: self.taken,
+                lost: true,
             },
         }
     }
@@ -97,6 +129,7 @@ impl Ownership {
                 owner: Some(host),
                 epoch: self.epoch.next(),
                 taken: self.taken,
+                lost: self.lost,
             },
         }
     }
@@ -130,6 +163,9 @@ pub enum Verdict {
     Refetch {
         /// Its epoch from now on.
         epoch: OwnerEpoch,
+        /// Whether to take the archive up from its files alone, as
+        /// [`Ownership::lost`] says.
+        from_files: bool,
     },
     /// Drop the local copy: it belongs to someone else, or no longer
     /// exists.
@@ -156,7 +192,10 @@ pub fn reconcile(host: HostId, listed: OwnerEpoch, row: Option<Ownership>) -> Ve
     let newest = row.taken <= listed;
     match row.owner {
         Some(owner) if owner == host && newest => Verdict::Keep { epoch: row.epoch },
-        Some(owner) if owner == host => Verdict::Refetch { epoch: row.epoch },
+        Some(owner) if owner == host => Verdict::Refetch {
+            epoch: row.epoch,
+            from_files: row.lost,
+        },
         None if newest => Verdict::Reclaim {
             change: row.reclaim(host),
         },
@@ -176,6 +215,7 @@ mod tests {
             owner,
             epoch: OwnerEpoch(epoch),
             taken: OwnerEpoch(taken),
+            lost: false,
         }
     }
 
@@ -188,6 +228,26 @@ mod tests {
         let given = cleared.set.give(B);
         assert_eq!(given.set, row(Some(B), 3, 3));
         assert_eq!(given.set.clear().set.reclaim(B).set, row(Some(B), 5, 3));
+    }
+
+    #[test]
+    fn only_a_release_or_a_create_vouches_for_the_stored_copy_again() {
+        let lost = Ownership::created(A).lose();
+        assert_eq!(lost.expect, Ownership::created(A));
+        assert_eq!(
+            lost.set,
+            Ownership {
+                lost: true,
+                ..row(None, 2, 1)
+            }
+        );
+        // Given on, given back and reclaimed, it still starts from files...
+        let given = lost.set.give(B).set;
+        assert!(given.lost);
+        assert!(given.lose().set.reclaim(B).set.lost);
+        // ...until an owner hands its latest state off.
+        assert!(!given.clear().set.lost);
+        assert!(!given.clear().set.give(A).set.lost);
     }
 
     #[test]
@@ -224,7 +284,20 @@ mod tests {
         assert_eq!(
             reconcile(A, e, Some(row(Some(A), 9, 9))),
             Verdict::Refetch {
-                epoch: OwnerEpoch(9)
+                epoch: OwnerEpoch(9),
+                from_files: false,
+            }
+        );
+        // The archive a lost owner left is taken up from its files.
+        let after_loss = Ownership {
+            lost: true,
+            ..row(Some(A), 9, 9)
+        };
+        assert_eq!(
+            reconcile(A, e, Some(after_loss)),
+            Verdict::Refetch {
+                epoch: OwnerEpoch(9),
+                from_files: true,
             }
         );
     }
