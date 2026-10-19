@@ -1909,3 +1909,45 @@ r25-s1's files are in `runs/r25-s1/`:
 - `host-sbx-p4-e-host-n6sv.full.log`: the journal.
 
 r25-s2's results are in `runs/r25-s2/results.md`.
+
+#### The environment's review fixes, after r25
+
+The docs review of 5bc1d3e05 and 8d26abc54 found three gaps in the
+environment, now closed. None changes a result above: r25-cb's hosts
+were replaced after the deploy, so their certificates came from the
+deployed control service, and r25-s2's pager file was written 2.6 s
+after the request, on either clock.
+
+- The hosts step checked only that hosts were live, not where their
+  certificates came from: hosts kept because the template was current
+  would keep a previous control service's certificates. It now reads
+  each host's certificate (its notAfter) on the host. It requires a
+  matching "issued a host certificate" line for that host in the logs of
+  the pods of the control service Deployment's current revision. A host
+  without one gets a new certificate with `compute-host-certificate
+  --force`, and is checked again.
+- The step no longer checked `HOSTS`. Now the group must be stable and
+  hold at least `HOSTS` hosts, and at least `HOSTS` of them must be live.
+- The pager proof compared a host file's time with the stack's clock. Now
+  both sides use the host's clock: the wake's completed `restore` step in
+  the host agent's journal, and the file times on the host.
+  `learned.json` must be written at or after the restore began, or
+  `wake-profile.json` rewritten after it ended.
+
+Checked live on sbx-p4-e (compute 3e0207fb8, backend fde01a4c2):
+
+- With the template current, the control service was redeployed at
+  19:45:42 (a rollout restart, revision 5) and `env.sh hosts` was run.
+  It found none of the three hosts' certificates in revision 5's log
+  (revision 4 had issued them). It renewed each by identity token from
+  19:45:58 to 19:46:01, then matched all three to revision 5's log at
+  19:46:08 (`runs/r25-pg/hosts-redeploy.log`).
+- With `HOSTS=4`, the step failed with "holds 3 hosts ..., fewer than
+  HOSTS=4". `hosts.sh issued` with a notAfter one second off exited 3,
+  naming the host.
+- r25-pg (suite 19:46:23 to 19:47:58, `ONLY=background,sleep-saved`)
+  ran the host-clock pager proof. It reported "learned.json on
+  sbx-p4-e-host-1wps written 0.8 s after the restore from archived
+  (memory from the pager) ended, by the host's clock". The check failed
+  for r20a's subset reason only: the idle archive finished at 19:47:40.81,
+  before the wake request (`runs/r25-pg/results.md`).

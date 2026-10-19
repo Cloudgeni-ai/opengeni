@@ -209,13 +209,14 @@ fleet() {
 }
 
 # --- hosts: the group's hosts on the control service under test ---------
-# After deploy, so every host gets its certificate from, and registers
-# with, the control service the run tests rather than the one before it.
+# After deploy: every host the run uses must hold a certificate the
+# deployed control service issued, and be live on it, whether or not the
+# group's template changed.
 hosts() {
   # The group takes a new template only for hosts it makes (hosts outlive
   # their agent, ADR 9). Between runs no sandbox here needs keeping, so the
   # environment replaces hosts that run an older bundle at once.
-  local group=$PREFIX-hosts names
+  local group=$PREFIX-hosts names=() addresses=() name user pairs at stale attempt i
   if [ "$(g compute instance-groups managed describe "$group" --zone "$ZONE" \
     --format='value(status.versionTarget.isReached)')" != True ]; then
     log "replacing the hosts of $group with the new template"
@@ -225,12 +226,52 @@ hosts() {
     g compute instance-groups managed wait-until "$group" --zone "$ZONE" --version-target-reached \
       --timeout 1800 >/dev/null
   fi
-  names=$(g compute instance-groups managed list-instances "$group" --zone "$ZONE" \
-    --format='value(instance.basename())' | tr '\n' ' ')
-  [ -n "${names// /}" ] || { log "$group has no hosts"; return 1; }
+  # No instance still being made or deleted, so the list is the run's hosts.
+  g compute instance-groups managed wait-until "$group" --zone "$ZONE" --stable --timeout 1800 >/dev/null
+  read -ra names <<<"$(g compute instance-groups managed list-instances "$group" --zone "$ZONE" \
+    --format='value(instance.basename())' | tr '\n' ' ')"
+  if [ ${#names[@]} -lt "$HOSTS" ]; then
+    log "$group holds ${#names[@]} hosts (${names[*]}), fewer than HOSTS=$HOSTS"
+    return 1
+  fi
+  for name in "${names[@]}"; do
+    addresses+=("$(g compute instances describe "$name" --zone "$ZONE" \
+      --format='value(networkInterfaces[0].networkIP)')")
+  done
   push_scripts
-  on "bash e2e/hosts.sh $names" >"$STATE/hosts.log" 2>&1 || { tail -5 "$STATE/hosts.log" >&2; return 1; }
-  tail -1 "$STATE/hosts.log" >&2
+  user=$(os_login_user)
+  : >"$STATE/hosts.log"
+  # A host whose certificate an older control service issued (a host made
+  # before this deploy, or kept because the template did not change) gets
+  # a new one from the deployed service, once, and its agent restarts with
+  # it (keeping its lease, so the service sees it live throughout); then
+  # every certificate must be the deployed service's.
+  for attempt in 1 2; do
+    on "bash e2e/hosts.sh live $HOSTS ${names[*]}" >>"$STATE/hosts.log" 2>&1 ||
+      { tail -5 "$STATE/hosts.log" >&2; return 1; }
+    pairs=()
+    for i in "${!names[@]}"; do
+      at=$(on_host "$user" "${addresses[$i]}" \
+        'sudo date -u -d "$(sudo openssl x509 -noout -enddate -in /etc/compute/host.pem | cut -d= -f2)" +%s') &&
+        [[ $at =~ ^[0-9]+$ ]] || { log "could not read ${names[$i]}'s certificate"; return 1; }
+      pairs+=("${names[$i]}=$at")
+    done
+    if on "bash e2e/hosts.sh issued ${pairs[*]}" >>"$STATE/hosts.log" 2>&1; then
+      tail -1 "$STATE/hosts.log" >&2
+      return 0
+    fi
+    stale=$(tail -1 "$STATE/hosts.log" | sed -n 's/.*not issued by the deployed control service: //p')
+    if [ "$attempt" = 2 ] || [ -z "$stale" ]; then
+      tail -5 "$STATE/hosts.log" >&2
+      return 1
+    fi
+    for i in "${!names[@]}"; do
+      case " $stale " in *" ${names[$i]} "*) ;; *) continue ;; esac
+      log "${names[$i]}: a new certificate from the deployed control service"
+      on_host "$user" "${addresses[$i]}" 'sudo /opt/compute/current/compute-host-certificate --force &&
+        systemctl is-active compute-host' >>"$STATE/hosts.log" 2>&1 || { tail -5 "$STATE/hosts.log" >&2; return 1; }
+    done
+  done
 }
 
 # The condition of the stack VM's OS Login on the hosts: this environment's
