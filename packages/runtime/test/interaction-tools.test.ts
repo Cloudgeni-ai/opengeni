@@ -1275,8 +1275,71 @@ describe("interaction attempt tools", () => {
     expect(browser.resumes).toHaveLength(1);
     expect(result).toMatchObject({
       isError: true,
-      structuredContent: { error: { code: "browser_resumed" } },
+      structuredContent: {
+        error: {
+          code: "browser_resumed",
+          message: expect.stringContaining("The tab open completed"),
+        },
+      },
     });
+    expect(JSON.stringify(result)).not.toContain("did not run");
+  });
+
+  test("a browser that stops again after a resume resumes again", async () => {
+    const browser = stoppedBrowser({ running: true });
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport(browser.transport),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const observe = async () =>
+      await definitions[0]!.execute(
+        { browserSessionId },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+    for (const round of [1, 2]) {
+      browser.stop();
+      expect((await observe()).isError).toBeFalsy();
+      expect(browser.resumes).toHaveLength(round);
+    }
+  });
+
+  test("an unknown resume outcome stays unknown", async () => {
+    const browser = stoppedBrowser();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        ...browser.transport,
+        resumeBrowserSession: async () =>
+          ({
+            session: browser.suspended,
+            operation: {
+              state: "outcome_unknown",
+              error: {
+                code: "outcome_unknown",
+                message: "The controller did not answer.",
+                retryable: false,
+              },
+            },
+          }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const failure = await definitions[0]!
+      .execute(
+        { browserSessionId },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(OpenGeniApiError);
+    expect((failure as OpenGeniApiError).outcomeUnknown).toBe(true);
   });
 
   test("a failed resume is reported as failed, not as still resuming", async () => {
