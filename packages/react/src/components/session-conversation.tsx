@@ -18,6 +18,7 @@ import {
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import {
   useSessionConversation,
   type SessionConversationController,
@@ -248,18 +249,26 @@ export function SessionConversation({
   fetch,
   ...props
 }: SessionConversationProps) {
-  if (baseUrl === undefined) return <RetryingConversation {...props} />;
+  const resetKey = `${props.workspaceId ?? ""}:${props.sessionId}`;
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <RetryingConversation {...props} />
+      </ConversationRenderBoundary>
+    );
   const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope
-      baseUrl={baseUrl}
-      workspaceId={workspaceId}
-      client={client}
-      headers={headers}
-      fetch={fetch}
-    >
-      <RetryingConversation {...rest} />
-    </SessionProxyScope>
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        workspaceId={workspaceId}
+        client={client}
+        headers={headers}
+        fetch={fetch}
+      >
+        <RetryingConversation {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
   );
 }
 

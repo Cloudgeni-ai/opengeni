@@ -921,6 +921,8 @@ export const englishMessages = {
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
     "Your request was sent. GitHub asked the owners of your organization to approve Opengeni.",
+  "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
+  "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
   "copyButton.copy": "Copy",
   "counts.agents_one": "{count} agent",
