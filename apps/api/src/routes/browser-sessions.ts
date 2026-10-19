@@ -629,6 +629,12 @@ export function registerBrowserSessionRoutes(
                   throw new BrowserControllerFull(
                     placement.placement,
                     placement.placementInstanceId,
+                    {
+                      operationId: request.operationId,
+                      browserSessionId: preparedSession.id,
+                      sandboxGroupId: placement.controllerHostSandboxGroupId,
+                      controllerGeneration,
+                    },
                   );
                 }
                 const failure = interactionFailure(error);
@@ -2393,23 +2399,29 @@ export function registerBrowserSessionRoutes(
         const revisionAuthority = privateCheckpoint
           ? null
           : await requireBrowserRevisionRestoreAuthority(deps, grant, prepared.session);
-        restore = privateCheckpoint
-          ? await prepareBrowserPrivateCheckpointRestore(
-              deps,
-              grant,
-              prepared.session,
-              privateCheckpoint,
-            )
-          : await prepareBrowserStateRestore(
-              deps,
-              grant,
-              prepared.session,
-              prepared.session.placement,
-              revisionAuthority,
-            );
-        if (!restore) {
-          throw new BrowserSessionStateError("BrowserSession has no restorable durable state");
-        }
+        // Signed for a short time, so a retry after making room signs anew.
+        const prepareRestore = async () => {
+          restore?.dataKey.fill(0);
+          restore?.aad.fill(0);
+          restore = privateCheckpoint
+            ? await prepareBrowserPrivateCheckpointRestore(
+                deps,
+                grant,
+                prepared.session,
+                privateCheckpoint,
+              )
+            : await prepareBrowserStateRestore(
+                deps,
+                grant,
+                prepared.session,
+                prepared.session.placement,
+                revisionAuthority,
+              );
+          if (!restore) {
+            throw new BrowserSessionStateError("BrowserSession has no restorable durable state");
+          }
+        };
+        await prepareRestore();
 
         const sourceSession = await requireSourceSession(deps, workspaceId, before.sourceSessionId);
         // A full controller saves its least recently used idle browser once,
@@ -2528,6 +2540,12 @@ export function registerBrowserSessionRoutes(
                   throw new BrowserControllerFull(
                     placement.placement,
                     placement.placementInstanceId,
+                    {
+                      operationId: request.operationId,
+                      browserSessionId,
+                      sandboxGroupId: placement.controllerHostSandboxGroupId,
+                      controllerGeneration,
+                    },
                   );
                 }
                 if (!isDefiniteBrowserControllerFailure(error)) throw error;
@@ -2592,6 +2610,7 @@ export function registerBrowserSessionRoutes(
             error,
             browserSessionId,
           );
+          await prepareRestore();
           response = await resumeOnPlacement();
         }
         const parsed = BrowserSessionMutationResponse.parse(response);
@@ -2611,8 +2630,10 @@ export function registerBrowserSessionRoutes(
         }
         throw browserRouteError(error);
       } finally {
-        restore?.dataKey.fill(0);
-        restore?.aad.fill(0);
+        // Assigned inside prepareRestore, which narrowing cannot follow.
+        const preparedRestore = restore as RestorePlacementBrowserStateInput | null;
+        preparedRestore?.dataKey.fill(0);
+        preparedRestore?.aad.fill(0);
       }
     },
   );
@@ -3157,7 +3178,8 @@ export function registerBrowserSessionRoutes(
    * fails after it was handed to the controller leaves its browser for the
    * normal transition reconciliation and stops the search, so one outage
    * strands at most one browser. When nothing is freed the retried create or
-   * resume reports the controller's own capacity error.
+   * resume reports the controller's own capacity error. The waiting create or
+   * resume keeps its operation and holder alive throughout.
    */
   async function suspendLeastRecentlyUsedBrowser(
     context: Context,
@@ -3168,6 +3190,37 @@ export function registerBrowserSessionRoutes(
     creatingBrowserSessionId: string,
   ): Promise<boolean> {
     if (!deps.objectStorage) return false;
+    return await withInteractionHolderHeartbeat(
+      deps,
+      {
+        grant,
+        workspaceId,
+        sandboxGroupId: full.waiting.sandboxGroupId,
+        holderId: interactionHolderId(full.waiting.browserSessionId),
+        operationId: full.waiting.operationId,
+        resourceId: full.waiting.browserSessionId,
+        controllerGeneration: full.waiting.controllerGeneration,
+      },
+      async () =>
+        await saveLeastRecentlyUsedBrowser(
+          context,
+          grant,
+          workspaceId,
+          routeSourceSession,
+          full,
+          creatingBrowserSessionId,
+        ),
+    );
+  }
+
+  async function saveLeastRecentlyUsedBrowser(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    routeSourceSession: Session,
+    full: BrowserControllerFull,
+    creatingBrowserSessionId: string,
+  ): Promise<boolean> {
     const idleBefore = Date.now() - BROWSER_CAPACITY_SUSPEND_IDLE_MS;
     const candidates = await listBrowserCapacitySuspendCandidates(deps.db, {
       accountId: grant.accountId,
@@ -5325,11 +5378,19 @@ const BROWSER_CAPACITY_SUSPEND_IDLE_MS = 5 * 60_000;
 const BROWSER_CAPACITY_SUSPEND_CANDIDATES = 3;
 const BROWSER_CAPACITY_SUSPEND_ACTOR = "system:browser-capacity";
 
-/** A create reached a controller already at its browser limit. */
+/** A create or resume reached a controller already at its browser limit.
+ * `waiting` is that operation's dispatched authority, kept alive while room is
+ * made so the transition reaper does not settle it in the meantime. */
 class BrowserControllerFull extends Error {
   constructor(
     readonly placement: InteractionPlacement,
     readonly placementInstanceId: string,
+    readonly waiting: {
+      operationId: string;
+      browserSessionId: string;
+      sandboxGroupId: string | null;
+      controllerGeneration: string;
+    },
   ) {
     super("browser controller is at its browser limit");
   }
