@@ -365,8 +365,12 @@ export class CuaComputerBackend implements ComputerBackend {
       include_screenshot: false,
       include_accessibility_tree: true,
       // Both: the elements carry tokens and frames; the Markdown tree also has
-      // the unindexed text inside rows and cells, which the elements omit.
-      ...(this.identity.platform !== "windows" ? { tree_format: "both" } : {}),
+      // the unindexed text inside rows and cells, which the elements omit. CUA
+      // returns only Markdown when tree_format is omitted, on every platform.
+      tree_format: "both",
+      // UIA answers ordinary windows (Notepad, the Run dialog) in about two
+      // seconds; CUA's one-second default returned zero nodes for them.
+      ...(this.identity.platform === "windows" ? { timeout_ms: 5_000 } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
@@ -381,7 +385,7 @@ export class CuaComputerBackend implements ComputerBackend {
     const roots = projectElements(
       state.elements,
       this.identity.platform,
-      unindexedTextByElement(state.tree_markdown),
+      unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {

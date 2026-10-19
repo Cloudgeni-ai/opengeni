@@ -41,7 +41,6 @@ test("table rows read as the text CUA lists only in its Markdown tree", () => {
   expect([...texts.entries()]).toEqual([
     [1, ["bun", "5,29 GB"]],
     [2, ["Stop"]],
-    [3, ["hunter2"]],
     [0, ['say "hi"']],
   ]);
   const nodes = projectElements(
@@ -80,4 +79,55 @@ test("table rows read as the text CUA lists only in its Markdown tree", () => {
     // Never surface text from inside a protected field.
     { name: "Password", description: undefined },
   ]);
+});
+
+test("Windows Edit text never reaches an ancestor through the Markdown tree", () => {
+  // CUA emits disabled controls as unindexed rows, value included, and writes
+  // values without escaping newlines, so a multi-line Edit value can contain
+  // lines shaped like sibling rows. None of it may become an indexed
+  // ancestor's name or description.
+  const markdown = [
+    '- [0] Window "Settings" [actions=[raise]]',
+    "    - [1] Group",
+    '        - Text "API key"',
+    '        - Edit "API key" = "synthetic-sensitive-value"',
+    '        - Edit "synthetic-label-from-value"',
+    '        - Edit = "first line',
+    '        - Text "synthetic-injected-row"',
+    'last line"',
+    '    - [2] Edit "Name" = "typed text" [actions=[set_value]]',
+    '        - Text = "synthetic-inside-indexed-edit"',
+  ].join("\n");
+  const texts = unindexedTextByElement(markdown, "windows");
+  expect(texts.size).toBe(0);
+  const nodes = projectElements(
+    [
+      { element_index: 0, element_token: "s:0", role: "Window", label: "Settings", actions: [] },
+      { element_index: 1, element_token: "s:1", role: "Group", actions: [] },
+      {
+        element_index: 2,
+        element_token: "s:2",
+        role: "Edit",
+        label: "Name",
+        value: "typed text",
+        actions: ["set_value"],
+      },
+    ],
+    "windows",
+    texts,
+  );
+  const serialized = JSON.stringify(nodes);
+  expect(serialized).not.toContain("synthetic");
+  expect(serialized).not.toContain("typed text");
+});
+
+test("unindexed secure fields and their contents add no row text", () => {
+  const markdown = [
+    '- [0] AXWindow "Sign in"',
+    "    - [1] AXGroup",
+    '        - AXStaticText = "Password"',
+    '        - AXSecureTextField "synthetic-label" = "synthetic-secret"',
+    '            - AXStaticText = "synthetic-nested"',
+  ].join("\n");
+  expect([...unindexedTextByElement(markdown, "macos").entries()]).toEqual([[1, ["Password"]]]);
 });
