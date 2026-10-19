@@ -1471,7 +1471,8 @@ in `bgc-sampler.log`.
 
 ### r20a: the backend fixes, the host-loss alarm
 
-r20a (2026-10-19, 07:42 to 07:49:57) ran on hosts, a guest image and a
+r20a (2026-10-19; deployed at 07:42, the suite ran from 07:43:32 to
+07:49:57) ran on hosts, a guest image and a
 fleet service rebuilt from compute f25df32f5 (hosts first), with the
 backend ec9a064c7 (output release only while the sandbox is awake, and
 no exit status 124 for a request whose outcome is not known) and the same
@@ -1515,12 +1516,17 @@ check stores one first.
 The figures are the rows of `runs/r20a/results.md`; the stop is in its
 `suite.log`, the adoption and the alarm in
 `host-sbx-p4-e-host-kvm8.log`, the archive at 07:44:50.32 in
-`host-sbx-p4-e-host-dnv0.log`, and the wake lines in `api.log`.
+the kept journal `host-sbx-p4-e-host-dnv0@6239690355641972647.log`
+(line 16; `host-sbx-p4-e-host-dnv0.log` is the replacement machine's
+later boot), and the wake lines in `api.log`.
 
-### r21: the final run, every check
+### r21: every check, before the output-release rework
 
-r21 (2026-10-19, 08:12:29 to 08:34:09) is the final full-order run. It
-ran every check on hosts, a guest image (with the agent's new
+r21 (2026-10-19, 08:12:29 to 08:34:09) is a full-order run of every
+check. It validates the backend at d9d4cad74, which still releases a
+background command's output only while the sandbox is awake (migration
+0849); that release's replacement, one answered exchange (21114aca3),
+needs the rerun that comes next. It ran on hosts, a guest image (with the agent's new
 supervisor from the merged main) and a fleet service rebuilt from
 compute f25df32f5, hosts first, with the backend d9d4cad74
 (ec9a064c7, origin/main 4c9015433 merged, and the tombstone-identity
@@ -1543,7 +1549,7 @@ Opengeni offers no way to ask for it), with the verifier's agreement.
 | --- | --- |
 | create | first turn in 22.1 s |
 | background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
-| checkpoint | all 150 terminal ticks and 110 command ticks through 2 checkpoints, longest quiet 1.2 s |
+| checkpoint | the terminal showed all 150 ticks across 2 checkpoints (08:14:26.82 and 08:15:42.60), longest quiet 1.2 s; the command returned all 110 ticks in order across 1 (08:14:26.82), its proof ending before the second completed |
 | ui | file browser, terminal and desktop pass (Playwright) |
 | sleep-paused | paused in 0.3 s, woke in 0.1 s |
 | sleep-saved | saved in 6.6 s, woke in 0.4 s |
