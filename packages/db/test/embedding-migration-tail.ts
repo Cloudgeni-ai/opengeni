@@ -320,5 +320,9 @@ export const embeddingMigrationTail = [
   "0842_site_session_access.sql",
   // Patches the withheld provenance fences and subscription compatibility readers.
   "0843_indexed_inbox_lineage.sql",
+  // Both extend the scoped-credit constraint from withheld 0613 and plan
+  // routines from withheld 0797; replay only after those prerequisites.
+  "0844_free_plan_credit_scope.sql",
+  "0845_signup_eligibility_without_bonus.sql",
   "0846_independent_session_titles.sql",
 ];
