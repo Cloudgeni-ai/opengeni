@@ -45,13 +45,18 @@ the workstation only drives it.
    hosts endpoint as a NodePort, a link signing key, Opengeni's team link
    to the API's agent gateway); Caddy in front with Let's Encrypt
    certificates for `opengeni.`, `relay.` and `files.` names of the VM's
-   address (sslip.io). It waits for `HOSTS` live hosts. The chart's default
+   address (sslip.io). The chart's default
    two relays run behind Caddy as a stock install has them, a plain reverse
    proxy to the relay Service: any replica forwards a terminal's dial to the
    one that owns its channel. The fleet checkpoints running sandboxes every
    60 s (`--checkpoint-every-s=60`), so every check runs across checkpoints.
    `FRESH=1 env.sh deploy` first removes the release and its volumes, for a
    new database, object store and NATS.
+7. **hosts**: the group's hosts are replaced if their template is older
+   than the one fleet applied, and the step waits until the control
+   service reports each of the group's hosts live (`stack/hosts.sh`). It
+   comes after deploy, so every host gets its certificate from, and
+   registers with, the control service under test, not the one before it.
 
 Hosts reach the control service on the internal network, and Opengeni's agent
 gateway and relay over HTTPS through the NAT. NATS stays inside the cluster.

@@ -13,8 +13,8 @@
 #   - Caddy in front, with Let's Encrypt certificates for sslip.io names of
 #     the VM's address: opengeni.<ip> (web and API, the agent gateway),
 #     relay.<ip> and files.<ip> (object storage).
-# A model's settings (env.sh model-up) arrive on stdin. Waits until the
-# control service reports HOSTS hosts.
+# A model's settings (env.sh model-up) arrive on stdin. The hosts come
+# after it (env.sh hosts, stack/hosts.sh).
 set -euo pipefail
 : "${STACK_IP:?}" "${HOSTS:?}" "${ZONE:?}" "${HOSTS_PORT:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
@@ -239,23 +239,6 @@ sudo systemctl reload caddy || sudo systemctl restart caddy
 for _ in $(seq 60); do curl -fsS "https://$app/healthz" >/dev/null 2>&1 && break; sleep 5; done
 curl -fsS "https://$app/healthz" >/dev/null
 
-log "waiting for $HOSTS hosts"
-key=$(cat "$sec/compute-operator-key")
-# The service's address on the cluster network, which the node reaches
-# directly (a port-forward would stay bound to one replica as it rolls).
-control=$(ip "$full-compute-control")
-for _ in $(seq 120); do
-  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:8080:$control" \
-    -H "X-API-Key: $key" "https://$full-compute-control.$ns.svc:8080/v1/hosts" 2>/dev/null |
-    jq '[.[] | select(.state == "live")] | length' 2>/dev/null || echo 0)
-  [ "${count:-0}" -ge "$HOSTS" ] && break
-  sleep 10
-done
-if [ "${count:-0}" -lt "$HOSTS" ]; then
-  log "only ${count:-0} of $HOSTS hosts are live after 20 minutes"
-  exit 1
-fi
-log "hosts ready: $count of $HOSTS"
 cat >"$HOME/e2e/endpoints.env" <<EOF
 OPENGENI_URL=https://$app
 RELAY_URL=wss://$relay
