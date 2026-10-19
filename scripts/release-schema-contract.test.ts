@@ -2871,6 +2871,7 @@ describe("release schema contract", () => {
       "0847_read_only_runtime_probes.sql",
       "0848_strict_owner_maintenance_probes.sql",
       "0849_strict_owner_maintenance_claims.sql",
+      "0850_invitation_binding_seat_scope.sql",
       "0851_personal_machine_session_tree.sql",
       "0852_maintenance_predicate_privileges.sql",
       "0853_connected_machine_root_working_dirs.sql",

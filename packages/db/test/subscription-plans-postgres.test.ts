@@ -827,9 +827,10 @@ test("seat caps cover provisioning/reactivation, exclude external/service identi
 async function asProductionOwnerPosture<T>(fn: () => Promise<T>): Promise<T> {
   // Production's migration owner has BYPASSRLS; the test owner does not. That
   // difference hid the lockout here, so exercise the production posture too.
-  const [{ owner }] = await shared!.admin<Array<{ owner: string }>>`
+  const [row] = await shared!.admin<Array<{ owner: string }>>`
     select pg_get_userbyid(proowner)::text as owner from pg_proc
     where oid = 'opengeni_private.enforce_organization_plan_seats()'::regprocedure`;
+  const owner = row!.owner;
   await shared!.admin.unsafe(`ALTER ROLE "${owner.replaceAll('"', '""')}" BYPASSRLS`);
   try {
     return await fn();
@@ -841,7 +842,8 @@ async function asProductionOwnerPosture<T>(fn: () => Promise<T>): Promise<T> {
 for (const posture of ["production", "restricted"] as const) {
   test(`sign-in binds an email invitation into a full seat-limited organization and keeps existing access (${posture} owner)`, async () => {
     if (!client || !shared) return;
-    const run = posture === "production" ? asProductionOwnerPosture : <T,>(fn: () => Promise<T>) => fn();
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
     const { accountId, subject } = await account();
     await activate(accountId, "free");
     const userId = crypto.randomUUID();
@@ -849,7 +851,11 @@ for (const posture of ["production", "restricted"] as const) {
     await shared.admin`
       insert into auth_users (id, name, email, email_verified)
       values (${userId}, 'Existing recipient', ${email}, true)`;
-    const own = await ensureManagedAccessForUser(client.db, { userId, email, name: "Existing recipient" });
+    const own = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email,
+      name: "Existing recipient",
+    });
     const invitation = await createOrganizationInvitation(client.db, {
       organizationId: accountId,
       actorSubjectId: subject,
@@ -874,8 +880,12 @@ for (const posture of ["production", "restricted"] as const) {
           emailVerified: true,
         });
       const signedIn = await run(signIn);
-      expect(signedIn.organizationMemberships.map((m) => m.organizationId)).toContain(own.defaultAccountId!);
-      const [bound] = await shared.admin<Array<{ target_subject_id: string | null; revision: string }>>`
+      expect(signedIn.organizationMemberships.map((m) => m.organizationId)).toContain(
+        own.defaultAccountId!,
+      );
+      const [bound] = await shared.admin<
+        Array<{ target_subject_id: string | null; revision: string }>
+      >`
         select target_subject_id, revision::text from organization_membership_invitations where id = ${invitation.id}`;
       expect(bound?.target_subject_id).toBe(`user:${userId}`);
       expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
@@ -908,7 +918,7 @@ test("seat limits apply to lifecycle writers without the organization's account 
   await activate(accountId, "free");
   const lapsed = await invite(accountId, subject);
   await shared.admin`update organization_membership_invitations set expires_at=clock_timestamp()-interval '1 second' where id=${lapsed.id}`;
-  const pending = [];
+  const pending: Array<Awaited<ReturnType<typeof invite>>> = [];
   for (let i = 0; i < 4; i++) pending.push(await invite(accountId, subject));
   expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
   // Reviving the lapsed invitation would take a sixth seat. A writer with only
@@ -926,7 +936,9 @@ test("seat limits apply to lifecycle writers without the organization's account 
     await tx`select set_config('opengeni.subject_id', ${subject}, true)`;
     // Binding a pending invitation passes through the full seat check at the cap.
     await tx`update organization_membership_invitations set target_subject_id=${`user:${crypto.randomUUID()}`} where id=${pending[0]!.id}`;
-    return await tx<Array<{ account: string | null }>>`select nullif(current_setting('opengeni.account_id', true), '') as account`;
+    return await tx<
+      Array<{ account: string | null }>
+    >`select nullif(current_setting('opengeni.account_id', true), '') as account`;
   });
   expect(restored?.account ?? null).toBeNull();
 }, 180_000);
