@@ -46,7 +46,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         ) {
             Ok(listeners) => Some(listeners),
             Err(error) => {
-                tracing::error!(%id, %error, "could not listen for agent-link connections");
+                tracing::error!(sandbox = %id, %error, "could not listen for agent-link connections");
                 None
             }
         }
