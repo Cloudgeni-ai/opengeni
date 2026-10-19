@@ -1361,15 +1361,17 @@ after a host loss.
 
 ### r19: host loss boots from files
 
-r19 (2026-10-19, 05:50 to 06:13) ran on hosts, a guest image and a fleet
+r19 (2026-10-19; r19 started at 05:50 and wrote its results at 06:00:23,
+r19b and r19c at 06:08:12 and 06:12:43) ran on hosts, a guest image and a fleet
 service rebuilt from compute 85708a8a7 (hosts first), with the backend
 2c15dcf7d, which already carries the run-as and agent branches, and the
 same database (it never ran 16d85d2b9's schema, so no `FRESH`). Its
 host-loss check now asserts the boot from files listed in the suite's
 README: one VMM launch and one `boot` step on the adopting host, no
-`restore`, a higher generation, a new guest boot id and agent connection
-instance, the program gone, the checkpointed write kept and the late one
-lost, and the request in flight ended as outcome unknown. Rerun it with:
+`restore`, a new guest boot id and agent connection instance, the program gone, the checkpointed write kept and the late one
+lost, and the request in flight ended as outcome unknown. In r19 it also
+required the boot generation to rise, which was the check's own defect
+(below). Rerun it with:
 
 ```sh
 . p4.env   # OPENGENI_REF=origin/feat/compute-backend, COMPUTE_REF=origin/feat/compute-prod
@@ -1410,7 +1412,8 @@ instance changed, the program was gone, the archived and checkpointed
 files were there and the late write was not. Two assertions failed:
 
 - The generation went from 2 to 1, and the check required it to rise.
-  That requirement was wrong: each owner numbers its boots afresh, so
+  That was a defect in the check's assertion, not in the fabric, and the
+  failure stays recorded as it ran: each owner numbers its boots afresh, so
   generations compare only under one owner epoch (the restore notice
   orders by owner epoch first). The adopting host's boot step logged
   `generation=1` at 06:00:03.8, as designed. The check now reports the
@@ -1446,7 +1449,22 @@ passes on a stopped host keep their evidence. r19's saved results predate
 that and cannot be re-verified.
 
 A boot from files after a host loss raised no programs-lost alarm in
-r19, unlike a VM crash. Compute 1d58a47c0 raises it when an adoption
-sets the memory image aside, and host-loss now requires it on the
-adopting host. One gap stays open: the in-flight check reads the API's
+r19, unlike a VM crash; that holds for the build r19 ran. The alarm
+exists from compute 1d58a47c0, raised when an adoption sets the memory
+image aside, and host-loss now requires one for the sandbox on the
+adopting machine's boot, between the stop and the recovery. The next run
+is the first to verify it. One gap stays open: the in-flight check reads the API's
 answer, not a model turn's tool result; both carry the same text.
+
+Where the figures come from, under each run's directory (`runs/<run>/`
+in the suite's output): the table's per-check figures, the deletion
+time, "nothing left" and r19dry's 148.2 s are the rows of `results.md`
+(and `results.json`); the stop at 05:57:36 is in r19's `suite.log`; the
+adoption at 05:59:55.6 (139 s after the stop) and the boot step's
+`generation=1` at 06:00:03.8 are in `host-sbx-p4-e-host-jqh8.log`; the
+in-flight request's API lines and the recovery probe are in `api.log`
+(trace 8a57c1e67b392c70ada44e741e818363). For the reaper wake in r19c,
+the gateway line is in `api.log`, the reaper's dispatch in
+`worker-control.log`, the sleep and resume in
+`host-sbx-p4-e-host-66vl.log`, and the 5 s samples of the command rows
+in `bgc-sampler.log`.

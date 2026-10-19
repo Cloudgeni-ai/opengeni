@@ -2124,10 +2124,11 @@ const OUTCOME_UNKNOWN = [
  * agent's answer as it is (the HTTP error keeps the control error's
  * message), so only that field counts, only whole, and an `outcomeUnknown`
  * of anything but true or absent contradicts it. */
-function outcomeUnknown(body: string): string | undefined {
+function outcomeUnknown(failure: HttpError): string | undefined {
+  if (failure.status !== 409) return undefined;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
+    parsed = JSON.parse(failure.body);
   } catch {
     return undefined;
   }
@@ -2191,7 +2192,8 @@ type Adoption = {
   restores: number;
   launches: number;
   fromFiles: number;
-  programsLost: number;
+  /** When each programs_lost alarm for the sandbox was raised (ms). */
+  programsLost: number[];
   connected: number;
   reconnecting: number;
   lost: number;
@@ -2230,7 +2232,7 @@ function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
   const steps: string[] = [];
   let launches = 0;
   let fromFiles = 0;
-  let programsLost = 0;
+  const programsLost: number[] = [];
   for (const line of Buffer.from(out[1] ?? "", "base64")
     .toString("utf8")
     .split("\n")) {
@@ -2245,7 +2247,12 @@ function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
     }
     if (event["compute.sandbox.id"] !== boxId) continue;
     launches += Number(event["compute.launches"] ?? 0);
-    if (event["compute.alarm"] === "programs_lost") programsLost += 1;
+    if (event["compute.alarm"] === "programs_lost") {
+      const nanos = /^[0-9]+$/.test(String(event.time_unix_nano))
+        ? String(event.time_unix_nano)
+        : "";
+      programsLost.push(nanos ? Number(BigInt(nanos) / 1_000_000n) : NaN);
+    }
     if (event.event === "compute.step" && event["compute.outcome"] === "done")
       steps.push(String(event["compute.step"]));
   }
@@ -2625,7 +2632,7 @@ check(
           failures.push(
             `the command in flight at the loss was cut off by the suite's 600 s request limit after ${took} s: it hangs`,
           );
-        } else if (!(error instanceof HttpError) || !outcomeUnknown(error.body)) {
+        } else if (!(error instanceof HttpError) || !outcomeUnknown(error)) {
           // Its connection was replaced, so it is answered as an outcome
           // unknown, in the words the model's tool result gets too.
           failures.push(
@@ -2633,7 +2640,7 @@ check(
           );
         }
         const said =
-          error instanceof HttpError ? (outcomeUnknown(error.body) ?? error.body) : String(error);
+          error instanceof HttpError ? (outcomeUnknown(error) ?? error.body) : String(error);
         inflightHow = `${error instanceof HttpError ? `HTTP ${error.status}: ` : ""}${said.slice(0, 240)} after ${took} s`;
       }
       if (settledInflight.settled > inflightBound) {
@@ -2748,16 +2755,28 @@ check(
       failures.push(`${newHost}'s journal has no "adopted from its files" line for id=${id}`);
     }
     // Setting the memory image aside ends whatever ran, as a VM crash
-    // does, and the adopting host says so with the programs_lost alarm.
-    if (adopting.programsLost < 1) {
+    // does, and the adopting host says so with the programs_lost alarm:
+    // for this sandbox, in the adopting machine's journal of this boot,
+    // raised between the stop and the sandbox answering again (the host's
+    // clock, with 5 s for skew). One outside that window, or untimed, fails.
+    const alarmWindow = [start - 5_000, recoveredAt + 5_000] as const;
+    const inWindow = adopting.programsLost.filter(
+      (at) => at >= alarmWindow[0] && at <= alarmWindow[1],
+    );
+    const alarmAt = inWindow.map((at) => new Date(at).toISOString().slice(11, 23)).join(", ");
+    if (inWindow.length !== adopting.programsLost.length) {
       failures.push(
-        `${newHost}'s journal of boot ${hostBoot} has no programs_lost alarm for ${id}`,
+        `${newHost}'s journal of boot ${hostBoot} has a programs_lost alarm for ${id} outside the recovery window or with no time`,
+      );
+    } else if (inWindow.length < 1) {
+      failures.push(
+        `${newHost}'s journal of boot ${hostBoot} has no programs_lost alarm for ${id} between the stop and the recovery`,
       );
     }
     if (failures.length > 0) throw new Error(failures.join("; "));
     return (
       `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
-      `booted from files (guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}, programs_lost alarm ${adopting.programsLost}; generation ${boot} under the old owner, ${now.generation} under the new); ` +
+      `booted from files (guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}, programs_lost alarm at ${alarmAt}; generation ${boot} under the old owner, ${now.generation} under the new); ` +
       `the archived file kept, the checkpointed write kept, the late write ${lateHow}; program and command in flight gone, not run again; ` +
       `the command in flight ended with ${inflightHow}; connection instance ${linkBefore} -> ${linkAfter}; on ${newHost} (instance ${newInstance}, boot ${hostBoot}): ${consoleWords}; ${lost} is ${fenced}`
     );
