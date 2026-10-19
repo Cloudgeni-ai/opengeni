@@ -1645,13 +1645,16 @@ function connectedCommandControlOptions(
  * adoption. A successor enrollment connection is intentionally irrelevant: no
  * query or cancellation is ever rebound to it.
  *
- * Recovering a running command on a runner that reports its own operation
+ * Recovering a running command is housekeeping: its query and output replay
+ * are always sent without waking, whatever the runner (a Connected Machine's
+ * agent simply receives them). When a runner that reports its own operation
  * inventory (every compute agent, and a Connected Machine advertising
- * `op_release`) is housekeeping: its query and output replay are sent without
- * waking, once. When the runner does not answer, nothing is recorded and the
- * command is left to that runner, which reports the op again in its
- * inventory while it is talking; a compute sandbox's running command is then
- * not claimed again until such a report, a stop or the runner's retirement.
+ * `op_release`) does not answer, nothing is recorded and the command is left
+ * to that runner, which reports the op again in its inventory while it is
+ * talking: the command is not claimed again until such a report, a stop or the
+ * runner's retirement. A runner that does not report its inventory is asked
+ * again on a later pass, as when it is offline. When what the runner reports
+ * cannot be read, the command is skipped for this pass with nothing recorded.
  * A stop is the user's own request and is delivered as before. */
 export async function reconcileConnectedMachineBackgroundCommands(
   db: ActivityServices["db"],
@@ -1659,11 +1662,14 @@ export async function reconcileConnectedMachineBackgroundCommands(
   observability: ActivityServices["observability"],
   bus: ActivityServices["bus"],
   controlRpcOverride?: ControlRpc,
+  runnerModeOverride?: typeof connectedRunnerReleaseMode,
 ): Promise<void> {
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
   const unansweredConnections = new Set<string>();
+  const unreadableConnections = new Set<string>();
+  const runnerMode = runnerModeOverride ?? connectedRunnerReleaseMode;
   const runnerModes = new Map<string, Promise<ConnectedRunnerReleaseMode | null>>();
   const firstConnectionProbes = new Map<string, Promise<void>>();
   // Drain the fixed due frontier with the existing concurrency. Yield to the
@@ -1700,20 +1706,14 @@ export async function reconcileConnectedMachineBackgroundCommands(
         claim.enrollmentId,
         claim.connectionInstanceId,
       ]);
-      let housekeeping = false;
-      if (!proof && claim.state === "running") {
-        let mode = runnerModes.get(connectionKey);
-        if (!mode) {
-          mode = connectedRunnerReleaseMode(db, claim).catch(() => null);
-          runnerModes.set(connectionKey, mode);
-        }
-        housekeeping = (await mode) === "inventory";
-      }
-      const rpc = housekeeping ? withoutWaking(controlRpc) : controlRpc;
+      // Recovery never wakes; only delivering a stop may.
+      const recovery = !proof && claim.state === "running";
+      const rpc = recovery ? withoutWaking(controlRpc) : controlRpc;
       if (!proof) {
         const firstProbe = firstConnectionProbes.get(connectionKey);
         if (firstProbe) await firstProbe;
-        if (housekeeping && unansweredConnections.has(connectionKey)) {
+        if (unreadableConnections.has(connectionKey)) return;
+        if (recovery && unansweredConnections.has(connectionKey)) {
           await deferConnectedCommandClaim(
             db,
             settings,
@@ -1792,21 +1792,36 @@ export async function reconcileConnectedMachineBackgroundCommands(
             return;
           }
         } catch (error) {
-          if (housekeeping && isAgentNotAnswered(error)) {
-            // Once: the runner's inventory takes over from here.
-            unansweredConnections.add(connectionKey);
-            await deferConnectedCommandClaim(
-              db,
-              settings,
-              observability,
-              claim,
-              "provider_unanswered",
-            );
-            return;
+          if (recovery && isAgentNotAnswered(error)) {
+            let mode = runnerModes.get(connectionKey);
+            if (!mode) {
+              mode = runnerMode(db, claim).catch(() => null);
+              runnerModes.set(connectionKey, mode);
+            }
+            const runner = await mode;
+            if (runner === null) {
+              // Unknown whether the runner reports its inventory: nothing is
+              // recorded, and its commands wait for a later pass.
+              unreadableConnections.add(connectionKey);
+              return;
+            }
+            if (runner === "inventory") {
+              // Once: the runner's inventory takes over from here.
+              unansweredConnections.add(connectionKey);
+              await deferConnectedCommandClaim(
+                db,
+                settings,
+                observability,
+                claim,
+                "provider_unanswered",
+              );
+              return;
+            }
           }
           const offline =
-            error instanceof SelfhostedControlError &&
-            (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
+            (recovery && isAgentNotAnswered(error)) ||
+            (error instanceof SelfhostedControlError &&
+              (error.agentOffline || error.reason === "agent_reconnecting" || error.draining));
           if (offline) offlineConnections.add(connectionKey);
           if (!offline) {
             observability.warn("sandbox reaper: connected-command provider probe failed", {

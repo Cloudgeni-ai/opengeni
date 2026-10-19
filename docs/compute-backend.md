@@ -73,7 +73,9 @@ while the sandbox runs and its agent holds the link, and otherwise answers
 unanswered release or collection records nothing and is left to the agent's
 next inventory; an unanswered recovery query defers its command
 (`provider_unanswered`) until the agent reports again, so nothing contacts the
-sandbox or its host again on a timer. The gateway logs such a request to a
+sandbox or its host again on a timer. The transport never depends on what the
+database says about the runner, so a failed read cannot turn a recovery query
+into a waking one. The gateway logs such a request to a
 sandbox it last saw asleep at debug, never as a wake.
 
 Every compute agent serves `OpRelease` and reports its operation inventory

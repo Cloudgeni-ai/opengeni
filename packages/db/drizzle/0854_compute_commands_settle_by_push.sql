@@ -15,14 +15,20 @@
 -- command (Stop, Pause or Cancel) is claimed as before, since the claim is
 -- what delivers the cancellation, and stopping lasts only until the agent
 -- reports the exit. Commands on
--- Connected Machines are claimed exactly as before. The due probe gets the
--- same filter so it stays a superset of the claim without reporting idle
--- compute commands as work on every tick.
+-- Connected Machines are claimed exactly as before, with one exception: a
+-- running command whose runner reports its own operation inventory and did
+-- not answer a recovery request (last outcome provider_unanswered, recorded
+-- only for such runners) is left to that runner, on any enrollment kind. It
+-- is claimed again only once the runner reports it (a completion notice), it
+-- is stopped, it has a proof, or its runner is retired, so recovery contacts
+-- such a runner once. The due probe gets the same filter so it stays a
+-- superset of the claim without reporting idle compute commands as work on
+-- every tick.
 --
 -- The due probe reads the owner-only projections of its predicate columns
 -- (0848), so the filter's columns are added to them first: a command's
--- completion_notified_at and reconcile_proof_outcome and an enrollment's
--- kind. Their sync triggers are rebuilt from 0848's template with the wider
+-- completion_notified_at, reconcile_proof_outcome and last_reconcile_outcome
+-- and an enrollment's kind. Their sync triggers are rebuilt from 0848's template with the wider
 -- column lists, and the new columns are backfilled in the same owner-only
 -- window 0848 uses, under the same source locks, so no write slips between.
 --
@@ -51,7 +57,7 @@ BEGIN
   FOR source IN SELECT * FROM (VALUES
     ('enrollments', 'id', ARRAY['kind']),
     ('session_background_commands', 'id',
-      ARRAY['completion_notified_at', 'reconcile_proof_outcome'])
+      ARRAY['completion_notified_at', 'reconcile_proof_outcome', 'last_reconcile_outcome'])
   ) sources(name, key, additions) ORDER BY name LOOP
     projection := 'maintenance_probe_' || source.name;
     projection_table := format('opengeni_private.%I', projection)::regclass;
@@ -116,7 +122,9 @@ DECLARE
   );
   claim_anchor text := 'ORDER BY command.reconcile_after, command.started_at, command.id';
   claim_replacement text :=
-    'AND (enrollment.kind <> ''sandbox'''
+    'AND ((enrollment.kind <> ''sandbox'''
+    || ' AND (command.state <> ''running'''
+    || ' OR command.last_reconcile_outcome IS DISTINCT FROM ''provider_unanswered''))'
     || ' OR enrollment.status = ''revoked'''
     || ' OR (enrollment.connection_instance_id IS NOT NULL'
     || ' AND enrollment.connection_instance_id <> command.connection_instance_id)'
@@ -132,7 +140,8 @@ DECLARE
     || E'\n          AND NOT EXISTS (SELECT 1 FROM opengeni_private.maintenance_probe_enrollments enrollment'
     || ' WHERE enrollment.id = command.enrollment_id'
     || ' AND enrollment.workspace_id = command.control_workspace_id'
-    || ' AND enrollment.kind = ''sandbox'''
+    || ' AND (enrollment.kind = ''sandbox'''
+    || ' OR command.last_reconcile_outcome = ''provider_unanswered'')'
     || ' AND enrollment.status <> ''revoked'''
     || ' AND (enrollment.connection_instance_id IS NULL'
     || ' OR enrollment.connection_instance_id = command.connection_instance_id)'

@@ -12,6 +12,7 @@ import {
 } from "../src/index";
 import {
   claimConnectedMachineSessionBackgroundCommands,
+  deferConnectedMachineBackgroundCommandReconciliation,
   requestSessionBackgroundCommandCancellation,
 } from "../src/session-background-commands";
 
@@ -20,7 +21,9 @@ import {
 // enrollment. It claims one only after a pushed completion, with a saved
 // proof, once the command is retired (connection replaced, enrollment
 // revoked), or while it is stopping (the claim delivers the cancellation).
-// Connected Machine commands are claimed exactly as before. Runs as
+// Connected Machine commands are claimed as before, except that a running
+// command whose inventory-reporting runner did not answer a recovery request
+// (provider_unanswered) is left to that runner on either kind. Runs as
 // opengeni_app so FORCE RLS applies.
 
 let available = true;
@@ -52,6 +55,7 @@ afterAll(async () => {
 }, 180_000);
 
 type Kind = "sandbox" | "machine";
+const stops = new Map<string, () => Promise<void>>();
 
 async function runningCommand(
   kind: Kind,
@@ -101,6 +105,16 @@ async function runningCommand(
     status = ${options.revoked ? "revoked" : "active"}
     where id = ${enrollment.id}`;
   const id = crypto.randomUUID();
+  stops.set(id, async () => {
+    const { accepted } = await requestSessionBackgroundCommandCancellation(db, {
+      accountId,
+      workspaceId: workspaceId!,
+      sessionId: session.id,
+      commandId: id,
+      subjectId: `subject-${suffix}`,
+    });
+    expect(accepted).toBe(true);
+  });
   await admin`insert into session_background_commands
     (id, account_id, workspace_id, session_id, provider, state, control_workspace_id,
      enrollment_id, connection_instance_id, op_id, reconcile_after, completion_notified_at)
@@ -178,5 +192,63 @@ describe("connected-command reconciliation on compute sandboxes", () => {
     expect(claimed?.state).toBe("stopping");
     expect(claimed?.proof).toBeNull();
     expect(await due()).toBe(false);
+  }, 60_000);
+
+  /** Claim `id` and record that its runner did not answer the recovery
+   * request, as the reconciler does for a runner that reports its inventory;
+   * or, with `outcome`, another deferral. */
+  async function defer(id: string, outcome = "provider_unanswered") {
+    const claimed = (await claim()).find((c) => c.commandId === id);
+    expect(claimed?.proof).toBeNull();
+    expect(
+      await deferConnectedMachineBackgroundCommandReconciliation(db, {
+        claim: claimed!,
+        outcome,
+        retryAfterMs: 0,
+        leaveToRunner: outcome === "provider_unanswered",
+      }),
+    ).toBe(true);
+  }
+
+  for (const kind of ["sandbox", "machine"] as const) {
+    test(`a ${kind} runner that did not answer recovery is not contacted again until it reports`, async () => {
+      if (!available) return;
+      const left = await runningCommand(kind, { notified: true });
+      await defer(left);
+      for (let pass = 0; pass < 2; pass++) {
+        expect(await due()).toBe(false);
+        expect((await claim()).map((c) => c.commandId)).not.toContain(left);
+      }
+      // The runner reports the command again.
+      await admin`update session_background_commands set completion_notified_at = now() where id = ${left}`;
+      expect(await due()).toBe(true);
+      expect((await claim()).find((c) => c.commandId === left)?.proof).toBeNull();
+    }, 60_000);
+
+    test(`a ${kind} command left to its runner is still claimed for a stop or its runner's retirement`, async () => {
+      if (!available) return;
+      const stopped = await runningCommand(kind, { notified: true });
+      await defer(stopped);
+      const retired = await runningCommand(kind, { notified: true });
+      await defer(retired);
+      expect(await due()).toBe(false);
+      await stops.get(stopped)!();
+      await admin`update enrollments set status = 'revoked'
+        where id = (select enrollment_id from session_background_commands where id = ${retired})`;
+      expect(await due()).toBe(true);
+      const claims = await claim();
+      expect(claims.find((c) => c.commandId === stopped)?.state).toBe("stopping");
+      expect(claims.find((c) => c.commandId === retired)?.proof?.reason).toBe(
+        "op_enrollment_revoked",
+      );
+    }, 60_000);
+  }
+
+  test("a machine runner that does not report its inventory is asked again on the next pass", async () => {
+    if (!available) return;
+    const legacy = await runningCommand("machine");
+    await defer(legacy, "provider_offline");
+    expect(await due()).toBe(true);
+    expect((await claim()).find((c) => c.commandId === legacy)?.proof).toBeNull();
   }, 60_000);
 });

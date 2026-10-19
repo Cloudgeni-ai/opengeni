@@ -162,18 +162,21 @@ does not report keeps the earlier behaviour.
 
 Requests Opengeni sends on its own behalf rather than for a call (the release
 of stored output, the collection of output an inventory answer kept, and the
-reconciler's recovery query to a runner that reports its inventory) carry the
+reconciler's recovery query for a running command, to any runner) carry the
 `Opengeni-No-Wake` header. A compute host delivers such a request only while
 the sandbox runs and its agent holds the link, and otherwise answers it itself
 with `Opengeni-Agent-Unanswered` (`asleep`, `away` or `busy`) without waking
 the sandbox; a Connected Machine agent simply receives it. When such a request
 goes unanswered (that header, no responders, a lost link or a timeout),
 Opengeni records nothing and leaves the work to the agent's next inventory. The
-reconciler asks a reporting runner once: after one unanswered query it defers
-the command (outcome `provider_unanswered`) and does not claim it again until
-the agent reports it, the command is stopped, or its runner is retired. A
-Connected Machine never sleeps, so its answered queries continue on each pass
-as before.
+reconciler asks a runner that reports its inventory, compute or Connected
+Machine, once: after one unanswered query it defers the command (outcome
+`provider_unanswered`) and does not claim it again until the agent reports it,
+the command is stopped, or its runner is retired. A runner that does not report
+its inventory is asked again on a later pass, as when it is offline, and when
+the reconciler cannot read which kind of runner it is, it leaves the command
+for a later pass and records nothing. A Connected Machine never sleeps, so its
+answered queries continue on each pass as before.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses

@@ -1035,9 +1035,10 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
     outcome: string;
     retryAfterMs: number;
     /** Its runner reports its own operation inventory and did not answer a
-     * recovery request: forget the completion notice that made it due, so a
-     * compute sandbox's running command is claimed again only once the
-     * runner reports it again (or it is stopped, proven or retired). */
+     * recovery request: forget the completion notice that made it due, so the
+     * running command (outcome provider_unanswered, on any enrollment kind) is
+     * claimed again only once the runner reports it again (or it is stopped,
+     * proven or retired). */
     leaveToRunner?: boolean;
   },
 ): Promise<boolean> {

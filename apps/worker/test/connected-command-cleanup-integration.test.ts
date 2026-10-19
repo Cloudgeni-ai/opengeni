@@ -33,8 +33,10 @@ import {
 } from "@opengeni/db/session-background-commands";
 import type { OpStreamConnection } from "@opengeni/events";
 import {
+  AGENT_UNANSWERED_HEADER,
   FakeOpRunner,
   InMemoryOpStreamTransport,
+  NO_WAKE_HEADER,
   NatsControlRpc,
   SelfhostedControlError,
   subjectFor,
@@ -1149,6 +1151,65 @@ test("a request to a replaced connection ends without a wake when another proces
     await parkSession(fixture.session.id);
   }
 }, 20_000);
+
+test("recovery is always sent without waking, and a runner whose kind cannot be read is skipped with nothing recorded", async () => {
+  // Whatever the runner, recovering a running command never wakes: the
+  // transport does not depend on what the database says about the runner.
+  // When that read fails, the command waits for a later pass.
+  for (const kind of ["sandbox", "machine"] as const) {
+    const sessionId = await seed(2, kind);
+    try {
+      // A compute command is claimed only once its runner reported it.
+      if (kind === "sandbox")
+        await shared.admin`update session_background_commands set completion_notified_at=now() where session_id=${sessionId}`;
+      const sent: (string | undefined)[] = [];
+      const woken: string[] = [];
+      const connection: NatsRequestConnection = {
+        supportsHeaders: true,
+        async request(_subject, _payload, options) {
+          const noWake = options.headers?.[NO_WAKE_HEADER];
+          sent.push(noWake);
+          // The host answers a no-wake request for a sleeping sandbox itself.
+          if (noWake)
+            return {
+              data: new Uint8Array(0),
+              headers: {
+                get: (name: string) => (name === AGENT_UNANSWERED_HEADER ? "asleep" : ""),
+              },
+            };
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        },
+      };
+      const rpc = new NatsControlRpc(async () => connection, {
+        recoveryMs: 1_000,
+        onNoResponders: async (target) => {
+          woken.push(target);
+          return false;
+        },
+      });
+      let lookups = 0;
+      await reconcile(client.db, settings, observability, bus, rpc, async () => {
+        lookups++;
+        throw new Error("enrollment read failed");
+      });
+      expect(lookups).toBe(1);
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.filter((value) => value !== "1")).toEqual([]);
+      expect(woken).toEqual([]);
+      const rows = await shared.admin<
+        { last_reconcile_outcome: string | null; completion_notified_at: Date | null }[]
+      >`select last_reconcile_outcome, completion_notified_at from session_background_commands where session_id=${sessionId}`;
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        // Still only claimed: no outcome was recorded for it.
+        expect(row.last_reconcile_outcome).toBe("claimed");
+        expect(row.completion_notified_at === null).toBe(kind === "machine");
+      }
+    } finally {
+      await parkSession(sessionId);
+    }
+  }
+});
 
 test("the reaper sends nothing to a runner that reports its own inventory, in any pass", async () => {
   // Every compute sandbox agent reports its inventory, and so does a
