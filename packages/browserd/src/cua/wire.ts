@@ -92,6 +92,7 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   authorization_required: "permission_denied",
   unsupported: "unsupported",
   background_delivery_unsupported: "unsupported",
+  background_unavailable: "unsupported",
 };
 
 /** CUA's own explanation of a refused or unconfirmed action (why it refused,
