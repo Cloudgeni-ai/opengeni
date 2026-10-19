@@ -1,0 +1,40 @@
+{{- if .Values.api.enabled }}
+{{- range $job := list (dict "component" "migrate" "settings" .Values.migrations) (dict "component" "catalog-import" "settings" .Values.catalogImport) }}
+{{- if $job.settings.enabled }}
+{{- $scope := dict "root" $ "component" $job.component }}
+{{- $annotations := $job.settings.annotations | default dict }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opengeni.jobConfigName" $scope }}
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $job.component }}
+  {{- if index $annotations "helm.sh/hook" }}
+  annotations:
+    {{- include "opengeni.jobSettingsAnnotations" $annotations | nindent 4 }}
+  {{- end }}
+# Reuse the canonical rendering, including generated service/provider settings.
+data:
+  {{- (include (print $.Template.BasePath "/configmap.yaml") $ | fromYaml).data | toYaml | nindent 2 }}
+{{- if $.Values.secret.create }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "opengeni.jobRuntimeSecretName" $scope }}
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $job.component }}
+  {{- if index $annotations "helm.sh/hook" }}
+  annotations:
+    {{- include "opengeni.jobSettingsAnnotations" $annotations | nindent 4 }}
+  {{- end }}
+type: Opaque
+stringData:
+  {{- (include (print $.Template.BasePath "/secret.yaml") $ | fromYaml).stringData | default dict | toYaml | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
