@@ -52,8 +52,8 @@ sign() {
 # $work/fail-show does, and a restart starts the agent, or fails when
 # $work/fail-restart exists (and leaves the agent stopped and failed when
 # $work/stop-on-fail does too). The failure points: rm fails on a pair
-# under certificates/ when $work/fail-rm exists, and mv on host.key when
-# $work/fail-mv does.
+# under certificates/ when $work/fail-rm exists, mv on host.key when
+# $work/fail-mv does, and mv on restart-owed when $work/fail-mv-owed does.
 real_rm=$(command -v rm)
 real_mv=$(command -v mv)
 mkdir -p "$work/bin"
@@ -122,6 +122,10 @@ cat >"$work/bin/mv" <<EOF
 #!/usr/bin/env bash
 if [ -e "$work/fail-mv" ] && [ "\${!#}" = host.key ]; then
   echo "mv: injected failure on host.key" >&2
+  exit 1
+fi
+if [ -e "$work/fail-mv-owed" ] && [ "\${!#}" = restart-owed ]; then
+  echo "mv: injected failure on restart-owed" >&2
   exit 1
 fi
 exec "$real_mv" "\$@"
@@ -293,13 +297,40 @@ elif [ ! -e "$work/active" ] && [ "$(cat "$etc/restart-owed")" = tried ]; then
 else
   bad "after a restart that stopped the agent: owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
 fi
-rm -f "$work/fail-restart" "$work/stop-on-fail"
+# A tried restart is not marked again: a run stopped while marking it
+# cannot unmark it.
+rm -f "$work/stop-on-fail"
+touch "$work/fail-mv-owed"
+marked=$(stat -c '%i %y' "$etc/restart-owed")
+run >/dev/null 2>&1 || true
+if [ "$(restarts)" = 1 ] && [ "$(cat "$etc/restart-owed")" = tried ] &&
+  [ "$(stat -c '%i %y' "$etc/restart-owed")" = "$marked" ]; then
+  ok "a retry of a tried restart keeps it marked tried, without marking it again"
+else
+  bad "a retry of a tried restart: restarts $(restarts), owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+rm -f "$work/fail-restart" "$work/fail-mv-owed"
 run >/dev/null
 if [ "$(restarts)" = 1 ] && [ -e "$work/active" ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
   ok "the next run starts the agent the failed restart stopped"
 else
   bad "the stopped agent: restarts $(restarts), running $([ -e "$work/active" ] && echo yes || echo no)"
 fi
+
+# A run stopped while marking a restart tried leaves the debt as it was,
+# and the next run pays it.
+touch "$work/fail-mv-owed"
+if run --force >/dev/null 2>&1; then
+  bad "a run that could not mark the restart succeeded"
+elif [ "$(restarts)" = 0 ] && [ -e "$etc/restart-owed" ] && [ ! -s "$etc/restart-owed" ]; then
+  ok "a run stopped while marking the restart leaves it owed and untried"
+else
+  bad "after a failed marking: restarts $(restarts), owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+rm -f "$work/fail-mv-owed"
+run >/dev/null
+[ "$(restarts)" = 1 ] && [ ! -e "$etc/restart-owed" ] && ok "the next run pays it" ||
+  bad "after a failed marking, the next run: restarts $(restarts)"
 
 # The agent not running: nothing to restart, it starts with the new pair.
 rm -f "$work/active"

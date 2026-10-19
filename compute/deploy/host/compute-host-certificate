@@ -111,8 +111,14 @@ activate() {
     esac
   fi
   if [ -n "$state" ]; then
-    echo tried >restart-owed
-    sync -f restart-owed 2>/dev/null || sync
+    # Marked tried in one rename, and never rewritten once it is: a run
+    # stopped while marking leaves the debt as it was.
+    if [ "$state" != tried ]; then
+      echo tried >restart-owed.new
+      sync -f restart-owed.new 2>/dev/null || sync
+      mv -T restart-owed.new restart-owed
+      sync . 2>/dev/null || sync
+    fi
     systemctl restart compute-host.service
   fi
   rm -f restart-owed
