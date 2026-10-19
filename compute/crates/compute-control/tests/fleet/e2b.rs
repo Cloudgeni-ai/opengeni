@@ -5,14 +5,14 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use compute_control::e2b::{self, Front, Settings, Template};
 use compute_control::store::{MemoryStore, Store as _};
-use compute_guest::{ENVD_PORT, GATEWAY_PORT};
+use compute_guest::{ENVD_PORT, GATEWAY_PORT, gateway as guest_gateway};
 use compute_protocol::host::{ErrorCode, Id, LevelName, Reply, Request};
 use http_body_util::{Full, StreamBody};
 use hyper::body::Frame;
@@ -37,6 +37,8 @@ struct Seen {
     /// their gateway header only once this is notified, as a slow connect
     /// would.
     slow: tokio::sync::Notify,
+    /// envd's port is refused as not up, as while envd starts again.
+    envd_down: AtomicBool,
 }
 
 /// Counts a streaming response while it is open.
@@ -106,6 +108,11 @@ async fn gateway(seen: Arc<Seen>, mut stream: GuestStream) {
     *seen.dials.lock().unwrap().entry(port).or_default() += 1;
     if port == 8081 || port == 8082 {
         seen.slow.notified().await;
+    }
+    if port == ENVD_PORT && seen.envd_down.load(Ordering::SeqCst) {
+        let refused = format!("error {}\n", guest_gateway::ENVD_NOT_UP);
+        let _ = stream.get_mut().write_all(refused.as_bytes()).await;
+        return;
     }
     if port != ENVD_PORT && port != 8080 && port != 8081 {
         let _ = stream
@@ -494,6 +501,32 @@ async fn creates_refuse_what_is_not_offered() {
         )
         .await;
     assert_eq!(status, 401);
+}
+
+/// While envd starts again, its port answers as a sandbox still changing
+/// state does (503, which the SDK retries), not as a closed port.
+#[tokio::test]
+async fn envd_starting_again_is_answered_as_transitioning() {
+    let (_fleet, _host, _levels, seen, door) = fleet_with_guest().await;
+    let sandbox = door.create(json!({"templateID": "base"})).await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    seen.envd_down.store(true, Ordering::SeqCst);
+    let (status, body) = door
+        .text(
+            door.traffic(&id, ENVD_PORT, "/health")
+                .header("x-access-token", "t"),
+        )
+        .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("still transitioning"), "{body}");
+    seen.envd_down.store(false, Ordering::SeqCst);
+    let (status, body) = door
+        .text(
+            door.traffic(&id, ENVD_PORT, "/health")
+                .header("x-access-token", "t"),
+        )
+        .await;
+    assert_eq!((status, body.as_str()), (200, "port 49983 token t"));
 }
 
 #[tokio::test]

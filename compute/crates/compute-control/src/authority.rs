@@ -39,6 +39,50 @@ const AUTHORITY_FOR: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 /// a little behind.
 const BACKDATE: Duration = Duration::from_secs(5 * 60);
 
+/// How a host certificate's name was proven, which decides how it may be
+/// renewed. The authority records it as the certificate's organizational
+/// unit (`OU`) so the service reads it back from a certificate a caller
+/// presents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proven {
+    /// By a Google Compute Engine instance identity token. Such a
+    /// certificate is renewed only with a fresh token, never by presenting
+    /// it: once the instance is gone, so is the way to its next one.
+    GceIdentity,
+    /// By a current certificate, or offline where the authority's key is
+    /// (`compute-control issue-host-certificate`): renewed by presenting it.
+    Certificate,
+}
+
+impl Proven {
+    /// The organizational unit that records it.
+    #[must_use]
+    pub const fn unit(self) -> &'static str {
+        match self {
+            Self::GceIdentity => "proven by gce-identity",
+            Self::Certificate => "proven by certificate",
+        }
+    }
+
+    /// How `certificate`'s name was proven, as its organizational unit
+    /// records; `None` when it records neither.
+    #[must_use]
+    pub fn of(certificate: &CertificateDer<'_>) -> Option<Self> {
+        let params = CertificateParams::from_ca_cert_der(certificate).ok()?;
+        let unit = match params
+            .distinguished_name
+            .get(&DnType::OrganizationalUnitName)?
+        {
+            rcgen::DnValue::Utf8String(unit) => unit.as_str(),
+            rcgen::DnValue::PrintableString(unit) => unit.as_str(),
+            _ => return None,
+        };
+        [Self::GceIdentity, Self::Certificate]
+            .into_iter()
+            .find(|proven| proven.unit() == unit)
+    }
+}
+
 /// A certificate the authority issued.
 #[derive(Clone, Debug)]
 pub struct Issued {
@@ -91,6 +135,12 @@ fn subject_name(name: &str) -> anyhow::Result<SanType> {
     if let Ok(ip) = name.parse::<IpAddr>() {
         return Ok(SanType::IpAddress(ip));
     }
+    // A name with its root's dot is another name to a client checking it
+    // ("host." is not "host"), so certificates name neither form.
+    anyhow::ensure!(
+        !name.ends_with('.'),
+        "{name:?}: certificates name no names ending in a dot"
+    );
     let dns = DnsName::try_from(name.to_owned())
         .map_err(|_| anyhow::anyhow!("{name:?} is not a DNS name or an IP address"))?;
     anyhow::ensure!(
@@ -179,7 +229,7 @@ impl Authority {
     fn check(&self) -> anyhow::Result<()> {
         let probe = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let now = SystemTime::now();
-        let issued = self.issue(&["probe.invalid".to_owned()], &probe, now, ISSUED_FOR)?;
+        let issued = self.issue(&["probe.invalid".to_owned()], &probe, now, ISSUED_FOR, None)?;
         verify(&self.roots(), &issued.der, now, "probe.invalid").context(
             "a certificate the authority issues does not verify against its certificate: \
              is ca.key the key of the first certificate in ca.crt?",
@@ -206,18 +256,25 @@ impl Authority {
 
     /// A certificate for `names` (the first is also its common name), for
     /// `key`, valid from a little before `now` for `lifetime`, for server
-    /// and client authentication alike.
+    /// and client authentication alike; a host's records how its name was
+    /// `proven`.
     pub fn issue(
         &self,
         names: &[String],
         key: &impl PublicKeyData,
         now: SystemTime,
         lifetime: Duration,
+        proven: Option<Proven>,
     ) -> anyhow::Result<Issued> {
         let first = names.first().context("a certificate names something")?;
         let mut params = CertificateParams::default();
         params.distinguished_name = rcgen::DistinguishedName::new();
         params.distinguished_name.push(DnType::CommonName, first);
+        if let Some(proven) = proven {
+            params
+                .distinguished_name
+                .push(DnType::OrganizationalUnitName, proven.unit());
+        }
         params.subject_alt_names = names
             .iter()
             .map(|name| subject_name(name))
@@ -291,6 +348,7 @@ mod tests {
                 &key,
                 now,
                 ISSUED_FOR,
+                None,
             )
             .unwrap();
         let roots = authority.roots();
@@ -312,7 +370,7 @@ mod tests {
         // Another authority's certificates do not verify against this one.
         let other = self::authority();
         let foreign = other
-            .issue(&["control.example".into()], &key, now, ISSUED_FOR)
+            .issue(&["control.example".into()], &key, now, ISSUED_FOR, None)
             .unwrap();
         assert!(verify(&roots, &foreign.der, now, "control.example").is_err());
     }
@@ -335,7 +393,7 @@ mod tests {
         let host = KeyPair::generate().unwrap();
         let now = SystemTime::now();
         let issued = older
-            .issue(&["host-1".into()], &host, now, ISSUED_FOR)
+            .issue(&["host-1".into()], &host, now, ISSUED_FOR, None)
             .unwrap();
         verify(&authority.roots(), &issued.der, now, "host-1").unwrap();
     }
@@ -365,5 +423,27 @@ mod tests {
         assert!(subject_name("*.example.com").is_err());
         assert!(subject_name("not a name").is_err());
         assert!(subject_name("").is_err());
+        assert!(subject_name("host-1.").is_err(), "a trailing dot");
+        assert!(subject_name("control.example.com.").is_err());
+    }
+
+    #[test]
+    fn a_certificate_records_how_its_name_was_proven() {
+        let authority = authority();
+        let key = KeyPair::generate().unwrap();
+        let now = SystemTime::now();
+        for proven in [Proven::GceIdentity, Proven::Certificate] {
+            let issued = authority
+                .issue(&["host-1".into()], &key, now, ISSUED_FOR, Some(proven))
+                .unwrap();
+            assert_eq!(Proven::of(&issued.der), Some(proven));
+            verify(&authority.roots(), &issued.der, now, "host-1").unwrap();
+        }
+        // The service's own certificates, and older ones, record none.
+        let issued = authority
+            .issue(&["host-1".into()], &key, now, ISSUED_FOR, None)
+            .unwrap();
+        assert_eq!(Proven::of(&issued.der), None);
+        assert_eq!(Proven::of(&CertificateDer::from(vec![1, 2, 3])), None);
     }
 }

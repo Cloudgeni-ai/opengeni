@@ -94,6 +94,7 @@ enabling it changes no session's backend.
    `compute-control new-host-authority --out <dir>` does:
 
    ```sh
+   umask 077   # ca.key is the trust root: readable by you alone
    terraform output -raw host_authority_pem > ca.crt
    terraform output -raw host_authority_key_pem > ca.key
    kubectl create secret generic compute-hosts-tls --from-file=ca.crt --from-file=ca.key
@@ -141,7 +142,16 @@ enabling it changes no session's backend.
    fences. Both use the pod's cloud identity: on GKE, bind
    `computeControl.serviceAccount` to the `control_service_account` output
    with Workload Identity (`iam.gke.io/gcp-service-account` annotation and
-   `control_workload_identity` in Terraform).
+   `control_workload_identity` in Terraform). A service that runs off
+   Google Cloud uses a key of that account instead (`gcloud iam
+   service-accounts keys create key.json --iam-account <the output>`,
+   where the organisation's policy allows keys): keep it in a Secret,
+   mount it through `computeControl.extraVolumes` and
+   `extraVolumeMounts`, and name it in `GOOGLE_APPLICATION_CREDENTIALS`
+   through `computeControl.extraEnv`. Both the archive and the group take
+   it from there; only service account key files are supported. Rotate
+   the key as any long-lived credential, and delete it when the service
+   moves onto Google Cloud.
 8. **Images.** Sandboxes start from stored images
    (`computeControl.storedImages`, `name: <image id>`). Build each with
    `compute-host build-image <oci-ref> --guest <bundle>/guest --output
@@ -234,10 +244,10 @@ one:
 tar -xzf compute-host-0.1.0-x86_64-linux.tar.gz && cd compute-host-0.1.0-x86_64-linux
 cp host.env.example host.env   # fill in the service, name, address, zone, store
 sudo ./install.sh --config host.env --authority ca.crt --state-device /dev/nvme1n1
-# fails, naming the request it left at /etc/compute/host.csr; where ca.key is:
+# fails, naming the request it left at /etc/compute/request/host.csr; where ca.key is:
 compute-control issue-host-certificate --name compute-host-1 --csr host.csr --authority <dir> > host.pem
 # back on the host:
-sudo install -m 600 host.pem /etc/compute/host.pem && sudo ./install.sh
+sudo install -m 600 host.pem /etc/compute/request/host.pem && sudo ./install.sh
 ```
 
 A host whose certificate expired (off for over a week) needs a new one the
@@ -393,7 +403,32 @@ authority alone for agent links.
   running. `compute-host-certificate --force` renews at once. The service
   builds every certificate itself: it takes only the public key from the
   host's request and names the host it proved, never a name the request
-  asks for, nor the service's own names.
+  asks for, nor the service's own names, nor a name ending in a dot. Each
+  certificate records how its name was proven, as its organizational unit:
+  `proven by gce-identity` (an instance identity token) or `proven by
+  certificate` (a renewal by certificate, or `issue-host-certificate`).
+  Only the second kind renews by being presented, and only while it is
+  valid at the moment of renewal, whatever connection it came over; a
+  certificate a token proved renews only with a fresh token. On a host
+  the key and certificate are one unit: each pair is written to its own
+  directory under `/etc/compute/certificates/`, the symlink
+  `/etc/compute/certificate` is switched to it in one rename, and
+  `host.pem` and `host.key` point through it, so an interrupted renewal
+  leaves the old pair or the new one. A pair counts as current only if
+  the key is the certificate's and the certificate verifies against
+  `ca.pem`; runs take a lock. Each run first finishes what an
+  interrupted one left: it points `host.pem` and `host.key` through a
+  valid published pair they do not both point through yet, and does a
+  restart of the agent still owed. `/etc/compute/restart-owed` is written
+  before a pair is switched in and removed only once the agent restarted
+  (or was not running), so a failure after the switch, in cleaning up or
+  in the restart, is made good by the next run (the daily timer at the
+  latest).
+- **Google's keys** (for identity tokens) are used only until their
+  answer's `Cache-Control` expiry. Past it, only a successful fetch makes
+  them usable again, so while Google's keys cannot be fetched no host gets
+  a certificate by token: hosts retry (the startup's backoff, the daily
+  timer with days to spare), and the outage only delays renewals.
 - **The service's certificate** needs nothing: the service issues itself
   one for a week, from the authority, and a new one every day, for both
   ends of its links with hosts. Open links keep the certificate they began
@@ -485,9 +520,33 @@ before users move to compute from Modal:
   Instance names are unique in a zone, not across zones: keep each
   project's host names unique (the Terraform root's group does). Anyone
   who can create an instance running as the host account can add a host,
-  so grant `iam.serviceAccountUser` on it to no one but the service. Off
-  GCP, a host's stolen certificate and key renew themselves until the
-  host is removed and its certificates expire (a week at most).
+  so grant `iam.serviceAccountUser` on it to no one but the service.
+- **Revoking a host.** A GCP host's certificate renews only with a fresh
+  identity token, which only that instance's metadata server can give: so
+  once the instance is deleted, no new token can be had for it, and its
+  certificate and key, even stolen, never renew by themselves. The
+  service does not check offline whether an instance still exists,
+  though: an identity token the instance was given before (Google's last
+  an hour) gets a certificate until the token's `exp` plus the
+  verifier's 60 s leeway, as many times as it is presented. So what an
+  attacker took from the instance works for at most the token's remaining
+  lifetime, plus 60 s, plus the seven days of the last certificate it
+  got; with no token taken, until the certificate expires, a week at most. A
+  lost instance that comes back (stopped, reset, recreated under its
+  name) gets a new one by token. Off GCP, a host renews by presenting its
+  certificate, and the service keeps no list of retired hosts: a stolen
+  certificate and key of such a host renew themselves for as long as the
+  authority trusts them. Removing that host from the fleet does not stop
+  them, and neither does the three-step replacement of the authority (Keys
+  and certificates), during which they renew like any host's. Only
+  replacing the authority at once does: give the service a `ca.crt` and
+  `ca.key` of a new authority alone, replace the GCP hosts (`gcloud compute
+  instance-groups managed rolling-action replace`; new instances install
+  the new authority from their metadata), and on each remaining host off
+  GCP put the new `ca.crt` in `/etc/compute/ca.pem` and give it a new
+  certificate with `issue-host-certificate`. Every certificate of the old
+  authority stops working at once. Keep such hosts' keys as you keep the
+  service's.
 - **The authority's key** (`ca.key` in the service's Secret, and the
   Terraform state that made it) is the hosts' trust root: whoever holds it
   can act as any host or as the service. Keep it as the service's other
@@ -712,6 +771,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   cloud maps a public address onto the host, the host can also be reached
   through that address: pass it with `--block`, and check from a guest that
   it is refused.
+- **Hosts on an overlay network.** Where the control service and Opengeni
+  are reached only over an overlay network (a WireGuard mesh such as
+  Tailscale), the GCP root joins hosts to it at boot with
+  `host_startup_prelude`, a script run before anything else on every
+  attempt, and `advertise_interface` (such as `tailscale0`) makes each host
+  give the service that interface's address to dial. Keep the join key in
+  Secret Manager and list it in `host_readable_secrets` rather than in the
+  prelude, which is instance metadata. Overlay addresses in the shared
+  range (100.64.0.0/10) are blocked to sandboxes like any local network,
+  unless the host is trusted; do not accept routes or use an exit node on
+  hosts, and give hosts an overlay identity that may reach only the
+  service's host endpoint and Opengeni's agent gateway.
 
 ## Capacity and cost
 

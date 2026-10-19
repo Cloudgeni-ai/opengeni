@@ -170,6 +170,24 @@ variable "host_args" {
   default     = ""
 }
 
+variable "host_startup_prelude" {
+  description = "A shell script each host runs as root at every boot, before it installs or reaches the network for anything else: for example joining an overlay network that the control service and Opengeni are reached on. It runs again on every attempt, so it must be safe to repeat. Empty: none."
+  type        = string
+  default     = ""
+}
+
+variable "advertise_interface" {
+  description = "Network interface whose IPv4 address each host gives the control service to dial (port 7443), waiting up to two minutes for it: for example tailscale0 when the service reaches hosts over an overlay network. Empty: the host's VPC address."
+  type        = string
+  default     = ""
+}
+
+variable "host_readable_secrets" {
+  description = "Secret Manager secret IDs in this project that the hosts' service account may read, so the prelude can fetch credentials (such as an overlay network's join key) instead of carrying them in instance metadata."
+  type        = list(string)
+  default     = []
+}
+
 variable "archive_bucket" {
   description = "Name of the archive bucket to create (globally unique)."
   type        = string

@@ -29,7 +29,10 @@ data "google_compute_machine_types" "host" {
 }
 
 resource "google_project_service" "apis" {
-  for_each           = toset(["compute.googleapis.com", "storage.googleapis.com", "iam.googleapis.com"])
+  for_each = toset(concat(
+    ["compute.googleapis.com", "storage.googleapis.com", "iam.googleapis.com"],
+    length(var.host_readable_secrets) > 0 ? ["secretmanager.googleapis.com"] : [],
+  ))
   project            = var.project_id
   service            = each.value
   disable_on_destroy = false
@@ -40,7 +43,7 @@ resource "google_project_service" "apis" {
 resource "google_service_account" "host" {
   account_id   = "${var.name_prefix}-host"
   display_name = "Opengeni compute host"
-  description  = "Compute hosts: the archive bucket's objects, nothing else."
+  description  = "Compute hosts: the archive bucket's objects and the secrets in host_readable_secrets, nothing else."
 }
 
 resource "google_service_account" "control" {
@@ -148,6 +151,17 @@ resource "tls_self_signed_cert" "authority" {
     organization = "Opengeni compute"
     common_name  = "${var.name_prefix} hosts"
   }
+}
+
+# The secrets the hosts' prelude may read (host_readable_secrets).
+resource "google_secret_manager_secret_iam_member" "host_reads" {
+  for_each  = toset(var.host_readable_secrets)
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.host.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # --- Network ----------------------------------------------------------------
@@ -271,6 +285,8 @@ resource "google_compute_instance_template" "host" {
     compute-nested         = var.nested ? "true" : "false"
     compute-huge-pages-pct = tostring(var.huge_pages_percent)
     compute-host-args      = var.host_args
+    compute-prelude        = var.host_startup_prelude
+    compute-advertise      = var.advertise_interface
     startup-script         = file("${path.module}/host-startup.sh")
   }
 

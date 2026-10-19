@@ -146,6 +146,33 @@ describe("computeControl", () => {
     expect(config.data.OPENGENI_SANDBOX_BACKEND).toBe("modal");
   });
 
+  test("gives the sweep the service's extra credentials too", async () => {
+    // Off Google Cloud, a key file mounted from a Secret is the identity of
+    // both the service and the sweep that reads and deletes in the archive.
+    const key = { name: "gcp-key", secret: { secretName: "compute-gcp-key", defaultMode: 0o440 } };
+    const mount = { name: "gcp-key", mountPath: "/etc/compute/gcp", readOnly: true };
+    const env = { name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/etc/compute/gcp/key.json" };
+    const manifests = await render({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        extraEnv: [env],
+        extraVolumes: [key],
+        extraVolumeMounts: [mount],
+      },
+    });
+    const service = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template.spec;
+    const sweep = find(manifests, "CronJob", "cc-opengeni-compute-control-sweep").spec.jobTemplate
+      .spec.template.spec;
+    for (const pod of [service, sweep]) {
+      expect(pod.containers[0].env).toContainEqual(env);
+      expect(pod.containers[0].volumeMounts).toContainEqual(mount);
+      expect(pod.volumes).toContainEqual(key);
+      // Mounted 0440, readable through the pod's group.
+      expect(pod.securityContext.fsGroup).toBe(pod.securityContext.runAsUser);
+    }
+  });
+
   test("provisions on the upgrade that first enables it, under network policy", async () => {
     // An existing release with Postgres and network policy turns compute on:
     // the Job is applied with the release's other resources, among them the
@@ -420,7 +447,10 @@ describe("computeControl", () => {
       computeControl: {
         ...enabled.computeControl,
         hostsTls: { secretName: "compute-hosts-tls", extraNames: ["10.0.0.5"] },
-        hostIdentity: { gcpProject: "example", gcpAccount: "hosts@example.iam.gserviceaccount.com" },
+        hostIdentity: {
+          gcpProject: "example",
+          gcpAccount: "hosts@example.iam.gserviceaccount.com",
+        },
       },
     });
     const args = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template.spec

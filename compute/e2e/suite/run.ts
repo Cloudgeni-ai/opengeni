@@ -1437,12 +1437,10 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
         );
       }
       // A saved sleep's wake is a paged restore: this restore's pager, on
-      // the host that restored it, must leave learned.json (written at or
-      // after the suite's request) and not keep failing in pager.log.
+      // the host that restored it, must write the order it learned as its
+      // VM's user and not keep failing in pager.log.
       const pager =
-        level === "saved"
-          ? await step("the restore's pager", () => pagerAfter(awake.host!, Date.parse(to)))
-          : "";
+        level === "saved" ? await step("the restore's pager", () => pagerAfter(awake.host!)) : "";
       proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to, by: "agent_link" });
       const moved = await sandbox();
       return (
@@ -1454,31 +1452,116 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
   );
 }
 
-/** Waits up to 60 s for the sandbox's pager on `host` to write learned.json
- * at or after `since` (ms), and fails if pager.log says "Permission
- * denied" more than once. */
-async function pagerAfter(host: string, since: number): Promise<string> {
-  const dir = vmDir(state.sandbox!);
+/** How long a restore's pager has to write what it learned: the hosts'
+ * recording window (compute-host --pager-record-ms, 120 s by default) and
+ * a margin. */
+const PAGER_PROOF_MS = 150_000;
+
+/** The completed restore of `boxId` that the wake after its last sleep
+ * made, by a journal's compute events, in the host's own clock (ns): the
+ * last restore into running after which no step took the sandbox deeper
+ * than paused (an idle pause may follow a wake within seconds; a sleep to
+ * saved or below takes far longer). Undefined until the host has logged it.
+ * An older restore is followed by the sleep the check asked for. */
+type Restore = { start: bigint; end: bigint; before: string; source: string };
+function wakeRestoreIn(journal: string, boxId: string): Restore | undefined {
+  let found: Restore | undefined;
+  // The agent colours its log; the journal's message keeps the colours.
+  // oxlint-disable-next-line no-control-regex -- the colour escapes are what is removed
+  for (const line of journal.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+    const at = line.indexOf("compute_event: ");
+    if (at < 0) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line.slice(at + "compute_event: ".length));
+    } catch {
+      continue;
+    }
+    // Its nanoseconds as written: JSON.parse would round them to a double.
+    const nano = /"time_unix_nano":([0-9]+)/.exec(line)?.[1];
+    if (
+      event.event !== "compute.step" ||
+      event["compute.outcome"] !== "done" ||
+      event["compute.sandbox.id"] !== boxId ||
+      !nano
+    )
+      continue;
+    const after = String(event["compute.level.after"]);
+    if (event["compute.step"] === "restore" && after === "running") {
+      const end = BigInt(nano);
+      found = {
+        start: end - BigInt(Math.round(Number(event["compute.duration_us"] ?? 0))) * 1_000n,
+        end,
+        before: String(event["compute.level.before"]),
+        source: String(event["compute.memory.source"]),
+      };
+    } else if (after !== "running" && after !== "paused") {
+      found = undefined;
+    }
+  }
+  return found;
+}
+
+/** Nanoseconds since the epoch of `date +%s.%N`'s output. */
+const fileNanos = (at: string) => {
+  const [whole = "", part = ""] = at.split(".");
+  return BigInt(whole) * 1_000_000_000n + BigInt(part.padEnd(9, "0").slice(0, 9));
+};
+
+/** Waits up to PAGER_PROOF_MS for the pager of the sandbox's restore on
+ * `host` that its last wake made to write the order it learned, and fails if
+ * pager.log says "Permission denied" more than once. Everything is compared
+ * in the host's clock: the restore's start and end from the host agent's own
+ * step event, the files' times from the host's file system.
+ *
+ * A pager writes pager/learned.json early only once the guest faulted on
+ * pages its prefetch did not bring in; a wake whose profile covered every
+ * page it touched writes it when the recording window closes or the VM
+ * stops. An archive, or the next wake, may then take it into
+ * wake-profile.json before this looks. So either counts: learned.json
+ * written at or after the restore began (the restore took any older one
+ * before its pager started), or wake-profile.json rewritten after the
+ * restore ended (the restore's own take of an older learned.json is part
+ * of it). */
+async function pagerAfter(host: string): Promise<string> {
+  const id = state.sandbox!;
+  const dir = vmDir(id);
   const start = Date.now();
+  let restore: Restore | undefined;
   for (;;) {
-    const [learned = "", denied = ""] = onHost(
+    const [learned = "", kept = "", denied = "", ...journal] = onHost(
       host,
-      `sudo stat -c %Y ${dir}/pager/learned.json 2>/dev/null || echo none; ` +
-        `sudo cat ${dir}/pager.log ${dir}/pager/pager.log 2>/dev/null | grep -c 'Permission denied' || true`,
+      `sudo date -r ${dir}/pager/learned.json +%s.%N 2>/dev/null || echo none; ` +
+        `sudo date -r ${dir}/wake-profile.json +%s.%N 2>/dev/null || echo none; ` +
+        `sudo cat ${dir}/pager.log ${dir}/pager/pager.log 2>/dev/null | grep -c 'Permission denied' || true; ` +
+        (restore
+          ? ""
+          : `sudo journalctl --no-pager -o cat -u 'compute-*' --since -2h | ` +
+            `grep -F '"compute.sandbox.id":"${id}"' | grep -F '"event":"compute.step"' || true`),
     )
       .trim()
       .split("\n");
     if (Number(denied) > 1)
       throw new Error(`pager.log on ${host} says "Permission denied" ${denied} times`);
-    // stat gives whole seconds.
-    if (learned !== "none" && Number(learned) >= Math.floor(since / 1000)) {
-      return `pager: learned.json on ${host} written ${(Number(learned) - since / 1000).toFixed(0)} s after the request, "Permission denied" ${denied} times`;
+    // Pinned once found: a later idle sleep must not move it.
+    restore ??= wakeRestoreIn(journal.join("\n"), id);
+    if (restore) {
+      const after = (at: string) => (Number(fileNanos(at) - restore!.end) / 1e9).toFixed(1);
+      const what = `the restore from ${restore.before} (memory from the ${restore.source})`;
+      if (learned !== "none" && fileNanos(learned) >= restore.start) {
+        return `pager: learned.json on ${host} written ${after(learned)} s after ${what} ended, by the host's clock, "Permission denied" ${denied} times`;
+      }
+      if (kept !== "none" && fileNanos(kept) > restore.end) {
+        return `pager: what it learned taken into wake-profile.json on ${host} ${after(kept)} s after ${what} ended, by the host's clock, "Permission denied" ${denied} times`;
+      }
     }
-    if (Date.now() - start > 60_000) {
+    if (Date.now() - start > PAGER_PROOF_MS) {
       throw new Error(
-        learned === "none"
-          ? `no learned.json in the sandbox's pager directory on ${host} within 60 s of the wake`
-          : `learned.json on ${host} is from before this wake (${new Date(Number(learned) * 1000).toISOString()})`,
+        !restore
+          ? `${host}'s journal shows no completed restore of the sandbox after its sleep`
+          : learned === "none"
+            ? `the restore's pager on ${host} wrote neither learned.json nor a new wake-profile.json within ${PAGER_PROOF_MS / 1000} s of the wake`
+            : `learned.json on ${host} is from before this wake's restore (${new Date(Number(fileNanos(learned) / 1_000_000n)).toISOString()})`,
       );
     }
     await sleep(3_000);

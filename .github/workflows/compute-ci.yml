@@ -173,8 +173,11 @@ jobs:
         run: |
           shellcheck --severity=warning compute/deploy/host/install.sh compute/deploy/host/bundle.sh \
             compute/deploy/host/check-host compute/deploy/host/host-setup \
-            compute/deploy/host/compute-host-certificate compute/ci/*.sh \
+            compute/deploy/host/compute-host-certificate \
+            compute/deploy/host/test-compute-host-certificate compute/ci/*.sh \
             deploy/terraform/gcp-compute/host-startup.sh
+      - name: host certificate script
+        run: compute/deploy/host/test-compute-host-certificate
       - uses: hashicorp/setup-terraform@v4
       - name: Terraform (GCP host fleet)
         run: |

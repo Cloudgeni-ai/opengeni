@@ -85,7 +85,7 @@ fetch() {
 
 log "packages"
 missing=
-for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux \
+for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux flock:util-linux \
   jq:jq openssl:openssl; do
   command -v "${tool%%:*}" >/dev/null || missing="$missing ${tool#*:}"
 done

@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use compute_control::api::key_digest;
 use compute_control::authority::{self, Authority};
 use compute_control::e2b;
-use compute_control::group::{COMPUTE_API, GcpGroup, METADATA};
+use compute_control::group::{COMPUTE_API, Credentials, GcpGroup, METADATA, ServiceAccountKey};
 use compute_control::hostapi::Certificates;
 use compute_control::identity::{Expected, GOOGLE_KEYS, GceIdentity, GoogleKeys};
 use compute_control::leader::Scaling;
@@ -184,6 +184,11 @@ struct Serve {
     gcp_api: String,
     #[arg(long, default_value = METADATA, hide = true)]
     gcp_metadata: String,
+    /// A service account key file whose account manages the group, for a
+    /// service that runs off Google Cloud. Without one, its tokens come from
+    /// the metadata server (the instance's or the GKE workload's account).
+    #[arg(long, env = "GOOGLE_APPLICATION_CREDENTIALS")]
+    gcp_credentials: Option<PathBuf>,
     /// Fewest hosts the group keeps.
     #[arg(long, default_value_t = 1)]
     scale_min: u32,
@@ -274,8 +279,18 @@ fn host_names(url: &str, extra: &[String]) -> anyhow::Result<Vec<String>> {
         .with_context(|| format!("--host-url {url:?} names no host"))?
         .trim_start_matches('[')
         .trim_end_matches(']');
+    // "control.example." is another name than "control.example" to a host
+    // checking the certificate, so one form is configured, never both.
+    anyhow::ensure!(
+        !host.ends_with('.'),
+        "--host-url {url:?}: give the host without its trailing dot"
+    );
     let mut names = vec![host.to_owned()];
     for name in extra {
+        anyhow::ensure!(
+            !name.ends_with('.'),
+            "--host-name {name:?}: give the name without its trailing dot"
+        );
         if !names.contains(name) {
             names.push(name.clone());
         }
@@ -368,7 +383,11 @@ impl Serve {
             "--scale-host-memory-mib is needed to grow a group"
         );
         Ok(Some(Scaling {
-            group: std::sync::Arc::new(GcpGroup::new(path, &self.gcp_api, &self.gcp_metadata)?),
+            group: std::sync::Arc::new(GcpGroup::new(
+                path,
+                &self.gcp_api,
+                self.gcp_credentials()?,
+            )?),
             policy: ScalePolicy {
                 spare_per_mille: self.scale_spare_per_mille,
                 spare_largest: self.scale_spare_largest,
@@ -380,6 +399,17 @@ impl Serve {
             every: Duration::from_secs(self.scale_every_s),
             boot_within: Duration::from_secs(self.scale_boot_within_s),
         }))
+    }
+
+    /// Where the group's tokens come from: the key file, if one is named.
+    fn gcp_credentials(&self) -> anyhow::Result<Credentials> {
+        let Some(file) = &self.gcp_credentials else {
+            return Ok(Credentials::Metadata(self.gcp_metadata.clone()));
+        };
+        let json = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        let key = ServiceAccountKey::from_json(&json)
+            .with_context(|| format!("the key file {}", file.display()))?;
+        Ok(Credentials::Key(Box::new(key)))
     }
 }
 
@@ -534,7 +564,12 @@ async fn main() -> anyhow::Result<()> {
                 reserved: Vec::new(),
             };
             let issued = certificates
-                .issue(&name, &csr, std::time::SystemTime::now())
+                .issue(
+                    &name,
+                    &csr,
+                    std::time::SystemTime::now(),
+                    authority::Proven::Certificate,
+                )
                 .map_err(|(_, message)| anyhow::anyhow!(message))?;
             print!("{}", issued.certificate);
             Ok(())
@@ -596,6 +631,12 @@ mod tests {
         );
         assert!(host_names("http://control.example:8443", &[]).is_err());
         assert!(host_names("control.example", &[]).is_err());
+        // A trailing dot, in the URL or an extra name, is refused at start.
+        let error = host_names("https://control.example.:8443", &[]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+        let error =
+            host_names("https://control.example:8443", &["extra.example.".into()]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
     }
 
     #[test]
@@ -620,7 +661,12 @@ mod tests {
             reserved: Vec::new(),
         };
         let issued = certificates
-            .issue("host-9", &csr, std::time::SystemTime::now())
+            .issue(
+                "host-9",
+                &csr,
+                std::time::SystemTime::now(),
+                authority::Proven::Certificate,
+            )
             .unwrap();
         assert_eq!(issued.name, "host-9");
         let der = rustls::pki_types::CertificateDer::from_pem_slice(issued.certificate.as_bytes())

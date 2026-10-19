@@ -11,7 +11,10 @@
 //!   device carries no half-close from the guest and the caller would
 //!   otherwise never see the end of what it sent ([`crate::relay`]). A
 //!   caller may send its first bytes right after the header without
-//!   waiting for the answer.
+//!   waiting for the answer. envd's port is refused with [`ENVD_NOT_UP`]
+//!   while envd is not up: one that just started has not yet taken what
+//!   the sandbox was given, its access token included, and would take any
+//!   request.
 //! - `init <json>`: the sandbox's own environment, access token, default
 //!   user and directory ([`crate::envd::InitData`]), as a create gives
 //!   them. The guest keeps them on its disk for good, passes them to
@@ -53,6 +56,10 @@ impl Header {
 
 /// The answer to a header that succeeded.
 pub const OK: &[u8] = b"ok\n";
+
+/// The reason a `tcp` stream to envd's port is refused while envd is not
+/// up: it is starting again, and a caller may try again shortly.
+pub const ENVD_NOT_UP: &str = "envd is not up";
 
 /// The answer to one that failed. The reason is kept to one line.
 #[must_use]

@@ -113,7 +113,7 @@ impl OwnCertificate {
         names: &[String],
     ) -> anyhow::Result<(Arc<CertifiedKey>, SystemTime)> {
         let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-        let issued = authority.issue(names, &key, SystemTime::now(), ISSUED_FOR)?;
+        let issued = authority.issue(names, &key, SystemTime::now(), ISSUED_FOR, None)?;
         let certified = CertifiedKey::from_der(
             vec![issued.der],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
@@ -336,7 +336,13 @@ mod tests {
         let key = KeyPair::generate().unwrap();
         let issued = tls
             .authority
-            .issue(&["host-1".into()], &key, SystemTime::now(), ISSUED_FOR)
+            .issue(
+                &["host-1".into()],
+                &key,
+                SystemTime::now(),
+                ISSUED_FOR,
+                None,
+            )
             .unwrap();
         let mut client = ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()

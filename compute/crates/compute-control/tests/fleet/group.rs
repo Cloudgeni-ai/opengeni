@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use compute_control::group::GcpGroup;
+use compute_control::group::{Credentials, GcpGroup, ServiceAccountKey};
 use compute_control::leader::Scaling;
 use compute_control::store::Store as _;
 use compute_fleet::{HostId, ScalePolicy};
@@ -204,7 +204,7 @@ async fn fleet_with(
     setup(&compute);
     let api = serve(Arc::clone(&compute)).await;
     let scaling = Scaling {
-        group: Arc::new(GcpGroup::new(GROUP, &api, &api).unwrap()),
+        group: Arc::new(GcpGroup::new(GROUP, &api, Credentials::Metadata(api.clone())).unwrap()),
         policy: ScalePolicy {
             spare_per_mille: 200,
             spare_largest: 2,
@@ -615,4 +615,184 @@ async fn a_host_outside_the_group_is_given_up_on_without_a_fence() {
         "{:?}",
         compute.asked()
     );
+}
+
+/// A key made for the tests alone (PKCS #1 DER in base64), the one the
+/// identity tests sign with: it signs nothing else.
+const TEST_KEY: &str = include_str!("../../src/testdata/token-signer.rsa.b64");
+
+/// DER's length of `len` bytes.
+fn der_len(len: usize) -> Vec<u8> {
+    match u16::try_from(len) {
+        Ok(short) if short < 0x80 => vec![u8::try_from(short).unwrap()],
+        Ok(long) if long <= 0xff => vec![0x81, u8::try_from(long).unwrap()],
+        Ok(long) => {
+            let [high, low] = long.to_be_bytes();
+            vec![0x82, high, low]
+        }
+        Err(_) => unreachable!("a test key"),
+    }
+}
+
+/// The test key in PKCS #8, as Google's key files hold one.
+fn test_key_pkcs8() -> Vec<u8> {
+    use base64::Engine as _;
+    let pkcs1 = base64::engine::general_purpose::STANDARD
+        .decode(TEST_KEY.split_whitespace().collect::<String>())
+        .unwrap();
+    let mut body = vec![0x02, 0x01, 0x00];
+    // rsaEncryption, no parameters.
+    body.extend([
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+    ]);
+    body.push(0x04);
+    body.extend(der_len(pkcs1.len()));
+    body.extend(pkcs1);
+    let mut der = vec![0x30];
+    der.extend(der_len(body.len()));
+    der.extend(body);
+    der
+}
+
+/// A key file as `gcloud iam service-accounts keys create` writes one,
+/// whose token endpoint is `token_uri`.
+fn key_file(token_uri: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(test_key_pkcs8());
+    let lines: Vec<&str> = encoded
+        .as_bytes()
+        .chunks(64)
+        .map(|line| std::str::from_utf8(line).unwrap())
+        .collect();
+    let pem = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        lines.join("\n")
+    );
+    serde_json::to_vec(&json!({
+        "type": "service_account",
+        "project_id": "p",
+        "private_key_id": "key-1",
+        "private_key": pem,
+        "client_email": "control@p.iam.gserviceaccount.com",
+        "client_id": "1",
+        "token_uri": token_uri,
+    }))
+    .unwrap()
+}
+
+/// What the fake token endpoint was sent and gave out.
+#[derive(Default)]
+struct Grants {
+    /// Token requests whose assertion verified, with its claims.
+    granted: Mutex<Vec<Value>>,
+}
+
+/// Grants a token for an assertion the test key signed, and only then.
+async fn grant(State(grants): State<Arc<Grants>>, body: String) -> Response {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let form: HashMap<String, String> = form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    if form.get("grant_type").map(String::as_str)
+        != Some("urn:ietf:params:oauth:grant-type:jwt-bearer")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let assertion = &form["assertion"];
+    let (signed, signature) = assertion.rsplit_once('.').unwrap();
+    let key = ring::signature::RsaKeyPair::from_pkcs8(&test_key_pkcs8()).unwrap();
+    let public = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+        ring::signature::KeyPair::public_key(&key).as_ref().to_vec(),
+    );
+    if public
+        .verify(
+            signed.as_bytes(),
+            &URL_SAFE_NO_PAD.decode(signature).unwrap(),
+        )
+        .is_err()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (header, claims) = signed.split_once('.').unwrap();
+    let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(header).unwrap()).unwrap();
+    let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims).unwrap()).unwrap();
+    assert_eq!(
+        header,
+        json!({"alg": "RS256", "typ": "JWT", "kid": "key-1"})
+    );
+    grants.granted.lock().unwrap().push(claims);
+    Json(json!({ "access_token": "keyed", "expires_in": 3600, "token_type": "Bearer" }))
+        .into_response()
+}
+
+/// Answers the group only with the token the key got.
+async fn describe_keyed(headers: axum::http::HeaderMap) -> Response {
+    if headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer keyed")
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({ "targetSize": 1, "baseInstanceName": "hosts" })).into_response()
+}
+
+/// A service off Google Cloud signs its own token requests with a service
+/// account's key, for the Compute Engine API, and calls the API with the
+/// token it got, until that nears its expiry.
+#[tokio::test]
+async fn a_service_off_google_cloud_gets_its_tokens_with_a_key() {
+    let grants = Arc::new(Grants::default());
+    let router = axum::Router::new()
+        .route("/token", post(grant))
+        .route(&format!("/compute/v1/{GROUP}"), get(describe_keyed))
+        .with_state(Arc::clone(&grants));
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let token_uri = format!("{api}/token");
+    let key = ServiceAccountKey::from_json(&key_file(&token_uri)).unwrap();
+    assert!(!format!("{key:?}").contains("PRIVATE"), "{key:?}");
+    let group = GcpGroup::new(GROUP, &api, Credentials::Key(Box::new(key))).unwrap();
+    for _ in 0..2 {
+        let described = group.describe().await.unwrap();
+        assert_eq!(
+            (described.target_size, described.base_instance_name.as_str()),
+            (1, "hosts")
+        );
+    }
+    let granted = grants.granted.lock().unwrap().clone();
+    assert_eq!(granted.len(), 1, "one token, used until it nears expiry");
+    let claims = &granted[0];
+    assert_eq!(claims["iss"], "control@p.iam.gserviceaccount.com");
+    assert_eq!(claims["scope"], "https://www.googleapis.com/auth/compute");
+    assert_eq!(claims["aud"], token_uri.as_str());
+    let issued = claims["iat"].as_u64().unwrap();
+    assert_eq!(claims["exp"].as_u64().unwrap(), issued + 3600);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(issued.abs_diff(now) < 60, "{issued} vs {now}");
+}
+
+/// Only a service account's key file is taken: other credential files,
+/// such as workload identity federation's, are refused when the service
+/// starts, not on the first fence.
+#[test]
+fn other_credential_files_are_refused() {
+    let mut file: Value =
+        serde_json::from_slice(&key_file("https://oauth2.example/token")).unwrap();
+    file["type"] = "external_account".into();
+    let error = ServiceAccountKey::from_json(&serde_json::to_vec(&file).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("external_account"), "{error:#}");
+    file["type"] = "service_account".into();
+    file["private_key"] = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".into();
+    assert!(ServiceAccountKey::from_json(&serde_json::to_vec(&file).unwrap()).is_err());
+    assert!(ServiceAccountKey::from_json(b"{}").is_err());
 }

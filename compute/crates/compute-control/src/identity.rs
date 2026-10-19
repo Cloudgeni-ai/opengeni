@@ -144,6 +144,10 @@ pub enum Refused {
     UnknownKey(String),
     #[error("Google's keys cannot be had: {0}")]
     Keys(String),
+    #[error(
+        "Google's keys the service holds are past their expiry and could not be fetched again yet: {0}"
+    )]
+    StaleKeys(String),
     #[error("the token's signature is not Google's")]
     Signature,
     #[error("the token is not for a host of this fleet: {0}")]
@@ -163,6 +167,8 @@ struct Claims {
     aud: String,
     exp: u64,
     iat: u64,
+    #[serde(default)]
+    nbf: Option<u64>,
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -186,8 +192,12 @@ struct ComputeEngine {
 #[derive(Default)]
 struct Cache {
     keys: HashMap<String, RsaPublicKeyComponents<Vec<u8>>>,
+    /// Until when `keys` may be used: their answer's `Cache-Control`
+    /// expiry. Past it, only a successful fetch makes keys usable again.
     fresh_until: Option<Instant>,
     fetched_at: Option<Instant>,
+    /// Why the last fetch failed, while no fetch has succeeded since.
+    failed: Option<String>,
 }
 
 /// Checks identity tokens against what [`Expected`] says.
@@ -285,6 +295,12 @@ impl GceIdentity {
         if claims.iat > now.saturating_add(leeway) {
             return refused("it is issued in the future".into());
         }
+        if claims
+            .nbf
+            .is_some_and(|nbf| nbf > now.saturating_add(leeway))
+        {
+            return refused("it is not valid yet".into());
+        }
         if claims.email.as_deref() != Some(self.expected.account.as_str())
             || claims.email_verified == Some(false)
         {
@@ -315,6 +331,11 @@ impl GceIdentity {
 
     /// The key `kid`, fetching Google's keys when the ones held are stale
     /// or do not have it, at most once every [`REFETCH_EVERY`].
+    ///
+    /// Keys are used only until their answer's expiry: past it, a failed
+    /// or not yet allowed fetch leaves no key usable (fail closed), and
+    /// only a successful fetch makes keys usable again. Hosts retry, so
+    /// an outage of Google's keys only delays their certificates.
     async fn key(&self, kid: &str) -> Result<RsaPublicKeyComponents<Vec<u8>>, Refused> {
         let mut cache = self.cache.lock().await;
         let now = Instant::now();
@@ -322,32 +343,49 @@ impl GceIdentity {
         let may_fetch = cache
             .fetched_at
             .is_none_or(|at| now.duration_since(at) >= REFETCH_EVERY);
-        let mut failed = None;
+        let mut fetched = false;
         if may_fetch && (stale || !cache.keys.contains_key(kid)) {
             cache.fetched_at = Some(now);
             match self.source.fetch().await {
-                Ok(fetched) => {
-                    cache.keys = fetched
+                Ok(answer) => {
+                    cache.keys = answer
                         .keys
                         .keys
                         .iter()
                         .filter_map(|key| Some((key.kid.clone(), components(key)?)))
                         .collect();
-                    cache.fresh_until = Some(now + fetched.fresh_for);
+                    cache.fresh_until = Some(now + answer.fresh_for);
+                    cache.failed = None;
+                    fetched = true;
                 }
                 Err(error) => {
                     tracing::warn!(error = %format!("{error:#}"), "fetching Google's keys failed");
-                    failed = Some(format!("{error:#}"));
+                    cache.failed = Some(format!("{error:#}"));
                 }
             }
         }
-        match (cache.keys.get(kid), failed) {
-            (Some(key), _) => Ok(RsaPublicKeyComponents {
+        // Usable: fresh by their expiry, or just fetched (an answer whose
+        // expiry is now still serves the token that fetched it).
+        let usable = fetched || cache.fresh_until.is_some_and(|until| now < until);
+        if !usable {
+            return Err(match &cache.failed {
+                Some(error) if cache.fresh_until.is_none() => Refused::Keys(error.clone()),
+                Some(error) => Refused::StaleKeys(error.clone()),
+                None => Refused::StaleKeys(format!(
+                    "the next fetch is allowed {} s after the last",
+                    REFETCH_EVERY.as_secs()
+                )),
+            });
+        }
+        match cache.keys.get(kid) {
+            Some(key) => Ok(RsaPublicKeyComponents {
                 n: key.n.clone(),
                 e: key.e.clone(),
             }),
-            (None, Some(error)) => Err(Refused::Keys(error)),
-            (None, None) => Err(Refused::UnknownKey(kid.to_owned())),
+            None => match &cache.failed {
+                Some(error) => Err(Refused::Keys(error.clone())),
+                None => Err(Refused::UnknownKey(kid.to_owned())),
+            },
         }
     }
 }
@@ -561,6 +599,10 @@ pub(crate) mod tests {
                 "issued in the future",
                 Box::new(move |c| c["iat"] = (now + 120).into()),
             ),
+            (
+                "not valid yet",
+                Box::new(move |c| c["nbf"] = (now + 120).into()),
+            ),
         ];
         for (what, change) in cases {
             let mut claims = claims("host-1", now);
@@ -576,6 +618,7 @@ pub(crate) mod tests {
         let mut claims = claims("host-1", now);
         claims["exp"] = (now - 30).into();
         claims["iat"] = (now + 30).into();
+        claims["nbf"] = (now + 30).into();
         let token = google.sign(&google.header(), &claims);
         assert!(identity.verify(&token, SystemTime::now()).await.is_ok());
     }
@@ -682,5 +725,97 @@ pub(crate) mod tests {
         );
         assert_eq!(max_age("no-cache"), None);
         assert_eq!(max_age("max-age=x"), None);
+    }
+
+    /// Serves the signer's key, or fails, as the test says.
+    struct Flaky {
+        keys: Jwks,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+        fetches: Arc<AtomicUsize>,
+    }
+
+    impl KeySource for Flaky {
+        fn fetch(&self) -> BoxFuture<'_, anyhow::Result<Fetched>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let failing = self.failing.load(Ordering::SeqCst);
+            let keys = self.keys.clone();
+            Box::pin(async move {
+                anyhow::ensure!(!failing, "Google's keys answered 503");
+                Ok(Fetched {
+                    keys,
+                    fresh_for: Duration::from_secs(3600),
+                })
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keys_past_their_expiry_count_only_once_fetched_again() {
+        let google = Google::new();
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let identity = GceIdentity::new(
+            expected(),
+            Arc::new(Flaky {
+                keys: Jwks {
+                    keys: vec![google.jwk(&google.kid)],
+                },
+                failing: Arc::clone(&failing),
+                fetches: Arc::clone(&fetches),
+            }),
+        );
+        let verify = || async {
+            identity
+                .verify(&google.token("host-1"), SystemTime::now())
+                .await
+        };
+        assert_eq!(verify().await, Ok("host-1".into()));
+        // Google's keys fail from now on. While the keys held are fresh
+        // they are used, with no fetch (the negative control).
+        failing.store(true, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(3599)).await;
+        assert_eq!(verify().await, Ok("host-1".into()));
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        // Past their expiry, a failed fetch leaves none usable, and so does
+        // a fetch not allowed yet.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            matches!(verify().await, Err(Refused::StaleKeys(_))),
+            "a failed fetch"
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(verify().await, Err(Refused::StaleKeys(_))),
+            "within the minute"
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        tokio::time::advance(REFETCH_EVERY).await;
+        assert!(matches!(verify().await, Err(Refused::StaleKeys(_))));
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+        // Once a fetch succeeds, the keys count again.
+        failing.store(false, Ordering::SeqCst);
+        assert!(matches!(verify().await, Err(Refused::StaleKeys(_))));
+        tokio::time::advance(REFETCH_EVERY).await;
+        assert_eq!(verify().await, Ok("host-1".into()));
+        assert_eq!(fetches.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn with_no_keys_ever_fetched_a_failed_fetch_names_the_failure() {
+        let google = Google::new();
+        let identity = GceIdentity::new(
+            expected(),
+            Arc::new(Flaky {
+                keys: Jwks { keys: vec![] },
+                failing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                fetches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        assert!(matches!(
+            identity
+                .verify(&google.token("host-1"), SystemTime::now())
+                .await,
+            Err(Refused::Keys(_))
+        ));
     }
 }

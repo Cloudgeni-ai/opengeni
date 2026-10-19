@@ -35,6 +35,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
+            fsGroup: 65532
             seccompProfile:
               type: RuntimeDefault
           containers:
@@ -58,8 +59,16 @@ spec:
                 {{- with $cc.extraEnv }}
                 {{- toYaml . | nindent 16 }}
                 {{- end }}
+              {{- with $cc.extraVolumeMounts }}
+              volumeMounts:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
               resources:
                 {{- toYaml $cc.resources | nindent 16 }}
+          {{- with $cc.extraVolumes }}
+          volumes:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with $cc.nodeSelector }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}

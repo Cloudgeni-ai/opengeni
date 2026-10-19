@@ -18,12 +18,32 @@
 #   - elsewhere, with its current certificate: a new one for the same name;
 #   - a host off Google Cloud that has none gets its first with
 #     `compute-control issue-host-certificate`, run where the authority's key
-#     is, for the request this script leaves at /etc/compute/host.csr.
+#     is, for the request this script leaves at /etc/compute/request/host.csr;
+#     the certificate goes back to /etc/compute/request/host.pem, and the
+#     next run installs it.
 #
 # It trusts the service by /etc/compute/ca.pem, the hosts' authority, and
 # replaces that with the authorities the service hands out, so a host
 # follows the authority being replaced (operations.md, Keys and
 # certificates).
+#
+# The key and the certificate are one unit: each pair is written to a
+# directory of its own under certificates/, and the symlink `certificate`
+# is switched to it in one rename; host.pem and host.key, the paths the
+# agent is configured with, point through it. So an interrupted run leaves
+# the old pair or the new one, never a key of one and the certificate of
+# the other, and a pair counts as current only if the key is the
+# certificate's and the certificate verifies against ca.pem. Runs are
+# serialised by a lock.
+#
+# Every run first finishes what an interrupted one left: host.pem and
+# host.key are pointed through `certificate` if that holds a valid pair
+# and they do not (a run stopped between the two, as when moving from the
+# old layout of plain files), and a restart the agent is owed is done. The
+# file restart-owed is written, durably, before a pair is switched in, and
+# removed only once the agent restarted (or was not running, so it starts
+# with the new pair): a run that fails after the switch, in cleaning up or
+# in the restart, leaves it for the next run.
 set -euo pipefail
 
 config=/etc/compute/host.env
@@ -50,8 +70,82 @@ source "$config"
 [ -s "$dir/ca.pem" ] ||
   fail "$dir/ca.pem is missing: it holds the hosts' authority, ca.crt of the control service's hosts TLS Secret (install.sh --authority installs it)"
 cd "$dir"
+exec 9>"$dir/.certificate.lock"
+flock 9
 
-current() { [ -s host.pem ] && [ -s host.key ] && openssl x509 -in host.pem -noout -checkend "${1:-0}" >/dev/null 2>&1; }
+# Whether the key `$2` is the certificate `$1`'s, the certificate verifies
+# against ca.pem, and it is valid for `$3` more seconds.
+pair() {
+  [ -s "$1" ] && [ -s "$2" ] &&
+    [ "$(openssl x509 -in "$1" -noout -pubkey 2>/dev/null)" = "$(openssl pkey -in "$2" -pubout 2>/dev/null)" ] &&
+    openssl verify -CAfile ca.pem "$1" >/dev/null 2>&1 &&
+    openssl x509 -in "$1" -noout -checkend "${3:-0}" >/dev/null 2>&1
+}
+current() { pair host.pem host.key "${1:-0}"; }
+
+# Points host.pem and host.key through `certificate`, each in one rename.
+link_public() {
+  local file
+  for file in host.pem host.key; do
+    if [ "$(readlink "$file" 2>/dev/null)" != "certificate/$file" ]; then
+      ln -sfn "certificate/$file" "$file.new"
+      mv -T "$file.new" "$file"
+    fi
+  done
+}
+
+# Restarts the agent if it runs, so it takes up the published pair, then
+# clears the restart owed; a failed restart leaves it owed.
+activate() {
+  if systemctl is-active -q compute-host.service; then
+    systemctl restart compute-host.service
+  fi
+  rm -f restart-owed
+  sync . 2>/dev/null || sync
+}
+
+# Makes the pair in directory `$1` (host.pem, host.key) the host's, in one
+# rename, and points host.pem and host.key through it.
+publish() {
+  local stamp
+  stamp=$(date -u +%Y%m%dT%H%M%SZ).$$
+  mkdir -p certificates
+  chmod 700 certificates
+  mkdir -m 700 "certificates/$stamp"
+  cp -p "$1/host.key" "$1/host.pem" "certificates/$stamp/"
+  chmod 600 "certificates/$stamp/host.key" "certificates/$stamp/host.pem"
+  sync -f "certificates/$stamp/host.pem" 2>/dev/null || sync
+  # Owed from before the switch until the agent restarted with the pair.
+  : >restart-owed
+  sync -f restart-owed 2>/dev/null || sync
+  ln -sfn "certificates/$stamp" certificate.new
+  mv -T certificate.new certificate
+  link_public
+  # Older pairs are no longer anyone's.
+  for old in certificates/*; do
+    [ "$old" = "certificates/$stamp" ] || rm -rf -- "$old"
+  done
+}
+
+# What an interrupted run left: a published pair the public paths do not
+# yet both point through, and a restart owed.
+if [ -L certificate ] && pair certificate/host.pem certificate/host.key; then
+  link_public
+fi
+if [ -e restart-owed ]; then
+  log "restarting the agent for the certificate published before"
+  activate
+fi
+
+# A first certificate an operator issued for the request left here.
+if [ -s request/host.pem ] && pair request/host.pem request/host.key; then
+  publish request
+  rm -rf request
+  log "installed the certificate issued for $COMPUTE_NAME, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
+  activate
+  exit 0
+fi
+
 if [ -z "$force" ] && current "$renew_within"; then
   exit 0
 fi
@@ -73,13 +167,13 @@ elif current; then
   client=(--cert "$dir/host.pem" --key "$dir/host.key")
   by="its current certificate"
 else
-  if [ ! -s host.csr ] || [ ! -s host.key ]; then
-    (umask 077 && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-      -keyout host.key -subj "/CN=$COMPUTE_NAME" -out host.csr 2>/dev/null)
+  if [ ! -s request/host.csr ] || [ ! -s request/host.key ]; then
+    (umask 077 && mkdir -p request && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout request/host.key -subj "/CN=$COMPUTE_NAME" -out request/host.csr 2>/dev/null)
   fi
   fail "no current certificate, and not on Google Cloud: get this host its first one where the authority's key is, with
   compute-control issue-host-certificate --name $COMPUTE_NAME --csr host.csr --authority <dir> > host.pem
-copying $dir/host.csr there and the certificate back to $dir/host.pem, then run this again"
+copying $dir/request/host.csr there and the certificate back to $dir/request/host.pem, then run this again"
 fi
 
 work=$(mktemp -d)
@@ -103,13 +197,11 @@ jq -r .authorities "$work/answer.json" >"$work/ca.pem"
 openssl verify -CAfile "$work/ca.pem" "$work/host.pem" >/dev/null ||
   fail "the certificate the service issued does not verify against the authorities it gave"
 
-chmod 600 "$work/host.key" "$work/host.pem"
 chmod 644 "$work/ca.pem"
-mv "$work/host.key" host.key
-mv "$work/host.pem" host.pem
+# The authorities first: the new pair verifies against them, and the old
+# one still does while an authority is being replaced (both are listed).
 cmp -s "$work/ca.pem" ca.pem || mv "$work/ca.pem" ca.pem
-rm -f host.csr
+publish "$work"
+rm -rf request
 log "a certificate for $name by $by, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
-if systemctl is-active -q compute-host.service; then
-  systemctl restart compute-host.service
-fi
+activate

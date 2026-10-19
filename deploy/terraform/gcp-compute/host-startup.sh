@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A compute host's startup script on Google Cloud, run as root at every
-# boot from the instance template's metadata (main.tf). It prepares the
-# state volume, fetches and checks the host bundle the template names,
+# boot from the instance template's metadata (main.tf). It runs the
+# deployment's prelude if it has one, prepares the state volume, fetches and checks the host bundle the template names,
 # writes /etc/compute/host.env and runs the bundle's install.sh with the
 # hosts' authority from the metadata, which gets the host its certificate
 # from the control service and starts the guard and the agent. A new
@@ -12,6 +12,21 @@ export PATH=$PATH:/snap/bin
 
 meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
 attr() { meta "instance/attributes/$1"; }
+# An attribute the template may leave out: empty when the metadata server
+# says it is not there, a failed attempt (tried again) on any other error,
+# so a configured setting is never mistaken for an absent one.
+optional_attr() {
+  local body status
+  body=$(mktemp)
+  status=$(curl -sS -o "$body" -w '%{http_code}' -H Metadata-Flavor:Google \
+    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1") || status=error
+  case "$status" in
+    200) cat "$body" ;;
+    404) ;;
+    *) rm -f "$body"; log "reading the attribute $1 failed ($status)" >&2; return 1 ;;
+  esac
+  rm -f "$body"
+}
 log() { echo "compute-startup: $*"; }
 
 # Every step below is safe to run again, and several reach the network
@@ -29,8 +44,31 @@ if [ -z "${COMPUTE_STARTUP_ATTEMPT:-}" ]; then
   exit 0
 fi
 
+# --- The deployment's own prelude (host_startup_prelude), such as joining
+# an overlay network, before anything else reaches the network.
+prelude=$(optional_attr compute-prelude)
+if [ -n "$prelude" ]; then
+  log "running the prelude"
+  bash -euo pipefail -c "$prelude"
+fi
+
 NAME=$(meta instance/name)
-ADDRESS=$(meta instance/network-interfaces/0/ip)
+# The address the control service dials: the VPC's, or that of the
+# interface advertise_interface names once it has one.
+interface=$(optional_attr compute-advertise)
+if [ -n "$interface" ]; then
+  ADDRESS=
+  for _ in $(seq 120); do
+    # Until the interface exists, ip fails; that is waited out too.
+    ADDRESS=$({ ip -4 -o addr show dev "$interface" 2>/dev/null || true; } |
+      awk '{ sub("/.*", "", $4); print $4; exit }')
+    [ -n "$ADDRESS" ] && break
+    sleep 1
+  done
+  [ -n "$ADDRESS" ] || { log "$interface has no IPv4 address"; exit 1; }
+else
+  ADDRESS=$(meta instance/network-interfaces/0/ip)
+fi
 ZONE=$(meta instance/zone)
 ZONE=${ZONE##*/}
 BUNDLE_URL=$(attr compute-bundle-url)
@@ -87,7 +125,7 @@ attr compute-host-authority >/etc/compute/authority.pem.new
 
 # --- The host's configuration.
 huge_pages=0
-args=$(attr compute-host-args || true)
+args=$(optional_attr compute-host-args)
 if [ "$(attr compute-nested)" = true ]; then
   percent=$(attr compute-huge-pages-pct)
   huge_pages=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo) * percent / 100 / 2048))

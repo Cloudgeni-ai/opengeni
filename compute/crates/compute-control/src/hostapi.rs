@@ -6,7 +6,10 @@
 //! certificate is refused by every route but the one that issues one
 //! ([`CERTIFICATE_PATH`]), which names a host only as it proves: an
 //! instance identity token names its instance ([`identity`](crate::identity)),
-//! and a current certificate of the authority names what it names.
+//! and a certificate of the authority, current when the new one is issued,
+//! names what it names, if it was itself proven by a certificate: one an
+//! instance identity token proved renews only with a fresh token
+//! ([`Proven`]).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +33,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt as _;
 
-use crate::authority::{Authority, ISSUED_FOR, requested_key};
+use crate::authority::{Authority, ISSUED_FOR, Proven, requested_key, verify};
 use crate::identity::GceIdentity;
 use crate::link::Links;
 use crate::store::{Admission, Store};
@@ -42,10 +45,19 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// KiB.
 pub const MAX_CERTIFICATE_ASKED: usize = 16 << 10;
 
-/// What the caller presented on its connection: the names its certificate
-/// is valid for, or `None` without a certificate.
+/// A client certificate the TLS handshake verified: the names it is valid
+/// for, and the certificate itself, whose validity is checked again where
+/// it matters later than the handshake (renewal).
+#[derive(Clone, Debug)]
+pub struct Caller {
+    pub names: Arc<[String]>,
+    pub certificate: rustls::pki_types::CertificateDer<'static>,
+}
+
+/// What the caller presented on its connection: its certificate, or `None`
+/// without one.
 #[derive(Clone, Debug, Default)]
-pub struct Presented(pub Option<Arc<[String]>>);
+pub struct Presented(pub Option<Arc<Caller>>);
 
 /// A caller with a certificate of the hosts' authority, and the names it
 /// is valid for. Routes that take one refuse a caller without a
@@ -61,7 +73,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Peer {
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(match parts.extensions.get::<Presented>() {
-            Some(Presented(Some(names))) => Ok(Self(Arc::clone(names))),
+            Some(Presented(Some(caller))) => Ok(Self(Arc::clone(&caller.names))),
             _ => Err((
                 StatusCode::UNAUTHORIZED,
                 "this needs a host certificate of the hosts' authority",
@@ -85,12 +97,14 @@ fn refused(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, 
 }
 
 impl Certificates {
-    /// A certificate for the host `name`, for the key `csr` was signed by.
+    /// A certificate for the host `name`, for the key `csr` was signed by,
+    /// recording how the name was `proven`.
     pub fn issue(
         &self,
         name: &str,
         csr: &str,
         now: std::time::SystemTime,
+        proven: Proven,
     ) -> Result<HostCertificate, (StatusCode, String)> {
         if self
             .reserved
@@ -104,7 +118,8 @@ impl Certificates {
         }
         let dns = name.parse::<std::net::IpAddr>().is_err()
             && rustls::pki_types::DnsName::try_from(name).is_ok()
-            && !name.contains('*');
+            && !name.contains('*')
+            && !name.ends_with('.');
         if !dns {
             return Err(refused(
                 StatusCode::FORBIDDEN,
@@ -115,7 +130,7 @@ impl Certificates {
             .map_err(|error| refused(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
         let issued = self
             .authority
-            .issue(&[name.to_owned()], &key, now, ISSUED_FOR)
+            .issue(&[name.to_owned()], &key, now, ISSUED_FOR, Some(proven))
             .map_err(|error| refused(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
         let not_after_ms = issued
             .not_after
@@ -349,7 +364,7 @@ async fn certificate<S: Store>(
 ) -> Result<Json<HostCertificate>, (StatusCode, String)> {
     let certificates = &api.0.certificates;
     let now = std::time::SystemTime::now();
-    let (name, by) = match &asked.proof {
+    let (name, proven) = match &asked.proof {
         Proof::GceIdentity { token } => {
             let Some(identity) = &certificates.identity else {
                 return Err(refused(
@@ -361,27 +376,68 @@ async fn certificate<S: Store>(
                 .verify(token, now)
                 .await
                 .map_err(|error| refused(StatusCode::FORBIDDEN, error))?;
-            (name, "an instance identity token")
+            (name, Proven::GceIdentity)
         }
-        Proof::Certificate => match &presented.0 {
-            Some(names) if names.len() == 1 => (names[0].clone(), "its certificate"),
-            Some(_) => {
-                return Err(refused(
-                    StatusCode::FORBIDDEN,
-                    "a certificate that names one host renews",
-                ));
-            }
-            None => {
-                return Err(refused(
-                    StatusCode::UNAUTHORIZED,
-                    "renewing needs the current certificate of the hosts' authority",
-                ));
-            }
-        },
+        Proof::Certificate => (
+            renewed(certificates, presented.0.as_deref(), now)?,
+            Proven::Certificate,
+        ),
     };
-    let issued = certificates.issue(&name, &asked.csr, now)?;
+    let issued = certificates.issue(&name, &asked.csr, now, proven)?;
+    let by = match proven {
+        Proven::GceIdentity => "an instance identity token",
+        Proven::Certificate => "its certificate",
+    };
     tracing::info!(host = %name, by, not_after_ms = issued.not_after_ms, "issued a host certificate");
     Ok(Json(issued))
+}
+
+/// The one name the certificate `caller` presented renews, at `now`: it
+/// must name one host, be valid now (the handshake that verified it may be
+/// long past) and have been proven by a certificate itself.
+fn renewed(
+    certificates: &Certificates,
+    caller: Option<&Caller>,
+    now: std::time::SystemTime,
+) -> Result<String, (StatusCode, String)> {
+    let Some(caller) = caller else {
+        return Err(refused(
+            StatusCode::UNAUTHORIZED,
+            "renewing needs the current certificate of the hosts' authority",
+        ));
+    };
+    let [name] = &*caller.names else {
+        return Err(refused(
+            StatusCode::FORBIDDEN,
+            "a certificate that names one host renews",
+        ));
+    };
+    verify(
+        &certificates.authority.roots(),
+        &caller.certificate,
+        now,
+        name,
+    )
+    .map_err(|error| {
+        refused(
+            StatusCode::UNAUTHORIZED,
+            format!("the certificate presented is not current: {error:#}"),
+        )
+    })?;
+    match Proven::of(&caller.certificate) {
+        Some(Proven::Certificate) => Ok(name.clone()),
+        Some(Proven::GceIdentity) => Err(refused(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{name}'s certificate was proven by an instance identity token: it renews only \
+                 with a fresh one"
+            ),
+        )),
+        None => Err(refused(
+            StatusCode::FORBIDDEN,
+            format!("{name}'s certificate records no proof it may renew by"),
+        )),
+    }
 }
 
 /// The host API's routes.
@@ -437,7 +493,12 @@ pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, router: Router)
                     .1
                     .peer_certificates()
                     .and_then(|chain| chain.first())
-                    .map(|certificate| names_of(certificate).into()),
+                    .map(|certificate| {
+                        Arc::new(Caller {
+                            names: names_of(certificate).into(),
+                            certificate: certificate.clone().into_owned(),
+                        })
+                    }),
             );
             let service = router.map_request(
                 move |mut request: axum::http::Request<hyper::body::Incoming>| {
@@ -473,6 +534,52 @@ mod tests {
         router: Router,
         authority: Arc<Authority>,
         google: Google,
+    }
+
+    /// A caller holding a certificate of `authority` for `names`, proven as
+    /// `proven`, issued at `at` for `lifetime`.
+    fn caller_of(
+        authority: &Authority,
+        names: &[&str],
+        proven: Option<Proven>,
+        at: std::time::SystemTime,
+        lifetime: Duration,
+    ) -> Caller {
+        let owned: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        // A certificate naming nothing cannot be issued: such a caller
+        // presents some other certificate, and no names.
+        let issued_for = if owned.is_empty() {
+            vec!["unnamed.example".to_owned()]
+        } else {
+            owned.clone()
+        };
+        let issued = authority
+            .issue(
+                &issued_for,
+                &KeyPair::generate().unwrap(),
+                at,
+                lifetime,
+                proven,
+            )
+            .unwrap();
+        Caller {
+            names: owned.into(),
+            certificate: issued.der,
+        }
+    }
+
+    impl Api {
+        /// A caller holding a current certificate of this API's authority
+        /// for `names`, renewable by certificate.
+        fn holding(&self, names: &[&str]) -> Caller {
+            caller_of(
+                &self.authority,
+                names,
+                Some(Proven::Certificate),
+                std::time::SystemTime::now(),
+                ISSUED_FOR,
+            )
+        }
     }
 
     fn api() -> Api {
@@ -513,7 +620,7 @@ mod tests {
     async fn post(
         router: &Router,
         path: &str,
-        presented: Option<&[&str]>,
+        presented: Option<Caller>,
         body: &impl serde::Serialize,
     ) -> (StatusCode, Vec<u8>) {
         let mut request = axum::http::Request::post(path)
@@ -522,13 +629,7 @@ mod tests {
             .unwrap();
         request
             .extensions_mut()
-            .insert(Presented(presented.map(|names| {
-                names
-                    .iter()
-                    .map(|name| (*name).to_owned())
-                    .collect::<Vec<_>>()
-                    .into()
-            })));
+            .insert(Presented(presented.map(Arc::new)));
         let response = router.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let body = response
@@ -564,7 +665,13 @@ mod tests {
         // A token is proof even from a caller whose certificate names
         // another host: the token decides.
         let asked = token_asked(api.google.token("host-3"), csr("host-3"));
-        let (status, body) = post(&api.router, CERTIFICATE_PATH, Some(&["host-1"]), &asked).await;
+        let (status, body) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            Some(api.holding(&["host-1"])),
+            &asked,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
         assert_eq!(issued.name, "host-3");
@@ -610,22 +717,144 @@ mod tests {
             csr: csr("host-9"),
             proof: Proof::Certificate,
         };
-        let (status, body) = post(&api.router, CERTIFICATE_PATH, Some(&["host-4"]), &renew).await;
+        let (status, body) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            Some(api.holding(&["host-4"])),
+            &renew,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
         assert_eq!(issued.name, "host-4");
         let (status, _) = post(
             &api.router,
             CERTIFICATE_PATH,
-            Some(&["host-4", "host-5"]),
+            Some(api.holding(&["host-4", "host-5"])),
             &renew,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "one name only");
-        let (status, _) = post(&api.router, CERTIFICATE_PATH, Some(&[]), &renew).await;
+        let (status, _) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            Some(api.holding(&[])),
+            &renew,
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         let (status, _) = post(&api.router, CERTIFICATE_PATH, None, &renew).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// A renewal by certificate: the asked CSR, and what came back.
+    async fn renew_with(api: &Api, caller: Caller) -> (StatusCode, String) {
+        let renew = CertificateAsked {
+            csr: csr("host-4"),
+            proof: Proof::Certificate,
+        };
+        let (status, body) = post(&api.router, CERTIFICATE_PATH, Some(caller), &renew).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_certificate_renews_only_while_it_is_current_at_issuance() {
+        let api = api();
+        let now = std::time::SystemTime::now();
+        // Current: renews (the negative control).
+        let current = caller_of(
+            &api.authority,
+            &["host-4"],
+            Some(Proven::Certificate),
+            now,
+            ISSUED_FOR,
+        );
+        assert_eq!(renew_with(&api, current).await.0, StatusCode::OK);
+        // Verified at a handshake while it was current, and expired since,
+        // on the same connection: refused. (Issued ten minutes ago for
+        // two.)
+        let expired = caller_of(
+            &api.authority,
+            &["host-4"],
+            Some(Proven::Certificate),
+            now - Duration::from_secs(600),
+            Duration::from_secs(120),
+        );
+        let (status, body) = renew_with(&api, expired).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("not current"), "{body}");
+        // Another authority's certificate never renews, however it got in.
+        let (other, other_key) = generate("other authority").unwrap();
+        let other = Authority::from_pem(&other, &other_key).unwrap();
+        let foreign = caller_of(
+            &other,
+            &["host-4"],
+            Some(Proven::Certificate),
+            now,
+            ISSUED_FOR,
+        );
+        assert_eq!(renew_with(&api, foreign).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_an_identity_token_proved_renews_only_with_a_token() {
+        let api = api();
+        let now = std::time::SystemTime::now();
+        // What a token got its instance records how.
+        let asked = token_asked(api.google.token("host-1"), csr("host-1"));
+        let (status, body) = post(&api.router, CERTIFICATE_PATH, None, &asked).await;
+        assert_eq!(status, StatusCode::OK);
+        let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
+        let der = CertificateDer::from_pem_slice(issued.certificate.as_bytes())
+            .unwrap()
+            .into_owned();
+        assert_eq!(Proven::of(&der), Some(Proven::GceIdentity));
+        // Presenting it, current, renews nothing: a deleted instance's
+        // certificate, stolen, lasts out its week and no longer.
+        let token_proven = Caller {
+            names: vec!["host-1".to_owned()].into(),
+            certificate: der,
+        };
+        let (status, body) = renew_with(&api, token_proven.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("fresh"), "{body}");
+        // A fresh token from the same caller does.
+        let asked = token_asked(api.google.token("host-1"), csr("host-1"));
+        let (status, _) = post(&api.router, CERTIFICATE_PATH, Some(token_proven), &asked).await;
+        assert_eq!(status, StatusCode::OK);
+        // A certificate recording no proof (the service's own, or one
+        // older than the record) renews nothing either.
+        let unrecorded = caller_of(&api.authority, &["host-4"], None, now, ISSUED_FOR);
+        assert_eq!(renew_with(&api, unrecorded).await.0, StatusCode::FORBIDDEN);
+        // What renewal by certificate issues records the same proof, so
+        // it renews again.
+        let (status, body) = renew_with(&api, api.holding(&["host-4"])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let issued: HostCertificate = serde_json::from_str(&body).unwrap();
+        let der = CertificateDer::from_pem_slice(issued.certificate.as_bytes()).unwrap();
+        assert_eq!(Proven::of(&der), Some(Proven::Certificate));
+    }
+
+    #[test]
+    fn no_host_certificate_names_a_name_ending_in_a_dot() {
+        let (certificate, key) = generate("test authority").unwrap();
+        let certificates = Certificates {
+            authority: Arc::new(Authority::from_pem(&certificate, &key).unwrap()),
+            identity: None,
+            reserved: Vec::new(),
+        };
+        let now = std::time::SystemTime::now();
+        for name in ["host-1.", "host-1.example."] {
+            let refused = certificates
+                .issue(name, &csr("host-1"), now, Proven::Certificate)
+                .unwrap_err();
+            assert_eq!(refused.0, StatusCode::FORBIDDEN, "{name}");
+        }
+        assert!(
+            certificates
+                .issue("host-1", &csr("host-1"), now, Proven::Certificate)
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -635,7 +864,13 @@ mod tests {
             let (status, _) = post(&api.router, path, None, &json!({})).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
             // With one, the request gets as far as its body.
-            let (status, _) = post(&api.router, path, Some(&["host-1"]), &json!({})).await;
+            let (status, _) = post(
+                &api.router,
+                path,
+                Some(api.holding(&["host-1"])),
+                &json!({}),
+            )
+            .await;
             assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}");
         }
         let huge = token_asked("x".repeat(MAX_CERTIFICATE_ASKED), csr("host-1"));

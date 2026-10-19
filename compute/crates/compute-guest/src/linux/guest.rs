@@ -275,11 +275,12 @@ impl Guest {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// envd answers: gives it everything kept, with the time. Only then
-    /// does it count as up.
+    /// envd answers: gives it everything kept. Only then
+    /// does it count as up, and only then does the gateway reach it: until
+    /// then it would take requests without the sandbox's access token.
     pub fn envd_started(&self) -> io::Result<()> {
         let state = self.state();
-        call_init(&state.effective()?, now_nanos())?;
+        call_init(&state.effective()?)?;
         self.envd.lock().unwrap_or_else(PoisonError::into_inner).up = true;
         self.envd_changed.notify_all();
         Ok(())
@@ -304,6 +305,19 @@ impl Guest {
         envd.up
     }
 
+    /// Connects to TCP `port` on the guest's loopback; `None` for envd's
+    /// while envd is not up. envd's is connected to under the lock its stop
+    /// takes, and a stopped envd starts again only after its stop: so a
+    /// connection reaches only an envd that took what the sandbox was
+    /// given, its access token included, never one started since.
+    fn connect(&self, port: u16) -> Option<io::Result<TcpStream>> {
+        if port != ENVD_PORT || !self.has_envd {
+            return Some(connect(port));
+        }
+        let envd = self.envd.lock().unwrap_or_else(PoisonError::into_inner);
+        envd.up.then(|| connect(port))
+    }
+
     /// Handles one connection to the notice port. Notices are handled one
     /// at a time, on the listener's thread, and so are the host's
     /// `activity` question and `sync` request.
@@ -326,12 +340,21 @@ impl Guest {
         let Some(notice) = Notice::parse(&line) else {
             return;
         };
-        if !self.state().orders.admits(notice.order) {
-            // Said, so that a host sending it learns at once.
-            let _ = stream.write_all(notice::STALE);
-            return;
-        }
-        if let Err(error) = sys::set_clock(notice.nanos) {
+        let retry = {
+            let state = self.state();
+            if !state.orders.admits(notice.order) {
+                // Said, so that a host sending it learns at once.
+                let _ = stream.write_all(notice::STALE);
+                return;
+            }
+            state.orders.is_latest(notice.order)
+        };
+        // Another attempt of the notice applied last carries the host's time
+        // from when it was sent, and the guest may get to it late, after the
+        // attempt before it: it moves the clock only forward.
+        if (!retry || notice.nanos > now_nanos())
+            && let Err(error) = sys::set_clock(notice.nanos)
+        {
             log(&format!("clock: {error}"));
         }
         if let Some(sandbox) = &notice.sandbox
@@ -353,9 +376,7 @@ impl Guest {
         }
         let mut state = self.state();
         if self.has_envd
-            && let Err(error) = state
-                .effective()
-                .and_then(|data| call_init(&data, now_nanos()))
+            && let Err(error) = state.effective().and_then(|data| call_init(&data))
         {
             log(&format!("restore notice: envd /init: {error}"));
             return;
@@ -376,10 +397,18 @@ impl Guest {
             }
         };
         match Header::parse(&line) {
-            Ok(Header::Tcp(port)) => {
-                let _ = stream.set_read_timeout(None);
-                relay(stream, &rest, port);
-            }
+            Ok(Header::Tcp(port)) => match self.connect(port) {
+                Some(Ok(tcp)) => {
+                    let _ = stream.set_read_timeout(None);
+                    relay(stream, &rest, port, tcp);
+                }
+                Some(Err(error)) => {
+                    let _ = stream.write_all(&gateway::error(&format!("port {port}: {error}")));
+                }
+                None => {
+                    let _ = stream.write_all(&gateway::error(gateway::ENVD_NOT_UP));
+                }
+            },
             Ok(Header::Init(data)) => {
                 let answer = match self.init(*data) {
                     Ok(()) => gateway::OK.to_vec(),
@@ -420,7 +449,7 @@ impl Guest {
         }
         if self.has_envd {
             let state = self.state();
-            call_init(&state.effective()?, now_nanos())?;
+            call_init(&state.effective()?)?;
             drop(state);
         }
         self.start_command(env);
@@ -453,9 +482,9 @@ fn read_line(stream: &mut Stream, limit: usize) -> io::Result<(String, Vec<u8>)>
     }
 }
 
-/// Calls envd's `/init` with `data` and the time `nanos`.
-fn call_init(data: &InitData, nanos: u64) -> io::Result<()> {
-    let body = data.body(Some(nanos));
+/// Calls envd's `/init` with `data`, and no time (see [`crate::envd`]).
+fn call_init(data: &InitData) -> io::Result<()> {
+    let body = data.body();
     let status = call_envd(&envd::request("POST", "/init", Some(&body)), INIT_LIMIT)?;
     if (200..300).contains(&status) {
         Ok(())
@@ -498,29 +527,26 @@ fn call_envd(request: &[u8], limit: Duration) -> io::Result<u16> {
     }
 }
 
-/// Connects `stream` to TCP `port` on the guest's loopback, answers `ok`,
-/// and relays both ways until both sides are done. `first` is what the
-/// caller sent after its header.
-fn relay(mut stream: Stream, first: &[u8], port: u16) {
+/// Connects to TCP `port` on the guest's loopback, over IPv4 or else IPv6.
+fn connect(port: u16) -> io::Result<TcpStream> {
     let addresses = [
         SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
     ];
     let mut last = io::Error::from(io::ErrorKind::ConnectionRefused);
-    let mut tcp = None;
     for address in addresses {
         match TcpStream::connect_timeout(&address, CONNECT_LIMIT) {
-            Ok(connected) => {
-                tcp = Some(connected);
-                break;
-            }
+            Ok(connected) => return Ok(connected),
             Err(error) => last = error,
         }
     }
-    let Some(mut tcp) = tcp else {
-        let _ = stream.write_all(&gateway::error(&format!("port {port}: {last}")));
-        return;
-    };
+    Err(last)
+}
+
+/// Answers `ok` on `stream`, connected to `tcp` on the guest's TCP `port`,
+/// and relays both ways until both sides are done. `first` is what the
+/// caller sent after its header.
+fn relay(mut stream: Stream, first: &[u8], port: u16, mut tcp: TcpStream) {
     let _ = tcp.set_nodelay(true);
     if stream.write_all(gateway::OK).is_err() || tcp.write_all(first).is_err() {
         return;
