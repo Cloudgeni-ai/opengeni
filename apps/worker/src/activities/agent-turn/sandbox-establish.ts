@@ -273,6 +273,14 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     ? (managedSessionGroupBackend(settings.sandboxBackend, runSettings.sandboxBackend) ??
       runSettings.sandboxBackend)
     : runSettings.sandboxBackend;
+  // A machine-home chat with no machine selected, on a deployment without a
+  // managed sandbox to fall back to, has nowhere to run. Say so plainly instead
+  // of building a Connected Machine client that names no machine.
+  if (!machinePrimary && groupBoxBackend === "selfhosted") {
+    throw new Error(
+      "This chat runs on a Connected Machine, but no machine is selected for it. Choose a machine for this chat, then send the message again.",
+    );
+  }
   const groupRouteSettings = sandboxSettingsForRoute({
     runSettings,
     machinePrimary,
