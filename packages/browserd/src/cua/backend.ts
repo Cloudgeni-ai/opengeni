@@ -19,6 +19,7 @@ import {
 } from "../computer-backend";
 import {
   callDesktop,
+  CuaFailure,
   walkIncompleteness,
   Windows,
   WindowState,
@@ -67,6 +68,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private pending = 0;
   private nativeTools: CuaNativeTools | null = null;
   private nativeObservations = false;
+  /** Windows CUA could not read because they are sheets of another window. */
+  private readonly unreadableSheets = new Set<string>();
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -240,6 +243,7 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
+      const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
@@ -265,6 +269,8 @@ export class CuaComputerBackend implements ComputerBackend {
               false,
               false,
             );
+          if (error instanceof CuaFailure && !error.dispatched)
+            throw this.keyboardRefusal(command, error, observed) ?? error;
           throw error;
         }
       }
@@ -364,6 +370,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (!live.has(id)) {
         this.targetsById.delete(id);
         this.observations.delete(id);
+        this.unreadableSheets.delete(id);
         for (const [frameId, frame] of this.frames)
           if (frame.targetId === id) this.frames.delete(frameId);
       }
@@ -384,6 +391,79 @@ export class CuaComputerBackend implements ComputerBackend {
 
   private args(target: Target): Record<string, unknown> {
     return { pid: target.pid, window_id: target.windowId, session: this.session };
+  }
+
+  /** The window a macOS sheet (a Save panel, a Go to Folder prompt) is
+   * attached to. A sheet has a window id of its own, but its controls are in
+   * the accessibility tree of its parent: another window of the same process
+   * whose bounds contain it. */
+  private sheetParent(target: Target): Target | undefined {
+    const inner = target.native.bounds;
+    if (this.identity.platform !== "macos" || !inner) return undefined;
+    return [...this.targetsById.values()]
+      .filter((other) => {
+        const outer = other.native.bounds;
+        return (
+          other !== target &&
+          other.pid === target.pid &&
+          outer !== undefined &&
+          outer !== null &&
+          inner.x >= outer.x &&
+          inner.y >= outer.y &&
+          inner.x + inner.width <= outer.x + outer.width &&
+          inner.y + inner.height <= outer.y + outer.height &&
+          inner.width * inner.height < outer.width * outer.height
+        );
+      })
+      .sort(
+        (a, b) =>
+          a.native.bounds!.width * a.native.bounds!.height -
+          b.native.bounds!.width * b.native.bounds!.height,
+      )[0];
+  }
+
+  private attachedSheetError(target: Target, parent: Target): ComputerBackendError {
+    return new ComputerBackendError(
+      "target_stale",
+      `${target.native.id} is a sheet attached to the window ${parent.native.id}, and its controls are read and used through that window: observe ${parent.native.id} and act on its refs`,
+      false,
+      false,
+    );
+  }
+
+  /** CUA's refusals of background input name CUA's own options (a foreground
+   * delivery mode the caller does not have). Say what the caller can do. */
+  private keyboardRefusal(
+    command: ComputerBackendActionCommand,
+    error: CuaFailure,
+    observed: ComputerBackendObservation | undefined,
+  ): ComputerBackendError | null {
+    const target = this.targetsById.get(command.targetId);
+    if (
+      !target ||
+      this.identity.platform !== "macos" ||
+      error.cuaCode !== "window_not_key" ||
+      command.action.type !== "keyboard"
+    )
+      return null;
+    if (observed?.roots.some((node) => node.role === "AXSheet"))
+      return new ComputerBackendError(
+        error.code,
+        "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+        false,
+        false,
+      );
+    const others = [...this.targetsById.values()]
+      .filter((other) => other !== target && other.pid === target.pid)
+      .map((other) => other.native.id);
+    return new ComputerBackendError(
+      error.code,
+      `Keys reach only the focused window of a background app, and another of its windows has focus${
+        others.length ? ` (one of ${others.slice(0, 5).join(", ")})` : ""
+      }, so none were sent: act on that window, or close it first`,
+      false,
+      false,
+    );
   }
 
   private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
@@ -427,13 +507,19 @@ export class CuaComputerBackend implements ComputerBackend {
       max_depth: 25,
     });
     const state = WindowState.parse(data);
-    if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id)
+    if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
+      const parent = this.sheetParent(target);
+      if (parent && String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")) {
+        this.unreadableSheets.add(targetId);
+        throw this.attachedSheetError(target, parent);
+      }
       throw new ComputerBackendError(
         "target_stale",
         `CUA observation did not bind the requested window (snapshot=${state.snapshot_id ?? "missing"}, reason=${data.degraded_reason ?? "none"})`,
         false,
         false,
       );
+    }
     const roots = projectElements(
       state.elements,
       this.identity.platform,
@@ -685,6 +771,10 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       throw unsupported("CUA's move_cursor controls its overlay, not native hover input");
     }
+    if (action.type === "focus")
+      throw unsupported(
+        "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
+      );
     if (action.type !== "semantic" && action.type !== "keyboard")
       throw unsupported("This CUA operation is not admitted by the desktop adapter");
     const observed = this.observations.get(command.targetId);
@@ -701,13 +791,18 @@ export class CuaComputerBackend implements ComputerBackend {
       !observed ||
       !command.expectedObservationId ||
       (observed.observationId !== command.expectedObservationId && !refFenced)
-    )
+    ) {
+      const parent = this.unreadableSheets.has(command.targetId)
+        ? this.sheetParent(target)
+        : undefined;
+      if (parent) throw this.attachedSheetError(target, parent);
       throw new ComputerBackendError(
         "observation_stale",
         "CUA action requires the current semantic observation",
         false,
         false,
       );
+    }
     if (action.type === "semantic") {
       const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))

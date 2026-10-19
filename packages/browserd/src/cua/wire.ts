@@ -95,6 +95,19 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   background_unavailable: "unsupported",
 };
 
+/** A failure CUA reported itself, with CUA's own code, so the backend can
+ * recognize a refusal without reading CUA's wording. */
+export class CuaFailure extends ComputerBackendError {
+  constructor(
+    code: ComputerBackendErrorCode,
+    message: string,
+    dispatched: boolean,
+    readonly cuaCode: string | undefined,
+  ) {
+    super(code, message, false, dispatched);
+  }
+}
+
 /** CUA's own explanation of a refused or unconfirmed action (why it refused,
  * what to do instead), so the failure says more than that it failed. The text
  * is kept exactly as CUA wrote it: the computer driver redacts typed secrets
@@ -181,13 +194,13 @@ export async function callDesktop(
           : result.errorCode;
     const mapped = code ? errorCodes[code] : undefined;
     const reason = cuaFailureReason(result, data);
-    throw new ComputerBackendError(
+    throw new CuaFailure(
       mutation && !refused ? "outcome_unknown" : (mapped ?? "driver_failed"),
       `CUA ${name} ${refused ? "refused the operation" : "did not establish completion"}${
         reason ? `: ${reason}` : ""
       }`,
-      false,
       mutation && !refused,
+      code,
     );
   }
   if (mode === true && effect !== "confirmed" && effect !== "unverifiable") {
