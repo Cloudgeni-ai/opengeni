@@ -315,6 +315,8 @@ describe("run_on Connected Machine exec receipts", () => {
     });
     expect(result.stderr).toContain("120-second execution limit");
     expect(result.reason).toContain("120000 ms execution deadline");
+    // Someone at that computer may need to answer a prompt on its screen.
+    expect(result.reason).toContain("permission prompt or dialog on their screen");
     expect(runner.executions).toBe(1);
     expect(runner.completedSideEffects).toBe(0);
   });

@@ -9,8 +9,8 @@ import { HTTPException } from "hono/http-exception";
  */
 export function wrongInteractionPlacementMessage(targetSandboxId: string): string {
   return (
-    "The requested Connected Machine is not this session's current placement. " +
-    `Move the session to that machine before creating an interaction resource: if sandbox_swap is available, call it with target "${targetSandboxId}", retry, and swap back (target "session") when done.`
+    "The requested Connected Machine is not the machine this session is working on, and computer and browser sessions open on that machine. " +
+    `To use it, call sandbox_swap with target "${targetSandboxId}" if it is available, then retry; staying on that machine afterwards is fine.`
   );
 }
 

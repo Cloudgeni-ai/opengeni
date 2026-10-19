@@ -155,7 +155,10 @@ rebuilds transport, not execution: immutable delivery identities join accepted
 work or replay its reply. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
-bounded recovery; legacy agents keep one-shot mutation semantics. See the
+bounded recovery. The requester listens for the exact process's hello before
+sending and recovers pending journaled deliveries immediately on reconnect,
+without resetting deadlines. The native hello follows subscription readiness;
+legacy agents keep one-shot mutation semantics. See the
 [recovery contract](connected-machines.md#control-transport-recovery).
 
 Transactional file transfers keep the exact connection, operation ID and epoch.
@@ -188,6 +191,12 @@ Stalled finalization requests host-owned graceful shutdown: peers checkpoint
 before the shutdown ceiling contains stuck writers. Cleanup can consume exact,
 independently committed retained-process terminal proof, never manufacture
 quiescence or replay unknown commands.
+For a failed Connected Machine exec, the launch client may also query its exact
+runner for a zero-frame terminal record (failed spawn or cancel-before-start).
+That proof releases the turn's local writer custody without waiting for an exit
+frame that never existed, changing the original command error, or inventing an
+output receipt. Running, lost, mismatched and unavailable observations remain
+fenced; the proof says nothing about effects before spawn cleanup.
 
 Unavailable control reads/owned attempts retain bounded, interruptible waits,
 not idle/settlement, writer revocation or successor dispatch. Temporal metadata

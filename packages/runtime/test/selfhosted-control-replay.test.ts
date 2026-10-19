@@ -19,6 +19,42 @@ const result = ControlResponse.encode({ requestId: mutation.requestId }).finish(
 const timeout = () => Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
 
 describe("control reply recovery", () => {
+  test("only safe probes and journaled deliveries opt into exact-process recovery", async () => {
+    for (const journaled of [false, true]) {
+      const calls: Array<{ target: string; resendOn?: string }> = [];
+      const rpc = new NatsControlRpc(async () => ({
+        supportsHeaders: true,
+        async request(target, _payload, options) {
+          calls.push({ target, resendOn: options.resendOn });
+          return { data: result, headers: { get: () => (journaled ? "1" : "") } };
+        },
+      }));
+      await rpc.request(subject, mutation, { timeoutMs: 60_000 });
+      expect(calls[0]?.resendOn).toBe(subject.replace(/\.rpc$/, ".hello"));
+      expect(calls[1]?.resendOn).toBe(journaled ? calls[0]?.resendOn : undefined);
+    }
+  });
+
+  test("permanent failures underneath a transport resend stop without erasing uncertainty", async () => {
+    let deliveries = 0;
+    const recovery = new ControlReplyRecovery(100, 1);
+    await expect(
+      recovery.request(
+        {
+          supportsHeaders: true,
+          async request(target) {
+            if (target === subject) return { data: result, headers: { get: () => "1" } };
+            deliveries += 1;
+            throw Object.assign(timeout(), { cause: { code: "PERMISSIONS_VIOLATION" } });
+          },
+        },
+        subject,
+        new Uint8Array(),
+        100,
+      ),
+    ).rejects.toMatchObject({ code: "TIMEOUT" });
+    expect(deliveries).toBe(1);
+  });
   for (const code of ["MAX_PAYLOAD_EXCEEDED", "PERMISSIONS_VIOLATION"]) {
     test(`a later ${code} refusal cannot rewrite an earlier unknown outcome`, async () => {
       let deliveries = 0;

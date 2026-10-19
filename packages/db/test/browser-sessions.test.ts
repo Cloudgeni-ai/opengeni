@@ -32,6 +32,7 @@ import {
   getBrowserPrivateCheckpointAuthority,
   continueExpiredBrowserSessionResume,
   getExpiredBrowserSessionResume,
+  listBrowserCapacitySuspendCandidates,
   listBrowserSessions,
   LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
@@ -244,6 +245,67 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("lists idle saveable browsers on one controller instance, least recently used first", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browsers = [];
+    for (let index = 0; index < 4; index += 1) browsers.push(await activeBrowser(scope));
+    const [recent, older, oldest, busy] = browsers.map((browser) => browser.session.id) as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    const minutesAgo = async (id: string, minutes: number) => {
+      await shared!.admin`
+        update browser_sessions
+        set last_used_at = now() - make_interval(mins => ${minutes})
+        where workspace_id = ${scope.workspaceId} and id = ${id}`;
+    };
+    await minutesAgo(recent, 1);
+    await minutesAgo(older, 10);
+    await minutesAgo(oldest, 20);
+    await minutesAgo(busy, 30);
+    // A browser with a lifecycle operation in flight is never a candidate.
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: busy,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: scope.subjectId,
+    });
+    const input = {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      placement: { kind: "sandbox_group" as const, sandboxGroupId: scope.sandboxGroupId },
+      placementInstanceId: "placement:test",
+      excludeBrowserSessionId: crypto.randomUUID(),
+      idleBefore: new Date(Date.now() - 5 * 60_000),
+      limit: 3,
+    };
+    expect(await listBrowserCapacitySuspendCandidates(client.db, input)).toEqual([oldest, older]);
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        excludeBrowserSessionId: oldest,
+        limit: 1,
+      }),
+    ).toEqual([older]);
+    // Browsers on another controller instance or placement are not this
+    // controller's to save.
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        placementInstanceId: "placement:other",
+      }),
+    ).toEqual([]);
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        placement: { kind: "connected_machine", sandboxId: crypto.randomUUID() },
+      }),
+    ).toEqual([]);
+  });
+
   test("replays a legacy Lightpanda create with corrected screenshot capabilities", async () => {
     if (!available) return;
     const scope = await fixture();

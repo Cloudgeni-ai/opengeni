@@ -84,6 +84,7 @@ export class ControlReplyRecovery {
       return await attempt(conn, subject, payload, timeoutMs, connectionCurrent);
     }
     const deadline = Date.now() + timeoutMs + this.recoveryMs;
+    const readySubject = subject.endsWith(".rpc") ? `${subject.slice(0, -4)}.hello` : undefined;
     let supported = this.supported.get(subject);
     if (!supported) {
       const probe = ControlRequest.encode(
@@ -99,6 +100,7 @@ export class ControlReplyRecovery {
         probe,
         timeoutMs,
         deadline,
+        readySubject,
         connectionCurrent,
       ).then((reply) => reply.headers?.get(REPLAY_HEADER) === "1");
       this.supported.set(subject, supported);
@@ -117,7 +119,16 @@ export class ControlReplyRecovery {
       );
     }
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
-    return this.retry(conn, subject, delivery, payload, timeoutMs, deadline, connectionCurrent);
+    return this.retry(
+      conn,
+      subject,
+      delivery,
+      payload,
+      timeoutMs,
+      deadline,
+      readySubject,
+      connectionCurrent,
+    );
   }
 
   private async retry(
@@ -127,6 +138,7 @@ export class ControlReplyRecovery {
     payload: Uint8Array,
     timeoutMs: number,
     deadline: number,
+    readySubject: string | undefined,
     connectionCurrent?: () => Promise<boolean>,
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
@@ -138,10 +150,15 @@ export class ControlReplyRecovery {
           payload,
           Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
           connectionCurrent,
+          readySubject,
         );
       } catch (error) {
         // Replaced while this attempt waited: it may have reached the old agent.
         if (error instanceof ControlConnectionReplacedError) throw error;
+        // A transport-level resend may already have an uncertain first delivery.
+        // Keep that uncertainty, but do not retry a permanent refusal underneath it.
+        const cause = (error as { cause?: unknown } | null)?.cause;
+        if (cause && !transient(cause)) throw error;
         // Even a definitive refusal of THIS attempt says nothing about a prior
         // attempt whose reply was lost. Stop, but preserve its uncertain outcome.
         if (!transient(error)) throw uncertain ?? error;
@@ -175,8 +192,10 @@ async function attempt(
   payload: Uint8Array,
   timeout: number,
   connectionCurrent: (() => Promise<boolean>) | undefined,
+  /** The agent's reconnect notification: the same delivery is resent on it. */
+  resendOn?: string,
 ): ReturnType<NatsRequestConnection["request"]> {
-  const reply = await awaitReply(conn, subject, payload, timeout, connectionCurrent);
+  const reply = await awaitReply(conn, subject, payload, timeout, connectionCurrent, resendOn);
   if (linkLost(reply)) throw new AgentLinkLostError();
   return reply;
 }
@@ -187,8 +206,9 @@ async function awaitReply(
   payload: Uint8Array,
   timeout: number,
   connectionCurrent: (() => Promise<boolean>) | undefined,
+  resendOn: string | undefined,
 ): ReturnType<NatsRequestConnection["request"]> {
-  const reply = conn.request(subject, payload, { timeout });
+  const reply = conn.request(subject, payload, { timeout, ...(resendOn ? { resendOn } : {}) });
   if (!connectionCurrent) return await reply;
   let done = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

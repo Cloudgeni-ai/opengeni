@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stageCuaRuntime } from "../scripts/stage-cua-runtime";
@@ -17,6 +17,16 @@ test.skipIf(
     const windows = process.platform === "win32";
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
+      if (process.platform === "darwin") {
+        const native = join(staged, "node_modules", `@trycua/cua-driver-darwin-${process.arch}`);
+        for (const file of await readdir(native)) {
+          if (!file.endsWith(".dylib") && !file.endsWith(".node")) continue;
+          const child = Bun.spawn(["lipo", "-archs", join(native, file)], { stdout: "pipe" });
+          const architectures = (await new Response(child.stdout).text()).trim();
+          expect(await child.exited).toBe(0);
+          expect(architectures).toBe(process.arch === "arm64" ? "arm64" : "x86_64");
+        }
+      }
       for (const directory of windows
         ? ["cua-sdk", "node_modules"]
         : ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])

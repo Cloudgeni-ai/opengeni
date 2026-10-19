@@ -1,5 +1,6 @@
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { access, lstat, open } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { resolve } from "node:path";
 import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
@@ -200,7 +201,7 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
     ),
     maxSessions: environmentInteger(
       environment.OPENGENI_BROWSERD_MAX_SESSIONS,
-      64,
+      defaultMaxBrowserSessions(machineMemoryBytes()),
       1,
       10_000,
       "OPENGENI_BROWSERD_MAX_SESSIONS",
@@ -310,6 +311,49 @@ function requiredEnvironment(environment: NodeJS.ProcessEnv, name: string): stri
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+/** Memory one browser is planned at: about the p90 resident (PSS) size of
+ * live agent browsers, including their renderer and GPU processes. */
+const PLANNED_BROWSER_MEMORY_BYTES = 300 * 1024 * 1024;
+/** Share of machine memory browsers may plan to use; the rest stays with the
+ * operating system, the agent and whatever else the machine runs. */
+const BROWSER_MEMORY_SHARE = 0.5;
+const MIN_DEFAULT_BROWSER_SESSIONS = 8;
+
+/**
+ * Default browser limit for one controller, sized to the machine: half its
+ * memory at {@link PLANNED_BROWSER_MEMORY_BYTES} each, so a 48 GiB machine
+ * runs 81 browsers and an 86 GiB one 147. OPENGENI_BROWSERD_MAX_SESSIONS
+ * overrides it.
+ */
+export function defaultMaxBrowserSessions(memoryBytes: number): number {
+  if (!Number.isFinite(memoryBytes) || memoryBytes <= 0) return 64;
+  return Math.min(
+    10_000,
+    Math.max(
+      MIN_DEFAULT_BROWSER_SESSIONS,
+      Math.floor((memoryBytes * BROWSER_MEMORY_SHARE) / PLANNED_BROWSER_MEMORY_BYTES),
+    ),
+  );
+}
+
+/** Physical memory, or a container's own cgroup limit when that is lower. */
+export function machineMemoryBytes(
+  physicalBytes: number = totalmem(),
+  readLimit: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): number {
+  for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    try {
+      const value = readLimit(path).trim();
+      if (!/^[0-9]+$/u.test(value)) continue;
+      const limit = Number(value);
+      if (Number.isSafeInteger(limit) && limit > 0 && limit < physicalBytes) return limit;
+    } catch {
+      // Not in a memory-limited cgroup namespace.
+    }
+  }
+  return physicalBytes;
 }
 
 function environmentInteger(

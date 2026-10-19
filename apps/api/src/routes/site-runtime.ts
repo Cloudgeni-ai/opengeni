@@ -41,6 +41,7 @@ import {
   resolveWorkspaceModelSelection,
   hasPermission,
   type ApiRouteDeps,
+  type WorkspaceModelSelection,
 } from "@opengeni/core";
 import {
   consumeSiteAuthCode,
@@ -82,7 +83,9 @@ import {
   isSubscriptionBilledModel,
   resolveSiteOutsideModel,
   siteCreditModelIds,
+  siteCreditModelSelections,
 } from "../site-publishing/agent-model";
+import { projectWorkspaceModelCatalog } from "../model-catalog";
 import {
   afterSitePlatformUsage,
   requireSitePlatformOpen,
@@ -932,7 +935,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost,
     viewer: SiteRuntimeViewer,
     limits: { agentModels: string[] | null },
-  ): Promise<{ allowed: string[]; default: string | null; unavailable: boolean }> => {
+  ): Promise<{
+    allowed: string[];
+    /** The allowed models' catalog selections, in `allowed` order. */
+    selections: WorkspaceModelSelection[];
+    default: string | null;
+    unavailable: boolean;
+  }> => {
     const agentModel = host.publication.agent.model;
     const named = (models: (string | null | undefined)[]) => [
       ...new Set(
@@ -948,10 +957,12 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: viewer.subjectId,
         }),
       );
+      const admissible = selections.filter((selection) =>
+        admissibleWorkspaceModel([selection], selection.model.id),
+      );
       return {
-        allowed: selections
-          .filter((selection) => admissibleWorkspaceModel([selection], selection.model.id))
-          .map((selection) => selection.model.id),
+        allowed: admissible.map((selection) => selection.model.id),
+        selections: admissible,
         default: agentModel,
         unavailable: false,
       };
@@ -960,20 +971,25 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       siteId: host.site.id,
       agentModel,
     });
-    const creditModels = new Set(await siteCreditModelIds(deps, host.scope, host.site.id));
-    const credited = (models: string[]) => models.filter((model) => creditModels.has(model));
-    if (choice.kind === "unavailable")
-      return {
-        allowed: credited(named(limits.agentModels ?? [])),
-        default: null,
-        unavailable: true,
-      };
+    const creditSelections = new Map(
+      (await siteCreditModelSelections(deps, host.scope, host.site.id)).map((selection) => [
+        selection.model.id,
+        selection,
+      ]),
+    );
+    const credited = (models: string[]) => models.filter((model) => creditSelections.has(model));
+    const selectionsOf = (models: string[]) =>
+      models.flatMap((model) => {
+        const selection = creditSelections.get(model);
+        return selection ? [selection] : [];
+      });
+    if (choice.kind === "unavailable") {
+      const allowed = credited(named(limits.agentModels ?? []));
+      return { allowed, selections: selectionsOf(allowed), default: null, unavailable: true };
+    }
     const model = choice.model;
-    return {
-      allowed: credited(named([model, ...(limits.agentModels ?? [])])),
-      default: model,
-      unavailable: false,
-    };
+    const allowed = credited(named([model, ...(limits.agentModels ?? [])]));
+    return { allowed, selections: selectionsOf(allowed), default: model, unavailable: false };
   };
 
   /**
@@ -1046,8 +1062,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       case "models.list": {
         const models = await siteViewerModels(host, viewer, limits);
+        // The in-Site SDK reads this as the workspace model catalog, so each
+        // row carries the same definition, readiness and availability as
+        // GET /v1/workspaces/:id/model-catalog, limited to this viewer.
         return context.json({
-          models: models.allowed.map((model) => ({ id: model })),
+          models: projectWorkspaceModelCatalog(models.selections).models,
           defaultModel: models.default,
         });
       }

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { computerRuntimeConfig } from "../src/main";
+import { computerRuntimeConfig, defaultMaxBrowserSessions, machineMemoryBytes } from "../src/main";
 
 test("desktop configuration selects CUA on Mac and Windows without changing the Linux host desktop", () => {
   expect(computerRuntimeConfig({}, "darwin")).toEqual({
@@ -220,3 +220,36 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
     if (timer) clearTimeout(timer);
   }
 }
+
+test("the default browser limit follows machine memory", () => {
+  const GiB = 1024 ** 3;
+  expect(defaultMaxBrowserSessions(7.8 * GiB)).toBe(13);
+  expect(defaultMaxBrowserSessions(16 * GiB)).toBe(27);
+  expect(defaultMaxBrowserSessions(48 * GiB)).toBe(81);
+  expect(defaultMaxBrowserSessions(62 * GiB)).toBe(105);
+  expect(defaultMaxBrowserSessions(86.4 * GiB)).toBe(147);
+  expect(defaultMaxBrowserSessions(2 * GiB)).toBe(8);
+  expect(defaultMaxBrowserSessions(Number.NaN)).toBe(64);
+});
+
+test("a container's own memory limit bounds the machine memory", () => {
+  const GiB = 1024 ** 3;
+  const limits = (values: Record<string, string>) => (path: string) => {
+    const value = values[path];
+    if (value === undefined) throw new Error("ENOENT");
+    return value;
+  };
+  expect(machineMemoryBytes(64 * GiB, limits({}))).toBe(64 * GiB);
+  expect(
+    machineMemoryBytes(64 * GiB, limits({ "/sys/fs/cgroup/memory.max": `${8 * GiB}\n` })),
+  ).toBe(8 * GiB);
+  expect(machineMemoryBytes(64 * GiB, limits({ "/sys/fs/cgroup/memory.max": "max\n" }))).toBe(
+    64 * GiB,
+  );
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({ "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712" }),
+    ),
+  ).toBe(64 * GiB);
+});

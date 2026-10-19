@@ -1454,13 +1454,29 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
       resumeStart,
     );
-    const suspend = source.slice(suspendStart, resumeStart);
+    const suspendRoute = source.slice(suspendStart, resumeStart);
+    const checkpointStart = source.indexOf("async function suspendBrowserSessionCheckpoint(");
+    const suspend = source.slice(
+      checkpointStart,
+      source.indexOf("async function withBrowserPlacement<T>(", checkpointStart),
+    );
     const resume = source.slice(resumeStart, endStart);
+    // The route authorizes the browser's own chat, then saves through the
+    // shared checkpoint with controller recovery.
+    expect(
+      suspendRoute.indexOf(
+        'authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control")',
+      ),
+    ).toBeLessThan(suspendRoute.indexOf("suspendBrowserSessionCheckpoint("));
+    expect(suspendRoute).toContain("{ before, recoverController: true }");
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
     // A controller that restarted is recovered from the browser's working copy
     // before the suspension is prepared, so the capture saves the intact
     // profile instead of recording the browser as lost.
+    expect(suspend.indexOf("if (checkpoint.recoverController)")).toBeLessThan(
+      suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend("),
+    );
     expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeGreaterThan(0);
     expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeLessThan(
       suspend.indexOf("prepareBrowserSessionSuspend("),
@@ -1520,6 +1536,40 @@ describe("BrowserSession route discipline", () => {
     expect(resume.lastIndexOf("failBrowserSessionResumePreparation")).toBeGreaterThan(
       resume.indexOf("withBrowserPlacement"),
     );
+  });
+
+  test("a full controller saves its least recently used idle browser once, then retries the create", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const createStart = source.indexOf('"browser.create",');
+    const create = source.slice(
+      source.lastIndexOf("let capacitySuspendAllowed = true;", createStart),
+      source.indexOf("withInitialView(response, launch.result)", createStart),
+    );
+    // Only a capacity error, and only once, turns into a save-and-retry; any
+    // other failure, or a second full controller, fails the create as before.
+    expect(
+      create.indexOf("capacitySuspendAllowed && browserControllerCapacityExhausted(error)"),
+    ).toBeLessThan(create.indexOf("failBrowserSessionOperation("));
+    expect(create).toContain("capacitySuspendAllowed = false;");
+    expect(create).toContain("if (!(error instanceof BrowserControllerFull)) throw error;");
+    expect(create.indexOf("await suspendLeastRecentlyUsedBrowser(")).toBeLessThan(
+      create.lastIndexOf("response = await createOnPlacement();"),
+    );
+    const helperStart = source.indexOf("async function suspendLeastRecentlyUsedBrowser(");
+    const helper = source.slice(
+      helperStart,
+      source.indexOf("async function suspendBrowserSessionCheckpoint(", helperStart),
+    );
+    // Candidates come from the same controller instance, least recently used
+    // first, re-checked as still idle, and saved through the ordinary private
+    // checkpoint routed via the creating chat on that same placement.
+    expect(helper).toContain("placementInstanceId: full.placementInstanceId");
+    expect(helper).toContain("excludeBrowserSessionId: creatingBrowserSessionId");
+    expect(helper).toContain("Date.parse(before.session.lastUsedAt) >= idleBefore");
+    expect(helper).toContain(
+      "{ before, recoverController: false, capacityFor: { routeSourceSession } }",
+    );
+    expect(helper).toContain('console.warn("browser.capacity_suspend_failed"');
   });
 
   test("resumes an expired resume only after ending its retained controller generation", async () => {

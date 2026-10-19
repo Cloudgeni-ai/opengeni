@@ -1390,14 +1390,6 @@ impl<P: Platform + 'static> Supervisor<P> {
             Err(outcome) => return outcome,
         };
 
-        // Send the connect hello. A failure here is just a disconnect (retry).
-        if let Err(e) = self.send_hello(link, &client).await {
-            return ConnectionOutcome::Disconnected(format!("hello failed: {e}"));
-        }
-
-        // A successful connect + hello resets the backoff window.
-        backoff.reset();
-
         // Subscribe to the RPC subject — this IS the registry.
         let subscription = match client.subscribe(link.rpc_subject()).await {
             Ok(sub) => sub,
@@ -1444,14 +1436,16 @@ impl<P: Platform + 'static> Supervisor<P> {
         ));
         *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
 
-        // T-derived sizing becomes active only after every generation seam is
-        // ready. Early hello/subscribe/bulk failures therefore cannot leave a
-        // stale payload entry in the shared engine.
-        self.engine
-            .set_link_max_payload(&link.connection_id, client.server_info().max_payload);
-
-        let outcome = self
-            .serve_connection_generation(
+        // Hello is also the controller's recovery notification. Send it only
+        // after both lanes and all subscriptions exist: recovered requests must
+        // reach this generation, not a gap before its subscription is installed.
+        let outcome = if let Err(e) = self.send_hello(link, &client).await {
+            ConnectionOutcome::Disconnected(format!("hello failed: {e}"))
+        } else {
+            backoff.reset();
+            self.engine
+                .set_link_max_payload(&link.connection_id, client.server_info().max_payload);
+            self.serve_connection_generation(
                 link,
                 &client,
                 subscription,
@@ -1462,7 +1456,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                     reconnect,
                 },
             )
-            .await;
+            .await
+        };
 
         // Tear the bulk lane down with the generation: hooks see None and
         // drop frames until the next generation re-attaches consumers.
@@ -5770,11 +5765,11 @@ mod tests {
             asked.elapsed()
         );
 
-        // The control connection gets through; the bulk dial is held.
+        // The control connection gets through; the bulk dial is held. The
+        // hello waits for both lanes, so none is sent meanwhile.
         gate.forward(1);
         reconnect.request();
         gate.accepted().await;
-        let _ = it::next_hello(&mut hellos).await;
         gate.accepted().await;
         gate.forward(1);
         let asked = Instant::now();
@@ -5785,11 +5780,23 @@ mod tests {
             "bulk dial abandoned after {:?}",
             asked.elapsed()
         );
-        let _ = it::next_hello(&mut hellos).await;
         gate.accepted().await;
 
-        // A stop during the held bulk dial follows a hello, so it is
-        // announced, and the run ends.
+        // Both lanes get through: the hello follows.
+        gate.forward(2);
+        reconnect.request();
+        gate.accepted().await;
+        gate.accepted().await;
+        let _ = it::next_hello(&mut hellos).await;
+
+        // A stop during a held bulk dial is announced on the control
+        // connection, and the run ends.
+        reconnect.request();
+        gate.accepted().await;
+        gate.forward(1);
+        reconnect.request();
+        gate.accepted().await;
+        gate.accepted().await;
         shutdown.request();
         assert!(
             it::wait_for_event(&mut events, Duration::from_secs(5), |e| matches!(
@@ -5851,12 +5858,13 @@ mod tests {
         let reconnect = supervisor.reconnect_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
 
-        // The host refuses the control connection, then serves it again.
+        // The host refuses the control connection, then serves it again
+        // (the hello waits for the bulk lane, which it refuses).
         gate.accepted().await;
         gate.forward(1);
         let asked = Instant::now();
         reconnect.request();
-        let _ = it::next_hello(&mut hellos).await;
+        gate.accepted().await;
         assert!(
             asked.elapsed() < Duration::from_secs(2),
             "control reconnected after {:?}",
@@ -6568,6 +6576,66 @@ mod tests {
             definition.with_api_url("https://other.example.test"),
         ));
         assert!(!Arc::ptr_eq(&retained, &other.replies));
+    }
+
+    /// Cross-language fixture for the real JWT-expiration probe. No-op in a
+    /// normal unit run; the runtime integration test owns the isolated broker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_rotation_probe_agent() {
+        use opengeni_agent_platform::{DesktopBackend, NativePlatform, PlatformResult};
+        use std::sync::atomic::AtomicUsize;
+
+        struct SlowInput {
+            executions: AtomicUsize,
+            root: std::path::PathBuf,
+        }
+        #[async_trait::async_trait]
+        impl DesktopBackend for SlowInput {
+            fn probe(&self) -> Option<v1::Display> {
+                None
+            }
+            async fn capture(&self) -> PlatformResult<opengeni_agent_platform::CapturedFrame> {
+                unreachable!("input probe only")
+            }
+            async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+                let number = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
+                std::fs::write(self.root.join(format!("execution-{number}")), b"once").unwrap();
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                Ok(())
+            }
+        }
+        let Ok(url) = std::env::var("OPENGENI_ROTATION_PROBE_NATS") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(
+            std::env::var("OPENGENI_ROTATION_PROBE_ROOT").expect("probe root"),
+        );
+        let input = Arc::new(SlowInput {
+            executions: AtomicUsize::new(0),
+            root: root.clone(),
+        });
+        let mut credentials = it::test_credentials(&url);
+        credentials.consented_screen_control = true;
+        let definition = SupervisorLink::new(
+            "rotation-probe",
+            Arc::new(NativePlatform::with_root(&root).with_desktop(input)),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let supervisor =
+            Supervisor::new_links(&[definition], "test-0.0.0").with_spool_root(root.join("spool"));
+        let shutdown = supervisor.shutdown_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+        let deadline = Instant::now() + Duration::from_secs(150);
+        while !root.join("stop").exists() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     /// The first non-idempotent move commits, but nobody receives its reply.

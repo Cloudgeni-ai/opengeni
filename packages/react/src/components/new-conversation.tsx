@@ -14,6 +14,7 @@ import { ChatComposer } from "./chat-composer";
 import { ModelPolicyPicker } from "./model-policy-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyNewVoice = lazy(() => import("../realtime/embedded-new-voice"));
@@ -53,18 +54,26 @@ export type NewConversationViewProps = Presentation & { creation: NewConversatio
 
 /** Standalone stock new-chat composer. OpenGeniChat uses this same implementation. */
 export function NewConversation({ baseUrl, headers, fetch, ...props }: NewConversationProps) {
-  if (baseUrl === undefined) return <NewConversationRuntime {...props} />;
+  const resetKey = props.workspaceId ?? "";
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <NewConversationRuntime {...props} />
+      </ConversationRenderBoundary>
+    );
   const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope
-      baseUrl={baseUrl}
-      headers={headers}
-      fetch={fetch}
-      client={client}
-      workspaceId={workspaceId}
-    >
-      <NewConversationRuntime {...rest} />
-    </SessionProxyScope>
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        headers={headers}
+        fetch={fetch}
+        client={client}
+        workspaceId={workspaceId}
+      >
+        <NewConversationRuntime {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
   );
 }
 function NewConversationRuntime(props: NewConversationProps) {

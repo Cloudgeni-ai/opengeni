@@ -353,6 +353,16 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Read terminal custody proof from this operation's pinned runner. */
+  async query(opId: string): Promise<OpStatus> {
+    return await querySelfhostedOp({
+      controlRpc: this.deps.controlRpc,
+      rpcSubject: this.deps.rpcSubject,
+      opId,
+      controlTimeoutMs: this.deps.controlTimeoutMs,
+    });
+  }
+
   /**
    * Run one exec over the op stream. `opId` is the durable id (B1) — a re-issue
    * with the same id attaches instead of re-running. `deadlineMs` is the exec
@@ -1091,6 +1101,8 @@ class OpConsumer {
   }
 
   private refusedStart(status: OpStatus | undefined): SelfhostedControlError {
+    // The runner's tombstone: this op was cancelled before it ever began.
+    if (status && isOpTombstone(status)) return new OpTombstonedError(status.exit!);
     if (status?.exit?.cancelled) {
       return new SelfhostedControlError({
         message: "The command was cancelled before the machine admitted it.",
@@ -1547,7 +1559,10 @@ export function isOpTombstone(status: OpStatus): boolean {
   const exit = status.exit;
   return (
     status.state === OpState.OP_STATE_COMPLETE &&
+    status.lostReason === OpLostReason.OP_LOST_REASON_UNSPECIFIED &&
     exit?.cancelled === true &&
+    !exit.failureCode &&
+    !exit.timedOut &&
     BigInt(status.nextSeq || "0") === 0n &&
     Object.keys(exit.totals ?? {}).length === 0 &&
     Object.keys(exit.digests ?? {}).length === 0
