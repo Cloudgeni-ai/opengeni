@@ -877,6 +877,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r15 23:06 | 8e8577dba | e53aa9512 | 24 | 3 | the suite's own host access (OS Login lacked `compute.projects.get`; fixed in the e2e); every product check passes |
 | r16 00:51 | 41f1e7bae+58d022965+6270b6eae | b593c5e25 | 19 | 7 | ui desktop (the chart predated the relay's owner routing); vm-crash, move, host-loss, delete (a request in flight across a VM crash never ends); link-stream (the window was too short for two checkpoints under load); see below |
 | r17 01:58 | 35d102db7+dc048ebe1+6270b6eae | 939d29e3b | 24 | 2 | vm-crash (the suite read the journal before the stream-end line), host-loss (the instance group recreated the host under its old name); both were check defects, fixed and passing in reruns; every product check passes; see below |
+| r18 04:17 | 4da6a3229+971f1b9b6+6270b6eae | 167d351ea | 10 | 0 | none; a rerun of background, vm-crash, host-loss and delete on the link-lost fix; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1305,3 +1306,44 @@ second try.
 | delete | deleting the session deletes its fabric sandbox | 20.4 s |
 | connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
 | cleanup | the run's sessions are deleted and its enrollment revoked | nothing left; r17c failed (see above) |
+
+### r18: a request on a lost host's link
+
+r18 (2026-10-19, 04:17 to 04:23) reran the checks that r17c's bug
+touched, on three fresh hosts built for the new compute commit and the
+same database (no `FRESH`). The backend was 4da6a3229. When a host's link
+session ends, the gateway now answers every request that session had not
+answered with an empty reply marked as link-lost, so the requester sends
+it again at once under the same delivery id, or ends a one-shot request
+as outcome unknown. A cancelled-before-start answer from the agent now
+settles a command's read as cancelled. It was merged with the run-as
+branch 971f1b9b6 and the agent's fabric branch 6270b6eae. Compute was
+167d351ea, whose fleet service no longer starts a stopped host that the
+instance group is recreating. Rerun it with:
+
+```sh
+. p4.env
+compute/e2e/env.sh build && compute/e2e/env.sh fleet && compute/e2e/env.sh deploy &&
+  RUN=r18 ONLY=background,vm-crash,host-loss,delete compute/e2e/env.sh suite
+```
+
+All 10 checks passed, cleanup included:
+
+| check | r18 |
+| --- | --- |
+| create | first turn in 25.1 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| vm-crash | the next command answered 4.5 s after the kill, on its second try; generation 1 -> 2; both writes kept; programs lost and reported; the request in flight ended with 409 after 30.1 s; one reconnect; the stream-end line names the sandbox |
+| host-loss | back on another live host in 177.7 s (owner epoch 1 -> 3), against 285.8 to 446.0 s in r17; the archived file kept, the late write lost; the kept journal's instance and boot checked |
+| delete | the fabric sandbox gone 10.2 s after the delete |
+| cleanup | nothing left |
+
+The session that r17c left stuck could be deleted once the API pods had
+been replaced by the deploy. Its stale holder was gone by then, the first
+delete answered 409 while its sandbox drained, and a delete 35 s later
+succeeded. That shows the new deploy clearing it, not the fix clearing a
+request it already held.
+
+This host-loss result is from before the next fabric change. With that
+change, a sandbox that was not handed off boots fresh from its newest
+copy's files after a host loss, instead of restoring that copy's memory.
