@@ -928,6 +928,64 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each([true, false])(
+    "browser_open create returns the tab it opened, not an older tab on the same URL (view=%s)",
+    async (withView) => {
+      // A person's Chrome (or a concurrent session sharing the profile) can
+      // already show the requested URL. The new session must get its own tab.
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const url = "https://requested.example.test/";
+      const older = { ...browserTarget(), id: "tab-older", url, selected: false };
+      const opened = { ...browserTarget(), id: "tab-opened", url, selected: true };
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          createBrowserSession: async () =>
+            ({
+              session,
+              ...(withView
+                ? {
+                    initialView: {
+                      targets: [older, opened],
+                      observation: browserObservation(opened),
+                    },
+                  }
+                : {}),
+            }) as never,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [older, opened],
+          }),
+          observeBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+            observed.push(targetId);
+            return browserObservation(targetId === opened.id ? opened : older);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { initialUrl: url },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(observed).toEqual(withView ? [] : [opened.id]);
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(content.targets).toEqual([agentTarget(opened)]);
+      expect(content.otherTabCount).toBe(1);
+      expect(content.observation).toMatchObject({ target: agentTarget(opened) });
+    },
+  );
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {

@@ -2322,7 +2322,11 @@ async function openBrowser(
     }
     targets = inventory.targets;
   }
-  const primary = openedBrowserTarget(targets, value.initialUrl);
+  const primary = openedBrowserTarget(
+    targets,
+    value.initialUrl,
+    initialView?.observation.target.id,
+  );
   const observation = !primary
     ? undefined
     : initialView?.observation.target.id === primary.id
@@ -2385,16 +2389,28 @@ function agentAttachedProfile(
 }
 
 /**
- * The tab the agent most likely acts on next: the tab showing the requested
- * URL, else the selected page.
+ * The tab the agent most likely acts on next: the tab this open launched, else
+ * the session's own (selected) tab showing the requested URL, else any tab
+ * showing it, else the selected page. An attached Chrome profile lists the
+ * person's tabs and other sessions' tabs too, so an older tab on the same URL
+ * must not win over the one this session opened.
  */
 function openedBrowserTarget(
   targets: z.infer<typeof BrowserTarget>[],
   initialUrl: string | undefined,
+  launchedTargetId: string | undefined,
 ): z.infer<typeof BrowserTarget> | undefined {
   const pages = targets.filter((target) => target.kind === "page");
+  const launched = launchedTargetId
+    ? pages.find((target) => target.id === launchedTargetId)
+    : undefined;
+  if (launched) return launched;
+  const showingUrl = initialUrl
+    ? pages.filter((target) => sameBrowserUrl(target.url, initialUrl))
+    : [];
   return (
-    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
+    showingUrl.find((target) => target.selected) ??
+    showingUrl[0] ??
     pages.find((target) => target.selected) ??
     (pages.length === 1 ? pages[0] : undefined)
   );
