@@ -2858,7 +2858,7 @@ describe("release schema contract", () => {
       "0844_free_plan_credit_scope.sql",
       "0845_signup_eligibility_without_bonus.sql",
       "0846_independent_session_titles.sql",
-      "0847_explicit_workspace_recovery.sql",
+      "0848_explicit_workspace_recovery.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

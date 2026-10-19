@@ -2761,7 +2761,7 @@ later provider loss. An operator may still explicitly authorize historical recov
 Every future agent attempt receives the discontinuity from its durable receipt
 as a new turn-scoped operational notice at the history tail. Earlier items and
 the legacy session-instruction prefix are never rewritten by this decision;
-compaction does not erase the receipt. Migration 0847 requires
+compaction does not erase the receipt. Migration 0848 requires
 warning protocol v4 on affected turn claims, so older workers cannot silently
 omit the new reason during a rolling deployment; ordinary sessions are unaffected.
 
