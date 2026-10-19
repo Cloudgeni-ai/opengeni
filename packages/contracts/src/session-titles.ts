@@ -196,7 +196,9 @@ const TITLE_LABEL_PATTERN =
   /^(?:(?:suggested|generated|concise)\s+)?(?:(?:session|chat|conversation|task)\s+)?title\s*[:\-–—]\s*/iu;
 
 const LEADING_BOILERPLATE_PATTERNS = [
-  /^(?:hi|hello|hey)(?:\s+there)?\s*[,!:.\-–—]*\s*/iu,
+  // Require a real separator, not ASCII-only \b: History, HelloWorld and
+  // Unicode word continuations are title content, as is "thereabouts" after Hi.
+  /^(?:hi|hello|hey)(?:\s+there)?(?=$|[\s,!:.\-–—])\s*[,!:.\-–—]*\s*/iu,
   /^(?:i\s+(?:would\s+like|want|need)\s+you\s+to|i['’]d\s+like\s+you\s+to)\s+/iu,
   /^(?:please\s+)?(?:can|could|would|will)\s+you\s+/iu,
   /^(?:your|the)\s+(?:task|job)\s+is\s+to\s+/iu,
