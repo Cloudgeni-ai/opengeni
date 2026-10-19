@@ -266,8 +266,8 @@ async function exec(command: string, timeoutMs = 60_000, signal?: AbortSignal): 
     { signal },
   );
 }
-async function execOk(command: string, timeoutMs?: number): Promise<string> {
-  const result = await exec(command, timeoutMs);
+async function execOk(command: string, timeoutMs?: number, signal?: AbortSignal): Promise<string> {
+  const result = await exec(command, timeoutMs, signal);
   if (result.exitCode !== 0) {
     // A traceback's last lines say what went wrong.
     throw new Error(
@@ -284,6 +284,7 @@ function fabric<T = any>(
   path: string,
   body?: unknown,
   key = OPENGENI_KEY,
+  signal?: AbortSignal,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -316,9 +317,13 @@ function fabric<T = any>(
     request.setTimeout(900_000, () =>
       request.destroy(new Error(`fabric ${method} ${path} timed out`)),
     );
-    onCheckAbort((reason) =>
-      request.destroy(reason instanceof Error ? reason : new Error(String(reason))),
-    );
+    const stop = (reason: unknown) =>
+      request.destroy(reason instanceof Error ? reason : new Error(String(reason)));
+    onCheckAbort(stop);
+    if (signal) {
+      if (signal.aborted) stop(signal.reason);
+      else signal.addEventListener("abort", () => stop(signal.reason), { once: true });
+    }
     if (payload) request.write(payload);
     request.end();
   });
@@ -554,13 +559,20 @@ type SandboxState = {
   step: string | null;
   generation: number | null;
 };
-async function sandboxState(): Promise<SandboxState> {
+async function sandboxState(signal?: AbortSignal): Promise<SandboxState> {
   for (let tries = 0; ; tries += 1) {
     try {
-      return await fabric<SandboxState>("GET", `/v1/sandboxes/${state.sandbox}/state`);
+      return await fabric<SandboxState>(
+        "GET",
+        `/v1/sandboxes/${state.sandbox}/state`,
+        undefined,
+        OPENGENI_KEY,
+        signal,
+      );
     } catch (error) {
       if (!(error instanceof HttpError && error.status === 503) || tries >= 60) throw error;
       await sleep(1_000);
+      if (signal?.aborted) throw signal.reason;
     }
   }
 }
@@ -1499,12 +1511,18 @@ check(
     // What each file's sha256 must be: in/<n> written through the API, out/<n>
     // made in the guest and read through the API.
     const sums = new Map<string, string>();
-    const roundTrip = async (path: string, expected: string, what: string) => {
-      const read = await og<any>("POST", `${ses()}/fs/read`, {
-        path,
-        encoding: "base64",
-        maxBytes: 2 * LINK_FILE_BYTES,
-      });
+    const roundTrip = async (
+      path: string,
+      expected: string,
+      what: string,
+      signal?: AbortSignal,
+    ) => {
+      const read = await og<any>(
+        "POST",
+        `${ses()}/fs/read`,
+        { path, encoding: "base64", maxBytes: 2 * LINK_FILE_BYTES },
+        { signal },
+      );
       const bytes = Buffer.from(read.content, "base64");
       if (read.truncated || bytes.length !== LINK_FILE_BYTES || sha256(bytes) !== expected) {
         throw new Error(
@@ -1531,52 +1549,84 @@ check(
       }
     };
     await execOk("rm -rf e2e/link && mkdir -p e2e/link");
-    const from = new Date().toISOString();
+    // One absolute deadline over every transfer and state request.
+    const transfers = new AbortController();
+    const windowTimer = setTimeout(
+      () => transfers.abort(new Error(`the ${LINK_WINDOW_MAX_MS / 1000} s cap on the transfers`)),
+      LINK_WINDOW_MAX_MS,
+    );
     const start = Date.now();
+    // The proof window is the transfers' own: from the first transfer's
+    // start to the last one's end.
+    const from = new Date(start).toISOString();
+    let lastTransferEnd = start;
     let cycles = 0;
     const durations: number[] = [];
-    // Checkpoints the host's state showed begin and end inside the window:
-    // one counts only if it was seen not under way, then under way, then
-    // not (a checkpoint already under way at the start is not counted).
-    let checkpointing = (await sandboxState()).step === "checkpoint";
+    // Checkpoints the host's state showed begin and end during the
+    // transfers: the first look is taken after a transfer, and a checkpoint
+    // counts only if it was seen not under way, then under way, then not
+    // (one under way at the first look is not counted). At least one more
+    // transfer runs after the second is seen to end, so it ended inside.
+    let checkpointing: boolean | undefined;
     let checkpointSeenBegin = false;
     let checkpointsSeen = 0;
-    while (
-      Date.now() - start < LINK_WINDOW_MS ||
-      (checkpointsSeen < 2 && Date.now() - start < LINK_WINDOW_MAX_MS)
-    ) {
-      const slot = cycles % LINK_SLOTS;
-      const began = Date.now();
-      await step(`cycle ${cycles + 1}`, async () => {
-        // In: random bytes written through the API, read back.
-        const data = randomBytes(LINK_FILE_BYTES);
-        const inPath = `e2e/link/in-${slot}`;
-        sums.set(inPath, sha256(data));
-        await og("POST", `${ses()}/fs/write`, {
-          path: inPath,
-          content: data.toString("base64"),
-          encoding: "base64",
+    let transfersAfterSecond = 0;
+    try {
+      while (
+        Date.now() - start < LINK_WINDOW_MS ||
+        checkpointsSeen < 2 ||
+        transfersAfterSecond < 1
+      ) {
+        const slot = cycles % LINK_SLOTS;
+        const began = Date.now();
+        const signal = transfers.signal;
+        await step(`cycle ${cycles + 1}`, async () => {
+          // In: random bytes written through the API, read back.
+          const data = randomBytes(LINK_FILE_BYTES);
+          const inPath = `e2e/link/in-${slot}`;
+          sums.set(inPath, sha256(data));
+          await og(
+            "POST",
+            `${ses()}/fs/write`,
+            { path: inPath, content: data.toString("base64"), encoding: "base64" },
+            { signal },
+          );
+          await roundTrip(inPath, sums.get(inPath)!, "written then read", signal);
+          // Out: random bytes the guest makes, read through the API.
+          const outPath = `e2e/link/out-${slot}`;
+          const made = await execOk(
+            `head -c ${LINK_FILE_BYTES} /dev/urandom > ${outPath} && sha256sum ${outPath}`,
+            undefined,
+            signal,
+          );
+          sums.set(outPath, made.trim().split(/\s+/)[0]!);
+          await roundTrip(outPath, sums.get(outPath)!, "made in the guest", signal);
         });
-        await roundTrip(inPath, sums.get(inPath)!, "written then read");
-        // Out: random bytes the guest makes, read through the API.
-        const outPath = `e2e/link/out-${slot}`;
-        const made = await execOk(
-          `head -c ${LINK_FILE_BYTES} /dev/urandom > ${outPath} && sha256sum ${outPath}`,
-        );
-        sums.set(outPath, made.trim().split(/\s+/)[0]!);
-        await roundTrip(outPath, sums.get(outPath)!, "made in the guest");
-      });
-      durations.push(Date.now() - began);
-      cycles += 1;
-      const now = (await sandboxState()).step === "checkpoint";
-      if (now && !checkpointing) checkpointSeenBegin = true;
-      if (!now && checkpointing && checkpointSeenBegin) {
-        checkpointsSeen += 1;
-        checkpointSeenBegin = false;
+        lastTransferEnd = Date.now();
+        durations.push(lastTransferEnd - began);
+        cycles += 1;
+        if (checkpointsSeen >= 2) transfersAfterSecond += 1;
+        const busy = (await sandboxState(signal)).step === "checkpoint";
+        if (checkpointing !== undefined) {
+          if (busy && !checkpointing) checkpointSeenBegin = true;
+          if (!busy && checkpointing && checkpointSeenBegin) {
+            checkpointsSeen += 1;
+            checkpointSeenBegin = false;
+          }
+        }
+        checkpointing = busy;
       }
-      checkpointing = now;
+    } catch (error) {
+      if (!transfers.signal.aborted) throw error;
+      throw new Error(
+        `the host's state showed ${checkpointsSeen} checkpoint(s) begin and end during the transfers` +
+          `${checkpointsSeen >= 2 ? " but no transfer after the second" : ""}, not two, within the ${LINK_WINDOW_MAX_MS / 1000} s cap (${cycles} cycles)`,
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(windowTimer);
     }
-    const to = new Date().toISOString();
+    const to = new Date(lastTransferEnd).toISOString();
     const moved = cycles * LINK_FILE_BYTES;
     await step("the guest's sums after the transfers", guestSums);
     const during = await step("the guest console after the transfers", async () =>
