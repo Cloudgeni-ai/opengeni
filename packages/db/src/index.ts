@@ -61764,13 +61764,15 @@ export async function setEnrollmentAgentRuntime(
         'requested', 'accepted', 'waiting_for_idle', 'downloading', 'verifying',
         'applying', 'restarting'
       )`;
-      const successorProvesCompletion = sql`(
+      // No receipt (manual install or ordinary restart) is false, not SQL NULL:
+      // the negation below must still settle the replaced process's operation.
+      const successorProvesCompletion = sql`coalesce((
         ${activeUpdate}
         and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
         and ${completedBinarySha256} = ${input.binarySha256}
-      )`;
+      ), false)`;
       const acceptingProcessWasReplaced = sql`(
         ${activeUpdate}
         and ${schema.enrollments.agentUpdateConnectionInstanceId}

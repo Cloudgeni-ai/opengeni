@@ -91,6 +91,10 @@ pages or guarantee graceful completion for a permanently stuck controller.
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  For Windows, the managed-cloud one-liner is
+  `irm https://app.opengeni.ai/install.ps1 | iex`; self-hosted installations use
+  their own deployment origin instead. That same origin serves the promoted
+  release assets, so installation does not require a separate download hostname.
   Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
   Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
   authenticates its archive against a SHA-256 pinned in the script before execution,
