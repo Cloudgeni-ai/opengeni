@@ -185,7 +185,8 @@ const EXPECTED_CAPS = [
     2,
     "run",
   ],
-  ["ci.yml", "browserd-real-e2e", "Run actual browserd end-to-end suite", 6, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 6, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headed browserd streaming and interaction suite", 5, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   [
     "publish-desktop-image.yml",
@@ -214,7 +215,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
   "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
-  "ci.yml:browserd-real-e2e": { stepCaps: 25, needed: 26, jobCap: 27 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 30, needed: 31, jobCap: 33 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
   "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
 } as const;
@@ -236,7 +237,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 50 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -276,7 +277,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(49);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(50);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
