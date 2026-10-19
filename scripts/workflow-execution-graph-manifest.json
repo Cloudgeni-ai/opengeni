@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "89e70d63097b07c71d99203afe965789e94a131e16cccb73f05ecf56cdf6556b"
+      "sha256": "d102bf773c7abd10de2e2ef752c88571c5c6a29686154e0a0abf112dcdb09770"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
