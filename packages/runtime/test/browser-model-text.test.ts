@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   browserActionText,
+  browserNodeLine,
   browserObservationText,
   browserOpenText,
   browserReadText,
@@ -117,6 +118,17 @@ describe("browser model text", () => {
         '- textbox "Password" [e0000000c] value=<redacted>',
         "(1 earlier element removed; 3 long fields clipped)",
       ].join("\n"),
+    );
+  });
+
+  test("clips a long form field value and says how long it is", () => {
+    const value = `${"word ".repeat(600)}end`;
+    const line = browserNodeLine(
+      { ref: "e0000000c", role: "textbox", depth: 0, name: "Body", value },
+      false,
+    );
+    expect(line).toBe(
+      `- textbox "Body" [e0000000c] value=${JSON.stringify(`${value.slice(0, 2_000)}…`)} valueChars=${value.length}`,
     );
   });
 

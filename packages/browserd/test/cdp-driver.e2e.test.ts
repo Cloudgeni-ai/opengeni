@@ -1272,8 +1272,7 @@ e2e(
           value: "hello",
         }),
       );
-      expect(values(filled)).not.toContain("hello");
-      expect(names(filled)).not.toContain("hello");
+      expect(values(filled)).toContain("hello");
       const submitted = await driver.dispatch(
         command(filled, {
           type: "press",

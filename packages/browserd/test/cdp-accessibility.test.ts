@@ -116,41 +116,45 @@ describe("normalizeCdpAccessibilityTree", () => {
     expect(JSON.stringify(snapshot.roots)).not.toContain("backendDOMNodeId");
   });
 
-  test("does not project editable control values", () => {
+  test("projects form field values but reports a masked password as redacted", () => {
+    const field = (nodeId: string, name: string, value: string) => ({
+      nodeId,
+      ignored: false,
+      role: { value: "textbox" },
+      name: { value: name },
+      value: { value },
+      backendDOMNodeId: Number(nodeId),
+      childIds: [`${nodeId}0`],
+    });
+    const text = (nodeId: string, parentId: string, name: string) => ({
+      nodeId,
+      parentId,
+      ignored: false,
+      role: { value: "StaticText" },
+      name: { value: name },
+    });
     const snapshot = normalizeCdpAccessibilityTree({
       controllerGeneration: "controller-1",
       targetId: "target-1",
       documentGeneration: "document-1",
       nodes: [
-        {
-          nodeId: "1",
-          ignored: false,
-          role: { value: "textbox" },
-          name: { value: "Password" },
-          value: { value: "super-secret" },
-          backendDOMNodeId: 42,
-          childIds: ["2"],
-        },
-        {
-          nodeId: "2",
-          parentId: "1",
-          ignored: false,
-          role: { value: "generic" },
-          childIds: ["3"],
-        },
-        {
-          nodeId: "3",
-          parentId: "2",
-          ignored: false,
-          role: { value: "StaticText" },
-          name: { value: "super-secret" },
-        },
+        { nodeId: "1", ignored: false, role: { value: "RootWebArea" }, childIds: ["2", "3"] },
+        { ...field("2", "Draft", "Reference 4821"), parentId: "1" },
+        text("20", "2", "Reference 4821"),
+        { ...field("3", "Password", "\u2022\u2022\u2022\u2022\u2022\u2022"), parentId: "1" },
+        text("30", "3", "\u2022\u2022\u2022\u2022\u2022\u2022"),
       ],
     });
 
-    expect(snapshot.roots[0]).not.toHaveProperty("value");
-    expect(JSON.stringify(snapshot.roots)).not.toContain("super-secret");
-    expect(snapshot.entries).toHaveLength(1);
+    const [draft, password] = snapshot.roots[0]!.children!;
+    expect(draft).toMatchObject({ role: "textbox", name: "Draft", value: "Reference 4821" });
+    expect(draft).not.toHaveProperty("children");
+    expect(password).toMatchObject({
+      role: "textbox",
+      name: "Password",
+      value: { redacted: true, reason: "password" },
+    });
+    expect(JSON.stringify(snapshot.roots)).not.toContain("\u2022");
   });
 
   test("keeps colliding frame-local AX ids and backend ids independently addressable", () => {

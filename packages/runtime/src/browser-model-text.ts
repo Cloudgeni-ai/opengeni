@@ -129,6 +129,14 @@ function quoted(value: string): string {
   return JSON.stringify(value);
 }
 
+/** Longest form field value shown inline; browser_read mode=dom returns more. */
+const SHOWN_VALUE_MAX_CHARS = 2_000;
+
+function shownValue(value: string): string {
+  if (value.length <= SHOWN_VALUE_MAX_CHARS) return `value=${quoted(value)}`;
+  return `value=${quoted(`${value.slice(0, SHOWN_VALUE_MAX_CHARS)}…`)} valueChars=${value.length}`;
+}
+
 export function browserNodeLine(node: BrowserTextNode, allRefs: boolean, baseDepth = 0): string {
   const parts = [`${"  ".repeat(Math.max(0, node.depth - baseDepth))}- ${node.role}`];
   if (node.name) parts.push(quoted(node.name));
@@ -136,7 +144,7 @@ export function browserNodeLine(node: BrowserTextNode, allRefs: boolean, baseDep
     parts.push(`[${node.ref}]`);
   }
   if (node.value !== undefined && node.value !== "") {
-    parts.push(typeof node.value === "string" ? `value=${quoted(node.value)}` : "value=<redacted>");
+    parts.push(typeof node.value === "string" ? shownValue(node.value) : "value=<redacted>");
   }
   if (node.description) parts.push(`description=${quoted(node.description)}`);
   for (const state of node.states ?? []) if (shownState(node.role, state)) parts.push(state);

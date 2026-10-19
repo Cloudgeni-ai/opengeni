@@ -84,6 +84,7 @@ import type {
 } from "./downloads";
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
+import { TypedSecretMemory } from "./typed-secrets";
 import {
   completeClientHints,
   hasEmptiedHighEntropyHints,
@@ -606,6 +607,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly autoSessions = new Map<string, string>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
+  /** Secret values this controller typed; redacted from everything it returns. */
+  private readonly typedSecrets = new TypedSecretMemory();
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -1073,6 +1076,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async observe(targetId: string): Promise<BrowserObservationValue> {
+    return this.typedSecrets.redact(await this.observeTarget(targetId));
+  }
+
+  private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
     return await this.withTarget(targetId, async (state, info) => {
       if (state.dialog) return await this.observeUnlocked(state, info);
       try {
@@ -1112,10 +1119,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.dialog) {
         throw new InteractionDefiniteDriverError(
           "resource_unavailable",
-          `${dialogSummary(state.dialog)} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
         );
       }
-      return await this.untilDialog(state, async () => await this.readDomUnlocked(state, request));
+      return this.typedSecrets.redact(
+        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
+      );
     });
   }
 
@@ -1245,7 +1254,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.diagnosticEntries.length > 0 &&
         state.diagnosticEntries[0]!.sequence > afterSequence + 1;
       const limited = available.length > entries.length;
-      return BrowserDiagnosticBatch.parse({
+      const batch = BrowserDiagnosticBatch.parse({
         browserSessionId: this.browserSessionId,
         controllerGeneration: this.controllerGeneration,
         targetId,
@@ -1256,6 +1265,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           : Math.max(afterSequence, state.diagnosticSequence),
         truncated: droppedBeforeCursor || limited,
       });
+      return this.typedSecrets.redact(batch);
     });
   }
 
@@ -1487,7 +1497,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
     const parsed = BrowserActionCommand.parse(commandInput);
-    const secretValues = parsed.secretValues;
+    // Remembered before dispatch: a failed action can still leave the value typed.
+    this.typedSecrets.remember(parsed.secretValues);
+    const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
@@ -1791,6 +1803,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   readClipboard(): BrowserClipboardValue {
+    return this.typedSecrets.redact(this.clipboardValue());
+  }
+
+  private clipboardValue(): BrowserClipboardValue {
     return BrowserClipboard.parse({
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,

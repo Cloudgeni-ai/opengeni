@@ -706,6 +706,31 @@ describe("ComputerDriver", () => {
       ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
     ]);
   });
+  test("redacts a typed secret from later observations of the field that holds it", async () => {
+    const transport = new EchoingFieldTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const raw = ["{{", "secret:Desk/api key", "}}"].join("");
+    const secret = "sk-live-0123456789abcdef";
+    const typed = await driver.dispatch({
+      ...typeCommand(raw),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+    });
+    expect(JSON.stringify(typed)).not.toContain(secret);
+    expect(transport.typed).toBe(secret);
+    // A later observation carries no secret of its own, yet the desktop
+    // still shows the field's value: it stays redacted.
+    const later = await driver.observe("window-1");
+    expect(JSON.stringify(later)).not.toContain(secret);
+    expect(later.semantic?.kind === "snapshot" && later.semantic.roots[0]).toMatchObject({
+      role: "textbox",
+      value: "[secret]",
+    });
+    expect(JSON.stringify(await driver.listTargets())).not.toContain(secret);
+  });
 });
 
 class FixtureNativeTransport implements ComputerBackend {
@@ -892,4 +917,32 @@ class UntypeableTextTransport extends FixtureNativeTransport {
 
 function typeCommand(value: string): ComputerActionCommand {
   return { ...command(), action: { type: "keyboard", action: "type", value } };
+}
+
+/** A desktop whose text field (and window title) shows what was typed into it. */
+class EchoingFieldTransport extends FixtureNativeTransport {
+  typed = "";
+
+  private field(observationId: string) {
+    return {
+      ...observation(observationId),
+      roots: [
+        { ref: "e1", role: "textbox", name: "API key", value: this.typed, states: [], actions: [] },
+      ],
+    };
+  }
+
+  override async observe() {
+    return { ...this.field("observation-1"), frameId: this.observationFrameId };
+  }
+
+  override async targets() {
+    return (await super.targets()).map((entry) => ({ ...entry, title: `Settings ${this.typed}` }));
+  }
+
+  override async dispatch(nativeCommand: ComputerBackendActionCommand) {
+    if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
+      this.typed = nativeCommand.action.value;
+    return this.field("observation-2");
+  }
 }
