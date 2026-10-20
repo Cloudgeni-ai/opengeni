@@ -147,7 +147,7 @@ describe("provider-neutral operational instructions", () => {
 
   test("answers in chat by default and routes document deliverables before local-file guidance", () => {
     const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
-      "Answer in chat by default, including summaries and reports",
+      "Answer in chat by default, including summaries, reports, briefs, letters and plans",
     );
     const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "When referencing a real local source file",
@@ -161,7 +161,7 @@ describe("provider-neutral operational instructions", () => {
       "including audit or summary reports produced while doing another task",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when the user asks for a document or file, or when the deliverable is large (multi-page) or clearly meant to be kept or shared",
+      "only when the user asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or the deliverable is too long to read comfortably in chat (several pages)",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "give a short summary and the artifact link in chat, not a full restatement",
