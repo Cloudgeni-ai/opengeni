@@ -43,6 +43,7 @@ import {
   type ModelAvailabilityV1,
   type ModelCredentialReadinessV1,
   type WorkspaceModelPolicyContract,
+  type LatencyMode,
 } from "@opengeni/contracts";
 import {
   listConnectionsMetadata,
@@ -522,6 +523,11 @@ export type ModelAvailabilityObservation = {
   status: "available" | "degraded" | "unavailable";
   reason: "not_entitled" | "provider_unhealthy" | null;
   checkedAt: string;
+  /**
+   * Speeds the model declares that no account serving this workspace offers
+   * (for example Ultrafast on plans without it). Omitted when unknown.
+   */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 export type ModelCredentialReadinessObservation =
@@ -586,6 +592,8 @@ export type WorkspaceModelSelection = {
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
   availability: ModelAvailabilityV1;
+  /** Declared speeds no account serving this workspace offers; see the observation. */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 function modelDefinitionRunnable(model: ConfiguredModel): boolean {
@@ -981,10 +989,13 @@ export function resolveWorkspaceModelSelection(
         nowMs,
         maxAgeMs,
       });
+      const unavailableLatencyModes =
+        input.observations?.[model.definitionVersion]?.unavailableLatencyModes;
       return {
         model,
         credentialReadiness,
         policyAllowed,
+        ...(unavailableLatencyModes?.length ? { unavailableLatencyModes } : {}),
         availability: availabilityFor({
           model,
           credentialReadiness,

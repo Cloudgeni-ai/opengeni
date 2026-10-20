@@ -762,24 +762,30 @@ export function ComposerPill({
   onPress,
   leading,
   fast = false,
+  ultrafast = false,
 }: {
   label: string;
   /** Secondary text after the label (the reasoning effort); truncates before the label. */
   detail?: string | null | undefined;
   /** Fast latency is on: a filled bolt after the name, as on the web pill. */
   fast?: boolean | undefined;
+  /** Ultrafast latency is on: two filled bolts. Takes precedence over `fast`. */
+  ultrafast?: boolean | undefined;
   onPress?: (() => void) | undefined;
   /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
 }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
+  const speedLabel = ultrafast
+    ? t("native.timeline.composer.ultrafast")
+    : fast
+      ? t("native.timeline.composer.fast")
+      : null;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={[label, detail, fast ? t("native.timeline.composer.fast") : null]
-        .filter(Boolean)
-        .join(", ")}
+      accessibilityLabel={[label, detail, speedLabel].filter(Boolean).join(", ")}
       onPress={onPress}
       disabled={!onPress}
       style={({ pressed }) => ({
@@ -819,7 +825,12 @@ export function ComposerPill({
           {detail}
         </Text>
       ) : null}
-      {fast ? <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} /> : null}
+      {fast || ultrafast ? (
+        <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} />
+      ) : null}
+      {ultrafast ? (
+        <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} />
+      ) : null}
       <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
     </Pressable>
   );

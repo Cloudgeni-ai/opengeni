@@ -653,7 +653,7 @@ export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type LatencyMode = "standard" | "priority" | "fast";
+export type LatencyMode = "standard" | "priority" | "fast" | "ultrafast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
 export type GitRepositoryAccess = "read" | "write";
@@ -4034,7 +4034,7 @@ export type ModelCapabilitiesV1 = {
       })
     | undefined;
   latencyModes: Array<{
-    id: "standard" | "priority" | "fast";
+    id: "standard" | "priority" | "fast" | "ultrafast";
     upstream: ModelCapabilitySupportV1;
     runnable: boolean;
     billingMultiplierBps?: number | undefined;

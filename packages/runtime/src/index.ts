@@ -1103,7 +1103,7 @@ export type GenerateSessionTitleOptions = {
   provider?: ResolvedModelProvider;
   model?: Model;
   modelName?: string;
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Reasoning effort for the title request only. Callers pass the model's
    * lowest runnable effort to leave room in the output budget for the title.
@@ -2180,7 +2180,7 @@ export type BuildAgentOptions = {
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Responses `text.verbosity`, set only for routes and models that accept it.
    * Hosts must keep it constant for a session: like reasoning effort, a

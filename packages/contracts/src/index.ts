@@ -820,9 +820,18 @@ export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["standard", "priority", "fast"]),
+  z.enum(["standard", "priority", "fast", "ultrafast"]),
 );
 export type LatencyMode = z.infer<typeof LatencyMode>;
+
+/**
+ * A subscription account's observed model list records each model it offers
+ * at a service tier as `<slug>@<tier>` (for example `gpt-6-astra@ultrafast`),
+ * next to the plain slug. Slugs never contain `@`, so slug checks are unchanged.
+ */
+export function modelServiceTierCatalogEntry(slug: string, tierId: string): string {
+  return `${slug}@${tierId}`;
+}
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
@@ -21206,7 +21215,7 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
     }).optional(),
     latencyModes: z.array(
       z.object({
-        id: z.enum(["standard", "priority", "fast"]),
+        id: z.enum(["standard", "priority", "fast", "ultrafast"]),
         upstream: ModelCapabilitySupportV1,
         runnable: z.boolean(),
         billingMultiplierBps: z.number().int().positive().optional(),

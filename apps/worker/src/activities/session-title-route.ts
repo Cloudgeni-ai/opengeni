@@ -35,7 +35,7 @@ export const SessionTitleRequest = z.object({
   chargesOpenGeniCredits: z.boolean(),
   countsTowardTokenCap: z.boolean(),
   pricingJson: z.string(),
-  serviceTier: z.enum(["fast", "priority"]).optional(),
+  serviceTier: z.enum(["fast", "priority", "ultrafast"]).optional(),
 });
 export type SessionTitleRequest = z.infer<typeof SessionTitleRequest>;
 

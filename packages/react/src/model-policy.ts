@@ -24,7 +24,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   catalog: TCatalog;
 };
 
-export type LatencyModeId = "standard" | "priority" | "fast";
+export type LatencyModeId = "standard" | "priority" | "fast" | "ultrafast";
 
 const BILLING_CLASS_LABELS = (t: OpenGeniText): Record<PickerBillingClass, string> => ({
   opengeni_credits: t("modelPolicy.models"),
@@ -162,6 +162,9 @@ export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[
 export function labelLatencyMode(t: OpenGeniText, mode: LatencyModeId): string {
   if (mode === "fast") {
     return t("modelPolicy.fast");
+  }
+  if (mode === "ultrafast") {
+    return t("modelPolicy.ultrafast");
   }
   if (mode === "priority") {
     return t("modelPolicy.priority");
