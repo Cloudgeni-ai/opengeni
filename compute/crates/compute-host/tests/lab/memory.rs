@@ -315,6 +315,16 @@ async fn a_guests_disk_writes_are_not_memory_it_holds() {
     // The agent samples every running VM each second.
     sleep(Duration::from_secs(3)).await;
     let after = resident(&agent.status().await, sandbox).expect("sampled");
+    // The cache is still in the group after the agent's reading, so the
+    // reading saw it: the guest writes nothing more, and cache once
+    // dropped stays so.
+    let still = charged().saturating_sub(charged_before);
+    assert!(
+        still >= WRITE / 2,
+        "the host dropped the guest's disk writes before the agent read them, so the check \
+         proves nothing: {} MiB left in the VM's group",
+        still / MIB
+    );
     assert!(
         after < before + WRITE / 4,
         "the agent counts the disk's page cache as held: {} MiB before, {} MiB after \
