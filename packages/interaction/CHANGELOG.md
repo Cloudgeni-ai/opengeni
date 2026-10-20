@@ -1,5 +1,15 @@
 # @opengeni/interaction
 
+## 4.2.0
+
+### Patch Changes
+
+- Updated dependencies [641e179]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+
 ## 4.1.3
 
 ### Patch Changes

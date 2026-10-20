@@ -1,5 +1,36 @@
 # @opengeni/react
 
+## 4.2.0
+
+### Minor Changes
+
+- 8c38fe4: An embedded conversation marks itself read while the person watches it.
+
+  - `@opengeni/react`: `SessionConversation` and `SessionConversationView` acknowledge each delivered reply, question or failure for the signed-in person while the timeline is on screen, the page is visible and the window focused (once per reply, never per streamed token, with `acknowledgedThroughSequence` so a late request never hides a newer reply). Unread state, and notifications a server derives from it, then skip replies the person already saw. A hidden timeline, background tab or unfocused window acknowledges nothing; `readAcknowledgement={false}` turns it off. `useSessionReadAcknowledgement` (from `@opengeni/react/session`) does the same for custom layouts. `createEmbeddedSessionClient` passes an optional `updateSessionAttention` through.
+  - `@opengeni/react-native`: the native session uses the same acknowledgement implementation, which now retries a transient failure once after a short delay and stops after a permanent rejection.
+  - `@opengeni/sdk`: `createSessionProxyHandler` forwards `PUT …/sessions/{sid}/attention` with only `{ unread: false, acknowledgedThroughSequence? }`.
+
+- 5252d01: Embedding products can show their own name everywhere people look.
+
+  - `@opengeni/react`: a `productName` prop on `OpenGeniProvider` and `OpenGeniMessagesProvider` (and `createOpenGeniText`) fills `{product}` in every built-in string that names the product, such as credit labels and recovery notices. Default "Opengeni".
+  - `@opengeni/agent-host`: `browserExtension: false` keeps an app's own agent from registering as the Opengeni Browser extension's native host, and removes a registration it made earlier, so another agent on the same computer keeps the extension.
+  - The agent's browser and computer helpers now run as `browserd` and `computer-native`, so Activity Monitor and Task Manager show no product name under an app that runs the agent under its own name. Older names beside an installed agent are still found.
+
+- 64e6d6b: Products can draw their own links in agent replies. Pass `renderLink` to `Markdown` or `OpenGeniLinkProvider` and links the agent writes with your scheme (`myapp:order/42`), in-app paths or web URLs reach you with the exact `href`, the link text and whether the link stands alone on its line, so you can show a chip or a card that opens in place. A paragraph holding a standalone link renders as a block so a card is valid there. Returning `undefined` keeps the default link. Without `renderLink`, nothing changes.
+
+### Patch Changes
+
+- a868e17: Repaint retained spreadsheet text tiles when web fonts finish loading so fallback glyphs do not remain cached until the next resize.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- f6cb82d: Refresh compiled styles to include the vertical padding used by the chat render-error boundary in embedded and published Site conversations.
+- 44dc72a: The chat no longer blanks a published Site. The model picker accepts catalog rows without readiness or availability details, and SessionConversation and NewConversation now contain render errors with a "This chat couldn't be displayed" message and a Try again button instead of unmounting the host page.
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [47eeb80]
+  - @opengeni/sdk@4.2.0
+  - @opengeni/connect@4.2.0
+
 ## 4.1.3
 
 ### Patch Changes
