@@ -561,6 +561,25 @@ export function useProviderConnection(
     return result?.error ? null : (result?.data ?? null);
   }, [client, customModelsKey, enabled]);
 
+  // Mutation receipts update the provider's own rows, but catalogs, access
+  // choices and organization summaries also depend on them. Invalidate these
+  // even after navigation; the old page's callback no longer owns any UI.
+  // Keep unrelated live provider usage and the authoritative saved rows intact.
+  const invalidateDependentReads = useCallback(
+    () =>
+      Promise.all([
+        invalidateSharedQueries(client, catalogKey),
+        invalidateSharedQueries(client, [
+          "model-settings",
+          "access",
+          "workspaces",
+          props.workspaceId,
+        ]),
+        invalidateSharedQueries(client, ["model-settings", "workspace-snapshots"]),
+      ]),
+    [client, catalogKey, props.workspaceId],
+  );
+
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
     if (!enabled || hasCatalogConnection) return null;
     if (props.canManageConnection) {
@@ -660,6 +679,7 @@ export function useProviderConnection(
         saved,
         ...current.filter((item) => !isProviderConnection(item, config)),
       ]);
+      void invalidateDependentReads();
       if (!isCurrent()) return;
       props.onConnectionChange?.();
       toast.success(`${config.credentialLabel} connected`);
@@ -671,6 +691,7 @@ export function useProviderConnection(
     } catch (caught) {
       if (!isCurrent()) {
         void invalidateSharedQueries(client, connectionsKey);
+        void invalidateDependentReads();
         return false;
       }
       let finalError = caught;
@@ -685,6 +706,7 @@ export function useProviderConnection(
           finalError = retryError;
         }
       }
+      void invalidateDependentReads();
       await refreshConnection();
       if (!isCurrent()) return false;
       recordOutcome("outcome_unknown");
@@ -706,6 +728,7 @@ export function useProviderConnection(
     setBusy(true);
     try {
       await client.deleteConnection(props.workspaceId, connection.id);
+      void invalidateDependentReads();
       const reconciled = await refreshConnection();
       if (!isCurrent()) return false;
       const committed =
@@ -726,6 +749,7 @@ export function useProviderConnection(
       toast.success(`${config.credentialLabel} disconnected`);
       return true;
     } catch (caught) {
+      void invalidateDependentReads();
       const reconciled = await refreshConnection();
       if (!isCurrent()) return false;
       const committed =
@@ -779,6 +803,7 @@ export function useProviderConnection(
         ),
         saved,
       ]);
+      void invalidateDependentReads();
       if (!isCurrent()) return;
       pendingModelCreateRef.current = null;
       setModelSlug((draft) => (draft === submittedSlug ? "" : draft));
@@ -807,6 +832,7 @@ export function useProviderConnection(
       }
       confirmAdded(saved);
     } catch (caught) {
+      void invalidateDependentReads();
       const reconciled = await refreshCustomModels();
       if (!isCurrent()) return;
       const committed = reconciled?.find(
@@ -843,6 +869,7 @@ export function useProviderConnection(
         customModelsKey,
         current.filter((candidate) => candidate.id !== model.id),
       );
+      void invalidateDependentReads();
       if (!isCurrent()) return;
       pendingModelDeleteOperationsRef.current.delete(model.id);
       removeFocusTargetRef.current = focusModelId
@@ -865,6 +892,7 @@ export function useProviderConnection(
       confirmRemoved();
       return true;
     } catch (caught) {
+      void invalidateDependentReads();
       const reconciled = await refreshCustomModels();
       if (!isCurrent()) return false;
       if (reconciled !== null) {

@@ -14,8 +14,11 @@ import { createRoot } from "react-dom/client";
 import {
   clearSharedQueries,
   invalidateSharedQueries,
+  peekSharedQuery,
   retainSharedQueries,
+  sharedQueryWriter,
 } from "@/lib/shared-query";
+import { renderHook } from "../../../../packages/react/test/render-hook";
 
 const listConnections = mock(async (_workspaceId: string): Promise<ConnectionMetadata[]> => []);
 const listWorkspaceGatewayCustomModels = mock(
@@ -209,8 +212,14 @@ mock.module("@/components/ui/destructive-confirm", () => ({
     ) : null,
 }));
 
-const { AiGatewayConnectionCard, OpenRouterConnectionCard, OpperConnectionCard } =
-  await import("./ai-gateway-connection");
+const {
+  AiGatewayConnectionCard,
+  OpenRouterConnectionCard,
+  OpperConnectionCard,
+  PROVIDER_CONNECTION_CONFIGS,
+  useProviderConnection,
+} = await import("./ai-gateway-connection");
+const { useWorkspaceModelCatalog } = await import("@/lib/use-workspace-model-catalog");
 
 /** The status in the provider page header; "…" while it's still loading. */
 function statusText(container: HTMLElement): string {
@@ -1035,6 +1044,104 @@ describe("AiGatewayConnectionCard custom models", () => {
       container.remove();
     }
   });
+
+  for (const mutation of ["custom model", "credential", "replacement credential"] as const) {
+    for (const mountedCatalog of [false, true]) {
+      test(`a deferred ${mutation} save after unmount refreshes ${mountedCatalog ? "mounted" : "retained"} dependents`, async () => {
+        const modelSave = deferred<WorkspaceGatewayCustomModel>();
+        const credentialSave = deferred<ConnectionMetadata>();
+        createWorkspaceGatewayCustomModel.mockImplementation(() => modelSave.promise);
+        createConnection.mockImplementation(() => credentialSave.promise);
+        updateConnection.mockImplementation(() => credentialSave.promise);
+        if (mutation === "replacement credential") {
+          listConnections.mockImplementation(async () => [gatewayConnection()]);
+        }
+        const catalogKey = ["model-settings", "workspace-catalog", "workspace-a"] as const;
+        const accessKey = [
+          "model-settings",
+          "access",
+          "workspaces",
+          "workspace-a",
+          "vercel_gateway",
+          "current",
+        ] as const;
+        const summaryKey = ["model-settings", "workspace-snapshots", "workspace-a"] as const;
+        const otherWorkspaceKey = ["model-settings", "workspace-catalog", "workspace-b"] as const;
+        const overviewKey = ["model-settings", "codex-overview", "workspace-a"] as const;
+        const release = retainSharedQueries(context.client);
+        const write = sharedQueryWriter(context.client);
+        write(catalogKey, { models: [] });
+        write(accessKey, { policy: "before" });
+        write(summaryKey, { "workspace-a": "before" });
+        write(otherWorkspaceKey, { models: [] });
+        write(overviewKey, { accounts: {} });
+        let catalog = mountedCatalog
+          ? await renderHook(() => useWorkspaceModelCatalog("workspace-a"), undefined)
+          : undefined;
+        const onConnectionChange = mock(() => {});
+        const provider = await renderHook(
+          () =>
+            useProviderConnection({
+              client: context.client as unknown as Parameters<
+                typeof useProviderConnection
+              >[0]["client"],
+              workspaceId: "workspace-a",
+              config: PROVIDER_CONNECTION_CONFIGS.vercel,
+              canManageConnection: true,
+              canManageCustomModels: true,
+              onConnectionChange,
+            }),
+          undefined,
+        );
+        let unmounted = false;
+        try {
+          let saving!: Promise<unknown>;
+          await act(async () => {
+            saving =
+              mutation === "custom model"
+                ? provider.result.current.addCustomModel("deepseek/deepseek-v3.2")
+                : provider.result.current.saveKey("fixture-late-credential");
+            await flush();
+          });
+          expect(
+            mutation === "custom model"
+              ? createWorkspaceGatewayCustomModel
+              : mutation === "credential"
+                ? createConnection
+                : updateConnection,
+          ).toHaveBeenCalledTimes(1);
+          await provider.unmount();
+          unmounted = true;
+          getWorkspaceModelCatalog.mockImplementation(async () => ({
+            models: [gatewayCatalogModel()],
+          }));
+          await act(async () => {
+            modelSave.resolve(customModel("deepseek/deepseek-v3.2"));
+            credentialSave.resolve(gatewayConnection());
+            await saving;
+            await flush();
+          });
+          if (!mountedCatalog) {
+            expect(peekSharedQuery(context.client, catalogKey)).toBeNull();
+            catalog = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), undefined);
+          }
+          expect(catalog!.result.current.models).toEqual([gatewayCatalogModel()]);
+          expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(1);
+          expect(peekSharedQuery(context.client, accessKey)).toBeNull();
+          expect(peekSharedQuery(context.client, summaryKey)).toBeNull();
+          expect(peekSharedQuery(context.client, otherWorkspaceKey)?.data).toEqual({ models: [] });
+          expect(peekSharedQuery(context.client, overviewKey)?.data).toEqual({ accounts: {} });
+          expect(onConnectionChange).not.toHaveBeenCalled();
+          expect(toastSuccess).not.toHaveBeenCalled();
+        } finally {
+          if (!unmounted) await provider.unmount();
+          await catalog?.unmount();
+          release();
+          await flush();
+        }
+      });
+    }
+  }
 
   test("suppresses a completed mutation after switching workspaces", async () => {
     let resolveWorkspaceACreate: ((value: WorkspaceGatewayCustomModel) => void) | undefined;
