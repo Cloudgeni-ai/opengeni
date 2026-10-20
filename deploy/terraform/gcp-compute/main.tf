@@ -19,11 +19,13 @@ locals {
   # bare-metal otherwise, unless chosen.
   memory_profile = var.memory_profile != "" ? var.memory_profile : (var.nested ? "nested" : "bare-metal")
   # The memory a new host offers sandboxes, which the control service grows
-  # the group by: on the nested profile its huge pages, a share of the
-  # kernel's MemTotal (host-startup.sh), here estimated as 95 % of the
-  # machine type's memory so the estimate errs low; on the bare-metal
-  # profile 85 % of it.
-  host_memory_mib = floor(one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100 * (local.memory_profile == "nested" ? var.huge_pages_percent : 85) / 100 / 2) * 2
+  # the group by, worked out as the agent does from the kernel's MemTotal,
+  # here estimated as 95 % of the machine type's memory so the estimate
+  # errs low: on the nested profile its huge pages, a share of MemTotal
+  # (host-startup.sh); on the bare-metal profile MemTotal less a sixteenth,
+  # at least 1 GiB.
+  mem_total_mib   = one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100
+  host_memory_mib = local.memory_profile == "nested" ? floor(local.mem_total_mib * var.huge_pages_percent / 100 / 2) * 2 : floor(local.mem_total_mib - max(local.mem_total_mib / 16, 1024))
 }
 
 data "google_compute_machine_types" "host" {

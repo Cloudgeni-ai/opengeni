@@ -185,7 +185,10 @@ keeps `--memory-buffer-mib` (default a sixteenth of the capacity) free by
 pushing idle sandboxes deeper in the background, least recently used
 first, and also makes room for sandboxes that are held while refused, which
 then wake by themselves. Held or recently busy sandboxes are never touched.
-When that is not enough on a bare-metal host, sandboxes in use above their
+When available memory still runs low on a bare-metal host (below
+`--memory-low-mib`, by default a thirty-second of the host's memory and at
+least 512 MiB, until twice that is free), idle sandboxes are pushed deeper
+and then sandboxes in use above their
 request give way, furthest above first: their balloons take file cache
 back from their guests, and if the host is still short one is paused and
 saved, held or not, and wakes by itself with its programs once there is
