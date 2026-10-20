@@ -123,9 +123,6 @@ export const embeddingMigrationTail = [
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
   "0622_organization_slack_bot_delivery.sql",
-  // Extends the organization bot access table and routines installed by 0622.
-  // Replay after that withheld base rather than applying to a missing table.
-  "0864_scheduled_bot_capability.sql",
   // M2 extends the membership finalizer to revoke legacy Claude rows; replay
   // only after the deliberately withheld 0598 Claude tables are restored.
   "0642_shared_subscription_core.sql",
@@ -341,5 +338,8 @@ export const embeddingMigrationTail = [
   // Patches 0855's fork routines and temporarily disables the sessions fence
   // trigger installed by withheld 0345.
   "0856_session_fork_workflow_identity.sql",
+  // Replaces the Slack message routine and alters the access table created by
+  // withheld 0622; replay after it.
+  "0864_scheduled_bot_capability.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
