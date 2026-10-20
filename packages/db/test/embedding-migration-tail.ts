@@ -326,8 +326,6 @@ export const embeddingMigrationTail = [
   "0844_free_plan_credit_scope.sql",
   "0845_signup_eligibility_without_bonus.sql",
   "0846_independent_session_titles.sql",
-  // Replaces the seat trigger created by withheld 0797; replay after it.
-  "0850_invitation_binding_seat_scope.sql",
   // Extends machine grant predicates rewritten by withheld 0501.
   "0851_personal_machine_session_tree.sql",
   // Temporarily disables the sessions fence trigger installed by withheld 0345.
@@ -343,5 +341,7 @@ export const embeddingMigrationTail = [
   // Replaces the Slack message routine and alters the access table created by
   // withheld 0622; replay after it.
   "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

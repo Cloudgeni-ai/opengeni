@@ -2871,7 +2871,6 @@ describe("release schema contract", () => {
       "0847_read_only_runtime_probes.sql",
       "0848_strict_owner_maintenance_probes.sql",
       "0849_strict_owner_maintenance_claims.sql",
-      "0850_invitation_binding_seat_scope.sql",
       "0851_personal_machine_session_tree.sql",
       "0852_maintenance_predicate_privileges.sql",
       "0853_connected_machine_root_working_dirs.sql",
@@ -2881,6 +2880,7 @@ describe("release schema contract", () => {
       "0857_connection_origin_workspace_cascade.sql",
       "0868_humanless_personal_workspace_learning.sql",
       "0869_personal_workspace_editable_artifacts.sql",
+      "0870_invitation_binding_seat_scope.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
