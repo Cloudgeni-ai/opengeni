@@ -243,6 +243,8 @@ const client = {
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
   listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  getWorkspaceSubscriptionUsagePools: mock(async (_workspaceId: string) => ({ pools: [] })),
+  getOrganizationSubscriptionUsagePools: mock(async (_organizationId: string) => ({ pools: [] })),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -1801,6 +1803,9 @@ describe("One Models page for the organization and the workspace", () => {
     client.getModelConnectionAccess.mockImplementation(async () => {
       throw new Error("Connection request failed");
     });
+    // A cold load, unlike a normal retained revisit.
+    const { clearSharedQueries } = await import("@/lib/shared-query");
+    clearSharedQueries(client);
     const failedView = await render();
     try {
       await flush();
