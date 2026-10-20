@@ -22,7 +22,7 @@ import {
   codexAccountsQueryKey,
   codexLiveUsageQueryKey,
   invalidateSharedQueries,
-  peekSharedQuery,
+  MODEL_SETTINGS_STALE_TIME_MS,
   recordCodexLiveUsage,
   sharedQueryWriter,
   useSharedQuery,
@@ -31,7 +31,7 @@ import {
 } from "@/lib/shared-query";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -715,6 +715,7 @@ export function useCodexSubscriptions({
     client,
     codexAccountsQueryKey(workspaceId),
     () => client.listCodexAccounts(workspaceId),
+    { staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
   const data = accountsQuery.error ? null : accountsQuery.data;
   const loading = accountsQuery.loading;
@@ -728,62 +729,21 @@ export function useCodexSubscriptions({
     codexLiveUsageQueryKey(workspaceId),
   );
   const retainedUsage = liveUsageQuery.data?.usage ?? EMPTY_CODEX_USAGE;
-  // Accounts that got a live reading during this visit. Earlier readings show
-  // while this visit's read runs, but once that read fails they are not
-  // presented as current: those accounts say their usage is unavailable.
-  const [visitReadIds, setVisitReadIds] = useState<ReadonlySet<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<CodexWorking | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
-  // True while a LIVE batched usage refresh is in flight with no earlier live
-  // reading to show (drives the meter skeleton). Earlier live readings stay on
-  // screen while this mount's read runs.
-  const [refreshingUsage, setRefreshingUsage] = useState(
-    () => !peekSharedQuery(client, codexLiveUsageQueryKey(workspaceId))?.data,
-  );
-  const [overviewMap, setOverviewMap] = useState<CodexOverviewResponse["accounts"]>({});
-  // The last live overview read failed as a whole (not one account's usage).
-  const [usageError, setUsageError] = useState(false);
-  const usageMap = useMemo<CodexUsageMap>(
-    () =>
-      usageError
-        ? Object.fromEntries(Object.entries(retainedUsage).filter(([id]) => visitReadIds.has(id)))
-        : retainedUsage,
-    [usageError, retainedUsage, visitReadIds],
-  );
-  // The account whose single-account live refresh is in flight (per-page spinner).
-  const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
-  const cancelled = useRef(false);
-  const usageRefreshedRef = useRef(false);
-  // A clock for reset times and usage labels - one timer, never a backend re-hit.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Re-read this list only (after a live usage read wrote the cached columns).
-  const { refresh: reloadAccounts } = accountsQuery;
-  // After an account change: every retained Codex list for this workspace,
-  // including session account choices, may now be wrong.
-  const refreshAccounts = useCallback(
-    () => invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId)),
-    [client, workspaceId],
-  );
-
-  // LIVE batched overview refresh: usage + reset-credit details settle
-  // independently per account under the server's max-four provider-call cap.
-  const refreshUsage = useCallback(async () => {
-    setRefreshingUsage(!peekSharedQuery(client, codexLiveUsageQueryKey(workspaceId))?.data);
-    // Created before the read: a clear (identity change) meanwhile refuses it.
-    const write = sharedQueryWriter(client);
-    try {
+  // Retain the independently-settled usage and reset inventory together.
+  // A revisit only checks the provider after five minutes (or explicit Refresh).
+  const overviewQuery = useSharedQuery<CodexOverviewResponse>(
+    client,
+    ["model-settings", "codex-overview", workspaceId],
+    async (signal) => {
+      const write = sharedQueryWriter(client);
       const result = await client.codexOverview(workspaceId);
-      if (!cancelled.current) {
-        setOverviewMap(result.accounts);
+      if (!signal.aborted)
         recordCodexLiveUsage(
           write,
           client,
@@ -799,49 +759,59 @@ export function useCodexSubscriptions({
           ) as CodexUsageMap,
           "replace",
         );
-        setVisitReadIds(new Set(Object.keys(result.accounts)));
-        setNow(Date.now());
-        setUsageError(false);
-      }
-    } catch {
-      // Per-account errors are each account's own "usage unavailable" state.
-      if (!cancelled.current) setUsageError(true);
-    } finally {
-      await reloadAccounts();
-      if (!cancelled.current) setRefreshingUsage(false);
-    }
-  }, [client, workspaceId, reloadAccounts]);
+      return result;
+    },
+    { enabled: Boolean(data?.accounts.length), staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  const overviewMap = overviewQuery.data?.accounts ?? {};
+  const refreshingUsage = overviewQuery.loading;
+  const usageError = Boolean(overviewQuery.error);
+  const usageMap = usageError ? EMPTY_CODEX_USAGE : retainedUsage;
+  // The account whose single-account live refresh is in flight (per-page spinner).
+  const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
+  const cancelled = useRef(false);
+  // A clock for reset times and usage labels - one timer, never a backend re-hit.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Re-read this list only (after a live usage read wrote the cached columns).
+  const { refresh: reloadAccounts } = accountsQuery;
+  // After an account change: every retained Codex list for this workspace,
+  // including session account choices, may now be wrong.
+  const refreshAccounts = useCallback(
+    () =>
+      Promise.all([
+        invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId)),
+        invalidateSharedQueries(client, ["model-settings"]),
+      ]).then(() => undefined),
+    [client, workspaceId],
+  );
+
+  // LIVE batched overview refresh: usage + reset-credit details settle
+  // independently per account under the server's max-four provider-call cap.
+  const { refresh: reloadOverview } = overviewQuery;
+  const refreshUsage = useCallback(async () => {
+    await reloadOverview();
+    await reloadAccounts();
+  }, [reloadOverview, reloadAccounts]);
 
   // Explicit retry still uses the independently-settled batch so reset detail
   // authority and usage can never drift.
   const refreshAccountUsage = useCallback(
     async (accountId: string) => {
       setRefreshingRow(accountId);
-      const write = sharedQueryWriter(client);
       try {
-        const result = await client.codexOverview(workspaceId);
-        if (!cancelled.current) {
-          setOverviewMap(result.accounts);
-          const usage = result.accounts[accountId]?.usage.value;
-          // Only this account's reading (and its time) changes.
-          recordCodexLiveUsage(
-            write,
-            client,
-            workspaceId,
-            { [accountId]: { status: usage?.status ?? "no-data", usage: usage ?? null } },
-            "merge",
-          );
-          setVisitReadIds((previous) => new Set([...previous, accountId]));
-          setNow(Date.now());
-        }
+        await refreshUsage();
       } catch {
         /* surfaced as the account's "usage unavailable" state */
       } finally {
-        await reloadAccounts();
         if (!cancelled.current) setRefreshingRow(null);
       }
     },
-    [client, workspaceId, reloadAccounts],
+    [refreshUsage],
   );
 
   useEffect(() => {
@@ -851,29 +821,8 @@ export function useCodexSubscriptions({
     };
   }, []);
 
-  // An access save elsewhere on the page can change which accounts this
-  // workspace lists as its own or sets aside.
-  useEffect(() => {
-    const changed = () => void refreshAccounts();
-    window.addEventListener("model-connections-changed", changed);
-    return () => window.removeEventListener("model-connections-changed", changed);
-  }, [refreshAccounts]);
-
-  // Detailed reset rows are deliberately never cached as redemption authority, so
-  // every mount performs exactly ONE independently-settled live overview read. The
-  // account identity renders immediately, but usage waits for this read rather
-  // than flashing the server's cached limit columns; only earlier LIVE readings
-  // (shared with the session switcher) may show meanwhile. Navigation/explicit
-  // refresh only, never an interval.
-  useEffect(() => {
-    if (loading || !data || usageRefreshedRef.current) return;
-    if (data.accounts.length > 0) {
-      usageRefreshedRef.current = true;
-      void refreshUsage();
-    } else {
-      setRefreshingUsage(false);
-    }
-  }, [loading, data, refreshUsage]);
+  // The retained overview is display data only. Redemption still prepares a
+  // fresh, server-authorized attempt before the irreversible confirmation.
 
   const setSourceMode = useCallback(
     async (mode: WorkspaceCodexSubscriptionMode, success?: string): Promise<boolean> => {
@@ -881,7 +830,6 @@ export function useCodexSubscriptions({
       setWorking("source");
       try {
         await client.requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, { mode });
-        usageRefreshedRef.current = false;
         await refreshAccounts();
         if (success) toast.success(success);
         return true;
@@ -943,18 +891,16 @@ export function useCodexSubscriptions({
                       description: userErrorText(error),
                     }),
                   );
-                usageRefreshedRef.current = false;
               }
               // The sign-in may finish after Settings is gone: every retained
               // Codex list for this workspace, session choices included, re-reads
               // now (mounted) or on its next mount, whether or not this page is.
-              void invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId));
+              await refreshAccounts();
               if (!cancelled.current) {
                 setPending(null);
                 toast.success(
                   `Codex connected${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
                 );
-                await refreshUsage();
                 options?.onConnected?.(
                   "accountId" in result && typeof result.accountId === "string"
                     ? result.accountId
@@ -989,7 +935,7 @@ export function useCodexSubscriptions({
         setBusy(false);
       }
     },
-    [client, workspaceId, refreshUsage, data?.source?.mode],
+    [client, workspaceId, refreshAccounts, data?.source?.mode],
   );
 
   const activate = useCallback(
@@ -1190,6 +1136,8 @@ export function useCodexSubscriptions({
     redemption: resets.redemption,
     now,
     refreshAccounts,
+    updatedAt: overviewQuery.updatedAt ?? accountsQuery.updatedAt,
+    refreshUsage,
     refreshAccountUsage,
     setSourceMode,
     connect,

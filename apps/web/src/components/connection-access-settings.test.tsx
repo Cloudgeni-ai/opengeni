@@ -3,6 +3,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError, OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
+import { retainSharedQueries, useConsoleSharedQueries } from "@/lib/shared-query";
 
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
@@ -19,6 +21,90 @@ const { modelsScopeLabels, organizationReachLabel } = await import("./models/mod
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
+});
+
+test("access reserves rows, never guesses Shared by, reuses remounts and invalidates after save/event", async () => {
+  let policy = {
+    allowedModels: null as string[] | null,
+    allowedWorkspaces: ["one", "two"],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  };
+  const response = (): ModelConnectionAccessResponse => ({
+    policy,
+    models: [],
+    workspaces: [],
+    personalWorkspacesSupported: true,
+  });
+  let finish!: (value: ModelConnectionAccessResponse) => void;
+  let first = true;
+  const read = mock(async () =>
+    first
+      ? new Promise<ModelConnectionAccessResponse>((resolve) => {
+          finish = resolve;
+        })
+      : response(),
+  );
+  const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+    getModelConnectionAccess: read,
+    updateModelConnectionAccess: async (_target: unknown, next: typeof policy) => {
+      policy = { ...next, version: policy.version + 1 };
+      return policy;
+    },
+  });
+  const release = retainSharedQueries(client);
+  function Page() {
+    const access = useConnectionAccess({
+      client,
+      organizationId: "org",
+      kind: "codex",
+      connectionId: "account",
+    });
+    return (
+      <>
+        <div>{organizationReachLabel(modelsScopeLabels("Acme", false), access.data)}</div>
+        <ConnectionAccessRows access={access} organization canManage onEdit={() => undefined} />
+        <button onClick={() => void access.save({ ...policy, allowedModels: ["model"] })}>
+          Save fixture
+        </button>
+      </>
+    );
+  }
+  function Shell({ show }: { show: boolean }) {
+    useConsoleSharedQueries(client);
+    return show ? <Page /> : null;
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Shell show />));
+    expect(container.textContent).toContain("Available in");
+    expect(container.textContent).toContain("Models it can serve");
+    expect(container.textContent).not.toContain("Shared by");
+    expect(container.querySelectorAll('[aria-label="Loading"]').length).toBe(3);
+    first = false;
+    await act(async () => finish(response()));
+    expect(container.textContent).toContain("Selected workspaces");
+    await act(async () => root.render(<Shell show={false} />));
+    await act(async () => root.render(<Shell show />));
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Selected workspaces");
+    expect(container.querySelector('[aria-label="Loading"]')).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Save fixture")!
+        .click(),
+    );
+    expect(container.textContent).toContain("1 model");
+    const beforeEvent = read.mock.calls.length;
+    await act(async () => window.dispatchEvent(new Event("model-connections-changed")));
+    expect(read.mock.calls.length).toBeGreaterThan(beforeEvent);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    release();
+  }
 });
 
 test("SUB-OWN-06: sharing is explicit, explains consumer-plan limits and requires a chosen reach", async () => {
@@ -411,7 +497,7 @@ test("an organization account no workspace can use says so, on its tag, row and 
   expect(organizationReachLabel(labels, access(["workspace-a"], false))).toBe("Engineering only");
   expect(organizationReachLabel(labels, access([], true))).toBe("Selected workspaces");
   expect(organizationReachLabel(labels, access([], false))).toBe("No workspaces");
-  expect(organizationReachLabel(labels, null)).toBe("Shared by Acme");
+  expect(typeof organizationReachLabel(labels, null)).not.toBe("string");
 
   const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
     requestJson: async () => access([], false),

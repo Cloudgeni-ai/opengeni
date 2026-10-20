@@ -464,7 +464,12 @@ function BarFull({ label, value, level, fill, resetsLabel, loading }: Parts) {
       ) : (
         <Track level={level} fill={fill} />
       )}
-      {resetsLabel && !loading ? (
+      {loading ? (
+        <span
+          aria-hidden="true"
+          className="block h-4.5 w-32 rounded bg-surface-2 motion-safe:animate-pulse"
+        />
+      ) : resetsLabel ? (
         <p className="text-xs leading-4.5">
           <ResetLine level={level} resetsLabel={resetsLabel} />
         </p>

@@ -25,6 +25,7 @@ export {
   sharedQueryWriter,
   useSharedQuery,
   useSharedQueryValue,
+  useSharedQueryActivity,
   type SharedQueryKey,
   type SharedQueryWriter,
 } from "../../../../packages/react/src/hooks/shared-query";
@@ -52,6 +53,17 @@ export function invalidateSubscriptionAccountQueries(client: object): Promise<vo
 /** The window event pages dispatch after a model connection or its availability changes. */
 export const MODEL_CONNECTIONS_CHANGED = "model-connections-changed";
 
+// Provider checks are relatively expensive and limits seldom need second-level
+// freshness in Settings. Explicit Refresh always bypasses this five-minute TTL.
+export const MODEL_SETTINGS_STALE_TIME_MS = 5 * 60_000;
+
+export function invalidateModelSettingsQueries(client: object): Promise<void> {
+  return Promise.all([
+    invalidateSubscriptionAccountQueries(client),
+    invalidateSharedQueries(client, ["model-settings"]),
+  ]).then(() => undefined);
+}
+
 /**
  * The console's cache wiring for its API client (called once, at the root that
  * owns `client`):
@@ -66,7 +78,7 @@ export const MODEL_CONNECTIONS_CHANGED = "model-connections-changed";
 export function useConsoleSharedQueries(client: object): void {
   useEffect(() => retainSharedQueries(client), [client]);
   useEffect(() => {
-    const changed = () => void invalidateSubscriptionAccountQueries(client);
+    const changed = () => void invalidateModelSettingsQueries(client);
     window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
     return () => window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
   }, [client]);

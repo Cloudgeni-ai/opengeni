@@ -1,5 +1,5 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ConnectionAccessFormPage,
   useConnectionAccess,
@@ -62,7 +62,7 @@ export function ClaudeRow({
   account: ClaudeSubscriptionAccount;
   places: ClaudePlaces;
   onOpen: () => void;
-  scopeLabel?: string;
+  scopeLabel?: ReactNode;
 }) {
   // An organization's own account says where it's available, like Codex and SuperGrok.
   const access = useConnectionAccess({

@@ -35,79 +35,110 @@ const response: OrganizationCodexAccountsResponse = {
 };
 let usageNeedsReconnect = false;
 
-const requestJson = mock(async (method: string, path: string, _body?: unknown) => {
-  if (method === "GET" && path.endsWith("/usage")) {
-    if (usageNeedsReconnect) {
-      response.accounts[1] = { ...response.accounts[1]!, status: "needs_relogin" };
+const requestJson = mock(
+  async (method: string, path: string, _body?: unknown): Promise<unknown> => {
+    if (method === "GET" && path.endsWith("/overview")) {
+      const result = (await requestJson("GET", path.replace(/\/overview$/, "/usage"))) as {
+        usage: unknown;
+      };
       return {
-        status: "error",
+        accountId: inactiveAccountId,
         usage: {
+          source: "provider",
+          fetchedAt: new Date().toISOString(),
+          stale: false,
+          error: null,
+          value: result.usage,
+        },
+        resetCredits: {
+          source: "none",
+          fetchedAt: null,
+          stale: false,
+          error: null,
+          detailState: "unsupported",
+          detailsComplete: false,
+          availableCount: null,
+          credits: [],
+        },
+        canRedeem: false,
+        canResumeRedemption: false,
+        redemptions: [],
+        redemptionAccess: { ownership: "unowned", canClaimUnownedViaReconnect: false },
+      };
+    }
+    if (method === "GET" && path.endsWith("/usage")) {
+      if (usageNeedsReconnect) {
+        response.accounts[1] = { ...response.accounts[1]!, status: "needs_relogin" };
+        return {
           status: "error",
-          reason: "needs_relogin",
-          planType: null,
+          usage: {
+            status: "error",
+            reason: "needs_relogin",
+            planType: null,
+            fiveHour: null,
+            weekly: null,
+            limitReached: false,
+            fetchedAt: new Date().toISOString(),
+          },
+        };
+      }
+      return {
+        status: "ok",
+        usage: {
+          status: "ok",
+          planType: "pro",
           fiveHour: null,
           weekly: null,
           limitReached: false,
           fetchedAt: new Date().toISOString(),
+          credits: {
+            balance: "120.50",
+            hasCredits: true,
+            unlimited: false,
+            overageLimitReached: false,
+          },
         },
       };
     }
-    return {
-      status: "ok",
-      usage: {
-        status: "ok",
-        planType: "pro",
-        fiveHour: null,
-        weekly: null,
-        limitReached: false,
-        fetchedAt: new Date().toISOString(),
-        credits: {
-          balance: "120.50",
-          hasCredits: true,
-          unlimited: false,
-          overageLimitReached: false,
-        },
-      },
-    };
-  }
-  if (method === "GET" && path === `/v1/organizations/${organizationId}/codex/accounts`) {
-    return structuredClone(response);
-  }
-  if (
-    method === "PATCH" &&
-    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`
-  ) {
-    const enabled = (_body as { enabled: boolean }).enabled;
-    response.accounts[1] = {
-      ...response.accounts[1]!,
-      allocatorEnabled: enabled,
-      allocatorVersion: 2,
-    };
-    return { changed: true, allocatorEnabled: enabled, allocatorVersion: 2 };
-  }
-  if (method === "PATCH" && path.endsWith("/extra-credits")) {
-    const enabled = (_body as { enabled: boolean }).enabled;
-    response.accounts[1] = {
-      ...response.accounts[1]!,
-      extraCreditsEnabled: enabled,
-      extraCreditsVersion: 2,
-    };
-    return { changed: true, extraCreditsEnabled: enabled, extraCreditsVersion: 2 };
-  }
-  if (
-    method === "POST" &&
-    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
-  ) {
-    return undefined;
-  }
-  if (
-    method === "DELETE" &&
-    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`
-  ) {
-    return undefined;
-  }
-  throw new Error(`Unexpected request: ${method} ${path}`);
-});
+    if (method === "GET" && path === `/v1/organizations/${organizationId}/codex/accounts`) {
+      return structuredClone(response);
+    }
+    if (
+      method === "PATCH" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`
+    ) {
+      const enabled = (_body as { enabled: boolean }).enabled;
+      response.accounts[1] = {
+        ...response.accounts[1]!,
+        allocatorEnabled: enabled,
+        allocatorVersion: 2,
+      };
+      return { changed: true, allocatorEnabled: enabled, allocatorVersion: 2 };
+    }
+    if (method === "PATCH" && path.endsWith("/extra-credits")) {
+      const enabled = (_body as { enabled: boolean }).enabled;
+      response.accounts[1] = {
+        ...response.accounts[1]!,
+        extraCreditsEnabled: enabled,
+        extraCreditsVersion: 2,
+      };
+      return { changed: true, extraCreditsEnabled: enabled, extraCreditsVersion: 2 };
+    }
+    if (
+      method === "POST" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
+    ) {
+      return undefined;
+    }
+    if (
+      method === "DELETE" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`
+    ) {
+      return undefined;
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  },
+);
 const access = {
   policy: {
     allowedModels: null,

@@ -12,7 +12,11 @@ import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
 import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
-import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
+import {
+  invalidateSharedQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
+} from "@/lib/shared-query";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
@@ -44,7 +48,7 @@ export function useOrganizationCodexSubscriptions({
         "GET",
         `/v1/organizations/${organizationId}/codex/accounts`,
       ),
-    { enabled },
+    { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
   const data = query.error ? null : query.data;
   const loading = query.loading;
@@ -63,7 +67,10 @@ export function useOrganizationCodexSubscriptions({
   // account change invalidates every retained Codex list for this client.
   const refresh = useCallback(async () => {
     if (!enabled) return;
-    await invalidateSharedQueries(client, ["codex-accounts"]);
+    await Promise.all([
+      invalidateSharedQueries(client, ["codex-accounts"]),
+      invalidateSharedQueries(client, ["model-settings"]),
+    ]);
   }, [client, enabled]);
 
   useEffect(() => {
@@ -115,8 +122,7 @@ export function useOrganizationCodexSubscriptions({
             // a confirmed sign-in invalidates every retained Codex list, also
             // when the page was left as it was confirmed. (Leaving earlier
             // stops polling: unmount aborts it and `result` is null.)
-            if (result.status === "connected")
-              void invalidateSharedQueries(client, ["codex-accounts"]);
+            if (result.status === "connected") await refresh();
             if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
@@ -129,7 +135,6 @@ export function useOrganizationCodexSubscriptions({
               toast.success(
                 `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
               );
-              await refresh();
               options?.onConnected?.(
                 "accountId" in result && typeof result.accountId === "string"
                   ? result.accountId
