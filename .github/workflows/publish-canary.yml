@@ -2,6 +2,10 @@ name: Publish canary packages
 
 # Lockstep {next-patch}-canary.N to dist-tag canary. Does not consume
 # changeset files, does not commit, never moves latest.
+# The publish job writes each package once. npm accepts writes with 202 and
+# processes them later, so a separate credential-free confirm job waits for the
+# versions to become readable and emits the Site pins. If npm is slower than
+# one confirmation window, re-run the failed confirm job; nothing is republished.
 on:
   workflow_dispatch:
     inputs:
@@ -26,6 +30,8 @@ jobs:
     name: Publish canary.N
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      cohort: ${{ steps.publish.outputs.cohort }}
     steps:
       - name: Admit protected main source
         env:
@@ -131,6 +137,7 @@ jobs:
         run: bun build scripts/publish-canary-node.ts --target=node --packages=external --outfile .release/publish-canary.mjs
 
       - name: Publish canary versions
+        id: publish
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           GH_TOKEN: ${{ github.token }}
@@ -140,18 +147,11 @@ jobs:
         # Execute the trusted controller; only admitted source supplies package builds.
         run: node .release/publish-canary.mjs
 
-      - name: Retain exact Site package pins for this deployment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: site-package-versions-${{ inputs.source_sha }}
-          path: .release/site-package-versions.json
-          if-no-files-found: error
-
       - name: Retain bounded publication and registry receipts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: canary-publication-receipts-${{ inputs.source_sha }}
+          name: canary-publication-receipts-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: .release/canary-receipts
           if-no-files-found: warn
           retention-days: 7
@@ -171,5 +171,51 @@ jobs:
         with:
           name: canary-source-provenance-${{ inputs.source_sha }}
           path: .release/canary-provenance
+          if-no-files-found: warn
+          retention-days: 7
+
+  confirm:
+    name: Confirm canary.N registry receipts
+    needs: publish
+    runs-on: ubuntu-latest
+    # One 30-minute visibility window plus setup; re-run this job to wait longer.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out controller
+        uses: actions/checkout@v6
+        with:
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install controller dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Wait for npm to serve the accepted cohort
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANARY_COHORT: ${{ needs.publish.outputs.cohort }}
+        run: bun scripts/confirm-canary-publication.ts
+
+      - name: Retain exact Site package pins for this deployment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: site-package-versions-${{ inputs.source_sha }}
+          path: .release/site-package-versions.json
+          if-no-files-found: error
+
+      - name: Retain registry confirmation receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-confirmation-receipts-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: .release/canary-confirmation-receipts
           if-no-files-found: warn
           retention-days: 7
