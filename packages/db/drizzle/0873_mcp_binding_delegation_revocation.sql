@@ -14,10 +14,13 @@
 -- Revocation is the same proven lifecycle write whether or not visibility
 -- changes, so the first fence now accepts the capability alone (the cleared
 -- value, epoch advance, owner and capability checks are unchanged). The second
--- validates a session's unchanged accepted bindings against the delegations
--- they were accepted with when an update only narrows those delegations.
--- Execution still revalidates live authority, so retained bindings grant
--- nothing without a current delegation. Every other write keeps its check.
+-- treats a cleared delegation list like a visibility change: it requires the
+-- same epoch advance, unchanged owners and lifecycle capability, and clears the
+-- session's accepted bindings exactly as privatization does, so no binding is
+-- left without its delegation (a regranted owner can share the session again
+-- and new turns start from an empty selection). A session that stays shared
+-- keeps its bindings only when it is becoming shared. Every other write keeps
+-- its check.
 -- Patch the installed bodies so later authority checks remain unchanged.
 DO $binding_delegation_revocation$
 DECLARE
@@ -31,15 +34,22 @@ BEGIN
       E'        OR NEW.visibility IS NOT DISTINCT FROM OLD.visibility\n',
       ''),
     ('opengeni_private.fence_mcp_account_bindings()',
-      E'  PERFORM opengeni_private.validate_mcp_account_bindings(bindings,delegations);\n',
-      $patch$  PERFORM opengeni_private.validate_mcp_account_bindings(bindings,
-    CASE WHEN TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'sessions'
-      AND bindings IS NOT DISTINCT FROM old_bindings
-      AND coalesce(old_document -> 'initial_personal_connection_delegations', '[]'::jsonb)
-        @> coalesce(delegations, '[]'::jsonb)
-    -- 0873: revocation narrows delegations; accepted bindings stay as evidence.
-    THEN old_document -> 'initial_personal_connection_delegations'
-    ELSE delegations END);
+      E'    IF TG_TABLE_NAME = ''sessions'' AND document ->> ''visibility'' IS DISTINCT FROM old_document ->> ''visibility'' THEN\n',
+      $patch$    IF TG_TABLE_NAME = 'sessions' AND (document ->> 'visibility' IS DISTINCT FROM old_document ->> 'visibility'
+      -- 0873: membership revocation clears delegations under the same capability.
+      OR (delegations = '[]'::jsonb
+        AND old_document -> 'initial_personal_connection_delegations' IS DISTINCT FROM '[]'::jsonb
+        -- Without the capability every other write keeps its original refusal.
+        AND EXISTS (
+          SELECT 1 FROM session_visibility_write_capabilities capability
+          WHERE capability.backend_pid = pg_backend_pid()
+            AND capability.transaction_id = pg_current_xact_id()
+            AND capability.capability_id = nullif(current_setting('opengeni.session_visibility_write_capability',true),'')::uuid))) THEN
+$patch$),
+    ('opengeni_private.fence_mcp_account_bindings()',
+      E'      bindings := CASE WHEN document ->> ''visibility'' = ''workspace_shared''\n',
+      $patch$      bindings := CASE WHEN document ->> 'visibility' = 'workspace_shared'
+        AND old_document ->> 'visibility' IS DISTINCT FROM 'workspace_shared'
 $patch$)
   ) AS sites(signature, anchor, replacement)
   LOOP

@@ -343,5 +343,8 @@ export const embeddingMigrationTail = [
   "0864_scheduled_bot_capability.sql",
   // Replaces the seat trigger created by withheld 0797; replay after it.
   "0870_invitation_binding_seat_scope.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501 and the
+  // trigger from withheld 0836; replay after both.
+  "0873_mcp_binding_delegation_revocation.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

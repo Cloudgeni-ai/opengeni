@@ -130,9 +130,11 @@ function rethrowExternalWorkspaceOperation(error: unknown): never {
       status === 409
         ? "External membership operation changed or was cancelled"
         : "External membership operation is not available";
-    // Database fences raise fixed reasons without row data. Name the one that
-    // refused so an integrator (and our logs) can act on it.
-    const reason = nestedPostgresMessage(error);
+    // Permission fences (42501) raise fixed reasons without row data: name the
+    // one that refused so an integrator can act on it. Other states can carry
+    // identifiers in their message, so they keep only the summary; the cause
+    // stays attached for our logs.
+    const reason = status === 403 ? nestedPostgresMessage(error) : null;
     throw new HTTPException(status, {
       message: reason ? `${summary}: ${reason}` : summary,
       cause: error,
