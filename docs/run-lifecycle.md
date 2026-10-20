@@ -428,9 +428,19 @@ same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
-`packages/sdk/src/gateway-realtime-transport.ts`,
+`packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
+
+Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
+one WebSocket path: `POST …/realtime/websocket` asks the provider registry in
+`apps/api/src/realtime-websocket.ts` for the model's provider, which mints a
+short-lived client secret and returns the socket URL, subprotocols, wire
+dialect (`openai` or `ai-gateway`), and the complete session update the browser
+sends unchanged. The browser transport only speaks the two wire dialects; it
+holds no provider-specific configuration. A new OpenAI-compatible provider is
+one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
+aliases of the same handler for older clients.
 
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or

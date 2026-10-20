@@ -266,7 +266,8 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "activateCodexRealtimeConnection"
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
->;
+> &
+  Partial<Pick<OpenGeniClient, "negotiateRealtimeWebsocket">>;
 
 /** Exact public SDK surface required by cross-surface human interventions. */
 export type EmbeddedInterventionClientLike = Pick<

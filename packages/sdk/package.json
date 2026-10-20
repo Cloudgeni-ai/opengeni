@@ -154,6 +154,10 @@
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
     },
+    "./realtime-websocket-transport": {
+      "types": "./src/realtime-websocket-transport.ts",
+      "default": "./src/realtime-websocket-transport.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"

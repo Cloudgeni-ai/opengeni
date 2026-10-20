@@ -465,6 +465,7 @@ export type {
 export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
+  createRealtimeWebsocketTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
 } from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
@@ -850,6 +851,10 @@ export type {
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
   GatewayRealtimeInitialItem,
+  RealtimeWebsocketProtocol,
+  SessionRealtimeWebsocketInitialItem,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,

@@ -41,16 +41,17 @@ describe("@opengeni/sdk/realtime", () => {
           ? "azure-live"
           : model === "gpt-live-1-boulder-alpha"
             ? "codex"
-            : model === "supergrok/grok-voice-think-fast-2.0"
-              ? "xai-subscription"
-              : "gateway";
+            : "websocket";
       expect(sessionRealtimeTransportKind(model)).toBe(expected);
+      // Persisted owner keys keep their historical per-provider namespaces.
       const namespace =
         expected === "azure-live"
           ? "azure-live-owner"
-          : expected === "xai-subscription"
-            ? "xai-realtime-owner"
-            : `${expected}-realtime-owner`;
+          : expected === "codex"
+            ? "codex-realtime-owner"
+            : model === "supergrok/grok-voice-think-fast-2.0"
+              ? "xai-realtime-owner"
+              : "gateway-realtime-owner";
       expect(sessionRealtimeOwnerStorageNamespace(model)).toBe(namespace);
       expect(sessionRealtimeOwnerStorageKey(WORKSPACE_ID, SESSION_ID, model)).toBe(
         `opengeni:${namespace}:${WORKSPACE_ID}:${SESSION_ID}`,
@@ -144,6 +145,7 @@ describe("@opengeni/sdk/realtime", () => {
       beginSessionRealtime: async () => ({}) as never,
       heartbeatSessionRealtime: async () => ({}) as never,
       negotiateCodexRealtimeWebrtc: async () => ({}) as never,
+      negotiateRealtimeWebsocket: async () => ({}) as never,
       negotiateGatewayRealtime: async () => ({}) as never,
       negotiateXaiSubscriptionRealtime: async () => ({}) as never,
       activateCodexRealtimeConnection: async () => ({}) as never,
@@ -159,6 +161,7 @@ describe("@opengeni/sdk/realtime", () => {
         "getWorkspaceRealtimeModelCatalog",
         "heartbeatSessionRealtime",
         "negotiateCodexRealtimeWebrtc",
+        "negotiateRealtimeWebsocket",
         "negotiateGatewayRealtime",
         "negotiateXaiSubscriptionRealtime",
         "syncSessionRealtimeLedger",

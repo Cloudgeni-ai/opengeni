@@ -145,8 +145,8 @@ let upstream: (url: string, init?: RequestInit) => Promise<Response>;
 
 const { createXaiSubscriptionTranscriptionProvider } =
   await import("../src/transcription/providers/xai-subscription");
-const { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } =
-  await import("../src/xai-realtime");
+const { createRealtimeWebsocketConnection, RealtimeWebsocketBrokerError } =
+  await import("../src/realtime-websocket");
 const { readXaiCoreStatus, workspaceXaiOperationAvailable } =
   await import("../src/xai-subscription-core");
 
@@ -265,12 +265,11 @@ describe("SuperGrok transcription by route", () => {
 
 describe("SuperGrok realtime by route", () => {
   const create = () =>
-    createXaiRealtimeConnectionSecret({
+    createRealtimeWebsocketConnection({
       db: {} as never,
       settings,
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
-      subjectId: "user:caller",
       sessionId: SESSION,
       model: SUPERGROK_REALTIME_MODEL_ID,
     } as never);
@@ -279,7 +278,7 @@ describe("SuperGrok realtime by route", () => {
     "%s fails closed before any credential read",
     async (closed) => {
       route = closed;
-      await expect(create()).rejects.toBeInstanceOf(XaiRealtimeBrokerError);
+      await expect(create()).rejects.toBeInstanceOf(RealtimeWebsocketBrokerError);
       expect(calls.filter((call) => !call.startsWith("route:"))).toEqual([]);
     },
   );
@@ -287,7 +286,51 @@ describe("SuperGrok realtime by route", () => {
   test("core: the session owner's shared candidates under a realtime lease; no pin or binding", async () => {
     upstream = async () => Response.json({ value: "secret", expires_at: 1 });
     const secret = await create().catch((error: unknown) => error);
-    expect(secret).toMatchObject({ token: "secret" });
+    expect(secret).toMatchObject({
+      token: "secret",
+      protocol: "openai",
+      url: "wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0",
+      protocols: ["xai-client-secret.secret"],
+    });
+    // Byte-identical to the session.update clients built before the server owned it.
+    const connection = secret as { instructions: string; sessionUpdate: unknown };
+    expect(JSON.stringify(connection.sessionUpdate)).toBe(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: connection.instructions,
+          voice: "eve",
+          reasoning: { effort: "high" },
+          turn_detection: { type: "server_vad", prefix_padding_ms: 300, silence_duration_ms: 500 },
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24_000 },
+              transcription: { model: "grok-transcribe" },
+            },
+            output: { format: { type: "audio/pcm", rate: 24_000 } },
+          },
+          tools: [
+            {
+              type: "function",
+              name: "delegate_to_session",
+              description:
+                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+              parameters: {
+                type: "object",
+                properties: {
+                  request: {
+                    type: "string",
+                    description: "Complete standalone task for the session agent",
+                  },
+                },
+                required: ["request"],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      }),
+    );
     expect(calls).toContain("candidates:session:user:owner");
     expect(calls).toContain(`lease:realtime:session:${SHARED}`);
   });
@@ -295,16 +338,15 @@ describe("SuperGrok realtime by route", () => {
   test("core with SuperGrok subscriptions disabled for the deployment reads no credential", async () => {
     calls.length = 0;
     await expect(
-      createXaiRealtimeConnectionSecret({
+      createRealtimeWebsocketConnection({
         db: {} as never,
         settings: testSettings({ supergrokSubscriptionEnabled: false }),
         accountId: ACCOUNT,
         workspaceId: WORKSPACE,
-        subjectId: "user:caller",
         sessionId: SESSION,
         model: SUPERGROK_REALTIME_MODEL_ID,
       } as never),
-    ).rejects.toBeInstanceOf(XaiRealtimeBrokerError);
+    ).rejects.toBeInstanceOf(RealtimeWebsocketBrokerError);
     expect(calls.filter((call) => !call.startsWith("route:"))).toEqual([]);
   });
 });

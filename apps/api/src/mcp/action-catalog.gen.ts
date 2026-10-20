@@ -5178,6 +5178,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "negotiateRealtimeWebsocket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    "request": [
+      "SessionRealtimeWebsocketRequest"
+    ],
+    "response": [
+      "SessionRealtimeWebsocketResponse"
+    ]
+  },
+  {
     "id": "negotiateXaiSubscriptionRealtime",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok",

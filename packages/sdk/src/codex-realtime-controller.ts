@@ -31,6 +31,8 @@ import type {
   CodexRealtimeWebrtcResponse,
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   EndSessionRealtimeRequest,
   RenewSessionRealtimeRequest,
   SessionRealtimeInboundEntry,
@@ -171,12 +173,20 @@ export type CodexRealtimeControllerClient = {
     request: CodexRealtimeWebrtcRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<CodexRealtimeWebrtcResponse>;
+  negotiateRealtimeWebsocket?(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRealtimeWebsocketRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<SessionRealtimeWebsocketResponse>;
+  /** @deprecated Implement negotiateRealtimeWebsocket. */
   negotiateGatewayRealtime?(
     workspaceId: string,
     sessionId: string,
     request: GatewayRealtimeConnectRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<GatewayRealtimeConnectResponse>;
+  /** @deprecated Implement negotiateRealtimeWebsocket. */
   negotiateXaiSubscriptionRealtime?(
     workspaceId: string,
     sessionId: string,
