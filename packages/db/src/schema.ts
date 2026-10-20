@@ -5900,6 +5900,11 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
+    // History deletion's ON DELETE SET NULL check has only history_item_id,
+    // not a realtime_id. Avoid a full ledger scan for every archived item.
+    historyItem: index("session_realtime_entries_history_item_idx")
+      .on(table.historyItemId)
+      .where(sql`${table.historyItemId} is not null`),
     delegationTurn: uniqueIndex("session_realtime_entries_delegation_turn_uq")
       .on(table.turnId)
       .where(sql`${table.kind} = 'delegation_call' and ${table.turnId} is not null`),
