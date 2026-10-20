@@ -1,3 +1,4 @@
+import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
@@ -1335,12 +1336,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
     const recoveryCode = providerRecoveryCode(error, failure);
+    const internalMcpWait = recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
     // A recovery that interrupts a running tool is followed by a successful
     // model response before the tool runs again, which resets the in-memory
     // budget. Count those recoveries since the turn's last tool progress so
     // the same bounded backoff and limit still apply.
     const toolProgress =
-      earlyRecoverableSetup || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+      earlyRecoverableSetup || internalMcpWait || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
         ? null
         : await readSessionTurnToolProgressRecoveryState(db, input.workspaceId, {
             sessionId: input.sessionId,
@@ -1364,7 +1366,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         recovery: recoveryResult,
         httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
         nextRecoveryCount: nextProviderRecoveryCount,
-        recoveryLimit: providerRecoveryLimit(recoveryCode),
+        recoveryLimit: providerRecoveryLimit(recoveryCode) ?? Infinity,
       })
     ) {
       providerTurn.persistentModelTransportHttpOnly = true;
@@ -1419,14 +1421,23 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           triggerEventId: attempt.triggerEventId!,
           attemptId: input.attemptId,
           reason: recoveryCode ?? "provider_unavailable",
-          providerRecoveryCount: nextProviderRecoveryCount,
+          // Internal setup waits do not spend or reset the model-provider budget.
+          ...(!internalMcpWait ? { providerRecoveryCount: nextProviderRecoveryCount } : {}),
           retryAfterMs: recoveryResult.continueDelayMs,
           ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
           detail: {
             ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
-            providerRecoveryCount: nextProviderRecoveryCount,
-            maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
+            ...(internalMcpWait
+              ? {
+                  code: FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+                  error:
+                    "Opengeni's tool service is temporarily unavailable. This turn will continue automatically when it returns.",
+                }
+              : {
+                  providerRecoveryCount: nextProviderRecoveryCount,
+                  maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
+                }),
           },
         });
         if (recovery.action === "stale") {
@@ -1510,7 +1521,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               providerRecovery: {
                 failureCode: recoveryCode ?? "provider_unavailable",
                 providerRecoveryCount: nextProviderRecoveryCount,
-                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE ||
+                recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
                   ? { continueDelayMs: recoveryResult.continueDelayMs }
                   : {}),
               },

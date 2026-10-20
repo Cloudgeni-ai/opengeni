@@ -126,6 +126,7 @@ import {
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
   isMcpTransportConnectivityError,
+  isFirstPartyMcpSetupUnavailableError,
   projectModelInputForCapabilities,
   projectModelInputForImageSupport,
   prefixedMcpToolName,
@@ -556,6 +557,7 @@ test("preserves socket setup recovery through the MCP lifecycle wrapper", async 
   expect(failure).toBeDefined();
   expect(server.unwrapLifecycleError(failure!, "connect")).toBe(exact);
   expect(isMcpTransportConnectivityError(exact)).toBe(true);
+  expect(isFirstPartyMcpSetupUnavailableError(exact)).toBe(true);
   expect(connects).toBe(1);
 });
 
@@ -12690,6 +12692,7 @@ describe("runtime event normalization", () => {
       }
       expect(firstPartyFailure).toBeInstanceOf(Error);
       expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
+      expect(isFirstPartyMcpSetupUnavailableError(firstPartyFailure)).toBe(false);
 
       let externalFailure: unknown;
       try {
@@ -12711,6 +12714,7 @@ describe("runtime event normalization", () => {
       }
       expect(externalFailure).toBeInstanceOf(Error);
       expect(isMcpTransportConnectivityError(externalFailure)).toBe(false);
+      expect(isFirstPartyMcpSetupUnavailableError(externalFailure)).toBe(false);
     } finally {
       unavailable.stop(true);
     }

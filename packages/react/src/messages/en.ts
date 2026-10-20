@@ -1330,6 +1330,8 @@ export const englishMessages = {
     "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
+  "lib.providerRecovery.opengeniToolServiceUnavailable":
+    "Opengeni’s tool service is temporarily unavailable",
   "lib.providerRecovery.aRequiredMcpServerIs": "A required MCP server is unreachable",
   "lib.providerRecovery.aRequiredMcpServerIsn": "A required MCP server isn't responding",
   "lib.providerRecovery.aServiceThisTurnDepends":

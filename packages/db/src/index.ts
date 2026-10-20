@@ -1,3 +1,7 @@
+import {
+  recoverProviderClockAfterDependencyWait,
+  PROVIDER_RECOVERY_SUSPENDED_AT,
+} from "./provider-recovery-clock";
 export { getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
@@ -40858,7 +40862,10 @@ export async function applyContextCompaction(
         // Installing a successful summary is model progress, including a
         // maintenance turn that never enters the ordinary response stream.
         // Clear only provider recovery under the same locked attempt fence.
-        if (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0) {
+        if (
+          providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 ||
+          fence.turn!.metadata?.[PROVIDER_RECOVERY_SUSPENDED_AT] !== undefined
+        ) {
           await tx
             .update(schema.sessionTurns)
             .set({
@@ -79475,6 +79482,7 @@ function metadataWithoutProviderRecoveryCount(
   delete next.providerRecoveryCount;
   delete next.providerRecoveryStartedAt;
   delete next.providerRecoveryReason;
+  delete next[PROVIDER_RECOVERY_SUSPENDED_AT];
   return next;
 }
 
@@ -81368,6 +81376,11 @@ export async function requestSessionTurnRecovery(
           ),
         )
         .returning();
+      const recoveryMetadata = recoverProviderClockAfterDependencyWait(
+        recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+        input.reason,
+        now,
+      );
       const [updatedTurn] = await tx
         .update(schema.sessionTurns)
         .set({
@@ -81379,7 +81392,7 @@ export async function requestSessionTurnRecovery(
           cancelReason: null,
           version: turn.version + 1,
           metadata: {
-            ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...recoveryMetadata,
             ...(input.persistentModelTransportHttpOnly
               ? { persistentModelTransportHttpOnly: true }
               : {}),
@@ -81428,8 +81441,8 @@ export async function requestSessionTurnRecovery(
                   providerRecoveryCount: input.providerRecoveryCount,
                   providerRecoveryStartedAt:
                     providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
-                    typeof turn.metadata?.providerRecoveryStartedAt === "string"
-                      ? turn.metadata.providerRecoveryStartedAt
+                    typeof recoveryMetadata.providerRecoveryStartedAt === "string"
+                      ? recoveryMetadata.providerRecoveryStartedAt
                       : now.toISOString(),
                   providerRecoveryReason: input.reason,
                 }
@@ -86640,7 +86653,8 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                       },
                     );
                     const resetProviderRecovery =
-                      providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 &&
+                      (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 ||
+                        fence.turn!.metadata?.[PROVIDER_RECOVERY_SUSPENDED_AT] !== undefined) &&
                       hasCompletedCurrentModelRequest(inserted);
                     const resetCapacityRecovery =
                       fence.turn!.metadata?.[CODEX_CAPACITY_RECOVERY_KEY] !== undefined &&
