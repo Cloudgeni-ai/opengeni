@@ -111,6 +111,118 @@ export class CuaFailure extends ComputerBackendError {
   }
 }
 
+const RunStepsReport = z.object({
+  ok: z.boolean().optional(),
+  total: z.number().int().nonnegative().optional(),
+  executed: z.number().int().nonnegative(),
+  failed_step: z.number().int().nonnegative().nullish(),
+  /** invalid_batch: CUA refused the whole batch before running a step. */
+  code: z.string().max(256).optional(),
+  detail: z.string().max(65_536).optional(),
+  steps: z
+    .array(
+      z.object({
+        ok: z.boolean().optional(),
+        message: z.string().max(65_536).optional(),
+        /** Where a failed step stopped: wait_for, find, action, expect or time_budget. */
+        phase: z.string().max(64).optional(),
+        code: z.string().max(256).optional(),
+        hint: z.unknown().optional(),
+        /** The window-change report lines of the step's action. */
+        window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+      }),
+    )
+    .max(64)
+    .default([]),
+});
+
+/** How a CUA run_steps batch ended. */
+export type RunStepsOutcome =
+  | { kind: "completed"; windowChanges: string }
+  | {
+      kind: "stopped";
+      /** The actions that completed before the one the batch stopped at. */
+      completed: number;
+      /** CUA proves the stopped action did nothing: it was refused, or the
+       * batch stopped before acting. Otherwise it may have taken effect. */
+      definite: boolean;
+      code: ComputerBackendErrorCode | null;
+      message: string;
+    };
+
+/** Run actions in one CUA run_steps call: in order, stopping at the first
+ * that fails. A reply that does not say how far the batch got is ambiguous. */
+export async function runSteps(
+  runtime: CuaDesktopRuntime,
+  args: Record<string, unknown> & { steps: { tool: string; args: Record<string, unknown> }[] },
+): Promise<RunStepsOutcome> {
+  let result: ToolResult | undefined;
+  let report: z.infer<typeof RunStepsReport>;
+  try {
+    result = await runtime.callTool("run_steps", JSON.stringify(args));
+    if (!result.structuredJson || result.structuredJson.length > 8 * 1024 * 1024)
+      throw new Error("invalid envelope");
+    report = RunStepsReport.parse(JSON.parse(result.structuredJson));
+  } catch {
+    const reason = result?.isError && result.text.trim() ? `: ${result.text}` : "";
+    throw new ComputerBackendError(
+      "outcome_unknown",
+      `CUA run_steps did not return a valid result${reason}`,
+      false,
+      true,
+    );
+  }
+  const reply = result!;
+  if (report.code === "invalid_batch") {
+    const at = report.failed_step == null ? "" : ` at action ${report.failed_step + 1}`;
+    throw new ComputerBackendError(
+      "invalid_action",
+      `CUA refused the batch${at} before running any of it: ${report.detail ?? reply.text}`,
+      false,
+      false,
+    );
+  }
+  const total = args.steps.length;
+  if (report.failed_step == null) {
+    if (reply.isError || report.ok === false || report.executed !== total)
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        `CUA run_steps ran ${report.executed} of ${total} actions without naming a failed one`,
+        false,
+        true,
+      );
+    return {
+      kind: "completed",
+      windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
+    };
+  }
+  const index = report.failed_step;
+  const step = report.steps[index];
+  if (index >= total || !step)
+    throw new ComputerBackendError(
+      "outcome_unknown",
+      `CUA run_steps stopped at an action it did not report`,
+      false,
+      true,
+    );
+  const mapped = step.code ? errorCodes[step.code] : undefined;
+  // Waits, lookups and the time budget stop the batch before the step acts.
+  // An action CUA refused with a code it uses for refusals did nothing.
+  const definite =
+    step.phase === "wait_for" ||
+    step.phase === "find" ||
+    step.phase === "time_budget" ||
+    (step.phase === "action" && mapped !== undefined);
+  const hint = typeof step.hint === "string" && step.hint.trim() ? ` ${step.hint}` : "";
+  return {
+    kind: "stopped",
+    completed: index,
+    definite,
+    code: mapped ?? null,
+    message: `${step.message?.trim() || "CUA reported no reason"}${hint}`,
+  };
+}
+
 /** CUA's own explanation of a refused or unconfirmed action (why it refused,
  * what to do instead), so the failure says more than that it failed. The text
  * is kept exactly as CUA wrote it: the computer driver redacts typed secrets
