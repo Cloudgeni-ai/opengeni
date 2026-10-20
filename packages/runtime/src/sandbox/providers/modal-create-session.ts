@@ -24,6 +24,13 @@ export type ModalCreateLifecycle = {
   onCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
 };
 
+/** The pinned Agents adapter options plus Opengeni-owned physical-create
+ * placement. `regions` is applied only by Opengeni's own create boundary; the
+ * pinned adapter never sees or persists it, and resume keeps a box's placement. */
+export type OpenGeniModalSandboxClientOptions = Partial<ModalSandboxClientOptions> & {
+  regions?: string[];
+};
+
 /** Release local transport after a failed create, but never stop a box whose
  * original setup invocation may still be writing behind its durable fence. */
 export async function releaseModalCreateFailure(
@@ -109,14 +116,14 @@ function withoutMounts(manifest: Manifest): Manifest {
  * which is too late for a durable worker lease. No global SDK monkey-patching.
  */
 export async function createModalSessionWithLifecycle(
-  defaults: Partial<ModalSandboxClientOptions>,
+  defaults: OpenGeniModalSandboxClientOptions,
   args: Parameters<ModalSandboxClient["create"]>[0],
   lifecycle: ModalCreateLifecycle,
   installPolicy: (session: ModalSandboxSession) => ModalSandboxSession,
 ): Promise<ModalSandboxSession> {
   const create = normalizeSandboxClientCreateArgs(args);
   if (create.snapshot !== undefined) unsupported("snapshot");
-  const overrides = create.options as Partial<ModalSandboxClientOptions> | undefined;
+  const overrides = create.options as OpenGeniModalSandboxClientOptions | undefined;
   const options = { ...defaults };
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value !== null && value !== undefined) Object.assign(options, { [key]: value });
@@ -145,6 +152,14 @@ export async function createModalSessionWithLifecycle(
     const value = options[key];
     if (value !== undefined && (!Number.isFinite(value) || value <= 0))
       throw new Error(`Modal ${key} must be positive`);
+  }
+  if (
+    options.regions !== undefined &&
+    (!Array.isArray(options.regions) ||
+      options.regions.length === 0 ||
+      options.regions.some((region) => typeof region !== "string" || !region.trim()))
+  ) {
+    throw new Error("Modal regions must be a non-empty list of region names");
   }
   const manifest = create.manifest;
   validateManifest(manifest);
@@ -306,6 +321,7 @@ export async function createModalSessionWithLifecycle(
         gpu: options.gpu,
         encryptedPorts: options.exposedPorts,
         cloudBucketMounts,
+        regions: options.regions ? [...options.regions] : undefined,
       }),
     );
     let timer: ReturnType<typeof setTimeout> | undefined;

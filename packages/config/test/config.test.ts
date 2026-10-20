@@ -2468,6 +2468,23 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow();
   });
 
+  test("parses optional Modal region placement", () => {
+    expect(withEnv({}, () => getSettings()).modalRegions).toBeUndefined();
+    expect(withEnv({ OPENGENI_MODAL_REGIONS: "  " }, () => getSettings()).modalRegions).toBe(
+      undefined,
+    );
+    expect(withEnv({ OPENGENI_MODAL_REGIONS: "eu" }, () => getSettings()).modalRegions).toEqual([
+      "eu",
+    ]);
+    expect(
+      withEnv({ OPENGENI_MODAL_REGIONS: " US-East-1 , us-west-2" }, () => getSettings())
+        .modalRegions,
+    ).toEqual(["us-east-1", "us-west-2"]);
+    for (const invalid of ["eu,", "eu,eu", "eu west", "1eu"]) {
+      expect(() => withEnv({ OPENGENI_MODAL_REGIONS: invalid }, () => getSettings())).toThrow();
+    }
+  });
+
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {
     expect(withEnv({}, () => getSettings()).sandboxArtifactRuntimeEnabled).toBe(false);
     expect(

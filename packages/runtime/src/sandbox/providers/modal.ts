@@ -22,7 +22,11 @@ import {
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
-import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
+import {
+  createModalSessionWithLifecycle,
+  type ModalCreateLifecycle,
+  type OpenGeniModalSandboxClientOptions,
+} from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
 import {
@@ -722,12 +726,12 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
-  readonly #createOptions: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]>;
+  readonly #createOptions: OpenGeniModalSandboxClientOptions;
 
-  constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
-    super(...args);
-    this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
-    this.#createOptions = { ...args[0] };
+  constructor(options?: OpenGeniModalSandboxClientOptions) {
+    super(options);
+    this.#snapshotFilesystemTimeoutMs = options?.snapshotFilesystemTimeoutMs;
+    this.#createOptions = { ...options };
   }
 
   override async create(
@@ -838,7 +842,7 @@ export const modalProvider: ProviderRegistration = {
     }
   },
   build({ settings, environment, exposedPorts }) {
-    const options: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]> = {
+    const options: OpenGeniModalSandboxClientOptions = {
       appName: settings.modalAppName,
       timeoutMs: settings.modalTimeoutSeconds * 1000,
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
@@ -868,6 +872,9 @@ export const modalProvider: ProviderRegistration = {
     }
     if (settings.modalSandboxMemoryMiB !== undefined) {
       options.memoryMiB = settings.modalSandboxMemoryMiB;
+    }
+    if (settings.modalRegions !== undefined) {
+      options.regions = [...settings.modalRegions];
     }
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;

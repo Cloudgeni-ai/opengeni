@@ -270,6 +270,20 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // Modal's short server-default idle-reap can never kill an idle box before the
     // Opengeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+    // No region is pinned unless configured: Modal keeps its own placement.
+    expect(client.options?.regions).toBeUndefined();
+  });
+
+  test("modal threads configured region placement into physical create options", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "modal",
+        modalTokenId: "tok-id",
+        modalTokenSecret: "tok-secret",
+        modalRegions: ["eu"],
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(client.options?.regions).toEqual(["eu"]);
   });
 
   test("docker threads an explicit shared workspace base directory", () => {
