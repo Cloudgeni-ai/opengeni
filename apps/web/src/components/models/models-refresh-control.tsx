@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { invalidateModelSettingsQueries, useSharedQueryActivity } from "@/lib/shared-query";
+import {
+  invalidateModelSettingsQueries,
+  invalidateSharedQueries,
+  useSharedQueryActivity,
+} from "@/lib/shared-query";
 import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
 
 export function ModelsRefreshControl({ client }: { client: object }) {
@@ -10,6 +14,7 @@ export function ModelsRefreshControl({ client }: { client: object }) {
     "codex-accounts",
     "subscription-pool",
     "supergrok-accounts",
+    "subscription-usage-pools",
   ]);
   const [refreshing, setRefreshing] = useState(false);
   return (
@@ -30,6 +35,9 @@ export function ModelsRefreshControl({ client }: { client: object }) {
           setRefreshing(true);
           try {
             await invalidateModelSettingsQueries(client);
+            // Pool GETs project saved observations. Read them only after the
+            // live checks above have recorded their newest provider readings.
+            await invalidateSharedQueries(client, ["subscription-usage-pools"]);
           } finally {
             setRefreshing(false);
           }
