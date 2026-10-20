@@ -1576,6 +1576,59 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a window that is not on screen says so when it cannot be read", async () => {
+    // CUA lists the window off screen and, as for a hidden window, produces
+    // neither pixels nor a tree for it.
+    class OffScreenFixture extends Fixture {
+      onScreen = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name === "get_window_state" && !this.onScreen)
+          return {
+            ...result({}, true),
+            structuredJson: null,
+            text: "No content produced (neither AX tree nor screenshot succeeded)",
+          } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows") {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of data.windows) window.is_on_screen = this.onScreen;
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const fixture = new OffScreenFixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      // The window leaves the screen after it was listed.
+      fixture.onScreen = false;
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)])
+        await expect(read()).rejects.toMatchObject({
+          code: "unsupported",
+          dispatched: false,
+          message: expect.stringContaining("not on screen"),
+        });
+      // Once listed off screen, it is refused without asking CUA to read it.
+      const reads = () => fixture.calls.filter((call) => call.name === "get_window_state").length;
+      const before = reads();
+      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "unsupported" });
+      expect(reads()).toBe(before);
+      // Back on screen, it is read again.
+      fixture.onScreen = true;
+      expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
+      // The same failure for a window on screen stays a driver failure.
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, argumentsJson) =>
+        name === "get_window_state"
+          ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
+          : original(name, argumentsJson);
+      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "driver_failed" });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {
