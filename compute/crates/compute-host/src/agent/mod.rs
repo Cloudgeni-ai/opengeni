@@ -783,7 +783,7 @@ fn host_images(config: &HostConfig) -> Images {
     Images {
         kernel: config.kernel.clone(),
         boot_args: match &config.network {
-            Some(network) => format!("{} {}", config.boot_args, network.boot_args()),
+            Some(_) => format!("{} {}", config.boot_args, NetworkConfig::boot_args()),
             None => config.boot_args.clone(),
         },
         first_uid: config.first_uid,
@@ -805,7 +805,8 @@ async fn prepare_network(
     let Some(network) = network else {
         return Ok(None);
     };
-    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network))
+    let runtime = tokio::runtime::Handle::current();
+    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network, runtime))
         .await
         .map_err(|error| HostError::Io(error.to_string()))?
         .map_err(|error| HostError::Io(error.to_string()))?;
