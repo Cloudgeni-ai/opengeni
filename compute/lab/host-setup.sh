@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+# Prepare a fresh Ubuntu 24.04 cloud machine that exposes /dev/kvm (bare metal or
+# nested virtualization) for microVM sleep/wake experiments.
+#
+# Idempotent. Run as a login user with passwordless sudo:
+#   bash host-setup.sh
+#
+# Produces under $LAB_DIR (default /lab):
+#   bin/firecracker         pinned Firecracker release
+#   vmlinux                 guest kernel from Firecracker CI artifacts
+#   base.ext4               guest root filesystem with node, git, python, a
+#                           small exec agent listening on vsock port 52 and
+#                           the guest services below
+#   swapfile                backing swap so zswap can be measured
+#
+# Firecracker, the kernel and the root filesystem it starts from are the
+# pins in ../deploy/host/pins.env (or a pins.env beside this script, for a
+# copy of it on its own), each checked against its SHA-256.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pins="$here/../deploy/host/pins.env"
+[ -f "$pins" ] || pins="$here/pins.env"
+# shellcheck source=../deploy/host/pins.env
+source "$pins"
+LAB_DIR="${LAB_DIR:-/lab}"
+ROOTFS_SIZE="${ROOTFS_SIZE:-6G}"
+# Empty: as large as the host's memory, but never more than a quarter of the
+# space free where it goes, so the lab's disk keeps room for sandboxes and
+# builds (a fixed 256G once filled a 300G disk).
+SWAP_SIZE="${SWAP_SIZE:-}"
+NODE_MAJOR="${NODE_MAJOR:-24}"
+ARCH="$(uname -m)"
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+# fetch URL FILE SHA256: downloads URL to FILE and fails unless it has that
+# SHA-256.
+fetch() {
+  curl -fsSL -o "$2.part" "$1"
+  if ! echo "$3  $2.part" | sha256sum -c --quiet -; then
+    rm -f "$2.part"
+    echo "host-setup: $1 does not have the pinned SHA-256 $3" >&2
+    exit 1
+  fi
+  mv "$2.part" "$2"
+}
+
+# The guest's side of the host agent's identity contract: a booted guest
+# finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
+# restored one in the restore notice on vsock port 53 (`restored <unix
+# nanoseconds> sandbox=<id> seed=<hex> order=<generation>.<revision>
+# owner=<epoch>`), whose time sets the clock. A notice ordered below one
+# already applied (by owner epoch, then the two numbers) is answered
+# `stale`.
+# Either way the id ends up in /run/sandbox-id. The notice's `seed` is
+# mixed into the guest's random number generator, which reseeds before the
+# guest answers `ok seeded` (`ok` if it could not), so no command of the new
+# sandbox draws numbers another clone of the same snapshot draws; the host
+# uses a clone only after `ok seeded`. (The kernel reseeds by itself when it
+# learns of the VM generation ID's change, but later.) A guest whose machine
+# id was not made for the sandbox it is (/etc/opengeni-identity names whom
+# it was made for) makes its own, with the hostname, at boot and before it
+# acknowledges a notice: a clone, or a guest booted from a cloned disk.
+# Notices are applied one at a time, and one whose order (the host's record
+# fence, never the clock) is below the latest applied is ignored, so a late
+# attempt never takes back a newer identity.
+# A template is snapshotted once the guest accepts on vsock port 54, which
+# opens only when systemd has finished starting everything, so clones wake
+# settled instead of mid-boot.
+install_guest_services() {
+  local root="$1"
+  # Resident, so answering a notice starts no process in a guest whose
+  # memory is still being faulted in after its restore.
+  sudo tee "$root/usr/local/bin/lab-notice" >/dev/null <<'SCRIPT'
+#!/usr/bin/python3
+import fcntl, hashlib, os, socket, time
+
+RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
+
+
+def current_sandbox():
+    try:
+        with open("/run/sandbox-id") as file:
+            return file.read().strip()
+    except OSError:
+        return ""
+
+
+def owns_identity(sandbox):
+    try:
+        with open("/etc/opengeni-identity") as file:
+            return file.read().strip() == sandbox
+    except OSError:
+        return False
+
+
+def renew_identity(sandbox, seed):
+    # Its own machine id (the same for a retried notice) and hostname; whom
+    # they were made for goes last.
+    machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
+    with open("/etc/.machine-id.new", "w") as file:
+        file.write(machine_id + "\n")
+    os.replace("/etc/.machine-id.new", "/etc/machine-id")
+    socket.sethostname(sandbox[:63])
+    with open("/etc/.opengeni-identity.new", "w") as file:
+        file.write(sandbox + "\n")
+    os.replace("/etc/.opengeni-identity.new", "/etc/opengeni-identity")
+
+
+listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+listener.bind((socket.VMADDR_CID_ANY, 53))
+listener.listen(64)
+latest = None
+while True:
+    connection, _ = listener.accept()
+    with connection:
+        try:
+            line = b""
+            while not line.endswith(b"\n"):
+                chunk = connection.recv(256)
+                if not chunk:
+                    raise EOFError
+                line += chunk
+            word, nanos, *rest = line.decode().split()
+            fields = dict(field.partition("=")[::2] for field in rest)
+            # Ordered by the owner epoch, then the host's record fence, never
+            # by the clock: a sandbox that moves starts a new record on its
+            # new host, under a higher epoch.
+            fence = tuple(int(part) for part in fields.get("order", "").split("."))
+            order = (int(fields.get("owner", "")),) + fence
+            if word != "restored" or len(order) != 3:
+                continue
+            if latest and order < latest:
+                connection.sendall(b"stale\n")
+                continue
+            latest = order
+            time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            sandbox, seed = fields.get("sandbox", ""), fields.get("seed", "")
+            if sandbox and (sandbox != current_sandbox() or not owns_identity(sandbox)):
+                try:
+                    renew_identity(sandbox, seed)
+                except OSError:
+                    # The id is not taken, so a retry renews again; the host
+                    # does not use a clone that is not seeded.
+                    connection.sendall(b"ok\n")
+                    continue
+                with open("/run/sandbox-id.new", "w") as file:
+                    file.write(sandbox + "\n")
+                os.replace("/run/sandbox-id.new", "/run/sandbox-id")
+            seeded = False
+            if seed:
+                # Mixed into the input pool, then the generator reseeds from
+                # it at once.
+                try:
+                    with open("/dev/urandom", "wb", buffering=0) as pool:
+                        pool.write(bytes.fromhex(seed))
+                        fcntl.ioctl(pool, RNDRESEEDCRNG)
+                    seeded = True
+                    with open("/dev/kmsg", "w") as log:
+                        log.write("lab-notice: crng reseeded from the restore notice\n")
+                except (OSError, ValueError):
+                    pass
+            connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
+        except (OSError, ValueError, EOFError):
+            pass
+SCRIPT
+  sudo tee "$root/usr/local/bin/lab-identity" >/dev/null <<'SCRIPT'
+#!/bin/bash
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    opengeni.sandbox=*) id="${arg#opengeni.sandbox=}" ;;
+  esac
+done
+[ -n "$id" ] || exit 0
+printf '%s\n' "$id" >/run/sandbox-id
+# A machine id made for another sandbox (a template's, or the base image's)
+# is replaced by one of its own.
+if [ "$(cat /etc/opengeni-identity 2>/dev/null)" != "$id" ]; then
+  tr -d '-' </proc/sys/kernel/random/uuid >/etc/.machine-id.new &&
+    mv -f /etc/.machine-id.new /etc/machine-id &&
+    printf '%s\n' "$id" >/etc/.opengeni-identity.new &&
+    mv -f /etc/.opengeni-identity.new /etc/opengeni-identity
+fi
+hostname "${id:0:63}"
+SCRIPT
+  sudo chmod 755 "$root/usr/local/bin/lab-notice" "$root/usr/local/bin/lab-identity"
+  sudo tee "$root/etc/systemd/system/lab-notice.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Restore notices from the host agent on vsock port 53
+After=local-fs.target lab-identity.service
+
+[Service]
+OOMScoreAdjust=-1000
+ExecStart=/usr/local/bin/lab-notice
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-identity.service" >/dev/null <<'UNIT'
+[Unit]
+Description=The sandbox id from the kernel command line
+After=local-fs.target
+# Commands arrive through lab-agent; none may run before the id is known.
+Before=lab-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lab-identity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-ready.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Tells a template builder on vsock port 54 that startup has finished
+After=multi-user.target
+
+[Service]
+ExecStart=/bin/sh -c 'systemctl is-system-running --wait >/dev/null; exec /usr/bin/socat VSOCK-LISTEN:54,reuseaddr,fork SYSTEM:true'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  # The exec agent outlasts the commands it runs when the guest runs out of
+  # memory; each command resets the inherited setting to the default.
+  sudo tee "$root/etc/systemd/system/lab-agent.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Experiment exec agent on vsock port 52
+After=local-fs.target
+
+[Service]
+OOMScoreAdjust=-1000
+ExecStart=/usr/bin/socat VSOCK-LISTEN:52,reuseaddr,fork "SYSTEM:echo 0 > /proc/self/oom_score_adj; exec /bin/bash,stderr"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  for unit in lab-notice lab-identity lab-ready lab-agent; do
+    sudo ln -sf "/etc/systemd/system/$unit.service" "$root/etc/systemd/system/multi-user.target.wants/$unit.service"
+  done
+}
+
+log "packages"
+sudo apt-get update -qq
+sudo apt-get install -y -qq jq squashfs-tools e2fsprogs xfsprogs socat mdadm acl curl git unzip zstd fio sysstat >/dev/null
+
+log "scratch disk"
+if [ ! -e "$LAB_DIR/.scratch-ready" ]; then
+  mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
+  if [ "${#nvme[@]}" -eq 1 ]; then
+    sudo mkfs.xfs -q -f "${nvme[0]}"
+    sudo mkdir -p "$LAB_DIR"
+    sudo mount -o noatime "${nvme[0]}" "$LAB_DIR"
+  elif [ "${#nvme[@]}" -gt 1 ]; then
+    # GCP local NVMe: stripe all devices, XFS for reflink copies of disk images.
+    if [ ! -e /dev/md0 ]; then
+      sudo mdadm --create /dev/md0 --level=0 --raid-devices="${#nvme[@]}" "${nvme[@]}" --run
+    fi
+    sudo mkfs.xfs -q -f /dev/md0
+    sudo mkdir -p "$LAB_DIR"
+    sudo mount -o noatime /dev/md0 "$LAB_DIR"
+  elif [ -b /dev/disk/azure/resource ] || [ -b /dev/disk/azure/resource-part1 ]; then
+    # Azure local temp disk: reformat as XFS (it holds nothing durable).
+    dev=$(readlink -f /dev/disk/azure/resource-part1 2>/dev/null || readlink -f /dev/disk/azure/resource)
+    if mountpoint -q /mnt; then sudo umount /mnt; fi
+    sudo mkfs.xfs -q -f "$dev"
+    sudo mkdir -p "$LAB_DIR"
+    sudo mount -o noatime "$dev" "$LAB_DIR"
+  else
+    sudo mkdir -p "$LAB_DIR"
+  fi
+  sudo chown "$(id -u):$(id -g)" "$LAB_DIR"
+  touch "$LAB_DIR/.scratch-ready"
+fi
+sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+cd "$LAB_DIR"
+mkdir -p bin vms snapshots results
+
+log "firecracker $FC_VERSION"
+if [ ! -x bin/firecracker ]; then
+  [ "$ARCH" = x86_64 ] || { echo "host-setup: Firecracker is pinned for x86_64 only" >&2; exit 1; }
+  fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" \
+    firecracker.tgz "$FC_SHA256_X86_64"
+  tar -xzf firecracker.tgz
+  rm -f firecracker.tgz
+  cp "release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" bin/firecracker
+  cp "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" bin/jailer
+  rm -rf "release-${FC_VERSION}-${ARCH}"
+fi
+
+log "bun"
+if ! command -v bun >/dev/null && [ ! -x "$HOME/.bun/bin/bun" ]; then
+  curl -fsSL https://bun.sh/install | bash >/dev/null
+fi
+sudo ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
+
+if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
+  log "guest kernel and base image from Firecracker CI ($GUEST_KERNEL, $LAB_ROOTFS)"
+  fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL" vmlinux "$GUEST_KERNEL_SHA256"
+  fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL.config" vmlinux.config "$GUEST_KERNEL_CONFIG_SHA256"
+  fetch "$GUEST_ARTIFACTS/$LAB_ROOTFS" ubuntu.squashfs "$LAB_ROOTFS_SHA256"
+  printf '%s\n%s\n' "$GUEST_ARTIFACTS/$GUEST_KERNEL" "$GUEST_ARTIFACTS/$LAB_ROOTFS" > ci-artifacts.txt
+fi
+
+if [ -f base.ext4 ] && {
+  ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
+    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
+    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("owner"'
+}; then
+  log "guest services"
+  sudo mkdir -p /mnt/lab-base
+  sudo mount -o loop base.ext4 /mnt/lab-base
+  install_guest_services /mnt/lab-base
+  sudo umount /mnt/lab-base
+fi
+
+if [ ! -f base.ext4 ]; then
+  log "guest root filesystem"
+  sudo rm -rf rootfs
+  sudo unsquashfs -q -d rootfs ubuntu.squashfs
+  sudo mkdir -p rootfs/tmp && sudo chmod 1777 rootfs/tmp
+  # The CI image is stripped; recreate what apt and npm expect.
+  sudo mkdir -p rootfs/var/cache/apt/archives/partial rootfs/var/lib/apt/lists/partial rootfs/var/log/apt rootfs/var/tmp rootfs/var/lib/dpkg/updates rootfs/root
+  sudo chmod 1777 rootfs/var/tmp
+  sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
+  for m in proc sys dev; do sudo mount --bind "/$m" "rootfs/$m"; done
+  trap 'for m in proc sys dev; do sudo umount -l "$LAB_DIR/rootfs/$m" 2>/dev/null || true; done' EXIT
+  sudo chroot rootfs /bin/bash -euo pipefail -c '
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold git python3 socat ca-certificates curl xz-utils >/dev/null
+    apt-get clean
+  '
+  node_tar=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" | grep -oE "node-v[0-9.]+-linux-x64\.tar\.xz" | head -1)
+  curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${node_tar}" | sudo tar -xJ -C rootfs/usr/local --strip-components=1
+  # Synthetic workloads built only from public code.
+  sudo chroot rootfs /bin/bash -euo pipefail -c '
+    mkdir -p /opt/work && cd /opt/work
+    git clone -q --depth 200 https://github.com/expressjs/express.git
+    cd express && npm install --no-audit --no-fund --loglevel=error >/dev/null && cd ..
+    mkdir -p web && cd web
+    printf "%s\n" "{\"name\":\"web\",\"private\":true,\"type\":\"module\",\"scripts\":{\"dev\":\"vite --host 0.0.0.0 --port 5173\"}}" > package.json
+    printf "%s\n" "<!doctype html><html><body><div id=app></div><script type=module src=/main.js></script></body></html>" > index.html
+    printf "%s\n" "document.getElementById(\"app\").textContent = \"hello\";" > main.js
+    npm install --no-audit --no-fund --loglevel=error vite >/dev/null
+  '
+  install_guest_services rootfs
+  for m in proc sys dev; do sudo umount -l "rootfs/$m"; done
+  trap - EXIT
+  # Name servers come from the kernel's `ip=` boot argument, which the
+  # kernel publishes in /proc/net/pnp in resolv.conf syntax.
+  sudo ln -sfn /proc/net/pnp rootfs/etc/resolv.conf
+  sudo chown -R root:root rootfs
+  truncate -s "$ROOTFS_SIZE" base.ext4
+  sudo mkfs.ext4 -q -d rootfs -F base.ext4
+  sudo chown "$(id -u):$(id -g)" base.ext4
+  sudo rm -rf rootfs
+fi
+
+log "swap and zswap"
+if ! swapon --show=NAME --noheadings | grep -q "$LAB_DIR/swapfile"; then
+  if [ ! -f swapfile ]; then
+    if [ -z "$SWAP_SIZE" ]; then
+      memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+      free_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
+      quarter_kib=$((free_kib / 4))
+      SWAP_SIZE="$(( memory_kib < quarter_kib ? memory_kib : quarter_kib ))K"
+    fi
+    log "swap file of $SWAP_SIZE"
+    sudo fallocate -l "$SWAP_SIZE" swapfile
+    sudo chmod 600 swapfile
+    sudo mkswap -q swapfile
+  fi
+  sudo swapon swapfile
+fi
+echo 1 | sudo tee /sys/module/zswap/parameters/enabled >/dev/null
+echo zstd | sudo tee /sys/module/zswap/parameters/compressor >/dev/null || true
+echo 40 | sudo tee /sys/module/zswap/parameters/max_pool_percent >/dev/null
+# Keep the experiments' own memory decisions explicit: no transparent huge pages.
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null
+
+log "ready: $(./bin/firecracker --version | head -1), kernel $(head -1 ci-artifacts.txt | xargs basename)"

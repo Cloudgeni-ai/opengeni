@@ -1,0 +1,44 @@
+{{- if and .Values.networkPolicy.enabled .Values.computeControl.enabled }}
+# The API takes calls from Opengeni's API and workers; the hosts endpoint
+# takes connections from anywhere the Service exposes it (hosts are outside
+# the cluster, and authenticate with their certificates).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-control
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+            matchExpressions:
+              - key: opengeni.ai/worker-role
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: {{ .Values.computeControl.service.apiPort }}
+    - ports:
+        - protocol: TCP
+          port: 8443
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}
+  {{- end }}
+{{- end }}
