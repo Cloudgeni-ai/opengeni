@@ -405,7 +405,8 @@ pub fn install_native_host_manifests(
 }
 
 fn native_host_manifest_body(binary_path: &Path) -> Result<Vec<u8>, BrowserBridgeError> {
-    let binary = binary_path.to_str().ok_or_else(|| {
+    let binary = launchable_program_path(binary_path);
+    let binary = binary.to_str().ok_or_else(|| {
         BrowserBridgeError::Protocol("agent binary path is not valid UTF-8".to_string())
     })?;
     Ok(serde_json::to_vec_pretty(&NativeHostManifest {
@@ -417,13 +418,43 @@ fn native_host_manifest_body(binary_path: &Path) -> Result<Vec<u8>, BrowserBridg
     })?)
 }
 
+/// The path a manifest names for the agent binary. Chrome on Windows starts a
+/// Native Messaging host through `cmd.exe`, which cannot run a program named by
+/// a verbatim path (`\\?\C:\…`, the form `canonicalize` returns there): the host
+/// never starts and the extension reports a broken connection. The manifest
+/// therefore names the ordinary form of the same path.
+fn launchable_program_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(ordinary) = path.to_str().and_then(ordinary_windows_path) {
+        return PathBuf::from(ordinary);
+    }
+    path.to_path_buf()
+}
+
+/// `\\?\C:\dir\file` as `C:\dir\file` and `\\?\UNC\server\share\file` as
+/// `\\server\share\file`; `None` when `path` is not such a verbatim path.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ordinary_windows_path(path: &str) -> Option<String> {
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{share}"));
+    }
+    let rest = path.strip_prefix(r"\\?\")?;
+    let drive = rest.as_bytes();
+    (drive.len() >= 3 && drive[0].is_ascii_alphabetic() && drive[1] == b':' && drive[2] == b'\\')
+        .then(|| rest.to_string())
+}
+
 /// Whether a manifest naming `target` belongs to the agent at `binary_path`:
 /// it names this binary, or a program that no longer exists in this agent's
 /// own directory (a leftover from before the agent was renamed).
 fn manifest_points_here(body: &[u8], binary_path: &Path) -> bool {
+    let binary_path = launchable_program_path(binary_path);
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
-        .and_then(|manifest| manifest.get("path")?.as_str().map(PathBuf::from))
+        .and_then(|manifest| {
+            let target = manifest.get("path")?.as_str()?;
+            Some(launchable_program_path(Path::new(target)))
+        })
         .is_some_and(|target| {
             target == binary_path || (target.parent() == binary_path.parent() && !target.exists())
         })
@@ -2964,6 +2995,51 @@ mod tests {
         assert_eq!(
             registry.value(EDGE_HOST_KEY).as_deref(),
             Some(r"C:\Elsewhere\host.json")
+        );
+    }
+
+    #[test]
+    fn windows_verbatim_paths_have_an_ordinary_form() {
+        assert_eq!(
+            ordinary_windows_path(r"\\?\C:\Users\person\AppData\Local\Opengeni\bin\agent.exe")
+                .as_deref(),
+            Some(r"C:\Users\person\AppData\Local\Opengeni\bin\agent.exe")
+        );
+        assert_eq!(
+            ordinary_windows_path(r"\\?\UNC\server\share\agent.exe").as_deref(),
+            Some(r"\\server\share\agent.exe")
+        );
+        assert_eq!(ordinary_windows_path(r"C:\bin\agent.exe"), None);
+        assert_eq!(ordinary_windows_path(r"\\server\share\agent.exe"), None);
+        assert_eq!(ordinary_windows_path(r"\\?\Volume{0}\agent.exe"), None);
+    }
+
+    /// Chrome starts the host through `cmd.exe`, which cannot run a verbatim
+    /// path, so a manifest written from the canonical binary path names the
+    /// ordinary form, and still counts as this agent's when removing it.
+    #[cfg(windows)]
+    #[test]
+    fn windows_manifest_names_a_program_cmd_can_start() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("opengeni-agent.exe");
+        std::fs::write(&binary, b"fixture").expect("binary");
+        let canonical = binary.canonicalize().expect("canonical");
+        assert!(canonical.to_str().expect("path").starts_with(r"\\?\"));
+        let manifests_dir = directory.path().join("NativeMessagingHosts");
+        let registry = FakeRegistry::default();
+
+        install_registered_native_host(&canonical, &manifests_dir, &registry).expect("install");
+
+        let manifest = manifests_dir.join("ai.opengeni.browser.json");
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+        let named = body["path"].as_str().expect("path");
+        assert!(!named.starts_with(r"\\?\"), "{named}");
+        assert_eq!(Path::new(named).canonicalize().expect("named"), canonical);
+        assert_eq!(
+            remove_registered_native_host_for(&canonical, &manifests_dir, &registry)
+                .expect("remove"),
+            vec![manifest]
         );
     }
 
