@@ -43,6 +43,13 @@ export type ArtifactSandboxProps = {
   fullScreen?: boolean | undefined;
   /** Called when the person expands the frame or leaves full screen. */
   onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
+  /**
+   * Hide the frame's toolbar when the host draws its own reload and full
+   * screen controls. Full screen always shows it, for its Back button.
+   */
+  showToolbar?: boolean | undefined;
+  /** Reload the Site whenever this changes, from a host-drawn reload control. */
+  reloadToken?: number | undefined;
 };
 
 /**
@@ -100,7 +107,11 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
     >
       <div
         data-window-drag={focused || undefined}
-        className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4"
+        hidden={props.showToolbar === false && !focused}
+        className={cn(
+          "flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4",
+          props.showToolbar === false && !focused && "hidden",
+        )}
       >
         <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
@@ -186,7 +197,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         </div>
       </div>
       <PublishedHtmlArtifactFrame
-        key={reloadKey}
+        key={`${reloadKey}:${props.reloadToken ?? 0}`}
         title={props.title}
         html={props.html}
         autoHeight={Boolean(props.autoHeight && !focused)}

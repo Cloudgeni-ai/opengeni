@@ -411,3 +411,21 @@ test("Send waiting on Runs on is explained under the composer", async () => {
   expect(container.textContent).toContain("Connect one to send.");
   expect(container.querySelector("a")?.textContent).toBe("Connect a machine");
 });
+
+test("a removed or offline machine stays visible and requires replacement", async () => {
+  const draft = {
+    ...emptySessionDraft(),
+    compute: { kind: "machine" as const, sandboxId: "removed", folder: { kind: "root" as const } },
+  };
+  const state = choices({ draft, machines: [], rigs: [] });
+  expect(hasRunsOnChoices(state)).toBe(true);
+  expect(runsOnSummary(state)).toBe("Machine unavailable");
+  expect(runsOnAttention({ ...state, fleetLoading: false })).toBe("machine-unavailable");
+  await act(async () =>
+    root.render(
+      <RunsOnNotice attention="machine-unavailable" machines={[]} onRetryMachines={() => {}} />,
+    ),
+  );
+  expect(container.textContent).toContain("Machine unavailable");
+  expect(container.textContent).toContain("choose another");
+});

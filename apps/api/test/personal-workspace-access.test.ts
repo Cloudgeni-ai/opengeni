@@ -25,6 +25,7 @@ import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerBrowserSessionRoutes } from "../src/routes/browser-sessions";
+import { registerSitePublishingRoutes } from "../src/routes/site-publishing";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -142,6 +143,7 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerKnowledgeRoutes(registered, deps);
   registerVideoGenerationRoutes(registered, deps);
   registerBrowserSessionRoutes(registered, deps);
+  registerSitePublishingRoutes(registered, deps);
   return registered;
 }
 
@@ -335,6 +337,36 @@ describe("managed personal workspace access", () => {
     const [count] = await shared.admin<Array<{ count: number }>>`
       select count(*)::int as count from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
     expect(count?.count).toBe(0);
+  });
+
+  test("Personal owners administer their Sites' limits; delegated lookalikes do not", async () => {
+    if (!shared || !client) return;
+    const sitesApp = createTestApp({ sitesDomain: "sites.personal.example.test" });
+    const url = `http://x/v1/workspaces/${personalWorkspaceId}/site-limit-profile`;
+    const saved = await sitesApp.request(url, {
+      method: "PUT",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({ kind: "credits" }),
+    });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    const current = await sitesApp.request(url, { headers: { cookie: "session=present" } });
+    expect(((await current.json()) as { profile: { kind: string } }).profile.kind).toBe("credits");
+
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId: `user:${userId}`,
+      principalKind: "service",
+      permissions: managedPersonalWorkspacePermissions,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const denied = await sitesApp.request(url, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ kind: "unlimited" }),
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("Only a workspace admin can change Site limits");
   });
 
   test("Personal Knowledge uses the canonical API and validates pagination before retrieval", async () => {

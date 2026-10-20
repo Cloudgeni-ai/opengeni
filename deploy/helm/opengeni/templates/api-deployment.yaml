@@ -65,7 +65,8 @@ spec:
             # authoritative for protected provider/model overrides.
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
-          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+          {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
+          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled $computeTrusted }}
           env:
             {{- with .Values.api.metricsPort }}
             - name: OPENGENI_API_METRICS_PORT
@@ -73,15 +74,19 @@ spec:
             {{- end }}
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+            {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
           {{- else }}
           env: []
           {{- end }}
-          {{- with .Values.api.extraVolumeMounts }}
+          {{- if or .Values.api.extraVolumeMounts $computeTrusted }}
           volumeMounts:
+            {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with .Values.api.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- if .Values.api.probes.startup.enabled }}
           startupProbe:
@@ -108,9 +113,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- with .Values.api.extraVolumes }}
+      {{- if or .Values.api.extraVolumes $computeTrusted }}
       volumes:
+        {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with .Values.api.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- if .Values.api.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:

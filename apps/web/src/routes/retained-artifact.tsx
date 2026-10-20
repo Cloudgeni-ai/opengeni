@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { FileAsset, RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
 import { PatchApplyCommand, isPatchFilename } from "@opengeni/react/artifacts";
-import { DownloadIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
+import { DownloadIcon, LockKeyholeIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { ArtifactFullView } from "@/components/artifacts/artifact-full-view";
@@ -25,7 +25,14 @@ import {
 } from "@/components/artifacts/artifact-page-chrome";
 import { userErrorText } from "@/lib/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
-import { retainedArtifactLoadErrorPresentation } from "@/lib/retained-artifact-load-error";
+import {
+  isPrivateFileLoadError,
+  retainedArtifactLoadErrorPresentation,
+} from "@/lib/retained-artifact-load-error";
+import { FILE_AUDIENCE_COPY, useArtifactAudience } from "@/components/artifacts/site-audience";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
 
 export function RetainedArtifactRoute({
   workspaceId,
@@ -73,7 +80,8 @@ function RetainedArtifactDetail({
   fromSession?: string;
   embedded: boolean;
 }) {
-  const { client, accessKeyVersion } = useAppContext();
+  const context = useAppContext();
+  const { client, accessKeyVersion } = context;
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const [fullView, setFullView] = useArtifactFullView();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
@@ -82,6 +90,8 @@ function RetainedArtifactDetail({
     client: typeof client;
     artifact?: RetainedArtifactReference;
     filename?: string;
+    /** The workspace file behind it, when there is one: who can open it. */
+    file?: FileAsset;
     error?: Error;
   } | null>(null);
   const [retry, setRetry] = useState(0);
@@ -101,12 +111,13 @@ function RetainedArtifactDetail({
         if (!current) return;
         if (!artifact.available || artifact.artifactId !== artifactId)
           throw new Error("This artifact is no longer available.");
+        const own = file?.id === artifactId && file.workspaceId === workspaceId ? file : undefined;
         setState({
           key,
           client,
           artifact,
-          filename:
-            file?.id === artifactId && file.workspaceId === workspaceId ? file.filename : undefined,
+          filename: own?.filename,
+          ...(own ? { file: own } : {}),
         });
       })
       .catch((error: unknown) => {
@@ -132,6 +143,36 @@ function RetainedArtifactDetail({
     !embedded &&
     artifact !== undefined &&
     retainedPreviewKind(artifact.contentType, loaded?.filename) !== null;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  // A Personal workspace has nobody to share with, so there is no audience.
+  // Session screenshots and saved tool output stay with their chat.
+  const file = loaded?.file;
+  const showAudience =
+    file !== undefined &&
+    file.scope !== undefined &&
+    artifact?.kind !== "computer_screenshot" &&
+    artifact?.kind !== "browser_screenshot" &&
+    artifact?.kind !== "tool_result" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const audience = useArtifactAudience({
+    client,
+    workspaceId,
+    workspaceName: workspace?.name ?? "this workspace",
+    title: filename,
+    visibility: file?.scope === "personal" ? "private" : "workspace",
+    ownedByCurrentUser: Boolean(
+      showAudience &&
+      file?.ownerSubjectId &&
+      file.ownerSubjectId === context.accessContext.subjectId &&
+      hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
+    ),
+    copy: FILE_AUDIENCE_COPY,
+    update: async (visibility) => {
+      const response = await client.updateFileVisibility(workspaceId, artifactId, { visibility });
+      setState((current) => (current?.key === key ? { ...current, file: response.file } : current));
+      invalidateArtifactCatalog(client, workspaceId);
+    },
+  });
   const patchLoader = useMemo(
     () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
     [client, workspaceId],
@@ -199,12 +240,14 @@ function RetainedArtifactDetail({
         <ArtifactKindTile kind={artifact.contentType.startsWith("image/") ? "image" : "file"} />
       }
       title={filename}
+      chips={showAudience ? audience.chip : null}
       meta={[
         fileTypeLabel(artifact.contentType, loaded?.filename),
         formatBytes(artifact.originalBytes),
       ]}
       actions={
         <>
+          {showAudience ? audience.shareButton : null}
           {expandable ? (
             <RowButton onClick={() => setFullView(true)}>
               <Maximize2Icon aria-hidden="true" />
@@ -264,6 +307,7 @@ function RetainedArtifactDetail({
             </div>
           </>
         ) : null}
+        {showAudience ? audience.dialog : null}
       </DetailPage>
     </ContentPage>
   );
@@ -296,10 +340,14 @@ function formatBytes(bytes: number): string {
 
 function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const presentation = retainedArtifactLoadErrorPresentation(error);
+  // Someone else's Only me file is not a failure: it is private, and its
+  // owner can share it. Nothing about the file itself is shown.
+  const privateFile = isPrivateFileLoadError(error);
   return (
     <Notice
-      tone="failed"
-      live="assertive"
+      tone={privateFile ? "info" : "failed"}
+      live={privateFile ? "polite" : "assertive"}
+      {...(privateFile ? { icon: <LockKeyholeIcon className="size-4" aria-hidden /> } : {})}
       title={presentation.title}
       actionLayout="responsive"
       action={

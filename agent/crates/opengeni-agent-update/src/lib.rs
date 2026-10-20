@@ -368,8 +368,12 @@ impl PendingUpdate {
 
 #[cfg(target_os = "macos")]
 fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
+    let resolved = install_path
+        .canonicalize()
+        .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?;
     if install_path
         .ancestors()
+        .chain(resolved.ancestors())
         .any(|path| path.extension().is_some_and(|ext| ext == "app"))
     {
         return Err(UpdateError::HealthCheck(

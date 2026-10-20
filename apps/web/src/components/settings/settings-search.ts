@@ -127,6 +127,7 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       search: { view: "agent-defaults" },
     },
     { label: "Agent activity", keywords: ["pause agents", "resume agents", "stop"] },
+    { label: "Default machine", keywords: ["computer", "runs on", "new session", "schedule"] },
     { label: "Sandbox environment", keywords: ["default sandbox", "rig"] },
     { label: "Sandbox image", keywords: ["docker", "container"] },
     { label: "Voice input", keywords: ["transcription", "dictation", "microphone", "speech"] },

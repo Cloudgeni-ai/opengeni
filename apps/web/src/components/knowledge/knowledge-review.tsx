@@ -158,6 +158,13 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     workspace,
     context.managedSelfContext,
   );
+  // Workspace Skills are collaborative team content: anyone who can manage
+  // workspace documents may review them (the API gate is documents:manage).
+  const canManageSkills = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "documents:manage",
+  );
   const canManageOrganization = workspace
     ? hasAccountPermission(context.accessContext, workspace.accountId, "account:admin")
     : false;
@@ -168,7 +175,7 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     error: string | null;
   } | null>(null);
   const [retry, setRetry] = useState(0);
-  const identity = `${context.accessContext.subjectId}:${workspaceId}:${canReviewKnowledge}:${canManage}:${canManageOrganization}`;
+  const identity = `${context.accessContext.subjectId}:${workspaceId}:${canReviewKnowledge}:${canManage}:${canManageSkills}:${canManageOrganization}`;
 
   useEffect(() => {
     let current = true;
@@ -238,7 +245,7 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
         for (const skill of skills.value.skills) {
           const allowed =
             skill.scope === "user" ||
-            (skill.scope === "organization" ? canManageOrganization : canManage);
+            (skill.scope === "organization" ? canManageOrganization : canManageSkills);
           if (!skill.pendingRevisionIds.length || !allowed) continue;
           items.push({
             kind: "skill",
@@ -261,6 +268,7 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     workspaceId,
     canReviewKnowledge,
     canManage,
+    canManageSkills,
     canManageOrganization,
     identity,
     refresh,

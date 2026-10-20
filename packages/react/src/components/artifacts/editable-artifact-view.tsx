@@ -57,7 +57,14 @@ export type EditableArtifactViewProps = Readonly<{
   onTitle?: ((title: string) => void) | undefined;
   /** Loading copy; defaults to the `opening` label. */
   loadingLabel?: string | undefined;
-  /** Host-authenticated XLSX export; omitted for hosts without export support. */
+  /**
+   * Host-authenticated Office export (DOCX, XLSX, or PPTX by modality); omitted
+   * for hosts without export support. Every editor shows Download when set.
+   */
+  downloadArtifact?:
+    | ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>)
+    | undefined;
+  /** Spreadsheet-only XLSX export; `downloadArtifact` takes precedence when both are set. */
   downloadSpreadsheet?:
     | ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>)
     | undefined;
@@ -84,6 +91,7 @@ export function EditableArtifactView({
   describeError,
   onTitle,
   loadingLabel,
+  downloadArtifact,
   downloadSpreadsheet,
 }: EditableArtifactViewProps) {
   const t = useOpenGeniText();
@@ -166,19 +174,18 @@ export function EditableArtifactView({
   }
   const { artifact } = current.value;
   const surface = { title: artifact.title, showHeader };
+  const opened = current.value;
+  const exportFor = (
+    host: ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>) | undefined,
+  ) => (host ? (signal: AbortSignal) => host(opened, signal) : undefined);
   return (
     <div className="h-full min-h-0 bg-og-bg text-og-fg">
       <EditableArtifactWorkbenchHost
         sessionKey={sessionKey}
         createSession={createSession}
-        document={surface}
-        spreadsheet={{
-          ...surface,
-          download: downloadSpreadsheet
-            ? (signal) => downloadSpreadsheet(current.value, signal)
-            : undefined,
-        }}
-        presentation={surface}
+        document={{ ...surface, download: exportFor(downloadArtifact) }}
+        spreadsheet={{ ...surface, download: exportFor(downloadArtifact ?? downloadSpreadsheet) }}
+        presentation={{ ...surface, download: exportFor(downloadArtifact) }}
       />
     </div>
   );

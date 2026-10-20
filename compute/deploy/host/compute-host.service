@@ -1,0 +1,46 @@
+# The compute host agent in a fleet. Installed by install.sh; configured in
+# /etc/compute/host.env (the operator's: see host.env.example) and
+# /etc/compute/installed.env (install.sh's: which Firecracker, jailer and
+# kernel this release runs, and the older Firecracker binaries kept for
+# memory images they made).
+#
+# KillMode=process: stopping or restarting the agent ends the agent alone.
+# Its VMs and their pagers keep running and the next agent adopts them
+# (ADR 9), which is how the agent is upgraded.
+[Unit]
+Description=Opengeni compute host agent
+Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
+Requires=compute-guard.service compute-host-setup.service
+After=compute-guard.service compute-host-setup.service network-online.target
+Wants=network-online.target
+# The state volume must be the one mounted here: an unmounted path looks
+# like an empty host (operations.md, Storage).
+RequiresMountsFor=/var/lib/compute
+AssertPathIsMountPoint=/var/lib/compute
+
+[Service]
+EnvironmentFile=/etc/compute/installed.env
+EnvironmentFile=/etc/compute/host.env
+ExecStartPre=/opt/compute/current/check-host
+ExecStart=/opt/compute/current/compute-host --socket /run/compute-host.sock serve \
+  --root /var/lib/compute/state \
+  --firecracker ${COMPUTE_FIRECRACKER} --jailer ${COMPUTE_JAILER} $COMPUTE_RETAINED_FIRECRACKER \
+  --kernel ${COMPUTE_KERNEL} --base-image /var/lib/compute/base.ext4 \
+  --store ${COMPUTE_STORE} \
+  --restore-notice-port 53 --template-ready-port 54 \
+  --network \
+  --fleet-control ${COMPUTE_CONTROL} --fleet-name ${COMPUTE_NAME} \
+  --fleet-address ${COMPUTE_ADDRESS} --fleet-zone ${COMPUTE_ZONE} \
+  --fleet-cert /etc/compute/host.pem --fleet-key /etc/compute/host.key \
+  --fleet-ca /etc/compute/ca.pem \
+  $COMPUTE_HOST_ARGS
+Restart=always
+RestartSec=1
+KillMode=process
+# The agent is what wakes sandboxes: under memory pressure it keeps its
+# working memory and gets the processor first.
+MemoryMin=256M
+CPUWeight=1000
+
+[Install]
+WantedBy=multi-user.target

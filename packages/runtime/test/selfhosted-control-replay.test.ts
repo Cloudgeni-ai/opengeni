@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
-import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
-import { ControlReplyRecovery } from "../src/sandbox/selfhosted/control-replay";
+import {
+  agentErrorToControlError,
+  connectionReplacedAgentError,
+  NatsControlRpc,
+  RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY,
+  timeoutAgentError,
+} from "../src/sandbox/selfhosted/control-rpc";
+import {
+  AGENT_LINK_LOST_HEADER,
+  ControlReplyRecovery,
+} from "../src/sandbox/selfhosted/control-replay";
+import { decideSelfhostedRetry } from "../src/sandbox/selfhosted/retry-policy";
 
 const subject = "agent.workspace.machine.connection.process.rpc";
 const mutation = ControlRequest.fromPartial({
@@ -12,6 +22,135 @@ const result = ControlResponse.encode({ requestId: mutation.requestId }).finish(
 const timeout = () => Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
 
 describe("control reply recovery", () => {
+  test("a process that never answers within the recovery window is not waited for again", async () => {
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      { recoveryMs: 5 },
+    );
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1 });
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBe("1");
+    const error = agentErrorToControlError(response.error!, mutation.requestId);
+    // Still provably never sent, but re-issuing would only wait the same window.
+    expect(error.neverSent).toBe(true);
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error,
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }),
+    ).toEqual({ action: "fail" });
+  });
+
+  test("a wake hook that outlasts the recovery window still spends it", async () => {
+    let hooks = 0;
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      {
+        // Room for one wake before the 250 ms retry delay, but the wake
+        // itself spends the rest.
+        recoveryMs: 300,
+        onNoResponders: async () => {
+          hooks += 1;
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return false;
+        },
+      },
+    );
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1 });
+    expect(hooks).toBe(1);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBe("1");
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error: agentErrorToControlError(response.error!, mutation.requestId),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }),
+    ).toEqual({ action: "fail" });
+  });
+
+  test("an early refusal by the wake hook leaves the request to be sent again", async () => {
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      { recoveryMs: 10_000, onNoResponders: async () => false },
+    );
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1_000 });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBeUndefined();
+    expect(agentErrorToControlError(response.error!, mutation.requestId).neverSent).toBe(true);
+  });
+
+  test("a responder without reply recovery that vanishes is still retried", async () => {
+    // The probe answers without the replay header, so the operation is sent once
+    // directly; its no-responder did not wait out any recovery window.
+    let probes = 0;
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          if (probes++ === 0) return { data: result, headers: { get: () => "" } };
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      { recoveryMs: 10_000 },
+    );
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1_000 });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBeUndefined();
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error: agentErrorToControlError(response.error!, mutation.requestId),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("retry");
+  });
+
+  test("a connection without reply recovery still retries a missing responder", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      async request() {
+        throw Object.assign(new Error("no responders"), { code: "503" });
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1 });
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBeUndefined();
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error: agentErrorToControlError(response.error!, mutation.requestId),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("retry");
+  });
+
   test("only safe probes and journaled deliveries opt into exact-process recovery", async () => {
     for (const journaled of [false, true]) {
       const calls: Array<{ target: string; resendOn?: string }> = [];
@@ -197,5 +336,85 @@ describe("control reply recovery", () => {
     }));
     expect(await rpc.request(subject, mutation, { timeoutMs: 100 })).toEqual(failure);
     expect(executions).toBe(1);
+  });
+});
+
+describe("a request whose agent link ends before the answer", () => {
+  const replayHeaders = { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") };
+  const linkLost = {
+    data: new Uint8Array(0),
+    headers: { get: (name: string) => (name === AGENT_LINK_LOST_HEADER ? "1" : "") },
+  };
+
+  test("is delivered again at once under the same delivery, not after its timeout", async () => {
+    const deliveries: string[] = [];
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target: string, payload: Uint8Array) {
+        if (ControlRequest.decode(payload).op?.$case === "ping") {
+          return { data: result, headers: replayHeaders };
+        }
+        deliveries.push(target);
+        // The gateway that held the link answers for it as the link ends.
+        if (deliveries.length === 1) return linkLost;
+        return { data: result };
+      },
+    }));
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 30_000 });
+    expect(response.error).toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries[1]).toBe(deliveries[0]);
+  });
+
+  test("is never sent to another connection instance: once replaced, its outcome is unknown", async () => {
+    const deliveries: string[] = [];
+    let replaced = false;
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target: string, payload: Uint8Array) {
+        if (ControlRequest.decode(payload).op?.$case === "ping") {
+          return { data: result, headers: replayHeaders };
+        }
+        deliveries.push(target);
+        // The link ends, and the sandbox comes back as a new agent process.
+        replaced = true;
+        return linkLost;
+      },
+    }));
+    const response = await rpc.request(subject, mutation, {
+      timeoutMs: 30_000,
+      connectionCurrent: async () => !replaced,
+    });
+    expect(response.error).toEqual(connectionReplacedAgentError(false));
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.startsWith(`${subject}.`)).toBe(true);
+  });
+
+  test("a one-shot request ends as the ambiguous timeout it is, never as never-sent", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      async request() {
+        return linkLost;
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 30_000 });
+    expect(response.error?.code).toBe(timeoutAgentError().code);
+    expect(response.error?.detail ?? {}).not.toHaveProperty("_never_sent");
+  });
+
+  test("an agent's own reply is never mistaken for the link's end", async () => {
+    const recovery = new ControlReplyRecovery(100, 1);
+    const reply = await recovery.request(
+      {
+        async request() {
+          return { data: result, headers: { get: () => "1" } };
+        },
+      },
+      subject,
+      new Uint8Array(),
+      10,
+    );
+    expect(reply.data).toEqual(result);
   });
 });

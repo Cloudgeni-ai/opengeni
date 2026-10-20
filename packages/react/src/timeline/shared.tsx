@@ -1,4 +1,5 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
+import { useToolDetails } from "./tool-details";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
@@ -162,7 +163,10 @@ export function ActivityDisclosure({
   useEffect(() => {
     if (searchReveal) setOpen(true);
   }, [searchReveal]);
-  const truncation = useContext(ToolCallTruncationContext);
+  // A truncation notice is about raw output, which plain tool details never show.
+  const plain = useToolDetails() === "plain";
+  const truncationContext = useContext(ToolCallTruncationContext);
+  const truncation = plain ? null : truncationContext;
   const compact = useContext(CompactActivityContext);
   if (compact)
     return (
@@ -341,7 +345,14 @@ function Chip({ chip }: { chip: DisclosureChip }) {
 
 /* --- terminal output block (exec / write_stdin) ---------------------------- */
 
-export function TermBlock({
+type TermBlockProps = Parameters<typeof TermBlockView>[0];
+
+/** Terminal output under a tool row; plain tool details never show it. */
+export function TermBlock(props: TermBlockProps) {
+  return useToolDetails() === "plain" ? null : <TermBlockView {...props} />;
+}
+
+function TermBlockView({
   command,
   workdir,
   output,
@@ -444,8 +455,10 @@ export function PayloadBlock({
   value: unknown;
   failed?: boolean | undefined;
 }) {
+  const plain = useToolDetails() === "plain";
   const text = typeof value === "string" ? value : stringifyPayload(value);
-  if (!text || text.trim() === "") {
+  // Raw arguments and output are developer detail: plain tool details never show them.
+  if (plain || !text || text.trim() === "") {
     return null;
   }
   // Flush on the page, no frame — a labelled monospace run marked only by a 2px

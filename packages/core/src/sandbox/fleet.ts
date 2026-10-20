@@ -1048,6 +1048,7 @@ function runOnOperationAdmission(
     transactionalFsWriteMachineSupported:
       enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
@@ -1415,6 +1416,10 @@ export async function runOnSandbox(
               transport: new NatsOpStreamTransport(
                 async () => services.bus?.getOpStreamConnection?.() ?? null,
               ),
+              ...(enrollment.agentCapabilities.opRelease === true
+                ? { outputReleaseSupported: true }
+                : {}),
+              connectionGeneration: String(enrollment.connectionGeneration),
             },
           }
         : {}),

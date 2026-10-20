@@ -38,6 +38,8 @@ const ADMITTED = [
   "run_steps",
   "run_script",
   "parse_visual_regions",
+  // Read-only guidance that the other tools' descriptions point to.
+  "get_guide",
 ];
 
 // Release generation reads only the bundled driver's static tool inventory.

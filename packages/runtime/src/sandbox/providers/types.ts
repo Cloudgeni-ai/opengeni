@@ -67,6 +67,11 @@ export type ProviderWorkspaceCapturePolicy = {
    * physical instance. A replacing capture must never run behind a lease whose
    * provider identity cannot be atomically republished with it. */
   liveInstance: "preserved" | "replaced";
+  /** Which warm checkpoints run. `periodic` (the default): turn-end and
+   * interval checkpoints keep a recent recovery point. `forced_only`: the
+   * provider persists the live sandbox itself, so only a forced capture (a
+   * rotation) runs; drains still capture for rotation, archive or a move. */
+  warmCheckpoints?: "periodic" | "forced_only";
 };
 
 /**
@@ -91,6 +96,14 @@ export const REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE = Object.freeze({
   takeover: "parallel_read",
   strategy: "portable_tar",
   liveInstance: "preserved",
+} satisfies ProviderWorkspaceCapturePolicy);
+
+/** A provider that persists the live sandbox itself (Opengeni compute): a
+ * portable tar is read only to rotate, archive or move the workspace, never as
+ * a periodic warm checkpoint. */
+export const ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE = Object.freeze({
+  ...REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
+  warmCheckpoints: "forced_only",
 } satisfies ProviderWorkspaceCapturePolicy);
 
 /** Read SDK workspace persistence without coupling callers to the three shapes

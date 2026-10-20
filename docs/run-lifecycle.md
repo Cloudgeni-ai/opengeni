@@ -2761,7 +2761,7 @@ later provider loss. An operator may still explicitly authorize historical recov
 Every future agent attempt receives the discontinuity from its durable receipt
 as a new turn-scoped operational notice at the history tail. Earlier items and
 the legacy session-instruction prefix are never rewritten by this decision;
-compaction does not erase the receipt. Migration 0848 requires
+compaction does not erase the receipt. Migration 0871 requires
 warning protocol v4 on affected turn claims, so older workers cannot silently
 omit the new reason during a rolling deployment; ordinary sessions are unaffected.
 
@@ -3570,7 +3570,7 @@ observation window is never substituted for termination proof.
 box through a non-expiring interaction holder, so before migration 0705 an
 open browser or desktop that nobody used kept its Modal box warm until the
 provider deadline. They now follow the general idle grace
-(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default one minute, never under one minute);
 there is no separate window.
 
 Activity is deliberate and durable: the newest of the interaction holder's
@@ -3651,7 +3651,8 @@ there returns the candidate to active instead of stranding it in
 `suspending`. Up to three candidates are tried; when none can be saved, the
 create fails with the controller's `capacity_exhausted` error as before.
 Nothing happens below the limit. The saved browser resumes from its working
-copy on its next open.
+copy on its next open; a resume that reaches a full controller makes room the
+same way, once, without saving the browser being resumed.
 
 Downloads kept when a browser is saved (by capacity, an explicit suspend or a
 deadline checkpoint) follow the browser's chat, whoever's request stops it:

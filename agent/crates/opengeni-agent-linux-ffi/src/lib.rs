@@ -54,6 +54,59 @@ pub fn configure_process_cgroup_before_exec(
     ffi::configure_process_cgroup_before_exec(command, cgroup_procs);
 }
 
+/// Configures `command` to run as `uid`/`gid` with exactly `groups` as its
+/// supplementary groups, then to enter `cwd` as that user. The switch is
+/// registered as a pre-exec hook, so it runs after every hook registered before
+/// it (cgroup migration and OOM bias still run with the agent's privileges) and
+/// before user code. A failed switch or a directory the user cannot enter fails
+/// the spawn; the child never runs with the agent's credentials.
+///
+/// Give the working directory here, never through `Command::current_dir`: the
+/// standard library enters that directory before pre-exec hooks run, which
+/// would traverse it with the agent's credentials.
+///
+/// # Errors
+///
+/// A working directory that cannot be passed to the kernel (it contains a
+/// NUL byte); nothing is registered then.
+#[cfg(target_os = "linux")]
+pub fn configure_credentials_before_exec(
+    command: &mut tokio::process::Command,
+    uid: u32,
+    gid: u32,
+    groups: Vec<u32>,
+    cwd: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let cwd = cwd
+        .map(|cwd| std::ffi::CString::new(cwd.as_os_str().as_bytes()))
+        .transpose()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "working directory contains a NUL byte",
+            )
+        })?;
+    ffi::configure_credentials_before_exec(command, uid, gid, groups, cwd);
+    Ok(())
+}
+
+/// Irreversibly switches the CALLING THREAD ONLY to `uid`/`gid` with exactly
+/// `groups` as supplementary groups (real, effective, saved and filesystem ids
+/// all change, and a non-root result loses every capability). Other threads keep
+/// their credentials. Threads and processes later created by this thread inherit
+/// the new identity. Call it only on a dedicated thread that ends after its work.
+///
+/// # Errors
+///
+/// Returns the OS error of the first credential syscall that fails; the thread
+/// may then hold a partially switched identity and must not do further work.
+#[cfg(target_os = "linux")]
+pub fn drop_current_thread_credentials(uid: u32, gid: u32, groups: &[u32]) -> std::io::Result<()> {
+    ffi::drop_current_thread_credentials(uid, gid, groups)
+}
+
 /// Non-Linux stub so whole-workspace cross-platform checks retain one API.
 #[cfg(not(target_os = "linux"))]
 pub fn configure_oom_score_adj_before_exec(_command: &mut tokio::process::Command, _score: u16) {}
@@ -114,6 +167,95 @@ mod tests {
             .expect("read child PID");
         let _ = std::fs::remove_file(path);
         assert_eq!(actual, expected);
+    }
+
+    fn is_root() -> bool {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("Uid:"))
+                    .map(|line| line.split_whitespace().nth(2) == Some("0"))
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn credential_hook_runs_the_child_as_the_requested_identity() {
+        if !is_root() {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "echo $(id -u) $(id -g) $(id -G)"]);
+        configure_credentials_before_exec(&mut command, 65534, 65534, vec![65534, 12345], None)
+            .expect("configure credentials");
+        let output = command
+            .as_std_mut()
+            .output()
+            .expect("run credential fixture");
+        assert!(output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        let fields: Vec<&str> = text.split_whitespace().collect();
+        assert_eq!(&fields[..2], &["65534", "65534"]);
+        let mut groups = fields[2..].to_vec();
+        groups.sort_unstable();
+        assert_eq!(groups, vec!["12345", "65534"]);
+    }
+
+    #[test]
+    fn credential_hook_enters_the_working_directory_as_the_requested_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !is_root() {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        // A root-only parent with an open child: root may enter the child,
+        // the requested user may not.
+        let parent = std::env::temp_dir().join(format!("og-ffi-cwd-{}", std::process::id()));
+        let child = parent.join("open");
+        std::fs::create_dir_all(&child).expect("create fixture");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict parent");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755))
+            .expect("open child");
+        let run = |cwd: &std::path::Path, uid: u32| {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "pwd"]);
+            configure_credentials_before_exec(&mut command, uid, uid, vec![uid], Some(cwd))
+                .expect("configure credentials");
+            command.as_std_mut().output()
+        };
+        let denied = run(&child, 65534);
+        let allowed = run(&child, 0);
+        std::fs::remove_dir_all(&parent).expect("remove fixture");
+        let error = denied.expect_err("the user cannot traverse the root-only parent");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let allowed = allowed.expect("root enters the child");
+        assert_eq!(
+            String::from_utf8_lossy(&allowed.stdout).trim(),
+            child.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn thread_credential_drop_leaves_other_threads_unchanged() {
+        if !is_root() {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        let dropped = std::thread::spawn(|| {
+            drop_current_thread_credentials(65534, 65534, &[65534]).expect("drop thread creds");
+            std::fs::read_to_string("/proc/thread-self/status").expect("read thread status")
+        })
+        .join()
+        .expect("join");
+        assert!(dropped.lines().any(
+            |line| line.starts_with("Uid:") && line.split_whitespace().nth(2) == Some("65534")
+        ));
+        assert!(is_root(), "the process' other threads stay root");
     }
 
     #[test]

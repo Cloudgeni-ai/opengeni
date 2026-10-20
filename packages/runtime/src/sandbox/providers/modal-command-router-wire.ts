@@ -55,6 +55,16 @@ const startEncoderFingerprint = `sha256:${createHash("sha256")
 export const MODAL_ROUTER_READ_PAGE_BYTES = 1024 * 1024;
 const maxWireBytes = 4 * 1024 * 1024;
 
+/** Modal's DNS answers TXT queries for a task router name with NXDOMAIN, not
+ * NODATA. A caching resolver then denies the whole name, including its A
+ * record, for seconds. gRPC's default service-config TXT lookup on the first
+ * router channel of a fresh box therefore made the next channel (the SDK's
+ * first setup command) fail name resolution and stall the turn. Router channels
+ * use no DNS service config, so never send that query. */
+export const MODAL_ROUTER_CHANNEL_DNS_OPTIONS = Object.freeze({
+  "grpc.service_config_disable_resolution": 1,
+});
+
 /** Only constructed at the authenticated Start RPC boundary. Transport loss,
  * deadline, cancellation and UNKNOWN are deliberately not rejection proof. */
 export class ModalCommandStartRejectedError extends ProviderCommandStartRejectedError {
@@ -302,6 +312,7 @@ export class ModalCommandRouterWire {
         "grpc.max_receive_message_length": maxWireBytes,
         "grpc.max_send_message_length": maxWireBytes,
         "grpc.enable_retries": 0,
+        ...MODAL_ROUTER_CHANNEL_DNS_OPTIONS,
         // The HTTP/2 default 64 KiB window caps one read at 64 KiB per round
         // trip. Two pages lets stdout and stderr each fill a page in one trip
         // while bounding bytes discarded when a full read cancels its stream.

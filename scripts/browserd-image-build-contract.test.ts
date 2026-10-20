@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { computerRuntimeConfig } from "../packages/browserd/src/main";
 
 const root = resolve(import.meta.dir, "..");
 const imagePaths = ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"] as const;
@@ -148,6 +149,26 @@ describe("browser controller image build contract", () => {
       );
     }
   });
+
+  for (const imagePath of imagePaths) {
+    test(`${imagePath} runs the desktop driver it ships`, async () => {
+      const dockerfile = await readFile(resolve(root, imagePath), "utf8");
+      const environment: Record<string, string> = {};
+      for (const match of dockerfile.matchAll(/^ENV (OPENGENI_BROWSERD_[A-Z_]+)=(\S+)$/gm)) {
+        environment[match[1]!] = match[2]!;
+      }
+      // The images stage no CUA runtime beside the compiled controller, so a
+      // CUA default would fail every ComputerSession start.
+      expect(computerRuntimeConfig(environment, "linux")).toEqual({
+        computerBackend: "native",
+        computerEnvironmentMode: "isolated_linux",
+      });
+      expect(dockerfile).toContain(
+        "ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native",
+      );
+      expect(dockerfile).not.toContain("stage-cua-runtime");
+    });
+  }
 
   test("startup distinguishes a live setsid/env child from a completed browserd exec", async () => {
     const source = await readFile(resolve(root, startupScriptPath), "utf8");

@@ -113,6 +113,10 @@ pub enum JobCommand {
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
+    /// The consumer stored the result and released it (wire: `OpRelease`,
+    /// already checked against the terminal frame by the registry). Ends a
+    /// completed job's lingering collection; ignored while it still runs.
+    Release,
     /// Stop pumping and hand the job, untouched, to a successor process image
     /// (an in-place agent update). The reply carries everything needed to
     /// resume it, or `None` if the state could not be exported, in which case
@@ -1062,6 +1066,11 @@ impl Pump {
                     // registered its waiter yet, so the completion receipt
                     // cannot be lost in the send→wait handoff.
                     completed.notify_one();
+                }
+            }
+            JobCommand::Release => {
+                if self.exit_fence.is_some() {
+                    self.final_acked = true;
                 }
             }
             JobCommand::Cancel => {

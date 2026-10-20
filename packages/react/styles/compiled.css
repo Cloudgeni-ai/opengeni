@@ -5650,6 +5650,24 @@
       }
     }
   }
+:where(.og-root).\[\&_\[role\=status\]\]\:px-0,:where(.og-root) .\[\&_\[role\=status\]\]\:px-0 {
+    & [role=status] {
+      padding-inline: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).\[\&_\[role\=status\]\>span\:last-child\]\:sr-only,:where(.og-root) .\[\&_\[role\=status\]\>span\:last-child\]\:sr-only {
+    & [role=status]>span:last-child {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border-width: 0;
+    }
+  }
 :where(.og-root).\[\&_strong\]\:text-og-fg-muted,:where(.og-root) .\[\&_strong\]\:text-og-fg-muted {
     & strong {
       color: var(--og-color-fg-muted);

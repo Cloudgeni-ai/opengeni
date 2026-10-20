@@ -44,6 +44,7 @@ use opengeni_agent_proto::v1::{
     self, agent_event::Event, AgentEvent, ControlRequest, ControlResponse, GoingOffline,
     GoingOfflineReason, Heartbeat, Hello,
 };
+use opengeni_agent_stream::RelayCredential;
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -82,6 +83,46 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
+/// Keeps a compute link's relay credential current with what its host sends
+/// on [`crate::compute::RELAY_SUBJECT`], for as long as the generation lasts.
+/// The host sends the latest credential on each subscription, so a new
+/// generation starts with one.
+async fn follow_relay_credential(
+    mut subscription: async_nats::Subscriber,
+    credential: RelayCredential,
+) {
+    while let Some(message) = subscription.next().await {
+        match crate::compute::parse_relay_credential(&message.payload) {
+            Ok(endpoint) => {
+                debug!(expires_at_ms = ?endpoint.expires_at_ms, "relay credential from the host");
+                credential.set(endpoint);
+            }
+            Err(error) => warn!(%error, "ignoring a relay credential the host sent"),
+        }
+    }
+}
+
+/// A compute agent's relay credential comes from its host, on a subject only
+/// the host answers: follow it for the generation on `client`.
+async fn follow_compute_relay(
+    compute: Option<&ComputeLink>,
+    client: &async_nats::Client,
+) -> Result<Option<AbortOnDrop>, ConnectionOutcome> {
+    let Some(compute) = compute else {
+        return Ok(None);
+    };
+    let subscription = client
+        .subscribe(crate::compute::RELAY_SUBJECT)
+        .await
+        .map_err(|e| {
+            ConnectionOutcome::Disconnected(format!("relay credential subscribe failed: {e}"))
+        })?;
+    Ok(Some(AbortOnDrop(tokio::spawn(follow_relay_credential(
+        subscription,
+        compute.relay.clone(),
+    )))))
+}
+
 async fn publish_bulk_lane(
     engine: Arc<Engine>,
     client: async_nats::Client,
@@ -101,6 +142,18 @@ async fn publish_bulk_lane(
                     let event = crate::ops::completion_event(op_id, &exit);
                     if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
                         warn!(%error, "completion replay failed; retained proof retries after reconnect");
+                        transport_lost.request(TransportLossKind::Disconnected);
+                        return;
+                    }
+                }
+                // This connection's inventory, until every page is answered,
+                // and again while completed output goes unreleased: Opengeni
+                // names the ops to end and collects what it has not stored
+                // (inventory.rs). The runner starts every such exchange.
+                for page in engine.inventory_pages(&scope) {
+                    let event = crate::ops::inventory_event(page);
+                    if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
+                        warn!(%error, "inventory report failed; it retries after reconnect");
                         transport_lost.request(TransportLossKind::Disconnected);
                         return;
                     }
@@ -357,10 +410,11 @@ impl EpochCell {
 /// while the loop is between `.notified()` registrations — mid-connect, mid-hello,
 /// or in the sync gap before a select re-arms — is lost, and the agent never stops
 /// (or, worse, the loser of a race exits WITHOUT announcing going-offline). This
-/// pairs the notify with a latched flag: callers `await` [`notified`](Self::notified)
-/// to wake promptly AND check [`is_requested`](Self::is_requested) at each decision
-/// point, so a request is never missed and the clean-shutdown path (which publishes
-/// [`GoingOffline`]) is always reached while a client is live (§23.0).
+/// pairs the notify with a latched flag: every wait registers before checking the
+/// flag, so a request is never missed. Callers can also check
+/// [`is_requested`](Self::is_requested) at decision points to prioritize the
+/// clean-shutdown path, which publishes [`GoingOffline`] while a client is live
+/// (§23.0).
 #[derive(Clone, Default)]
 pub struct ShutdownSignal {
     requested: Arc<AtomicBool>,
@@ -398,12 +452,21 @@ impl ShutdownSignal {
         self.requested.load(Ordering::Acquire)
     }
 
-    /// Resolves when a shutdown is requested via a waiter wake. Because
-    /// `notify_waiters` does not latch a permit, ALWAYS pair this with an
-    /// [`is_requested`](Self::is_requested) check at the enclosing loop top so a
-    /// request that fired before this future registered is still observed.
+    /// Resolves once shutdown is requested, including before the first poll.
     pub async fn notified(&self) {
-        self.notify.notified().await;
+        self.requested().await;
+    }
+
+    /// Resolves once a shutdown is requested, at once if one already was.
+    /// The waiter is registered before the flag is read, so a request racing
+    /// this call is never missed. [`notified`](Self::notified) shares this path.
+    pub async fn requested(&self) {
+        let mut notified = std::pin::pin!(self.notify.notified());
+        notified.as_mut().enable();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -419,6 +482,59 @@ impl ShutdownSignal {
 enum TransportLossKind {
     Disconnected = 1,
     CredentialRotation = 2,
+}
+
+/// Asks every link to drop its connection and dial again at once, without
+/// the back-off it uses for an outage. An agent in a compute sandbox gets this
+/// when its host has no stream for its connections, after a move, a recovery
+/// on another host or a restart of the host agent: its connections went with
+/// the host that carried them, and the host answers at once. A request that
+/// arrives while a link is dialing is kept, so that link redials once more
+/// after it connects.
+#[derive(Clone)]
+pub struct ReconnectSignal {
+    generation: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Default for ReconnectSignal {
+    fn default() -> Self {
+        let (generation, _) = tokio::sync::watch::channel(0);
+        Self {
+            generation: Arc::new(generation),
+        }
+    }
+}
+
+impl ReconnectSignal {
+    /// Asks every link to reconnect now.
+    pub fn request(&self) {
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+}
+
+/// What a link needs when the agent runs in a compute sandbox (see
+/// [`crate::compute`]): it dials its host with no credential, and the relay
+/// credential arrives from the host on [`crate::compute::RELAY_SUBJECT`].
+#[derive(Clone, Debug)]
+pub struct ComputeLink {
+    /// The credential the link's relay hub presents, kept current from the
+    /// host's messages.
+    pub relay: RelayCredential,
+}
+
+/// Aborts a generation's helper task when the generation ends, however it
+/// ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// A level-triggered signal that one NATS client in the current connection
@@ -458,7 +574,12 @@ impl TransportLossSignal {
     }
 
     async fn notified(&self) {
-        self.notify.notified().await;
+        let mut notified = std::pin::pin!(self.notify.notified());
+        notified.as_mut().enable();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -474,6 +595,14 @@ fn transport_loss_outcome(lane: &'static str, signal: &TransportLossSignal) -> C
 struct ConnectedNats {
     client: async_nats::Client,
     transport_lost: TransportLossSignal,
+}
+
+/// What ends a live connection generation besides a shutdown and its own
+/// subscriptions: either lane losing its transport, or a reconnect request.
+struct GenerationEnds<'a> {
+    control_lost: TransportLossSignal,
+    bulk_lost: TransportLossSignal,
+    reconnect: &'a mut tokio::sync::watch::Receiver<u64>,
 }
 
 /// Ending either half retires the generation, rather than silently serving
@@ -512,6 +641,8 @@ pub struct SupervisorLink<P: Platform> {
     /// Random for this daemon process and stable across control/bulk reconnects.
     /// Auth-callout leases this exact value and operational subjects include it.
     pub connection_instance_id: String,
+    /// Set when the agent runs in a compute sandbox behind its host.
+    pub compute: Option<ComputeLink>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -523,6 +654,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             api_url: self.api_url.clone(),
             authentication_state: self.authentication_state,
             connection_instance_id: self.connection_instance_id.clone(),
+            compute: self.compute.clone(),
         }
     }
 }
@@ -542,7 +674,15 @@ impl<P: Platform> SupervisorLink<P> {
             api_url: None,
             authentication_state: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
+            compute: None,
         }
+    }
+
+    /// Serve this link as an agent in a compute sandbox.
+    #[must_use]
+    pub fn with_compute(mut self, compute: ComputeLink) -> Self {
+        self.compute = Some(compute);
+        self
     }
 
     /// Attach the deployment origin that this exact link enrolled against.
@@ -580,6 +720,7 @@ struct WorkspaceLink<P: Platform> {
     api_url: Option<String>,
     authentication_state: Option<crate::config::AuthenticationState>,
     connection_instance_id: String,
+    compute: Option<ComputeLink>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -605,6 +746,7 @@ impl<P: Platform> WorkspaceLink<P> {
             api_url: definition.api_url,
             authentication_state: definition.authentication_state,
             connection_instance_id: definition.connection_instance_id,
+            compute: definition.compute,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
@@ -693,9 +835,14 @@ pub struct Supervisor<P: Platform> {
     browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
+    /// Asks every link to reconnect at once (a compute sandbox whose host lost
+    /// its connections).
+    reconnect: ReconnectSignal,
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
     update_drain: Arc<UpdateDrain>,
+    /// Upload requests being served and when the last one began or ended.
+    upload_activity: Arc<UploadActivity>,
     /// Keep exact-scope receipts even if a credential file temporarily disappears.
     /// Re-adding that same process subject must never re-admit an old delivery.
     reply_journals: std::sync::Mutex<HashMap<ReplyScope, ReplyJournal>>,
@@ -709,6 +856,52 @@ pub struct Supervisor<P: Platform> {
 
 type ReplyScope = (Option<String>, String, String);
 type ReplyJournal = Arc<std::sync::Mutex<crate::rpc_replay::Registry>>;
+
+/// What the agent counts of its uploads as in use: every upload request
+/// being served, and the accepted transactions while their clients keep
+/// sending. An abandoned transaction stops counting once uploads have been
+/// silent for the window, so it cannot keep its sandbox awake for ever.
+#[derive(Default)]
+struct UploadActivity {
+    serving: std::sync::atomic::AtomicUsize,
+    last: std::sync::Mutex<Option<Instant>>,
+}
+
+impl UploadActivity {
+    /// Counts one upload request from its admission until it is served.
+    fn serve(self: &Arc<Self>) -> ServingUpload {
+        self.serving.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+        ServingUpload(self.clone())
+    }
+
+    fn touch(&self) {
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// The uploads in use at `now`, given how many transactions are accepted.
+    fn in_use_at(&self, now: Instant, accepted: usize, silence: Duration) -> usize {
+        let recent = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|at| now.saturating_duration_since(at) <= silence);
+        self.serving.load(Ordering::Acquire) + if recent { accepted } else { 0 }
+    }
+}
+
+/// One upload request being served; its end also counts as upload traffic.
+struct ServingUpload(Arc<UploadActivity>);
+
+impl Drop for ServingUpload {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.serving.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl<P: Platform + 'static> Supervisor<P> {
     /// Builds a supervisor over a platform + persisted credentials. The op
@@ -752,7 +945,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
             shutdown: ShutdownSignal::default(),
+            reconnect: ReconnectSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
+            upload_activity: Arc::default(),
             reply_journals: std::sync::Mutex::new(HashMap::new()),
             frame_lanes: Arc::new(std::sync::Mutex::new(FrameLanes::default())),
             #[cfg(unix)]
@@ -811,6 +1006,17 @@ impl<P: Platform + 'static> Supervisor<P> {
             .and_then(|handover| handover.pending.lock().expect("pending handover").take())
     }
 
+    /// Keeps the gone-op markers a predecessor image carried, so a start it
+    /// already answered or released never runs here. Call before running.
+    #[cfg(unix)]
+    pub fn restore_lost_markers(&self, markers: Vec<crate::handover::CarriedMarker>) {
+        self.engine.restore_markers(
+            markers
+                .into_iter()
+                .map(crate::handover::CarriedMarker::into_parts),
+        );
+    }
+
     /// Continues the jobs a predecessor image handed over. Call before
     /// running: their frames flow once their links connect.
     #[cfg(unix)]
@@ -829,6 +1035,36 @@ impl<P: Platform + 'static> Supervisor<P> {
     #[must_use]
     pub fn shutdown_handle(&self) -> ShutdownSignal {
         self.shutdown.clone()
+    }
+
+    /// A handle that asks every link to drop its connection and dial again at
+    /// once. Wired to `SIGUSR1` in compute mode.
+    #[must_use]
+    pub fn reconnect_handle(&self) -> ReconnectSignal {
+        self.reconnect.clone()
+    }
+
+    /// How much host work is running or waiting to run: what the agent reports
+    /// as in use in a compute sandbox. That is admitted engine work, every
+    /// upload request being served, and accepted upload transactions while
+    /// their clients keep sending within `silence` (a sleep between chunks
+    /// would reconnect the agent and fence the transaction).
+    pub fn work_in_progress(
+        &self,
+        silence: Duration,
+    ) -> impl Fn() -> usize + Send + Sync + 'static {
+        let engine = self.engine.clone();
+        let drain = self.update_drain.clone();
+        let uploads = self.upload_activity.clone();
+        move || {
+            let admission = engine.admission_snapshot();
+            let accepted = drain.snapshot().map_or(0, |snapshot| snapshot.uploads);
+            admission.light_running
+                + admission.light_queued
+                + admission.heavy_running
+                + admission.heavy_queued
+                + uploads.in_use_at(Instant::now(), accepted, silence)
+        }
     }
 
     fn retain_reply_scope(&self, mut link: WorkspaceLink<P>) -> Arc<WorkspaceLink<P>> {
@@ -865,10 +1101,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         self.shutdown.is_requested() || link.shutdown.is_requested()
     }
 
+    /// Resolves once the process or this link is asked to stop, at once if
+    /// either already was, so a stop that came while nothing waited (say,
+    /// while a hello was being prepared) is still seen.
     async fn link_stop_notified(&self, link: &WorkspaceLink<P>) {
         tokio::select! {
-            () = self.shutdown.notified() => {},
-            () = link.shutdown.notified() => {},
+            () = self.shutdown.requested() => {},
+            () = link.shutdown.requested() => {},
         }
     }
 
@@ -1039,6 +1278,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         }
         let mut backoff = Backoff::standard();
+        let mut reconnect = self.reconnect.subscribe();
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
@@ -1059,7 +1299,12 @@ impl<P: Platform + 'static> Supervisor<P> {
                 return;
             }
 
-            match self.serve_one_connection(link, &mut backoff).await {
+            // The dial that follows answers every reconnect asked for so far.
+            reconnect.mark_unchanged();
+            match self
+                .serve_one_connection(link, &mut backoff, &mut reconnect)
+                .await
+            {
                 ConnectionOutcome::CleanShutdown => return,
                 ConnectionOutcome::AuthenticationRejected => {
                     // The file watcher adopts recovery state and later renewed
@@ -1089,6 +1334,12 @@ impl<P: Platform + 'static> Supervisor<P> {
                         "NATS user credential rotated; reconnecting immediately"
                     );
                 }
+                ConnectionOutcome::Reconnect => {
+                    info!(
+                        connection_id = %link.connection_id,
+                        "reconnecting at once, as asked"
+                    );
+                }
                 ConnectionOutcome::Disconnected(reason) => {
                     let delay = backoff.next_delay();
                     warn!(
@@ -1104,6 +1355,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     tokio::select! {
                         biased;
                         () = self.link_stop_notified(link) => return,
+                        Ok(()) = reconnect.changed() => {}
                         () = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -1118,13 +1370,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         &self,
         link: &WorkspaceLink<P>,
         backoff: &mut Backoff,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
     ) -> ConnectionOutcome {
         // The dial has no client yet, so a shutdown here just exits (nothing to
-        // announce) — but race it so a hung/slow dial cannot delay a clean stop.
-        let connect = tokio::select! {
-            biased;
-            () = self.link_stop_notified(link) => return ConnectionOutcome::CleanShutdown,
-            result = self.connect(link) => result,
+        // announce).
+        let connect = match self.dial(link, reconnect).await {
+            Ok(result) => result,
+            Err(outcome) => return outcome,
         };
         let ConnectedNats {
             client,
@@ -1156,6 +1408,13 @@ impl<P: Platform + 'static> Supervisor<P> {
             return ConnectionOutcome::CleanShutdown;
         }
 
+        // Following the relay credential before the hello means the first
+        // stream Opengeni asks for finds it.
+        let _relay_follower = match follow_compute_relay(link.compute.as_ref(), &client).await {
+            Ok(follower) => follower,
+            Err(outcome) => return outcome,
+        };
+
         // Subscribe to the RPC subject — this IS the registry.
         let subscription = match client.subscribe(link.rpc_subject()).await {
             Ok(sub) => sub,
@@ -1186,15 +1445,14 @@ impl<P: Platform + 'static> Supervisor<P> {
         let ConnectedNats {
             client: bulk_client,
             transport_lost: bulk_transport_lost,
-        } = match self.connect(link).await {
+        } = match self.dial_bulk(link, &client, reconnect).await {
             Ok(connection) => connection,
-            Err(SupervisorError::Authentication(_)) => {
-                return ConnectionOutcome::AuthenticationRejected
-            }
-            Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
+            Err(outcome) => return outcome,
         };
         let (bulk_tx, bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
+        // A new connection reports the link's operations afresh.
+        self.engine.begin_link_connection(&link.connection_id);
         let publisher = tokio::spawn(publish_bulk_lane(
             self.engine.clone(),
             bulk_client,
@@ -1219,8 +1477,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                 &client,
                 subscription,
                 ack_subscription,
-                control_transport_lost,
-                bulk_transport_lost,
+                GenerationEnds {
+                    control_lost: control_transport_lost,
+                    bulk_lost: bulk_transport_lost,
+                    reconnect,
+                },
             )
             .await
         };
@@ -1246,20 +1507,22 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         mut subscription: impl futures::Stream<Item = async_nats::Message> + Unpin,
         mut ack_subscription: async_nats::Subscriber,
-        control_transport_lost: TransportLossSignal,
-        bulk_transport_lost: TransportLossSignal,
+        ends: GenerationEnds<'_>,
     ) -> ConnectionOutcome {
+        let GenerationEnds {
+            control_lost: control_transport_lost,
+            bulk_lost: bulk_transport_lost,
+            reconnect,
+        } = ends;
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut hb_seq: u64 = 0;
         let mut rpc_tasks = JoinSet::new();
 
         let outcome = loop {
-            // Level-triggered catch: a shutdown latched between selects — during the
-            // hello/subscribe just completed, or while a heartbeat/admission awaited
-            // — would be missed by the edge-triggered `notified()` branch below (its
-            // wake fired with no waiter registered). Checking the flag at the loop
-            // top guarantees this live generation still reaches the announce path.
+            // Prioritize already-latched shutdown and transport loss before
+            // accepting more work. The waits below also check their latch after
+            // registration, covering a request between these checks and select.
             if self.link_stop_requested(link) {
                 break ConnectionOutcome::CleanShutdown;
             }
@@ -1282,6 +1545,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 () = bulk_transport_lost.notified() => {
                     break transport_loss_outcome("bulk", &bulk_transport_lost);
                 }
+                Ok(()) = reconnect.changed() => {
+                    break ConnectionOutcome::Reconnect;
+                }
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
                 _ = heartbeat.tick() => {
@@ -1303,7 +1569,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // served inline.
                 ack = ack_subscription.next() => match ack {
                     Some(message) => {
-                        if crate::ops::handle_completion_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
+                        if crate::ops::handle_event_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
                             continue;
                         }
                         match v1::OpAck::decode(message.payload.as_ref()) {
@@ -1343,6 +1609,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             let reason = match &outcome {
                 ConnectionOutcome::CleanShutdown => "shutdown",
                 ConnectionOutcome::CredentialRotation => "credential_rotation",
+                ConnectionOutcome::Reconnect => "reconnect",
                 ConnectionOutcome::AuthenticationRejected => "authentication_rejected",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
@@ -1494,9 +1761,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             let client = client.clone();
             let reply_reservation = reservation.expect("upload reservation");
             let worker_reservation = reply_reservation.clone();
+            let serving = self.upload_activity.serve();
             spawn_admitted_rpc(rpc_tasks, reply_reservation, async move {
                 // A blocking filesystem call outlives cancellation of its reply task.
                 let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
+                    let _serving = serving;
                     uploads.lock().expect("upload registry").serve_reserved(
                         platform.as_ref(),
                         &request,
@@ -1576,11 +1845,16 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Bounded by the renewal HTTP timeout. Detached so adopting the
                 // renewed file (which restarts this link) cannot cut the reply.
                 let connection_id = link.connection_id.clone();
+                let compute = link.compute.is_some();
                 let client = client.clone();
                 let receipt = crate::rpc_replay::current();
                 tokio::spawn(crate::rpc_replay::scope(receipt, async move {
-                    let response =
-                        credential_renew_response(request_id, renew_now(&connection_id).await);
+                    let renewed = if compute {
+                        Err(RenewNowError::Unsupported)
+                    } else {
+                        renew_now(&connection_id).await
+                    };
+                    let response = credential_renew_response(request_id, renewed);
                     publish_response(&client, reply, response, label, max_payload).await;
                     // Adopting the renewed file restarts this link; send first.
                     let _ = client.flush().await;
@@ -1642,6 +1916,19 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) {
         let max_payload = client.server_info().max_payload;
         let request_id = request.request_id.clone();
+        if link.compute.is_some() {
+            // A sandbox's image pins its agent; a new agent comes with a new
+            // image, never by replacing the running one.
+            publish_response(
+                client,
+                reply,
+                update_error_response(request_id, "update_unsupported", false),
+                "agent_update_apply",
+                max_payload,
+            )
+            .await;
+            return;
+        }
         if request.epoch != 0 && request.epoch < link.epoch.load() {
             publish_response(
                 client,
@@ -2098,6 +2385,49 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
+    /// Dials one connection unless the link stops or a reconnect is asked
+    /// for first. A server that accepts the socket but never sends `INFO`
+    /// holds a dial indefinitely, so neither waits behind one; a reconnect
+    /// abandons the dial and the link dials afresh at once.
+    async fn dial(
+        &self,
+        link: &WorkspaceLink<P>,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<Result<ConnectedNats, SupervisorError>, ConnectionOutcome> {
+        tokio::select! {
+            biased;
+            () = self.link_stop_notified(link) => Err(ConnectionOutcome::CleanShutdown),
+            Ok(()) = reconnect.changed() => Err(ConnectionOutcome::Reconnect),
+            result = self.connect(link) => Ok(result),
+        }
+    }
+
+    /// Dials a generation's bulk connection after its hello is out, so a
+    /// stop during the dial is announced like any other.
+    async fn dial_bulk(
+        &self,
+        link: &WorkspaceLink<P>,
+        control: &async_nats::Client,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<ConnectedNats, ConnectionOutcome> {
+        match self.dial(link, reconnect).await {
+            Ok(Ok(connection)) => Ok(connection),
+            // A rejected credential pauses retries until renewal, as on the
+            // control connection, rather than redialing in a storm.
+            Ok(Err(SupervisorError::Authentication(_))) => {
+                Err(ConnectionOutcome::AuthenticationRejected)
+            }
+            Ok(Err(e)) => Err(ConnectionOutcome::Disconnected(format!(
+                "bulk dial failed: {e}"
+            ))),
+            Err(ConnectionOutcome::CleanShutdown) => {
+                self.announce_going_offline(link, control).await;
+                Err(ConnectionOutcome::CleanShutdown)
+            }
+            Err(outcome) => Err(outcome),
+        }
+    }
+
     /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
     /// AUTH-CALLOUT model, / M-AUTH): the server delegates to the
     /// control-plane callout responder, which validates the bearer and returns a
@@ -2119,7 +2449,9 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// link stays paused until renewal or explicit reconnect supplies credentials;
     /// transport failures alone use the reconnect backoff.
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
-        if link.creds.nats_bearer.is_empty() {
+        // A compute agent dials its own host, which authenticates the sandbox
+        // on its link; it presents no credential.
+        if link.compute.is_none() && link.creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
@@ -2130,8 +2462,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         let connection_id = link.connection_id.clone();
         let transport_lost = TransportLossSignal::default();
         let event_transport_lost = transport_lost.clone();
-        let opts = async_nats::ConnectOptions::new()
-            .token(link.creds.nats_bearer.clone())
+        let opts = if link.compute.is_some() {
+            async_nats::ConnectOptions::new()
+        } else {
+            async_nats::ConnectOptions::new().token(link.creds.nats_bearer.clone())
+        };
+        let opts = opts
             .name(format!(
                 "opengeni-agent/connection/{}",
                 link.connection_instance_id
@@ -2169,7 +2505,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         let client = async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
             .await
             .map_err(|e| {
-                if is_authentication_error(&e) {
+                // A compute host refuses a link it does not serve yet (a stale
+                // epoch, an invalid ticket, a sandbox it no longer holds) with
+                // the same authorization error. A compute link has no credential
+                // to renew, so that refusal is a disconnect: the link backs off
+                // and dials again at once when its host asks it to reconnect.
+                if link.compute.is_none() && is_authentication_error(&e) {
                     SupervisorError::Authentication(e.to_string())
                 } else {
                     SupervisorError::Connect(e.to_string())
@@ -2286,9 +2627,15 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
             transactional_fs_write_machine: link.platform.transactional_fs_write_supported(),
-            credential_renew: true,
+            // Opengeni compute keeps a sandbox's enrollment; its agent has nothing
+            // to renew.
+            credential_renew: link.compute.is_none(),
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),
+            // Linux agents running as root switch user per request.
+            run_as: link.platform.run_as_supported(),
+            // OpRelease is served: a release is confirmed in its answer.
+            op_release: true,
         }
     }
 
@@ -2438,7 +2785,9 @@ fn classify(request: &ControlRequest) -> Route {
         Some(Op::Ping(_)) => Route::Liveness,
         Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
-        Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
+        Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::OpRelease(_)) => {
+            Route::OpControl
+        }
         Some(Op::AgentUpdateApply(update)) => Route::AgentUpdate(update.clone()),
         Some(Op::CredentialRenew(_)) => Route::CredentialRenew,
         _ => Route::Work(JobClass::Light),
@@ -2465,6 +2814,9 @@ fn serve_op_control(
         Some(Op::OpAttach(attach)) => {
             crate::ops::serve_op_attach_scoped(engine, scope, request_id, attach)
         }
+        Some(Op::OpRelease(release)) => {
+            crate::ops::serve_op_release_scoped(engine, scope, request_id, release)
+        }
         _ => unreachable!("classified OpControl"),
     }
 }
@@ -2472,6 +2824,7 @@ fn serve_op_control(
 /// The three macOS desktop permissions, read without prompting. `None` off
 /// macOS desktop builds, where the control plane must treat them as unknown.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[allow(clippy::unnecessary_wraps)] // Shared signature with the non-macOS implementation below.
 fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
     let grants = opengeni_agent_platform::desktop_grants();
     Some(v1::MacDesktopPermissions {
@@ -2729,6 +3082,8 @@ enum ConnectionOutcome {
     /// The short-lived NATS user credential expired as designed. Reconnect with
     /// the durable enrollment bearer immediately to mint its successor.
     CredentialRotation,
+    /// A reconnect was asked for ([`ReconnectSignal`]): dial again at once.
+    Reconnect,
     /// A clean shutdown was requested; the run loop should exit.
     CleanShutdown,
 }
@@ -2770,6 +3125,7 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::OpCancel(_)) => "op_cancel",
         Some(Op::OpQuery(_)) => "op_query",
         Some(Op::OpAttach(_)) => "op_attach",
+        Some(Op::OpRelease(_)) => "op_release",
         Some(Op::WriteChunk(_)) => "write_chunk",
         None => "none",
     }
@@ -2871,6 +3227,11 @@ async fn hand_over_for_update<P: Platform>(
         from_version: from_version.to_string(),
         connection_instance_id: handover.connection_instance_id.clone(),
         ops,
+        lost_markers: engine
+            .carried_markers()
+            .into_iter()
+            .map(crate::handover::CarriedMarker::from)
+            .collect(),
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
@@ -2950,6 +3311,74 @@ mod tests {
         assert!(messages.next().await.is_none());
         let mut messages = rpc_messages(futures::stream::pending(), futures::stream::empty());
         assert!(messages.next().await.is_none());
+    }
+
+    #[test]
+    fn uploads_count_while_served_and_while_their_clients_keep_sending() {
+        let activity = Arc::new(UploadActivity::default());
+        let silence = Duration::from_secs(30);
+        assert_eq!(
+            activity.in_use_at(Instant::now(), 1, silence),
+            0,
+            "no upload traffic yet"
+        );
+        let serving = activity.serve();
+        // A request being served counts however long it takes.
+        assert_eq!(
+            activity.in_use_at(Instant::now() + silence * 4, 0, silence),
+            1
+        );
+        drop(serving);
+        let ended = Instant::now();
+        assert_eq!(activity.in_use_at(ended, 0, silence), 0);
+        assert_eq!(
+            activity.in_use_at(ended, 2, silence),
+            2,
+            "accepted transactions count while their clients keep sending"
+        );
+        assert_eq!(
+            activity.in_use_at(ended + silence * 2, 2, silence),
+            0,
+            "an abandoned transaction stops counting after the silence"
+        );
+    }
+
+    /// An accepted upload transaction is work in progress between its
+    /// requests, and stops being so once its client goes silent.
+    #[tokio::test]
+    async fn an_accepted_upload_is_work_in_progress_while_its_client_sends() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let definition = SupervisorLink::new(
+            "upload-activity",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            it::test_credentials("nats://127.0.0.1:9"),
+        );
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let work = supervisor.work_in_progress(Duration::from_secs(30));
+        let silent = supervisor.work_in_progress(Duration::ZERO);
+        assert_eq!(work(), 0);
+
+        let begin = supervisor
+            .update_drain
+            .reserve_work(Some(crate::uploads::update_drain::UploadIdentity {
+                connection: "upload-activity".into(),
+                operation: "fsw-activity".into(),
+                epoch: 1,
+            }))
+            .expect("admitted");
+        let accepted = begin.retain_upload();
+        drop(supervisor.upload_activity.serve());
+        drop(begin);
+        assert_eq!(
+            work(),
+            1,
+            "the accepted upload is in use between its requests"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(silent(), 0, "a silent upload is not in use");
+        drop(accepted);
+        assert_eq!(work(), 0, "a settled upload is not in use");
     }
 
     /// A real async-nats client over TCP with its actual writer backpressured.
@@ -3225,6 +3654,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || {
                 let mut command = tokio::process::Command::new("/bin/sh");
                 command.arg("-c").arg("printf synthetic-result");
@@ -3442,6 +3872,7 @@ mod tests {
                             ticket,
                             Vec::new(),
                             None,
+                            0,
                             || {
                                 let mut command = tokio::process::Command::new("/bin/sh");
                                 command.arg("-c").arg("sleep 30");
@@ -3480,6 +3911,7 @@ mod tests {
                 request_id: "carried".into(),
                 subject: "agent.w.a.connection.i.op.carried".into(),
                 window_bytes: 0,
+                connection_generation: 0,
             },
         );
         assert_eq!(engine.handover_counts(), (1, 1));
@@ -3658,6 +4090,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            0,
             || Err(std::io::Error::other("synthetic spawn failure")),
             |_| {},
             |_| Vec::new(),
@@ -3849,6 +4282,7 @@ mod tests {
                 path: "after-idle".into(),
                 parents: false,
                 mode: 0o700,
+                run_as: String::new(),
             })),
         };
         client
@@ -4277,8 +4711,7 @@ mod tests {
                 .with_stream_registry(Arc::new(RelayHub::new(RelayHubConfig {
                     workspace_id: "fixture".into(),
                     agent_id: "fixture".into(),
-                    relay_url: "ws://127.0.0.1:1".into(),
-                    agent_token: "unused".into(),
+                    credential: RelayCredential::fixed("ws://127.0.0.1:1", "unused"),
                     allow_screen_control: false,
                 }))),
         );
@@ -4531,25 +4964,45 @@ mod tests {
     async fn shutdown_signal_latches_and_wakes_registered_waiters() {
         let signal = ShutdownSignal::default();
         assert!(!signal.is_requested(), "not requested initially");
-
-        // A waiter already awaiting when the request lands is woken.
-        let waiter = {
-            let s = signal.clone();
-            tokio::spawn(async move { s.notified().await })
-        };
-        // Let the spawned waiter register before we request.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut first = std::pin::pin!(signal.notified());
+        let mut second = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
         signal.request();
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .expect("a registered waiter wakes on request")
-            .expect("waiter task did not panic");
-
-        // And the flag stays latched for any LATER checker even though
-        // `notify_waiters` stored no permit — this level-triggering is exactly what
-        // the run loop's `is_requested` checks rely on to never miss a stop that
-        // raced a select (the missed-signal half the fix closes).
+        assert!(futures::poll!(first.as_mut()).is_ready());
+        assert!(futures::poll!(second.as_mut()).is_ready());
         assert!(signal.is_requested(), "request latches permanently");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_observes_request_before_first_poll_and_after_cancellation() {
+        for update in [false, true] {
+            let signal = ShutdownSignal::default();
+            // A select branch can be constructed after a false loop-top check,
+            // then first polled only after another thread requests shutdown.
+            assert!(!signal.is_requested());
+            let waiter = signal.notified();
+            if update {
+                signal.request_update();
+            } else {
+                signal.request();
+            }
+            let mut waiter = std::pin::pin!(waiter);
+            assert!(futures::poll!(waiter.as_mut()).is_ready());
+            assert_eq!(signal.is_update(), update);
+
+            let mut late = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(late.as_mut()).is_ready());
+        }
+
+        let signal = ShutdownSignal::default();
+        {
+            let mut cancelled = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        }
+        signal.request();
+        let mut replacement = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(replacement.as_mut()).is_ready());
     }
 
     #[tokio::test]
@@ -4557,22 +5010,47 @@ mod tests {
         let signal = TransportLossSignal::default();
         assert!(!signal.is_requested(), "transport starts healthy");
 
-        let waiter = {
-            let signal = signal.clone();
-            tokio::spawn(async move { signal.notified().await })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut first = std::pin::pin!(signal.notified());
+        let mut second = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
         signal.request(TransportLossKind::Disconnected);
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("a registered transport waiter wakes")
-            .expect("waiter task did not panic");
+        assert!(futures::poll!(first.as_mut()).is_ready());
+        assert!(futures::poll!(second.as_mut()).is_ready());
 
         assert!(
             signal.is_requested(),
             "transport loss remains visible to later loop-top checks"
         );
         assert_eq!(signal.kind(), Some(TransportLossKind::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn transport_loss_signal_observes_request_before_first_poll_and_after_cancellation() {
+        for kind in [
+            TransportLossKind::Disconnected,
+            TransportLossKind::CredentialRotation,
+        ] {
+            let signal = TransportLossSignal::default();
+            assert!(!signal.is_requested());
+            let waiter = signal.notified();
+            signal.request(kind);
+            let mut waiter = std::pin::pin!(waiter);
+            assert!(futures::poll!(waiter.as_mut()).is_ready());
+            assert_eq!(signal.kind(), Some(kind));
+
+            let mut late = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(late.as_mut()).is_ready());
+        }
+
+        let signal = TransportLossSignal::default();
+        {
+            let mut cancelled = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        }
+        signal.request(TransportLossKind::Disconnected);
+        let mut replacement = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(replacement.as_mut()).is_ready());
     }
 
     #[test]
@@ -4671,13 +5149,17 @@ mod tests {
             .await
             .expect("subscribe ack");
 
+        let mut reconnect = supervisor.reconnect.subscribe();
         let generation = supervisor.serve_connection_generation(
             &link,
             &control_client,
             subscription,
             ack_subscription,
-            control_transport_lost,
-            bulk_transport_lost.clone(),
+            GenerationEnds {
+                control_lost: control_transport_lost,
+                bulk_lost: bulk_transport_lost.clone(),
+                reconnect: &mut reconnect,
+            },
         );
         let sever_bulk = async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4746,13 +5228,17 @@ mod tests {
             .expect("subscribe ack");
 
         let control_to_sever = control_client.clone();
+        let mut reconnect = supervisor.reconnect.subscribe();
         let generation = supervisor.serve_connection_generation(
             &link,
             &control_client,
             subscription,
             ack_subscription,
-            control_transport_lost,
-            bulk_transport_lost,
+            GenerationEnds {
+                control_lost: control_transport_lost,
+                bulk_lost: bulk_transport_lost,
+                reconnect: &mut reconnect,
+            },
         );
         let sever_control = async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -5114,6 +5600,447 @@ mod tests {
             .expect("clean supervisor result");
     }
 
+    /// Compute mode over a real nats-server playing the sandbox's host: the
+    /// link dials with no credential, advertises nothing to renew, follows the
+    /// relay credential the host sends, refuses renewal and self-update, and
+    /// reconnects at once when asked (its host lost its connections).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one linear wire scenario
+    async fn a_compute_link_serves_through_its_host_without_a_credential() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP a_compute_link_serves_through_its_host_without_a_credential: no nats-server"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let host = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+
+        let mut credentials = it::test_credentials(&url);
+        credentials.nats_bearer = String::new();
+        let relay = RelayCredential::pending();
+        let definition = SupervisorLink::new(
+            "compute-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_compute(ComputeLink {
+            relay: relay.clone(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        let hello = it::next_hello(&mut hellos).await;
+        let capabilities = hello.capabilities.expect("capabilities");
+        assert!(!capabilities.credential_renew, "nothing to renew");
+        assert!(capabilities.consented_whole_machine);
+
+        // The host sends the relay credential; the link's streams then use it.
+        host.publish(
+            crate::compute::RELAY_SUBJECT,
+            br#"{"url": "wss://relay.example/stream", "token": "ogr_from_host", "expires_at_ms": 18446744073709551615}"#
+                .as_slice()
+                .into(),
+        )
+        .await
+        .expect("publish relay credential");
+        let endpoint = relay
+            .current_within(Duration::from_secs(5))
+            .await
+            .expect("credential from the host");
+        assert_eq!(endpoint.token, "ogr_from_host");
+        assert_eq!(endpoint.url, "wss://relay.example/stream");
+
+        let request = |id: &str, op| ControlRequest {
+            request_id: id.to_string(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(op),
+        };
+        let renewal = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "renew",
+                v1::control_request::Op::CredentialRenew(v1::CredentialRenewRequest {}),
+            ),
+        )
+        .await;
+        let error = renewal.error.expect("renewal refused");
+        assert!(!error.retryable);
+        assert!(
+            error.message.contains("renewal_unsupported"),
+            "{}",
+            error.message
+        );
+
+        let update = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "update",
+                v1::control_request::Op::AgentUpdateApply(v1::AgentUpdateApplyRequest {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    target_version: "9.9.9".to_string(),
+                    channel: "stable".to_string(),
+                    expected_current_version: "test-0.0.0".to_string(),
+                    expected_current_sha256: String::new(),
+                    release_base_url: "https://releases.example".to_string(),
+                }),
+            ),
+        )
+        .await;
+        let error = update.error.expect("update refused");
+        assert!(!error.retryable);
+        assert_eq!(
+            error.detail.get("failure_code").map(String::as_str),
+            Some("update_unsupported")
+        );
+
+        // The host lost the link's connections: the link drops its own and
+        // says hello again at once, far inside the outage back-off.
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "reconnected in {:?}",
+            asked.elapsed()
+        );
+        let ping = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "after-reconnect",
+                v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 }),
+            ),
+        )
+        .await;
+        assert!(ping.error.is_none(), "{:?}", ping.error);
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("compute supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// A reconnect asked for while a link waits out its outage back-off
+    /// dials at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_cuts_the_outage_back_off_short() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP a_reconnect_cuts_the_outage_back_off_short: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut credentials = it::test_credentials(&url);
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "compute-backoff-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_compute(ComputeLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        // No server yet: the link fails its dials and backs off further each
+        // time.
+        let run = tokio::spawn(async move { supervisor.run().await });
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let host = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        host.flush().await.expect("flush");
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        // The fast-phase back-off waits up to 3 s; a natural retry beats this
+        // bound rarely.
+        assert!(
+            asked.elapsed() < Duration::from_millis(400),
+            "dialed in {:?}",
+            asked.elapsed()
+        );
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// A dial the server never answers (it accepts the socket but sends no
+    /// `INFO`, as a host restored under its agent may) gives way to a
+    /// reconnect, for the control and the bulk connection alike, and a stop
+    /// during the bulk dial is still announced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_abandons_a_dial_the_server_never_answers() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP a_reconnect_abandons_a_dial_the_server_never_answers: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let upstream = format!("127.0.0.1:{port}");
+        let host =
+            it::connect_with_retry(&format!("nats://{upstream}"), Duration::from_secs(5)).await;
+        let mut gate = it::SilentGate::start(upstream).await;
+
+        let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "compute-stalled-dial-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_compute(ComputeLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        let mut events = host
+            .subscribe(link.events_subject())
+            .await
+            .expect("subscribe events");
+        host.flush().await.expect("flush");
+
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        // The control dial waits on a server that never speaks.
+        gate.accepted().await;
+        let asked = Instant::now();
+        reconnect.request();
+        gate.accepted().await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "control dial abandoned after {:?}",
+            asked.elapsed()
+        );
+
+        // The control connection gets through; the bulk dial is held. The
+        // hello waits for both lanes, so none is sent meanwhile.
+        gate.forward(1);
+        reconnect.request();
+        gate.accepted().await;
+        gate.accepted().await;
+        it::assert_no_hello(&mut hellos, Duration::from_millis(500), "bulk dial held").await;
+        gate.forward(1);
+        let asked = Instant::now();
+        reconnect.request();
+        gate.accepted().await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "bulk dial abandoned after {:?}",
+            asked.elapsed()
+        );
+        gate.accepted().await;
+        it::assert_no_hello(
+            &mut hellos,
+            Duration::from_millis(500),
+            "redialed bulk held",
+        )
+        .await;
+
+        // Both lanes get through: the hello follows.
+        gate.forward(2);
+        reconnect.request();
+        gate.accepted().await;
+        gate.accepted().await;
+        let _ = it::next_hello(&mut hellos).await;
+
+        // A stop during a held bulk dial is announced on the control
+        // connection, and the run ends.
+        reconnect.request();
+        gate.accepted().await;
+        gate.forward(1);
+        reconnect.request();
+        gate.accepted().await;
+        gate.accepted().await;
+        shutdown.request();
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(5), |e| matches!(
+                e.event,
+                Some(Event::GoingOffline(_))
+            ))
+            .await,
+            "a stop during the bulk dial must publish GoingOffline"
+        );
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// A compute host refuses a link it does not serve yet (a stale epoch, an
+    /// invalid ticket) with the authorization error a control plane gives a
+    /// rejected credential. A compute link has no credential to renew, so the
+    /// refusal must not park it: it reconnects as soon as its host asks, for
+    /// the control and the bulk connection alike.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_compute_link_refused_by_its_host_reconnects_when_asked() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP a_compute_link_refused_by_its_host_reconnects_when_asked: no nats-server"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let upstream = format!("127.0.0.1:{port}");
+        let host =
+            it::connect_with_retry(&format!("nats://{upstream}"), Duration::from_secs(5)).await;
+        let mut gate = it::SilentGate::refusing(upstream).await;
+
+        let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "compute-refused-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_compute(ComputeLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        host.flush().await.expect("flush");
+
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        // The host refuses the control connection, then serves it again
+        // (the hello waits for the bulk lane, which it refuses).
+        gate.accepted().await;
+        gate.forward(1);
+        let asked = Instant::now();
+        reconnect.request();
+        gate.accepted().await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "control reconnected after {:?}",
+            asked.elapsed()
+        );
+
+        // The host refuses the bulk connection, then serves both again.
+        gate.accepted().await;
+        gate.forward(2);
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "bulk reconnected after {:?}",
+            asked.elapsed()
+        );
+        let ping = it::ask(
+            &host,
+            link.rpc_subject(),
+            ControlRequest {
+                request_id: "after-refusal".to_string(),
+                epoch: 0,
+                resource_policy: None,
+                op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 9 })),
+            },
+        )
+        .await;
+        assert!(ping.error.is_none(), "{:?}", ping.error);
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// A stop that came while nothing waited for one (as while a hello is
+    /// being prepared, between the control and the bulk dial) still ends a
+    /// later dial the server never answers, whether the process or the
+    /// link was asked to stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_before_a_dial_ends_a_dial_the_server_never_answers() {
+        use opengeni_agent_platform::NativePlatform;
+
+        // It lets nothing through, so it needs no server behind it.
+        let gate = it::SilentGate::start("127.0.0.1:9".to_owned()).await;
+        for link_stops in [false, true] {
+            let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+            credentials.nats_bearer = String::new();
+            let definition = SupervisorLink::new(
+                "compute-stop-before-dial-test",
+                Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+                credentials,
+            )
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+            .with_compute(ComputeLink {
+                relay: RelayCredential::pending(),
+            });
+            let link = WorkspaceLink::from_definition(definition.clone());
+            let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+            let mut reconnect = supervisor.reconnect.subscribe();
+            if link_stops {
+                link.shutdown.request();
+            } else {
+                supervisor.shutdown_handle().request();
+            }
+            let dialed = tokio::time::timeout(
+                Duration::from_secs(2),
+                supervisor.dial(&link, &mut reconnect),
+            )
+            .await
+            .expect("a stop already asked for ends the dial");
+            assert!(
+                matches!(dialed, Err(ConnectionOutcome::CleanShutdown)),
+                "link_stops={link_stops}"
+            );
+        }
+    }
+
     /// The op-stream wire round trip against a REAL nats-server + real
     /// supervisor: OpStart over rpc → OpFrames on the op subject (via the bulk
     /// connection) → cumulative + final OpAck on the ack subject → OpQuery.
@@ -5177,6 +6104,7 @@ mod tests {
                 window_bytes: 0,
                 deadline_ms: 0,
                 origin_id: "session-e2e".to_string(),
+                connection_generation: 0,
             })),
         };
         let reply = tokio::time::timeout(
@@ -5389,6 +6317,7 @@ mod tests {
                 window_bytes: 1 << 20,
                 deadline_ms: 0,
                 origin_id: "example-session".into(),
+                connection_generation: 0,
             })),
         };
         let started = client
@@ -5907,6 +6836,7 @@ mod tests {
         let request = ControlRequest {
             request_id: "move-once".into(),
             op: Some(v1::control_request::Op::FsMove(v1::FsMoveRequest {
+                run_as: String::new(),
                 from: source.to_string_lossy().into_owned(),
                 to: destination.to_string_lossy().into_owned(),
                 overwrite: false,
@@ -6138,6 +7068,7 @@ mod tests {
             let (supervisor, platform) = handover_test_supervisor(&directory, &url, &instance);
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
+                supervisor.restore_lost_markers(manifest.lost_markers);
                 supervisor.adopt_handed_over(&platform, manifest.ops);
                 let owned = supervisor.update_drain.snapshot().unwrap();
                 assert_eq!(
@@ -6301,6 +7232,7 @@ mod tests {
                 window_bytes: 0,
                 deadline_ms: 0,
                 origin_id: "session-handover".to_string(),
+                connection_generation: 0,
             })),
         };
         let reply = tokio::time::timeout(
@@ -6459,6 +7391,7 @@ mod tests {
     mod it {
         use std::path::{Path, PathBuf};
         use std::process::{Child, Command, Stdio};
+        use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
         use futures::StreamExt as _;
@@ -6468,8 +7401,20 @@ mod tests {
         use crate::config::StoredCredentials;
 
         /// Locates a `nats-server` binary on `$PATH`, else scans `/nix/store`
-        /// (this project's dev/CI hosts are NixOS). `None` → the caller skips.
+        /// (this project's dev/CI hosts are NixOS). `None` → the caller skips,
+        /// except where `OPENGENI_AGENT_REQUIRE_NATS=1` (CI's Linux leg): there
+        /// a missing server fails the test.
         pub fn find_nats_server() -> Option<PathBuf> {
+            let found = search_nats_server();
+            assert!(
+                found.is_some()
+                    || std::env::var("OPENGENI_AGENT_REQUIRE_NATS").as_deref() != Ok("1"),
+                "OPENGENI_AGENT_REQUIRE_NATS=1 but no nats-server is on PATH or in /nix/store"
+            );
+            found
+        }
+
+        fn search_nats_server() -> Option<PathBuf> {
             if let Some(path) = std::env::var_os("PATH") {
                 for dir in std::env::split_paths(&path) {
                     let candidate =
@@ -6499,6 +7444,98 @@ mod tests {
                 .local_addr()
                 .expect("local addr")
                 .port()
+        }
+
+        /// A listener that passes the connections it is allowed through to a
+        /// real server and holds the rest open in silence, like a server that
+        /// accepts a socket and never sends `INFO`.
+        pub struct SilentGate {
+            pub addr: std::net::SocketAddr,
+            accepted: tokio::sync::mpsc::UnboundedReceiver<()>,
+            forwards: Arc<Mutex<usize>>,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl SilentGate {
+            pub async fn start(upstream: String) -> Self {
+                Self::start_with(upstream, false).await
+            }
+
+            /// Refuses the connections it is not allowed to pass with the
+            /// authorization error a host gives a link it does not serve.
+            pub async fn refusing(upstream: String) -> Self {
+                Self::start_with(upstream, true).await
+            }
+
+            async fn start_with(upstream: String, refuse: bool) -> Self {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind gate");
+                let addr = listener.local_addr().expect("gate address");
+                let (tell, accepted) = tokio::sync::mpsc::unbounded_channel();
+                let forwards = Arc::new(Mutex::new(0_usize));
+                let allowed = forwards.clone();
+                let task = tokio::spawn(async move {
+                    while let Ok((mut socket, _)) = listener.accept().await {
+                        let forward = {
+                            let mut left = allowed.lock().expect("gate forwards");
+                            left.checked_sub(1).map(|rest| *left = rest).is_some()
+                        };
+                        let _ = tell.send(());
+                        let upstream = upstream.clone();
+                        tokio::spawn(async move {
+                            if forward {
+                                if let Ok(mut server) =
+                                    tokio::net::TcpStream::connect(upstream).await
+                                {
+                                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut server)
+                                        .await;
+                                }
+                            } else if refuse {
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                let _ = socket
+                                    .write_all(
+                                        b"INFO {\"server_id\":\"refusing-host\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                                    )
+                                    .await;
+                                let mut connect = [0_u8; 4096];
+                                let _ = socket.read(&mut connect).await;
+                                let _ = socket
+                                    .write_all(b"-ERR 'Authorization Violation'\r\n")
+                                    .await;
+                                let _ = socket.shutdown().await;
+                            } else {
+                                let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                            }
+                        });
+                    }
+                });
+                Self {
+                    addr,
+                    accepted,
+                    forwards,
+                    task,
+                }
+            }
+
+            /// Lets the next `n` connections through to the server.
+            pub fn forward(&self, n: usize) {
+                *self.forwards.lock().expect("gate forwards") += n;
+            }
+
+            /// Waits, within five seconds, for the next connection.
+            pub async fn accepted(&mut self) {
+                tokio::time::timeout(Duration::from_secs(5), self.accepted.recv())
+                    .await
+                    .expect("a dial in time")
+                    .expect("gate open");
+            }
+        }
+
+        impl Drop for SilentGate {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
         }
 
         /// A no-auth `nats-server` child, killed on drop.
@@ -6561,6 +7598,60 @@ mod tests {
                     Err(e) => panic!("could not connect to test nats-server: {e}"),
                 }
             }
+        }
+
+        /// The next `Hello` on a hello subject, within ten seconds.
+        pub async fn next_hello(
+            hellos: &mut async_nats::Subscriber,
+        ) -> opengeni_agent_proto::v1::Hello {
+            let message = tokio::time::timeout(Duration::from_secs(10), hellos.next())
+                .await
+                .expect("a hello in time")
+                .expect("hello subscription open");
+            opengeni_agent_proto::v1::Hello::decode(message.payload.as_ref()).expect("hello")
+        }
+
+        /// Fails if a `Hello` arrives on a hello subject within `quiet`.
+        pub async fn assert_no_hello(
+            hellos: &mut async_nats::Subscriber,
+            quiet: Duration,
+            while_: &str,
+        ) {
+            if let Ok(message) = tokio::time::timeout(quiet, hellos.next()).await {
+                panic!("a hello arrived while {while_}: {message:?}");
+            }
+        }
+
+        /// Sends one control request and decodes its answer, within five
+        /// seconds. An agent says hello before it subscribes to its RPC
+        /// subject, so a request sent right after a hello may find no one
+        /// yet: that is retried until the deadline.
+        pub async fn ask(
+            client: &async_nats::Client,
+            subject: String,
+            request: opengeni_agent_proto::v1::ControlRequest,
+        ) -> opengeni_agent_proto::v1::ControlResponse {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let reply = loop {
+                let sent = tokio::time::timeout_at(
+                    deadline,
+                    client.request(subject.clone(), request.encode_to_vec().into()),
+                )
+                .await
+                .expect("an answer in time");
+                match sent {
+                    Ok(reply) => break reply,
+                    Err(error)
+                        if error.kind() == async_nats::RequestErrorKind::NoResponders
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("request: {error}"),
+                }
+            };
+            opengeni_agent_proto::v1::ControlResponse::decode(reply.payload.as_ref())
+                .expect("response")
         }
 
         /// Waits until an `AgentEvent` matching `pred` arrives, or `timeout` elapses.

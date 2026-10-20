@@ -509,6 +509,7 @@ export type {
 } from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -1087,7 +1088,10 @@ export type {
   Entitlements,
   EntitlementValue,
   EntitlementsMode,
+  FileAccess,
   FileAsset,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   FileListRequest,
   FileListResponse,
   HumanInputAnswer,

@@ -832,6 +832,15 @@ describe("Gmail review snapshots", () => {
     expect(await missing.reviewContext("trash_message", { messageId: "gone" })).toEqual({
       samples: [],
     });
+    // A malformed id, rate limit or outage only drops the optional sample.
+    for (const status of [400, 429, 503]) {
+      const unreadable = make(async () =>
+        Response.json({ error: { message: "Unavailable" } }, { status }),
+      );
+      expect(await unreadable.reviewContext("modify_message", { messageId: "..." })).toEqual({
+        samples: [],
+      });
+    }
     const wrong = make(async () => Response.json({ id: "different" }));
     await expect(wrong.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow(
       "did not match",
@@ -840,6 +849,19 @@ describe("Gmail review snapshots", () => {
       Response.json({ error: { message: "Denied" } }, { status: 403 }),
     );
     await expect(denied.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow();
+    // Refusals still refuse when their body is not JSON.
+    for (const status of [401, 403]) {
+      const htmlRefusal = make(
+        async () =>
+          new Response("<html>refused</html>", {
+            status,
+            headers: { "content-type": "text/html" },
+          }),
+      );
+      await expect(
+        htmlRefusal.reviewContext("trash_message", { messageId: "one" }),
+      ).rejects.toThrow();
+    }
   });
   test("send-draft facts include original recipients and body only after exact content hash matches", async () => {
     const bytes = Buffer.from(

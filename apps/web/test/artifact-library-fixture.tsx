@@ -66,11 +66,17 @@ const session = createRoute({
     );
   },
 });
+// New artifact opens the new-chat composer with its prompt drafted.
+const newChat = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/sessions",
+  component: () => <h1>New chat</h1>,
+});
 const start = new URLSearchParams(location.search).get("session")
   ? `/workspaces/${workspaceId}/sessions/${sessionId}`
   : `/workspaces/${workspaceId}/artifacts`;
 const router = createRouter({
-  routeTree: root.addChildren([library, file, session]),
+  routeTree: root.addChildren([library, file, session, newChat]),
   history: createMemoryHistory({ initialEntries: [start] }),
 });
 Reflect.set(window, "artifactLibraryRouter", router);

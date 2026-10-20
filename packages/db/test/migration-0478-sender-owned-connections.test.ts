@@ -37,6 +37,8 @@ const withheldMigrations = [
   migration,
   accountBindingsMigration,
   sharingMigration,
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
   admissionDiagnosticsMigration,
   admissionRefusalsMigration,
   receiverExecutionContextMigration,

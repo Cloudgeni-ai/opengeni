@@ -234,6 +234,13 @@ pub fn install_native_host_manifests(
     binary_path: &Path,
     home: &Path,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    install_native_host_manifests_in(binary_path, &browser_data_home(home))
+}
+
+fn install_native_host_manifests_in(
+    binary_path: &Path,
+    data_home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
     let binary = binary_path.to_str().ok_or_else(|| {
         BrowserBridgeError::Protocol("agent binary path is not valid UTF-8".to_string())
     })?;
@@ -245,7 +252,7 @@ pub fn install_native_host_manifests(
         allowed_origins: extension_origins(),
     })?;
     let mut installed = Vec::new();
-    for (browser_root, primary) in native_host_browser_roots(home) {
+    for (browser_root, primary) in native_host_browser_roots(data_home) {
         if !primary && !browser_root.exists() {
             continue;
         }
@@ -261,7 +268,11 @@ pub fn install_native_host_manifests(
 /// Remove every user-scoped manifest location this build owns. Missing files are
 /// already clean and ignored.
 pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeError> {
-    for (browser_root, _) in native_host_browser_roots(home) {
+    remove_native_host_manifests_in(&browser_data_home(home))
+}
+
+fn remove_native_host_manifests_in(data_home: &Path) -> Result<(), BrowserBridgeError> {
+    for (browser_root, _) in native_host_browser_roots(data_home) {
         let path = browser_root
             .join("NativeMessagingHosts")
             .join(format!("{NATIVE_HOST_NAME}.json"));
@@ -274,9 +285,72 @@ pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeErro
     Ok(())
 }
 
+/// Remove the manifests that point at `binary_path`, leaving those another agent
+/// on this computer wrote. A manifest that points at a program which no longer
+/// exists in this agent's own directory is a leftover from before the agent was
+/// renamed, so it is removed too. Returns the removed paths.
+pub fn remove_native_host_manifests_for(
+    binary_path: &Path,
+    home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    remove_native_host_manifests_for_in(binary_path, &browser_data_home(home))
+}
+
+fn remove_native_host_manifests_for_in(
+    binary_path: &Path,
+    data_home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let mut removed = Vec::new();
+    for (browser_root, _) in native_host_browser_roots(data_home) {
+        let path = browser_root
+            .join("NativeMessagingHosts")
+            .join(format!("{NATIVE_HOST_NAME}.json"));
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let points_here = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|manifest| manifest.get("path")?.as_str().map(PathBuf::from))
+            .is_some_and(|target| {
+                target == binary_path
+                    || (target.parent() == binary_path.parent() && !target.exists())
+            });
+        if points_here {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// The directory under which Chromium-family browsers keep their per-user data
+/// for `home`.
 #[cfg(target_os = "macos")]
-fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
-    let applications = home.join("Library").join("Application Support");
+fn browser_data_home(home: &Path) -> PathBuf {
+    home.join("Library").join("Application Support")
+}
+
+/// The directory under which Chromium-family browsers keep their per-user data
+/// for `home`: `$XDG_CONFIG_HOME` when set, as the browsers themselves resolve it.
+#[cfg(target_os = "linux")]
+fn browser_data_home(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| home.join(".config"), PathBuf::from)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn browser_data_home(home: &Path) -> PathBuf {
+    home.to_path_buf()
+}
+
+#[cfg(target_os = "macos")]
+fn native_host_browser_roots(applications: &Path) -> Vec<(PathBuf, bool)> {
     vec![
         (applications.join("Google").join("Chrome"), true),
         (applications.join("Google").join("Chrome Beta"), false),
@@ -290,10 +364,7 @@ fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 #[cfg(target_os = "linux")]
-fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| home.join(".config"), PathBuf::from);
+fn native_host_browser_roots(config: &Path) -> Vec<(PathBuf, bool)> {
     vec![
         (config.join("google-chrome"), true),
         (config.join("google-chrome-beta"), false),
@@ -304,7 +375,7 @@ fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn native_host_browser_roots(_home: &Path) -> Vec<(PathBuf, bool)> {
+fn native_host_browser_roots(_data_home: &Path) -> Vec<(PathBuf, bool)> {
     Vec::new()
 }
 
@@ -2372,12 +2443,17 @@ mod tests {
         .is_err());
     }
 
+    // The manifest tests pass a temporary browser data directory directly. Going
+    // through the public functions would resolve `$XDG_CONFIG_HOME`, which CI
+    // runners and many desktops set, so parallel tests would share, and remove,
+    // the real user's manifests.
     #[test]
     fn installs_a_pinned_origin_manifest_and_removes_it_cleanly() {
         let directory = tempfile::tempdir().expect("tempdir");
         let binary = directory.path().join("opengeni-agent");
         std::fs::write(&binary, b"fixture").expect("binary");
-        let manifests = install_native_host_manifests(&binary, directory.path()).expect("install");
+        let manifests =
+            install_native_host_manifests_in(&binary, directory.path()).expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_ne!(manifests, Vec::<std::path::PathBuf>::new());
         for path in &manifests {
@@ -2388,7 +2464,44 @@ mod tests {
             assert_eq!(manifest["allowed_origins"][0], extension_origin());
             assert_eq!(manifest["allowed_origins"], json!(extension_origins()));
         }
-        remove_native_host_manifests(directory.path()).expect("remove");
+        remove_native_host_manifests_in(directory.path()).expect("remove");
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_only_the_manifests_that_point_at_this_agent() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let other = directory.path().join("other-agent");
+        let this = directory.path().join("this-agent");
+        std::fs::write(&other, b"fixture").expect("other binary");
+        let manifests =
+            install_native_host_manifests_in(&other, directory.path()).expect("install");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("keep"),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert!(manifests.iter().all(|path| path.exists()));
+        install_native_host_manifests_in(&this, directory.path()).expect("overwrite");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
+            manifests
+        );
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_a_leftover_manifest_from_before_this_agent_was_renamed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let install = directory.path().join("install");
+        std::fs::create_dir_all(&install).expect("install dir");
+        let old_name = install.join("old-agent");
+        let this = install.join("This Agent");
+        let manifests =
+            install_native_host_manifests_in(&old_name, directory.path()).expect("install");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
+            manifests
+        );
         assert!(manifests.iter().all(|path| !path.exists()));
     }
 

@@ -265,6 +265,21 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
   });
 
+  test("durable PTY open refuses agent-transport routes before opening anything", () => {
+    // Connected Machines and compute sandboxes serve terminals as agent relay
+    // streams; the durable PTY route must refuse them up front rather than open
+    // a PTY it cannot retain under a session-home lease.
+    const open = sessionsRoute.slice(
+      sessionsRoute.indexOf(
+        'app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty"',
+      ),
+    );
+    const guard = open.indexOf("usesAgentTransport(ctx.session.sandboxBackend)");
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(open.indexOf("service.ptyOpen("));
+    expect(open.slice(guard, guard + 200)).toContain("ctx.session.activeSandboxId !== null");
+  });
+
   test("the channel-a seam maps typed service errors to explicit HTTP status", () => {
     // backend:none -> 409; bad paths stay 400/404 while transient control-plane
     // failures are retryable 503s and never blame valid user input.

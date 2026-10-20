@@ -368,6 +368,41 @@ describe("subject-owned capability connection references", () => {
     },
   );
 
+  test("an accountless connector reports a connection requirement without provider discovery", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:missing-account-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://missing.example.test/mcp",
+    });
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          providerDomain: "missing.example.test",
+          kind: "oauth2",
+          accountSelection: "all_eligible",
+        },
+      },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    });
+    await expect(
+      getConnectorToolPermissions({
+        db,
+        settings,
+        workspaceId: workspace.workspaceId,
+        capabilityId,
+        grant: grant(workspace, "subject-alice"),
+        personalOwnerVerified: true,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Connect an account to manage its tool permissions",
+    });
+  });
+
   test("tool permissions enumerate eligible accounts and honor an explicit account choice", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
@@ -1343,13 +1378,13 @@ describe("subject-owned capability connection references", () => {
     };
     await expect(
       getConnectorToolPermissions({ ...permissionInput, connectionId: sharedConnection.id }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     await expect(
       updateConnectorToolPermissions({
         ...permissionInput,
         payload: { connectionId: sharedConnection.id, target: "default", permission: "allow" },
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     expect(
       await listConnectorToolPermissionPolicies(db, {
         ...workspace,
@@ -1375,7 +1410,7 @@ describe("subject-owned capability connection references", () => {
         capabilityId,
         personalOwnerVerified: true,
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
   });
 
   test.each([

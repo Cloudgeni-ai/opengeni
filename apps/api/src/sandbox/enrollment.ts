@@ -116,9 +116,11 @@ export async function renewEnrollmentCredentials(
   )
     return null;
   const enrollment = await getEnrollment(services.db, claims.workspaceId, claims.enrollmentId);
+  // A sandbox enrollment has no key and no bearer, so it never renews.
   if (
     !enrollment ||
     enrollment.status !== "active" ||
+    enrollment.pubkey === null ||
     enrollment.credentialGeneration !== claims.credentialGeneration
   )
     return null;

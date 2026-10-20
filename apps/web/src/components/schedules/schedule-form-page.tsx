@@ -1,3 +1,4 @@
+import { workspaceDefaultMachine } from "@/lib/workspace-default-machine";
 import { Link } from "@tanstack/react-router";
 /**
  * New schedule, Edit schedule and Duplicate: one full page with a back link
@@ -5,7 +6,7 @@ import { Link } from "@tanstack/react-router";
  * cadence sentence and its next runs) -> an optional Name -> one closed
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
-import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -55,11 +56,6 @@ import type { ScheduledTask, Session } from "@/types";
 
 import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
 
-// Slack posting pulls in the Slack bot helpers shared with Capabilities; load
-// it on demand so it does not reshape the chunks every session page shares.
-const ScheduleSlackPosting = lazy(async () => ({
-  default: (await import("@/components/schedule-slack-posting")).ScheduleSlackPosting,
-}));
 import { ComposerField } from "./schedule-composer";
 import { ScheduleAgentCapabilities } from "./schedule-agent-capabilities";
 import {
@@ -713,7 +709,11 @@ function AgentScheduleForm({
     isMachineComputeSelectable(machine.state),
   );
   const cantRunHere =
-    machineOnly && !inheritsChatSettings && !fleet.loading && selectableMachines.length === 0;
+    machineOnly &&
+    !inheritsChatSettings &&
+    draft.executionTarget !== "workspace_default" &&
+    !fleet.loading &&
+    selectableMachines.length === 0;
   // Editing a schedule whose compute is unchanged stays possible (a rename, a
   // new cadence); only a new or changed target has to be one that can run.
   const computeChanged =
@@ -721,9 +721,45 @@ function AgentScheduleForm({
     draft.runMode !== initial.runMode ||
     draft.executionTarget !== initial.executionTarget ||
     draft.machineSandboxId !== initial.machineSandboxId;
+  const workspaceTarget = workspaceDefaultMachine(
+    context.workspaces.find((item) => item.id === workspaceId)?.settings,
+  );
+  const workspaceMachine =
+    workspaceTarget?.kind === "machine"
+      ? scheduledMachines.find((item) => item.sandboxId === workspaceTarget.targetSandboxId)
+      : null;
+  const defaultMachineLabel =
+    workspaceTarget?.kind === "machine"
+      ? (workspaceMachine?.name ?? "Machine unavailable")
+      : machineOnly
+        ? "Choose a workspace default in Settings"
+        : noManagedSandbox
+          ? "No computer"
+          : "Managed sandbox";
+  const selectedComputeUnavailable =
+    !inheritsChatSettings &&
+    !fleet.loading &&
+    (draft.executionTarget === "workspace_default"
+      ? workspaceTarget?.kind === "machine"
+        ? !workspaceMachine || !isMachineComputeSelectable(workspaceMachine.state)
+        : machineOnly
+      : draft.executionTarget === "machine" &&
+        !scheduledMachines.some(
+          (item) =>
+            item.sandboxId === draft.machineSandboxId && isMachineComputeSelectable(item.state),
+        ));
   const whereValue =
-    draft.executionTarget === "managed" ? "managed" : draft.machineSandboxId || null;
+    draft.executionTarget === "workspace_default"
+      ? "workspace_default"
+      : draft.executionTarget === "managed"
+        ? "managed"
+        : draft.machineSandboxId || null;
   const whereOptions: SelectOption[] = [
+    {
+      value: "workspace_default",
+      label: "Workspace default",
+      description: defaultMachineLabel,
+    },
     {
       value: "managed",
       label: noManagedSandbox ? "No computer" : "Managed sandbox",
@@ -764,12 +800,14 @@ function AgentScheduleForm({
       : []),
   ];
   const whereLabel =
-    draft.executionTarget === "managed"
-      ? noManagedSandbox
-        ? "No computer"
-        : "Managed sandbox"
-      : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)?.name ??
-        "Connected machine");
+    draft.executionTarget === "workspace_default"
+      ? `Workspace default · ${defaultMachineLabel}`
+      : draft.executionTarget === "managed"
+        ? noManagedSandbox
+          ? "No computer"
+          : "Managed sandbox"
+        : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)
+            ?.name ?? "Connected machine");
 
   /* ----- summaries */
   const eachRun = draft.runMode as EachRun;
@@ -798,8 +836,7 @@ function AgentScheduleForm({
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
     ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
-    // A task that continues an existing chat never posts on its own.
-    ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
+
     ...(eachRun === "existing_session"
       ? []
       : [learningCustom ? "Custom agent learning" : "Workspace learning defaults"]),
@@ -935,7 +972,7 @@ function AgentScheduleForm({
     : !access.canManage;
   const submitBlocked =
     noAccess ||
-    (cantRunHere && computeChanged) ||
+    ((cantRunHere || selectedComputeUnavailable) && computeChanged) ||
     (draft.runMode !== "existing_session" && learningLoading) ||
     (draft.runMode === "existing_session" &&
       (!sessions.some((session) => session.id === draft.targetSessionId) ||
@@ -947,25 +984,27 @@ function AgentScheduleForm({
     ? editing && task && !ownsSchedule(task, access.viewerSubjectId)
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
-    : cantRunHere && computeChanged
-      ? "Connect a machine first. This Opengeni server can't run schedules without one."
-      : pinningAccounts && requiresAccountChoice
-        ? (accountChoiceMessage ?? "Pick an account for each tool.")
-        : (draft.runMode !== "existing_session" && learningLoading) ||
-            (pinningAccounts && connectionAccounts.loading)
-          ? "Loading this schedule's settings…"
-          : pinningAccounts && connectionAccounts.error
-            ? connectionAccounts.accessDenied
-              ? "You can't see this workspace's connected accounts. Ask a workspace admin."
-              : "Connected accounts couldn't load. Try again."
-            : draft.runMode === "existing_session" &&
-                !sessions.some((session) => session.id === draft.targetSessionId)
-              ? "Choose an available chat."
-              : pinsNeedChat
-                ? "Chat settings couldn't load. Reload before changing accounts."
-                : accessChange && !adoptSessionSettings
-                  ? "Review the destination chat’s attachments before saving."
-                  : undefined;
+    : selectedComputeUnavailable && computeChanged
+      ? "Machine unavailable. Choose another machine or update the workspace default."
+      : cantRunHere && computeChanged
+        ? "Connect a machine first. This Opengeni server can't run schedules without one."
+        : pinningAccounts && requiresAccountChoice
+          ? (accountChoiceMessage ?? "Pick an account for each tool.")
+          : (draft.runMode !== "existing_session" && learningLoading) ||
+              (pinningAccounts && connectionAccounts.loading)
+            ? "Loading this schedule's settings…"
+            : pinningAccounts && connectionAccounts.error
+              ? connectionAccounts.accessDenied
+                ? "You can't see this workspace's connected accounts. Ask a workspace admin."
+                : "Connected accounts couldn't load. Try again."
+              : draft.runMode === "existing_session" &&
+                  !sessions.some((session) => session.id === draft.targetSessionId)
+                ? "Choose an available chat."
+                : pinsNeedChat
+                  ? "Chat settings couldn't load. Reload before changing accounts."
+                  : accessChange && !adoptSessionSettings
+                    ? "Review the destination chat’s attachments before saving."
+                    : undefined;
 
   const selectedSession = sessions.find((session) => session.id === draft.targetSessionId);
   const sessionOptions: SelectOption[] = [
@@ -1206,55 +1245,27 @@ function AgentScheduleForm({
               inheritsChatSettings={inheritsChatSettings}
             />
           </Field>
-          {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
-            <div className="-mt-3 flex min-w-0 flex-col gap-2">
-              <ConnectionAccountPicker
-                groups={connectionAccounts.accountGroups}
-                choices={accountChoices}
-                onChoose={(serverId, ids) => {
-                  setEditedAccountServerIds((current) =>
-                    current.includes(serverId) ? current : [...current, serverId],
-                  );
-                  connectionAccounts.selectAccount(serverId, ids);
-                }}
-              />
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                <p className="min-w-0 text-xs text-fg-muted">
-                  {pinnedGroupNames.length > 0
-                    ? `Pinned for ${pinnedGroupNames.join(", ")}. Other connectors use your current accounts each run.`
-                    : "Each run uses your current accounts. Changing one here pins it."}
-                </p>
-                {pinnedGroupNames.length > 0 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    onClick={usePinnedAccountsDefaults}
-                  >
-                    Use current accounts
-                  </Button>
-                ) : null}
-              </div>
-              {connectionAccounts.error ? (
-                <Notice
-                  tone="failed"
-                  action={
-                    connectionAccounts.accessDenied ? undefined : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void connectionAccounts.refresh()}
-                      >
-                        Try again
-                      </Button>
-                    )
-                  }
+          {inheritsChatSettings ? (
+            <Disclosure
+              title="Uses this chat’s settings"
+              summary="Model, tools, accounts and machine"
+            >
+              <p className="text-sm text-fg-muted">
+                Scheduled messages use the chat’s current model, tools, accounts and machine.
+                Changes apply to the chat and its scheduled runs.
+              </p>
+              {targetSessionId ? (
+                <Link
+                  className="og-link text-sm"
+                  to="/workspaces/$workspaceId/sessions/$sessionId"
+                  params={{ workspaceId, sessionId: targetSessionId }}
                 >
-                  {connectionAccounts.error}
-                </Notice>
-              ) : null}
-            </div>
+                  Open chat settings
+                </Link>
+              ) : (
+                <p className="text-sm text-fg-muted">Choose a chat to view its settings.</p>
+              )}
+            </Disclosure>
           ) : null}
           <div className="min-w-0">
             <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
@@ -1294,27 +1305,80 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
-          {!inheritsChatSettings ? (
-            <ScheduleAgentCapabilities
-              workspaceId={workspaceId}
-              value={draft.agentCapabilities}
-              onChange={(agentCapabilities) =>
-                setDraft((previous) => {
-                  if (agentCapabilities !== undefined) return { ...previous, agentCapabilities };
-                  const { agentCapabilities: _dropped, ...rest } = previous;
-                  return rest;
-                })
-              }
-            />
-          ) : null}
           <Disclosure
             variant="row"
-            title="Advanced"
+            title="Settings"
             summary={advancedSummary}
             open={advancedOpen}
             onOpenChange={setAdvancedOpen}
           >
             <FieldStack>
+              {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
+                <div className="flex min-w-0 flex-col gap-2">
+                  <ConnectionAccountPicker
+                    groups={connectionAccounts.accountGroups}
+                    choices={accountChoices}
+                    onChoose={(serverId, ids) => {
+                      setEditedAccountServerIds((current) =>
+                        current.includes(serverId) ? current : [...current, serverId],
+                      );
+                      connectionAccounts.selectAccount(serverId, ids);
+                    }}
+                  />
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="min-w-0 text-xs text-fg-muted">
+                      {pinnedGroupNames.length > 0
+                        ? `Pinned for ${pinnedGroupNames.join(", ")}. Other connectors use your current accounts each run.`
+                        : "Each run uses your current accounts. Changing one here pins it."}
+                    </p>
+                    {pinnedGroupNames.length > 0 ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={usePinnedAccountsDefaults}
+                      >
+                        Use current accounts
+                      </Button>
+                    ) : null}
+                  </div>
+                  {connectionAccounts.error ? (
+                    <Notice
+                      tone="failed"
+                      action={
+                        connectionAccounts.accessDenied ? undefined : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void connectionAccounts.refresh()}
+                          >
+                            Try again
+                          </Button>
+                        )
+                      }
+                    >
+                      {connectionAccounts.error}
+                    </Notice>
+                  ) : null}
+                </div>
+              ) : null}
+              {!inheritsChatSettings ? (
+                <ScheduleAgentCapabilities
+                  bare
+                  workspaceId={workspaceId}
+                  value={draft.agentCapabilities}
+                  onChange={(agentCapabilities) =>
+                    setDraft((previous) => {
+                      if (agentCapabilities !== undefined)
+                        return { ...previous, agentCapabilities };
+                      const { agentCapabilities: _dropped, ...rest } = previous;
+                      return rest;
+                    })
+                  }
+                />
+              ) : null}
+
               {eachRun !== "new_session_per_run" ? (
                 <Field
                   label="If the previous run is still working"
@@ -1335,17 +1399,35 @@ function AgentScheduleForm({
                 </Field>
               ) : null}
               {!inheritsChatSettings ? (
-                <Field label="Where it runs" error={errors.machine}>
+                <Field
+                  label="Where it runs"
+                  error={errors.machine}
+                  hint={
+                    selectedComputeUnavailable
+                      ? "Machine unavailable. Choose a replacement or reconnect it."
+                      : draft.executionTarget === "workspace_default"
+                        ? `Currently: ${defaultMachineLabel}. Follows changes to the workspace default.`
+                        : undefined
+                  }
+                >
                   <SelectMenu
                     options={whereOptions}
                     value={whereValue}
                     onValueChange={(value) =>
-                      value === "managed"
-                        ? update({ executionTarget: "managed" })
-                        : update({
-                            executionTarget: "machine",
-                            machineSandboxId: value,
-                          })
+                      value === "workspace_default"
+                        ? update({ executionTarget: "workspace_default" })
+                        : value === "managed"
+                          ? update({
+                              executionTarget: "managed",
+                              sandboxBackend:
+                                context.clientConfig.defaultSandboxBackend === "selfhosted"
+                                  ? ""
+                                  : (context.clientConfig.defaultSandboxBackend ?? ""),
+                            })
+                          : update({
+                              executionTarget: "machine",
+                              machineSandboxId: value,
+                            })
                     }
                     placeholder={fleet.loading ? "Loading machines…" : "Pick where it runs"}
                     loading={fleet.loading && scheduledMachines.length === 0 && machineOnly}
@@ -1389,24 +1471,6 @@ function AgentScheduleForm({
                   error={secretVaults.error}
                   ownerIsViewer={!editing || !task || ownsSchedule(task, access.viewerSubjectId)}
                 />
-              ) : null}
-              {eachRun !== "existing_session" ? (
-                <Suspense fallback={null}>
-                  <ScheduleSlackPosting
-                    workspaceId={workspaceId}
-                    connectionId={draft.slackBotConnectionId}
-                    channelId={draft.slackBotChannelId}
-                    disabled={false}
-                    active={advancedOpen}
-                    connectionLocked={Boolean(materializedSessionId)}
-                    onChange={({ connectionId, channelId }) =>
-                      update({
-                        slackBotConnectionId: connectionId,
-                        slackBotChannelId: channelId,
-                      })
-                    }
-                  />
-                </Suspense>
               ) : null}
               {eachRun === "existing_session" ? null : learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">

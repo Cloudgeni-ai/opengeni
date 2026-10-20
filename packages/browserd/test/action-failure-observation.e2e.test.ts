@@ -156,8 +156,8 @@ e2e(
         value: "Ada",
       });
       observed = await driver.observe(observed.target.id);
-      // Typed text stays out of observations; a chosen option is shown.
-      expect(node(observed, "textbox", "Name").value).toBeUndefined();
+      // A field shows what was typed into it; a chosen option is shown.
+      expect(node(observed, "textbox", "Name").value).toBe("Ada");
       expect(node(observed, "combobox", "Plan").value).toBe("Starter");
       // A short select lists its options; a long one stays collapsed.
       expect(

@@ -134,7 +134,7 @@ async function performCapabilityActionUntracked(
 
   if (action.type === "install_skill") {
     if (!canManageSkills) {
-      throw new Error("Workspace administrator permission is required to install Skills.");
+      throw new Error("You need permission to manage workspace documents to install Skills.");
     }
     const libraryId = metadataString(item.metadata.libraryId);
     const expectedVersion = metadataString(item.metadata.version);

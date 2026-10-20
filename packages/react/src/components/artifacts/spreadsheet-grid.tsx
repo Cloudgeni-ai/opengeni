@@ -1261,7 +1261,12 @@ export function SpreadsheetProjectionGrid({
     if (typeof document === "undefined") return;
     let active = true;
     void document.fonts?.ready.then(() => {
-      if (active) setCanvasEpoch((value) => value + 1);
+      if (active) {
+        // Loaded glyphs change without changing the computed font-family.
+        // Repaint cached fallback-font tiles, not only the headers/selection.
+        canvasRendererRef.current?.dispose();
+        setCanvasEpoch((value) => value + 1);
+      }
     });
     if (typeof MutationObserver === "undefined") {
       return () => {

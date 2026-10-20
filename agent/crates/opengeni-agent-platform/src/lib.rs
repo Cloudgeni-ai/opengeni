@@ -39,6 +39,7 @@ mod native;
 #[cfg(unix)]
 mod process_cleanup;
 mod pty;
+pub mod run_as;
 pub mod service;
 pub mod transactional_write;
 mod work_scope;
@@ -357,6 +358,13 @@ pub trait Platform: Send + Sync {
 
     /// Whether this platform implements the transactional upload contract.
     fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform honors a request's `run_as` (Hello
+    /// `Capabilities.run_as`). Platforms that do not must refuse a non-empty
+    /// `run_as` instead of ignoring it.
+    fn run_as_supported(&self) -> bool {
         false
     }
 

@@ -21,6 +21,8 @@ export class InteractionDefiniteDriverError extends Error {
   /** Optional page or screen state the driver observed after the failure, so
    * the caller can act on it without another observation round trip. */
   observation: unknown = null;
+  /** Optional structured facts about the failure, kept in the receipt's error. */
+  details: InteractionError["details"] = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -38,6 +40,8 @@ export class InteractionDefiniteDriverError extends Error {
 export class InteractionOutcomeUnknownDriverError extends Error {
   /** Optional state observed after the failure; see InteractionDefiniteDriverError. */
   observation: unknown = null;
+  /** Optional structured facts; see InteractionDefiniteDriverError. */
+  details: InteractionError["details"] = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -124,6 +128,9 @@ type InteractionCoreAdapter<
   assertTargetAuthority(target: TTarget): void;
   assertExpectedGenerations(command: TCommand, target: TTarget): void;
   assertObservationAuthority(observation: TObservation, targetId: string | null): void;
+  /** Authority for the observation a dispatched command returns. Defaults to
+   * an observation of the command's own target. */
+  assertActionObservationAuthority?(observation: TObservation, command: TCommand): void;
   outcome?(observation: TObservation): {
     state: "completed" | "failed" | "outcome_unknown";
     error: InteractionError | null;
@@ -412,7 +419,7 @@ export class InteractionControllerCore<
         dispatchedObservation === null
           ? null
           : this.adapter.parseObservation(dispatchedObservation);
-      if (observation) this.adapter.assertObservationAuthority(observation, command.targetId);
+      if (observation) this.assertActionObservation(observation, command);
       const outcome = observation ? this.adapter.outcome?.(observation) : undefined;
       const completed = this.makeReceipt(
         command,
@@ -447,7 +454,12 @@ export class InteractionControllerCore<
             dispatchedAt,
             this.timestamp(),
             this.failureObservation(error.observation, command),
-            { code: error.code, message: error.message, retryable: error.retryable },
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
           ),
         );
       }
@@ -460,7 +472,12 @@ export class InteractionControllerCore<
             dispatchedAt,
             this.timestamp(),
             this.failureObservation(error.observation, command),
-            { code: error.code, message: error.message, retryable: error.retryable },
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
           ),
         );
       }
@@ -475,13 +492,19 @@ export class InteractionControllerCore<
     }
   }
 
+  private assertActionObservation(observation: TObservation, command: TCommand): void {
+    if (this.adapter.assertActionObservationAuthority)
+      this.adapter.assertActionObservationAuthority(observation, command);
+    else this.adapter.assertObservationAuthority(observation, command.targetId);
+  }
+
   /** A failure's observation is optional context. One that does not parse or
    * belongs to another target is dropped; it never changes the failure. */
   private failureObservation(observation: unknown, command: TCommand): TObservation | null {
     if (observation === null || observation === undefined) return null;
     try {
       const parsed = this.adapter.parseObservation(observation);
-      this.adapter.assertObservationAuthority(parsed, command.targetId);
+      this.assertActionObservation(parsed, command);
       return parsed;
     } catch {
       return null;

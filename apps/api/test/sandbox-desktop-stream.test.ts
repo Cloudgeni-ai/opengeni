@@ -203,6 +203,70 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
+  test("a compute group box serves its agent's relay terminal and desktop, fenced by the lease epoch, with nothing run over exec", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const ports: number[] = [];
+    const establish = async () =>
+      ({
+        client: { backendId: "compute" },
+        session: {
+          exec: async () => {
+            throw new Error("a compute stream must not run anything over exec");
+          },
+          resolveExposedPort: async (port: number) => {
+            ports.push(port);
+            return {
+              host: "relay.opengeni.test",
+              port: 443,
+              tls: true,
+              path: "/stream",
+              query: `ws=${workspaceId}&agent=agent-1&port=${port}&channel=ch-1`,
+            };
+          },
+          close: async () => {},
+        },
+        sessionState: {},
+        instanceId: "sbx-1",
+        backendId: "compute",
+      }) as unknown as EstablishedSandboxSession;
+    const computeSession = { ...session!, sandboxBackend: "compute" as const };
+    const terminal = await mintTerminalStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: computeSession,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish,
+      },
+    );
+    expect(terminal?.transport).toBe("relay-pty");
+    expect(terminal?.url).toContain("relay.opengeni.test");
+    expect(terminal?.leaseEpoch).toBe(lease.leaseEpoch);
+    expect((await verifyStreamToken(SECRET, terminal!.token))?.leaseEpoch).toBe(lease.leaseEpoch);
+    const desktop = await mintDesktopStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: computeSession,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish,
+      },
+    );
+    expect(desktop?.url).toContain("port=6080");
+    expect(desktop?.resolution).toBeDefined();
+    expect(ports).toEqual([7681, 6080]);
+    // The relay endpoint is not a provider tunnel: the lease records none.
+    const after = await readLease(db, workspaceId, session!.sandboxGroupId);
+    expect(after?.dataPlaneUrl ?? null).toBeNull();
+    expect(after?.terminalDataPlaneUrl ?? null).toBeNull();
+  }, 60_000);
+
   test("WARM + acked + desktop-enabled ⇒ a coherent {url,token,expiresAt}; the token verifies; data_plane_url recorded", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

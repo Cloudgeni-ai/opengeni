@@ -70,11 +70,11 @@ describe("toolDisplayName", () => {
         "mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations",
       ),
     ).toBe("List organizations");
-    expect(toolDisplayName(englishText, "opengeni__set_session_title")).toBe("Set session title");
+    expect(toolDisplayName(englishText, "opengeni__set_session_title")).toBe("Named the chat");
   });
 
-  test("plain built-in tool names (no __ boundary) are de-slugged and title-cased", () => {
-    expect(toolDisplayName(englishText, "session_create")).toBe("Session create");
+  test("built-in tool names read as plain steps; other bare names are de-slugged", () => {
+    expect(toolDisplayName(englishText, "session_create")).toBe("Got help from another assistant");
     expect(toolDisplayName(englishText, "bash")).toBe("Bash");
   });
 

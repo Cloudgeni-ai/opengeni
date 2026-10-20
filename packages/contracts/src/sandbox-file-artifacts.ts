@@ -2,6 +2,8 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 import { RetainedArtifactReferenceSchema } from "./retained-output";
+import { WorkspaceArtifactVisibility } from "./artifacts";
+import { FileAccess } from "./file-access";
 
 /**
  * Largest publishable sandbox file: one object-storage PUT. Files up to
@@ -21,6 +23,11 @@ export const PublishSandboxFileArtifactRequest = /* @__PURE__ */ defineSchema(()
   z
     .object({
       path: z.string().min(1).max(4_096),
+      /**
+       * Who can open the published file. Omitted: the chat's own audience
+       * (Only me in an Only me chat, else the workspace).
+       */
+      visibility: WorkspaceArtifactVisibility.optional(),
     })
     .strict(),
 );
@@ -37,6 +44,8 @@ export const SandboxFileArtifactReceipt = /* @__PURE__ */ defineSchema(() =>
       sandboxPath: z.string().min(1).max(4_096),
       filename: z.string().min(1).max(1_024),
       artifact: RetainedArtifactReferenceSchema,
+      /** Who can open the file. Absent from receipts made before files had audiences. */
+      access: FileAccess.optional(),
     })
     .strict()
     .superRefine((value, context) => {
