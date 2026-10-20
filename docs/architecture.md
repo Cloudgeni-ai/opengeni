@@ -112,6 +112,12 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group
+for machine heartbeat/event and Hello persistence. One member handles each
+delivery; other machine-event subscribers remain broadcast. Queue delivery is
+not durable or globally ordered: exact-runner database fences remain authoritative,
+and heartbeat renewal commits before optional inventory or telemetry work.
+
 Established-chat composer submissions (web and native) persist the submitted
 model, reasoning and latency as session defaults in the same transaction as
 prompt admission (`packages/db/src/session-queue-commands.ts`). Saving a draft
