@@ -1359,9 +1359,9 @@ describe("CUA desktop boundary", () => {
       }
     }
 
-    // The acted window closes, and the window it opened appears a moment
-    // after the action returns, unreported (CUA ran a key equivalent as a
-    // menu command).
+    // The acted window closes and a window of its app appears unreported:
+    // closing proves nothing about where that window came from, so nothing
+    // is observed in its place.
     {
       const fixture = new OpeningFixture();
       fixture.opens = [document];
@@ -1370,8 +1370,7 @@ describe("CUA desktop boundary", () => {
       try {
         const target = (await backend.targets())[0]!;
         const observation = await backend.observe(target.id);
-        const after = await backend.dispatch(command(observation));
-        expect(after?.target.id).toBe("cua:window:42:2");
+        expect(await backend.dispatch(command(observation))).toBeNull();
       } finally {
         await backend.close();
       }
