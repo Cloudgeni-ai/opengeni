@@ -1,0 +1,814 @@
+//! Requests from handles, checked against each sandbox's generation.
+
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, SandboxId, Step};
+use compute_engine::Engine;
+
+use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::Cause;
+use crate::pool::{Shape, Sources, Start, Template, first_files};
+use crate::protocol::{
+    BlockedSandbox, CapacityStatus, CpuStatus, DiskStatus, FailedStep, HostStatus, Id,
+    MemoryStatus, SandboxConfig, SandboxStatus, SleepConfig, step_name,
+};
+use crate::rootfs::Missing;
+use crate::state::{Change, Identity, Record, check_generation};
+use crate::step::images_of;
+use crate::store::{OwnerEpoch, Store};
+
+use super::disk::AfterReading;
+use super::holds::{Write, hold_id};
+use super::observe::{By, Why};
+use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
+
+/// Replies to `reply` once the write in `outcome` has made a change
+/// durable, or with why the change was refused or could not be kept.
+fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
+    match outcome {
+        Ok((write, answer)) => {
+            tokio::spawn(async move {
+                let result = write
+                    .await
+                    .map(|()| answer)
+                    .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
+                let _ = reply.send(result);
+            });
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+/// Makes a new sandbox's directory and first files, from `template` where
+/// one fits. Blocks.
+pub(super) fn new_files(
+    paths: &Paths,
+    base: &Path,
+    template: Option<(&Template, &Sources)>,
+) -> io::Result<Start> {
+    // The directory must be new: one already there belongs to a sandbox
+    // this agent does not know, and is left alone.
+    std::fs::create_dir(&paths.dir)?;
+    std::fs::create_dir(&paths.jail)?;
+    let start = first_files(paths, &images_of(paths), base, template)?;
+    // The record, written next, vouches for these: their directory entries
+    // must outlast a crash first, all the way up to the one in the
+    // sandboxes' directory.
+    sync_parent(&paths.disk)?;
+    sync_parent(&paths.jail)?;
+    sync_parent(&paths.dir)?;
+    Ok(start)
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    pub(super) fn on_command(&mut self, command: Command) {
+        match command {
+            Command::Create {
+                id,
+                config,
+                owner,
+                reply,
+            } => self.create(id, config, owner, reply),
+            command @ (Command::Adopt { .. }
+            | Command::HandOff { .. }
+            | Command::Reconcile { .. }
+            | Command::Owned { .. }
+            | Command::Inventory { .. }) => self.on_fleet_command(command),
+            Command::Traced(trace, command) => {
+                self.trace = Some(trace);
+                self.on_command(*command);
+                self.trace = None;
+            }
+            Command::Remove {
+                id,
+                generation,
+                reply,
+            } => self.remove(id, generation, reply),
+            Command::Touch {
+                id,
+                generation,
+                priority,
+                by,
+                reply,
+            } => {
+                let result = self.touch(id, generation, priority, by);
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
+            Command::Check {
+                id,
+                generation,
+                reply,
+            } => {
+                let result = match self.records.get(id) {
+                    Some(record) => check_generation(&record, Some(generation)).map_err(Into::into),
+                    None => Err(HostError::Removed(id)),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Sleep {
+                id,
+                generation,
+                level,
+                reply,
+            } => {
+                let result = self
+                    .check(id, generation)
+                    .and_then(|()| self.request_sleep(id, level));
+                let _ = reply.send(result);
+            }
+            command @ (Command::Hold { .. }
+            | Command::Unhold { .. }
+            | Command::Acquire { .. }
+            | Command::Release { .. }) => self.on_hold_command(command),
+            Command::Status { reply } => {
+                let _ = reply.send(self.status());
+            }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Holds taken, ended, acquired and released.
+    fn on_hold_command(&mut self, command: Command) {
+        match command {
+            Command::Hold {
+                id,
+                generation,
+                name,
+                ttl,
+                priority,
+                reply,
+            } => {
+                let outcome = self
+                    .check(id, generation)
+                    .and_then(|()| self.hold(id, name, ttl, priority));
+                answer_once_written(outcome, reply);
+            }
+            Command::Unhold {
+                id,
+                generation,
+                name,
+                reply,
+            } => {
+                let outcome = self
+                    .check(id, generation)
+                    .and_then(|()| self.unhold(id, &name));
+                answer_once_written(outcome.map(|write| (write, ())), reply);
+            }
+            Command::Acquire {
+                id,
+                generation,
+                hold,
+                priority,
+                reply,
+            } => self.acquire(id, generation, hold, priority, reply),
+            Command::Release { id, hold } => {
+                if self.slots.contains_key(&id.0) {
+                    self.input(Input::Release {
+                        sandbox: id.0,
+                        hold,
+                    });
+                }
+            }
+            _ => unreachable!("not a hold command"),
+        }
+    }
+
+    /// Notes that a request asks about `id`, for the step it causes.
+    /// Notes that `by` asked for sandbox `id` to wake, for the step that
+    /// wakes it to say.
+    fn note_ask(&mut self, id: Id, by: By) {
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+                by: Some(by),
+            });
+        }
+    }
+
+    pub(super) fn remove(&mut self, id: Id, generation: Option<u64>, reply: Reply<()>) {
+        if self.blocked.contains_key(&id.0) {
+            // A blocked sandbox with a readable record can still be removed:
+            // removal stops whatever VM it has and retries any removal that
+            // stopped part way.
+            let Some(record) = self.records.get(id) else {
+                match self.leftovers.get(&id.0) {
+                    Some(&left) => self.remove_leftovers(id, left, reply),
+                    None => {
+                        let _ = reply.send(Err(self.blocked_error(id)));
+                    }
+                }
+                return;
+            };
+            if let Err(error) = check_generation(&record, generation) {
+                let _ = reply.send(Err(error.into()));
+                return;
+            }
+            self.blocked.remove(&id.0);
+            self.remove_recorded(&record, None, vec![reply], None);
+            return;
+        }
+        if let Err(error) = self.check(id, generation) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.removers.push(reply);
+            self.input(Input::Remove { sandbox: id.0 });
+        } else if let Some(removers) = self.destroying.get_mut(&id.0) {
+            removers.push(reply);
+        } else if self.preparing.contains(&id.0) {
+            let _ = reply.send(Err(HostError::Busy(id)));
+        } else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+        }
+    }
+
+    /// Marks sandbox `id` used now, if it exists at `generation`.
+    fn touch(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+        by: By,
+    ) -> Result<(), HostError> {
+        self.check(id, generation)?;
+        self.not_handing_off(id)?;
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        self.note_ask(id, by);
+        self.input(Input::Touch {
+            sandbox: id.0,
+            priority,
+        });
+        Ok(())
+    }
+
+    /// Ends named hold `name`, returning the write that makes its end
+    /// durable. If it was already gone, an earlier release may still be
+    /// on its way to disk, or have failed to get there: the write then
+    /// resolves once that release is kept.
+    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Write, HostError> {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return Err(HostError::NotFound(id));
+        };
+        let write = if slot.holds.remove(name) {
+            slot.holds.write(unix_ms_now())
+        } else {
+            slot.holds.flush()
+        };
+        self.input(Input::Release {
+            sandbox: id.0,
+            hold: hold_id(name),
+        });
+        Ok(write)
+    }
+
+    pub(super) fn acquire(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        hold: HoldId,
+        priority: Priority,
+        reply: Reply<Woke>,
+    ) {
+        if let Err(error) = self
+            .check(id, generation)
+            .and_then(|()| self.not_handing_off(id))
+        {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let during = self.core.sandbox(id.0).and_then(|view| view.step);
+        let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+            return;
+        };
+        slot.waiters.push(Waiter {
+            generation,
+            during,
+            queued: false,
+            reply,
+        });
+        self.note_ask(id, By::Fleet);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold,
+            until: None,
+            priority,
+        });
+        self.settle(id);
+        // Still waiting: whatever wake runs now is the one it joins.
+        if let Some(waiter) = self
+            .slots
+            .get_mut(&id.0)
+            .and_then(|slot| slot.waiters.last_mut())
+        {
+            waiter.queued = true;
+        }
+    }
+
+    /// Refuses a request that names an execution the sandbox no longer
+    /// runs.
+    pub(super) fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        if self.blocked.contains_key(&id.0) {
+            return Err(self.blocked_error(id));
+        }
+        match self.records.get(id) {
+            Some(record) => Ok(check_generation(&record, generation)?),
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn request_sleep(&mut self, id: Id, level: Level) -> Result<(), HostError> {
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        if level >= Level::Archived && !self.store.is_configured() {
+            return Err(HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived".into(),
+            ));
+        }
+        if level >= Level::Saved
+            && self
+                .core
+                .sandbox(id.0)
+                .is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
+        {
+            return Err(HostError::Invalid(format!(
+                "sandbox {id}'s VM may have lost disk writes, so it cannot be saved; \
+                 it sleeps no deeper than compressed until its VM is replaced"
+            )));
+        }
+        if level == Level::Compressed && !self.can_compress {
+            return Err(HostError::Invalid(
+                "this host cannot compress memory; ask for saved instead".into(),
+            ));
+        }
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.sleep_asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+                by: None,
+            });
+        }
+        self.input(Input::Sleep {
+            sandbox: id.0,
+            level,
+        });
+        Ok(())
+    }
+
+    /// Holds sandbox `id` awake for `name`, returning the write that makes
+    /// the hold durable, and whether the hold was already there.
+    pub(super) fn hold(
+        &mut self,
+        id: Id,
+        name: String,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<(Write, bool), HostError> {
+        if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
+            return Err(HostError::NotFound(id));
+        }
+        self.not_handing_off(id)?;
+        let until = ttl.map(|ttl| self.now() + ttl);
+        self.note_ask(id, By::Fleet);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold: hold_id(&name),
+            until,
+            priority,
+        });
+        let now_ms = unix_ms_now();
+        let lapses_ms = ttl
+            .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
+        let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
+        let renewed = slot.holds.set(name, lapses_ms);
+        Ok((slot.holds.write(now_ms), renewed))
+    }
+
+    /// The refusal of a request for blocked sandbox `id`.
+    pub(super) fn blocked_error(&self, id: Id) -> HostError {
+        HostError::Blocked {
+            id,
+            reason: self.blocked.get(&id.0).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The answer to creating `id` with `config` when no work is needed: a
+    /// refusal, or success for a repeat of a create that already happened.
+    fn create_answer(&self, id: Id, config: &SandboxConfig) -> Option<Result<(), HostError>> {
+        if self.blocked.contains_key(&id.0) {
+            return Some(Err(self.blocked_error(id)));
+        }
+        if let Err(problem) = self.ordinals_known() {
+            return Some(Err(HostError::Io(problem)));
+        }
+        if self.preparing.contains(&id.0) {
+            // Perhaps this very create's earlier attempt: retrying once it
+            // is done tells.
+            return Some(Err(HostError::Busy(id)));
+        }
+        let record = self.records.get(id);
+        if self.slots.contains_key(&id.0)
+            || self.destroying.contains_key(&id.0)
+            || self.hosts.contains_key(&id.0)
+            || record.is_some()
+        {
+            // Creating is idempotent: a client retrying a create whose reply
+            // it lost finds the sandbox it asked for. One with other
+            // settings, or on its way out, is someone else's.
+            let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
+                && !self.destroying.contains_key(&id.0)
+                && record
+                    .is_some_and(|record| !record.removing && record.config.same_sandbox(config));
+            return Some(if same {
+                Ok(())
+            } else {
+                Err(HostError::Exists(id))
+            });
+        }
+        if self.tearing_down.contains_key(&id.0) {
+            // An old VM of this id is still being torn down; its teardown
+            // must not touch the new sandbox's files.
+            return Some(Err(HostError::Busy(id)));
+        }
+        match self.sleep_policy(config) {
+            Err(error) => Some(Err(HostError::Invalid(error))),
+            Ok(_) => self.needs_absent_store(&config.sleep).map(Err),
+        }
+    }
+
+    /// The refusal of `sleep` on a host without a store, if it archives or
+    /// checkpoints: judged by what was asked, before the host drops
+    /// checkpoints it cannot take.
+    fn needs_absent_store(&self, sleep: &SleepConfig) -> Option<HostError> {
+        (!self.store.is_configured()
+            && (sleep.archive_after_ms.is_some() || sleep.checkpoint_every_ms.is_some()))
+        .then(|| {
+            HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived or checkpointed".into(),
+            )
+        })
+    }
+
+    /// Refuses a new sandbox `id` of `config` that cannot be created here.
+    pub(super) fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
+        self.sleep_policy(config).map_err(HostError::Invalid)?;
+        if let Some(refused) = self.needs_absent_store(&config.sleep) {
+            return Err(refused);
+        }
+        // One that could never run here is refused at once, so it can be
+        // placed elsewhere.
+        if let Some(capacity) = self.core.capacity() {
+            let needed = self.size(config, None).request;
+            if needed > capacity.budget {
+                return Err(HostError::HostFull {
+                    id,
+                    resource: Resource::Memory,
+                    needed,
+                    free: capacity.free(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn create(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        self.create_from(id, config, owner, reply, true);
+    }
+
+    /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
+    /// one, for the ownership under `owner`.
+    pub(super) fn create_from(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+        ready: bool,
+    ) {
+        if let Some(answer) = self.create_answer(id, &config) {
+            // A repeat with the agent link sent changed takes it up.
+            if answer.is_ok()
+                && let Some(record) = self.records.get(id)
+                && record.config.link != config.link
+            {
+                self.take_owner(id, Change::new().owner(owner).link(config.link), reply);
+                return;
+            }
+            let _ = reply.send(answer);
+            return;
+        }
+        if let Err(error) = self.can_create(id, &config) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        self.template_used(Shape::of(&config));
+        let unclaimed = if ready {
+            self.claim(id, config, owner, reply)
+        } else {
+            Some((config, reply))
+        };
+        let Some((config, reply)) = unclaimed else {
+            return;
+        };
+        self.create_fresh(id, config, owner, reply);
+    }
+
+    /// Creates sandbox `id` from its shape's template, or cold, once the
+    /// host has its image.
+    pub(super) fn create_fresh(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            self.create_after_fetch(image, id, config, owner, reply);
+            return;
+        }
+        let shape = Shape::of(&config);
+        let template = self.template_for(shape);
+        // Its first files are written before the core knows it: they are
+        // booked from before the copy until a reading shows them.
+        let template_disk = template.as_ref().map(|t| t.disk());
+        let disk = match self.first_files_fit(id, shape.image, template_disk.as_deref()) {
+            Ok(Some(disk)) => disk,
+            Ok(None) => {
+                self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let ordinal = match self.take_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(problem) => {
+                let _ = reply.send(Err(HostError::Io(problem)));
+                return;
+            }
+        };
+        self.preparing.insert(id.0);
+        let allocation = match self.images.allocate(ordinal) {
+            Ok(allocation) => allocation,
+            Err(problem) => {
+                self.preparing.remove(&id.0);
+                self.ordinals.remove(&ordinal);
+                let _ = reply.send(Err(HostError::Invalid(problem)));
+                return;
+            }
+        };
+        self.input(Input::Writes { key: id.0, disk });
+        let mut record = Record::new(id, ordinal, allocation, config);
+        record.owner_epoch = owner.0;
+        self.prepare(record, template, reply);
+    }
+
+    /// Makes the files of the new sandbox `record` describes in the
+    /// background, from `template` if it has one, then records it;
+    /// [`Event::Prepared`] says how it went.
+    fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
+        let (id, ordinal) = (record.id, record.ordinal);
+        let image = record.config.image;
+        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
+        let link = Images::link(&record);
+        let paths = Paths::new(&self.root, id);
+        let dir = paths.dir.clone();
+        let base = self.base_image.clone();
+        let rootfs = Arc::clone(&self.rootfs);
+        let records = Arc::clone(&self.records);
+        let net = self.net.clone();
+        let events = self.events_tx.clone();
+        tokio::spawn(async move {
+            // Held until its disk is copied, so it is not removed meanwhile.
+            let held = match image {
+                Some(image) => {
+                    let Some(held) = rootfs.hold(image).await else {
+                        let missing = Missing::Failed {
+                            image,
+                            error: "it was removed before the create could copy it".into(),
+                        };
+                        tracing::warn!(%id, %missing, "a create's image is gone");
+                        let _ = events.send(Event::Prepared {
+                            id,
+                            ordinal,
+                            result: Err(missing.into()),
+                            reply,
+                            stale: None,
+                        });
+                        return;
+                    };
+                    Some(held)
+                }
+                None => None,
+            };
+            let first = held.as_ref().map_or(base, |held| held.path.clone());
+            let networks = net.clone();
+            let from = template.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                let warm = from.as_deref().zip(sources.as_deref());
+                let start = new_files(&paths, &first, warm)?;
+                if let (Some(net), Some(link)) = (&networks, &link) {
+                    net.ensure(link)?;
+                }
+                Ok((start, std::fs::metadata(&paths.disk)?.len()))
+            })
+            .await
+            .unwrap_or_else(|error| Err(io::Error::other(error)));
+            drop(held);
+            let stale = match prepared {
+                Ok((Start::Stale, _)) => template,
+                _ => None,
+            };
+            // The record goes last: a directory without one is an
+            // unfinished creation and is cleaned up on recovery.
+            let result = match prepared {
+                Ok((start, disk_bytes)) => {
+                    record.allocation.disk_bytes = Some(disk_bytes);
+                    // A sandbox started from a template holds a memory image
+                    // of a guest that never ran as it: its first wake
+                    // restores it.
+                    // It learns which sandbox it is from the restore notice.
+                    if start == Start::Template {
+                        record.image = true;
+                        record.identity = Identity::Pending;
+                    }
+                    records.insert(record).await.map_err(HostError::from)
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
+                    let _ = events.send(Event::Prepared {
+                        id,
+                        ordinal,
+                        result: Err(HostError::Exists(id)),
+                        reply,
+                        stale,
+                    });
+                    return;
+                }
+                Err(error) => Err(HostError::Io(error.to_string())),
+            };
+            if result.is_err() {
+                // The id stays reserved until this is done, so it cannot
+                // remove a newer sandbox's files or network.
+                if let Some(net) = net {
+                    let _ =
+                        tokio::task::spawn_blocking(move || net.remove(id, Some(ordinal))).await;
+                }
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+            let _ = events.send(Event::Prepared {
+                id,
+                ordinal,
+                result,
+                reply,
+                stale,
+            });
+        });
+    }
+
+    pub(super) fn status(&self) -> HostStatus {
+        let mut sandboxes: Vec<SandboxStatus> = self
+            .slots
+            .iter()
+            .filter_map(|(id, slot)| self.sandbox_status(*id, slot))
+            .collect();
+        sandboxes.sort_by_key(|sandbox| sandbox.id);
+        let steps = Step::ALL
+            .iter()
+            .map(|step| {
+                let mut stats = self.stats[step.index()];
+                stats.in_flight = self.core.in_flight(*step);
+                (step_name(*step).to_owned(), stats)
+            })
+            .collect();
+        #[cfg(target_os = "linux")]
+        let store_stalled_ms = self
+            .fetcher
+            .as_ref()
+            .and_then(|fetcher| fetcher.stalled_for())
+            .map(|stalled| u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX));
+        #[cfg(not(target_os = "linux"))]
+        let store_stalled_ms = None;
+        HostStatus {
+            sandboxes,
+            steps,
+            available_memory: self.available_memory,
+            reclaimable_memory: self.core.reclaimable_memory(),
+            blocked: self
+                .blocked
+                .iter()
+                .map(|(id, problem)| BlockedSandbox {
+                    id: Id(*id),
+                    problem: problem.clone(),
+                })
+                .collect(),
+            capacity: self.core.capacity().map(|capacity| CapacityStatus {
+                total: capacity.budget,
+                reserved: capacity.reserved,
+                occupied: capacity.occupied,
+                free: capacity.free(),
+                awake: capacity.awake,
+            }),
+            cpu: self.core.cpu_capacity().map(|cpu| CpuStatus {
+                total: cpu.budget,
+                reserved: cpu.reserved,
+                free: cpu.free(),
+            }),
+            disk: self.core.disk().map(|disk| {
+                let free = disk.free();
+                DiskStatus {
+                    available: disk.available.bytes,
+                    booked: disk.booked.bytes,
+                    reserve: disk.reserve.bytes,
+                    free: free.bytes,
+                    inodes_available: disk.available.inodes,
+                    inodes_booked: disk.booked.inodes,
+                    inodes_free: free.inodes,
+                }
+            }),
+            templates: {
+                let mut templates = self
+                    .warm
+                    .as_ref()
+                    .map(|warm| warm.pool.status())
+                    .unwrap_or_default();
+                self.ready.status(&mut templates, &self.ready_usage());
+                templates
+            },
+            store_stalled_ms,
+            unseen_activity: self.unseen_activity,
+            about: self.about.clone(),
+        }
+    }
+    /// One sandbox's state, as status reports it.
+    fn sandbox_status(&self, id: SandboxId, slot: &Slot<E::Vm>) -> Option<SandboxStatus> {
+        let view = self.core.sandbox(id)?;
+        let record = self.records.get(Id(id));
+        Some(SandboxStatus {
+            id: Id(id),
+            generation: record.as_ref().map_or(0, |record| record.generation),
+            owner_epoch: record
+                .as_ref()
+                .map_or(OwnerEpoch::FIRST.0, |record| record.owner_epoch),
+            revision: record.as_ref().map_or(0, |record| record.revision),
+            level: view.state.level.into(),
+            durability: view.state.durability.into(),
+            backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
+            memory_saved: view.state.keeps_programs(),
+            step: view.step.map(|step| step_name(step).to_owned()),
+            holds: view.holds,
+            launches: slot.launches,
+            resident_bytes: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
+            unsavable: view.unsavable,
+            broken: view.broken,
+            waiting_for_room: self.core.room_needed(id),
+            paused_for_memory: view.paused_for_memory,
+            balloon_bytes: (view.balloon > 0).then_some(view.balloon),
+            memory: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.memory_stats(&live.vm).ok())
+                .map(memory_status),
+            failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
+                step: step_name(*step).to_owned(),
+                error: error.clone(),
+            }),
+        })
+    }
+}
+
+/// What the API reports of a VM cgroup's memory counters.
+fn memory_status(stats: compute_engine::MemoryStats) -> MemoryStatus {
+    MemoryStatus::new(stats.zswpout, stats.zswpin, stats.pressure_some_avg10)
+}

@@ -1175,6 +1175,8 @@ export type ComputerSessionCapabilities = {
   backgroundActions: boolean;
   /** Raw window input stays in the background. Absent means foreground-only. */
   backgroundInput?: boolean | undefined;
+  /** Accepts a ComputerActionBatch as one operation. Absent means unsupported. */
+  actionBatches?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1286,6 +1288,16 @@ export type ComputerAction =
   | { type: "focus"; targetId: string }
   | { type: "launch"; applicationId: string };
 
+/** Semantic and keyboard actions run in order on one target as one operation,
+ * stopping at the first failure; the receipt observes the target once, after
+ * the last action. A batch stopped part way names how many actions completed
+ * in its error's details (`batchActionsCompleted`). Send it only to a session
+ * whose capabilities include actionBatches. */
+export type ComputerActionBatch = {
+  type: "batch";
+  actions: Extract<ComputerAction, { type: "semantic" | "keyboard" }>[];
+};
+
 export type CreateComputerSessionRequest = {
   operationId: string;
   sessionId: string;
@@ -1350,7 +1362,7 @@ export type ComputerActionRequest = {
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
   expectedFrameId: string | null;
-  action: ComputerAction;
+  action: ComputerAction | ComputerActionBatch;
 };
 
 export type ComputerActionReceipt = {

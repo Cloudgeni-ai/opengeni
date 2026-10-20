@@ -594,6 +594,101 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(res.stdout.trim()).toBe("the-vm");
   });
 
+  test("runAs reaches only a runner that advertises run-as", async () => {
+    const fsOps = (mock: MockAgentResponder) =>
+      mock.requests
+        .map((request) => request.req.op)
+        .filter(
+          (op) => op?.$case === "fsRead" || op?.$case === "fsWrite" || op?.$case === "fsStat",
+        );
+
+    const supported = new MockAgentResponder();
+    const runAsSession = sessionWith(supported, 0, undefined, { runAsSupported: true });
+    await runAsSession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(supported).runAs).toBe("dev");
+    await runAsSession.writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" });
+    await runAsSession.readFile({ path: "/tmp/as-dev", runAs: "dev" });
+    await runAsSession.pathExists("/tmp/as-dev", "dev");
+    expect(
+      fsOps(supported).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : op?.$case === "fsStat"
+              ? op.fsStat.runAs
+              : null,
+      ),
+    ).toEqual(["dev", "dev", "dev"]);
+
+    // An older runner would ignore the field and act as its own account, so it
+    // never receives one: commands and reads keep their legacy behavior and
+    // writes keep refusing.
+    const legacy = new MockAgentResponder();
+    const legacySession = sessionWith(legacy);
+    await legacySession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(legacy).runAs).toBe("");
+    await legacySession.writeFile({ path: "/tmp/plain", content: "x" });
+    await legacySession.readFile({ path: "/tmp/plain", runAs: "dev" });
+    expect(
+      fsOps(legacy).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : null,
+      ),
+    ).toEqual(["", ""]);
+    await expect(
+      legacySession.writeFile({ path: "/tmp/refused", content: "x", runAs: "dev" }),
+    ).rejects.toThrow("Native file writes do not support runAs impersonation");
+  });
+
+  test("a runAs write is refused, never stripped, when a reconnect swaps in a runner without run-as", async () => {
+    const mock = new MockAgentResponder();
+    let dropped = false;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        if (!dropped && request.op?.$case === "fsWrite") {
+          dropped = true;
+          return offlineControlResponse(request.requestId, true);
+        }
+        return await mock.request(subject, request, opts);
+      },
+    };
+    const admissions = [
+      { connectionInstanceId: CONNECTION_INSTANCE, runAsSupported: true },
+      { connectionInstanceId: "33333333-3333-4333-8333-333333333333", runAsSupported: false },
+    ];
+    let reads = 0;
+    const session = sessionWith(rpc, 0, undefined, {
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => ({
+        ...admissions[Math.min(reads++, admissions.length - 1)]!,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+      }),
+    });
+
+    const error = await session
+      .writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect((error as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_UNSUPPORTED);
+    expect((error as Error).message).toContain("no file was written");
+    // The write was checked and dispatched on one admission; only the retry
+    // re-admitted, and it refused the replacement runner.
+    expect(reads).toBe(2);
+    expect(mock.requests.filter((r) => r.req.op?.$case === "fsWrite")).toHaveLength(0);
+  });
+
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
@@ -1276,7 +1371,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1286,7 +1381,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "retry-connection",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
@@ -1313,7 +1408,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1323,7 +1418,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "shared-connect",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     const [first, second] = await Promise.all([
@@ -1349,7 +1444,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1370,7 +1465,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1391,6 +1486,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
             ping: {
               nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
               agentMonotonicMs: "1",
+              controlReplayTokens: [],
             },
           },
         };
@@ -1399,6 +1495,88 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const session = sessionWith(rpc);
     expect(await session.ping("42")).toBe(true);
+  });
+
+  test("a request bound to a replaced agent connection ends at once, never sent", async () => {
+    const { NatsControlRpc, CONNECTION_REPLACED_DETAIL_KEY } = await import("../src/sandbox");
+    let deliveries = 0;
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async () => {
+        deliveries += 1;
+        throw Object.assign(new Error("503 no responders"), { code: "503" });
+      },
+    }));
+    let checks = 0;
+    const startedAt = Date.now();
+    const res = await rpc.request(
+      "agent.x.y.rpc",
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
+      } as ControlRequest,
+      {
+        timeoutMs: 50,
+        // The agent restarted after the first delivery found no responder.
+        connectionCurrent: async () => (checks += 1) < 2,
+      },
+    );
+    expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(res.error?.message).toMatch(/was replaced before this request reached it/);
+    expect(res.error?.detail[CONNECTION_REPLACED_DETAIL_KEY]).toBeDefined();
+    // Well inside the transport's 120 s recovery allowance.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(deliveries).toBe(2);
+  });
+
+  test("a Connected Machine read in flight when its agent restarts is read again from the new agent", async () => {
+    const { NatsControlRpc } = await import("../src/sandbox");
+    const NEW_INSTANCE = "33333333-3333-4333-8333-333333333333";
+    const mock = new MockAgentResponder({ files: { "/home/user/project/a.txt": "kept" } });
+    let live = CONNECTION_INSTANCE;
+    const subjects: string[] = [];
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async (subject: string, payload: Uint8Array) => {
+        subjects.push(subject);
+        if (!subject.includes(live)) {
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        if (subject.includes(CONNECTION_INSTANCE)) {
+          // The agent restarts: its old connection is gone, a new one is live.
+          live = NEW_INSTANCE;
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        const base = subject.split(".replay.")[0]!;
+        const answer = await mock.request(base, ControlRequest.decode(payload), {
+          timeoutMs: 1_000,
+        });
+        return {
+          data: ControlResponse.encode(answer).finish(),
+          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+        };
+      },
+    }));
+    const session = sessionWith(rpc, 0, undefined, {
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: live,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+      }),
+    });
+    const startedAt = Date.now();
+    const bytes = await session.readFile({ path: "/home/user/project/a.txt" });
+    expect(new TextDecoder().decode(bytes)).toBe("kept");
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(subjects.some((subject) => subject.includes(NEW_INSTANCE))).toBe(true);
   });
 });
 
@@ -1527,11 +1705,53 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     await session.clearSecretFilesForAttempt();
     const removes = mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove");
     expect(removes.map((entry) => entry.req.op)).toEqual([
-      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true } },
+      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true, runAs: "" } },
     ]);
     // Idempotent: the scope is forgotten once removed.
     await session.clearSecretFilesForAttempt();
     expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
+  });
+
+  test("an exec gives up at its deadline while a secret file is still being written", async () => {
+    const events: string[] = [];
+    class SlowWrites extends MockAgentResponder {
+      override async request(
+        subject: string,
+        req: ControlRequest,
+        opts: { timeoutMs: number },
+      ): Promise<ControlResponse> {
+        if (req.op?.$case === "fsWrite") {
+          await Bun.sleep(150);
+          events.push("write");
+        }
+        if (req.op?.$case === "fsRemove") events.push("remove");
+        return await super.request(subject, req, opts);
+      }
+    }
+    const mock = new SlowWrites();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      execTimeoutMs: 50,
+    });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}} {{secretfile:Other}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY, Other: "other" }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    const startedAt = Date.now();
+    const error = await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text }),
+    ).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    // The exec gives up at its deadline, with the first write still in flight.
+    expect(String(error)).toMatch(/did not respond in time/);
+    expect(Date.now() - startedAt).toBeLessThan(140);
+    expect(events).toEqual([]);
+    expect(mock.requests.some((entry) => entry.req.op?.$case === "opStart")).toBe(false);
+    // The preparation it left finishes on its own; nothing waits for it.
+    await Bun.sleep(350);
   });
 });
 

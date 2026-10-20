@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import {
   CodemodeClient,
   CodemodeApprovalPendingError,
   CodemodeOperationError,
   generateCodemodeDeclarations,
+  materializeCodemodeImages,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
 } from "@opengeni/codemode";
@@ -22,7 +32,7 @@ function usage(exitCode = 1): void {
     "  ogtool list [--full | --json]",
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
-    "  ogtool call <tool-path-or-model-name> [json-object] [--full]",
+    "  ogtool call <tool-path-or-model-name> [json-object] [--full] [--save-image <path>]",
     "  ogtool read <operation-id>",
     "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
@@ -31,6 +41,10 @@ function usage(exitCode = 1): void {
     "",
     "list returns all authorized tools by default; --limit/--offset are opt-in slices",
     "call omits a text block that only repeats structuredContent; --full prints the exact result",
+    "call writes images (such as screenshots) to files and prints their paths instead of base64;",
+    "  --save-image saves the result's single image at that path and never overwrites",
+    "  if the call completes but its image cannot be saved, the result is still printed",
+    "  with imageSaveError and the exit code is 4; do not repeat that call",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -177,6 +191,111 @@ export function callOutput(result: AttemptToolResult, full = false): string {
   return `${JSON.stringify(printed, null, 2)}\n`;
 }
 
+/**
+ * Write a result's image blocks to files, as `tab.screenshot()` does, and,
+ * unless the exact result was requested, print each as
+ * `{type, mimeType, path, sizeBytes}` instead of base64 pixels. The native
+ * client (`codemode call`) does the same.
+ */
+export async function materializeCallImages(
+  result: AttemptToolResult,
+  options: { saveTo?: string; full?: boolean } = {},
+): Promise<AttemptToolResult> {
+  if (options.full && options.saveTo === undefined) return result;
+  const images = await materializeCodemodeImages(result, {
+    ...(options.saveTo === undefined ? {} : { saveTo: options.saveTo }),
+  });
+  if (options.saveTo !== undefined && images.length !== 1) {
+    throw new Error("--save-image needs a result with exactly one image");
+  }
+  if (options.full || images.length === 0) return result;
+  let next = 0;
+  return {
+    ...result,
+    content: result.content.map((block) => {
+      if (block.type !== "image") return block;
+      const image = images[next++]!;
+      return {
+        type: "image",
+        mimeType: image.mimeType,
+        path: image.path,
+        sizeBytes: image.sizeBytes,
+      } as unknown as (typeof result.content)[number];
+    }),
+  };
+}
+
+/**
+ * Refuse a --save-image path before the tool runs when the file could not be
+ * written anyway, so nothing is called for a screenshot that cannot be kept.
+ */
+export function preflightImagePath(saveTo: string): void {
+  const path = resolve(saveTo);
+  let exists = true;
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    exists = false;
+  }
+  if (exists) {
+    throw new Error(`--save-image ${path} already exists; choose a new path (nothing was called)`);
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  accessSync(dirname(path), constants.W_OK);
+}
+
+/**
+ * The tool call already completed, so a failure to save its image must not
+ * hide the result: print it (images kept in a private temporary file when
+ * possible) with the save error and the operation ID.
+ */
+export async function imageSaveFailureOutput(
+  result: AttemptToolResult,
+  error: unknown,
+  operationId: string,
+  full: boolean,
+): Promise<string> {
+  let printed = result;
+  if (!full) {
+    try {
+      printed = await materializeCallImages(result);
+    } catch {
+      printed = result;
+    }
+  }
+  return callOutput(
+    {
+      ...printed,
+      imageSaveError: {
+        operationId,
+        message: error instanceof Error ? error.message : String(error),
+        note: "The call completed; only saving its image failed. Do not repeat the call.",
+      },
+    } as AttemptToolResult,
+    full,
+  );
+}
+
+function callFlags(args: string[]): { full: boolean; saveTo?: string; rest: string[] } {
+  let full = false;
+  let saveTo: string | undefined;
+  const rest: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--full") full = true;
+    else if (arg === "--save-image") {
+      const value = args[++index];
+      if (!value) throw new Error("--save-image requires a path");
+      saveTo = value;
+    } else if (arg.startsWith("--save-image=")) {
+      saveTo = arg.slice("--save-image=".length);
+      if (!saveTo) throw new Error("--save-image requires a path");
+    } else rest.push(arg);
+  }
+  return { full, ...(saveTo === undefined ? {} : { saveTo }), rest };
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === "--help" || command === "-h" || command === "help") return usage(0);
@@ -222,16 +341,27 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "call") {
-    const full = args.includes("--full");
-    const [name, rawArguments] = args.filter((arg) => arg !== "--full");
+    const { full, saveTo, rest } = callFlags(args);
+    const [name, rawArguments] = rest;
     if (!name) throw new Error("tool path or model name is required");
     const argumentsValue = parseToolArguments(rawArguments);
     const catalog = await client.catalog();
     const entry = resolveTool(catalog, name);
-    const result = await client.call(entry.identity, argumentsValue, {
-      operationId: randomUUID(),
-    });
-    process.stdout.write(callOutput(result, full));
+    if (saveTo !== undefined) preflightImagePath(saveTo);
+    const operationId = randomUUID();
+    const result = await client.call(entry.identity, argumentsValue, { operationId });
+    let printed: AttemptToolResult;
+    try {
+      printed = await materializeCallImages(result, {
+        full,
+        ...(saveTo === undefined ? {} : { saveTo }),
+      });
+    } catch (error) {
+      process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));
+      process.exitCode = 4;
+      return;
+    }
+    process.stdout.write(callOutput(printed, full));
     return;
   }
   if (command === "declarations") {

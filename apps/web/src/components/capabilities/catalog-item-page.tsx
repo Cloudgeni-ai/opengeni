@@ -723,7 +723,12 @@ export function CatalogItemPage({
           description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
-            key={`${workspaceId}:${item.id}`}
+            key={`${workspaceId}:${item.id}:${
+              connectionAccounts?.connections
+                ?.map((account) => `${account.id}:${account.version}:${account.status}`)
+                .sort()
+                .join(",") ?? ""
+            }`}
             workspaceId={workspaceId}
             capabilityId={item.id}
             bare

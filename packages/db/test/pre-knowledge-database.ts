@@ -5,6 +5,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** Session storage lifecycle migrations build on the withheld 0560 import
  * guards; this historical fixture withholds them and adds only the session
@@ -37,10 +38,19 @@ export async function acquirePreKnowledgeTestDatabase(
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Resolves knowledge_index_claim from the withheld 0461 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+    for (const name of strictOwnerMaintenanceMigrationTail)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     for (const name of knowledgeActorMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Rewrites the visibility transition installed by the withheld 0501 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
+    // Extends the machine grant predicates from withheld 0501.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0851_personal_machine_session_tree.sql')`;
+    // Replaces the file ownership trigger from withheld 0461 and reads the
+    // file read-capability table from withheld 0499.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0854_file_visibility.sql')`;
+    // The fork workflow identity backfill reads the withheld 0560 import column.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0856_session_fork_workflow_identity.sql')`;
     // The import migration extends the withheld 0499 attachment helper.
     await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
     // The session storage lifecycle extends the withheld import guards.
@@ -88,7 +98,10 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
+    for (const name of strictOwnerMaintenanceMigrationTail)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0851_personal_machine_session_tree.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;

@@ -141,6 +141,21 @@ export async function provisionRoles(
 
   const sql = postgres(adminConnection, { max: 1, ...databaseBootConnectOptions(adminConnection) });
   try {
+    // Converge PUBLIC drift even for dedicated-only/scoped provisioning. The
+    // ordinary app grant below includes these policy predicates; dedicated
+    // artifact roles must only receive their explicit entry points.
+    await sql.unsafe(`DO $maintenance_predicates$
+      DECLARE signature text;
+      BEGIN
+        FOREACH signature IN ARRAY ARRAY[
+          'opengeni_private.maintenance_claim_active(text,text)',
+          'opengeni_private.maintenance_title_event_visible(text,uuid)'
+        ] LOOP
+          IF to_regprocedure(signature) IS NOT NULL THEN
+            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',signature);
+          END IF;
+        END LOOP;
+      END $maintenance_predicates$;`);
     // FORCE strategy provisions the non-owner app role Opengeni connects as.
     // SCOPED strategy: the host owns the connection role; Opengeni provisions no
     // app role (skipped here), only the optional Temporal role.
@@ -1833,6 +1848,23 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- 0851's migration grants the atomic agent-child creation seam only to
+    -- roles that existed then; a role provisioned later needs it here too.
+    IF to_regprocedure(
+      format(
+        '%I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES.map(literal).join(", ")}] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
@@ -2503,6 +2535,9 @@ BEGIN
       IF to_regprocedure('opengeni_private.list_pending_modal_provider_creates()') IS NOT NULL THEN
         REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
       END IF;
+      IF to_regprocedure('opengeni_private.list_stale_compute_sandbox_enrollments(uuid)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments(uuid) FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.modal_native_origin_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM %I', ${literal(role)});
@@ -2616,6 +2651,9 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
+      IF to_regprocedure('opengeni_private.file_private_to_another(uuid,uuid,uuid)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.file_private_to_another(uuid,uuid,uuid) FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.artifact_catalog_pins') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM %I', ${literal(role)});
@@ -2666,6 +2704,17 @@ BEGIN
         opengeni_private.list_organization_slack_bots(uuid,uuid),
         opengeni_private.prepare_organization_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,uuid,bigint,text,text,text),
         opengeni_private.read_organization_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
+      -- Selected-workspace access arrived after the base organization bot
+      -- table. Historical schema provisioning must use the installed routine
+      -- inventory, not migration receipts (upgrade fixtures withhold bodies).
+      FOREACH routine_signature IN ARRAY ARRAY[
+        'set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[])',
+        'read_slack_bot_workspace_access(uuid,uuid,uuid)'
+      ] LOOP
+        IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+          EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        END IF;
+      END LOOP;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'sync_usage_maintenance_due()',

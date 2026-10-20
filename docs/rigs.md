@@ -63,7 +63,7 @@ A sandbox environment-bound turn's system instructions carry a non-bypassable do
 
 ### Default sandbox environment resolution
 
-A session's sandbox environment binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else sandbox environment-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted sandbox environment, or one somehow left with no active version) degrades silently to sandbox environment-less rather than failing the create. `PUT /v1/workspaces/:workspaceId/default-rig` (`rigs:manage`) sets or clears the default, and the Sandbox Environment page offers the same control; changing it never moves an existing session.
+A session's sandbox environment binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else sandbox environment-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted sandbox environment, or one somehow left with no active version) degrades silently to sandbox environment-less rather than failing the create. `PUT /v1/workspaces/:workspaceId/default-rig` (`rigs:manage` plus workspace settings authority: a workspace admin or the Personal-workspace owner; a person-less API key needs only `rigs:manage`) sets or clears the default, and the Sandbox Environment page offers the same control; changing it never moves an existing session.
 
 Paths that create sessions apply the workspace default as follows:
 

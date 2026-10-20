@@ -19,7 +19,8 @@ use std::{
 
 use async_trait::async_trait;
 use opengeni_agent_platform::{
-    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult,
+    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult, UpdateAdmission,
+    UpdateBlocker,
 };
 use opengeni_agent_proto::v1;
 use serde::Deserialize;
@@ -63,7 +64,9 @@ const EMPTY_CONTROLLER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const EMPTY_CONTROLLER_GRACE: Duration = Duration::from_secs(10 * 60);
 /// browserd opt-in: exit gracefully when the agent's end of stdin closes.
 const PARENT_LIFELINE_ENV: &str = "OPENGENI_BROWSERD_PARENT_LIFELINE";
-const MAX_IDLE_RESPONSE_BYTES: usize = 1_024;
+// The controller summarizes at most 32 kinds plus overflow, without IDs.
+// Keep a byte bound as well as that cardinality bound.
+const MAX_IDLE_RESPONSE_BYTES: usize = 8_192;
 
 #[derive(Debug)]
 struct Sidecar {
@@ -510,7 +513,7 @@ async fn add_allowed_origins(
 
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
-    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
         sidecars_update_admission(self, operation_id, true).await
     }
 
@@ -750,7 +753,7 @@ async fn sidecars_update_admission(
     manager: &BrowserSidecarManager,
     operation_id: &str,
     begin: bool,
-) -> PlatformResult<bool> {
+) -> PlatformResult<UpdateAdmission> {
     tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
         let mut sidecars = manager.sidecars.lock().await;
         manager.retire_exited_sidecars(&mut sidecars)?;
@@ -758,6 +761,14 @@ async fn sidecars_update_admission(
         // A controller that ended uncleanly holds the update back (busy, not
         // failed) until nothing of it remains.
         let mut idle = manager.unclean_exits_settled();
+        let mut blockers = Vec::new();
+        if !idle {
+            blockers.push(UpdateBlocker {
+                kind: "controller_process_cleanup".into(),
+                resource_id: String::new(),
+                count: 1,
+            });
+        }
         let mut failure = None;
         for sidecar in sidecars.values_mut() {
             if let Some(previous) = sidecar.pending_update.clone() {
@@ -781,6 +792,14 @@ async fn sidecars_update_admission(
             match sidecar_runtime_request(&client, sidecar, Some((operation_id, begin))).await {
                 Ok(state) => {
                     idle &= state.idle;
+                    if !state.idle && state.blockers.is_empty() {
+                        blockers.push(UpdateBlocker {
+                            kind: "controller_unknown".into(),
+                            resource_id: String::new(),
+                            count: 1,
+                        });
+                    }
+                    blockers.extend(state.blockers);
                     if !begin {
                         sidecar.pending_update = None;
                     }
@@ -790,7 +809,7 @@ async fn sidecars_update_admission(
         }
         match failure {
             Some(error) => Err(error),
-            None => Ok(idle),
+            None => Ok(UpdateAdmission { idle, blockers }),
         }
     })
     .await
@@ -886,6 +905,8 @@ struct RuntimeIdleResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeIdleState {
     idle: bool,
+    #[serde(default)]
+    blockers: Vec<UpdateBlocker>,
     #[serde(default)]
     empty: Option<bool>,
     #[serde(default)]
@@ -1152,6 +1173,9 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
             message: format!("{message}; {diagnostic}"),
             retryable,
         },
+        PlatformError::RunAsUnknownUser(message) => {
+            PlatformError::RunAsUnknownUser(format!("{message}; {diagnostic}"))
+        }
     }
 }
 
@@ -1856,7 +1880,7 @@ mod tests {
             .pending_update
             .is_none());
         assert_eq!(drain.reserve_update(&next), UpdateReservation::Started);
-        assert!(manager.begin_update(&next).await.unwrap());
+        assert!(manager.begin_update(&next).await.unwrap().idle);
         manager.release_update(&next).await.unwrap();
         drain.release_update(&next);
         server.await.unwrap();
@@ -1897,7 +1921,7 @@ mod tests {
         // and waits (busy) while anything of the controller remains.
         assert!(drain.snapshot().is_some());
         assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
-        assert!(!manager.begin_update("update").await.unwrap());
+        assert!(!manager.begin_update("update").await.unwrap().idle);
         assert!(!manager.is_idle().await.unwrap());
         manager.release_update("update").await.unwrap();
         drain.release_update("update");
@@ -1911,7 +1935,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(drain.reserve_update("later"), UpdateReservation::Started);
-        assert!(manager.begin_update("later").await.unwrap());
+        assert!(manager.begin_update("later").await.unwrap().idle);
         manager.release_update("later").await.unwrap();
         drain.release_update("later");
         // Ordinary scoped recovery still works afterwards.

@@ -32,7 +32,7 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (13 values; every member is
 // additive at the end). 3-way enum parity is pinned by the SDK contract-parity
 // test.
 export const SandboxBackend = z.enum([
@@ -48,6 +48,7 @@ export const SandboxBackend = z.enum([
   "vercel",
   "selfhosted",
   "opensandbox",
+  "compute",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -145,6 +146,20 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   // over the agent's enrollment; the enrollment-signing + relay-token secrets are
   // deployment-level (a runtime secret), not per-active-backend required creds.
   selfhosted: { required: [], optional: [] },
+  // compute also relies on the deployment-level Connected Machine plane.
+  compute: {
+    required: ["OPENGENI_COMPUTE_API_URL", "OPENGENI_COMPUTE_API_KEY"],
+    optional: [
+      "OPENGENI_COMPUTE_IMAGE",
+      "OPENGENI_COMPUTE_DESKTOP_IMAGE",
+      "OPENGENI_COMPUTE_VCPUS",
+      "OPENGENI_COMPUTE_MEMORY_MIB",
+      "OPENGENI_COMPUTE_MEMORY_REQUEST_MIB",
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS",
+      "OPENGENI_COMPUTE_LINK_URL",
+      "OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS",
+    ],
+  },
 };
 
 // sandbox workspace runtime env (the desktop/Channel-A feature rollout). These are

@@ -77,6 +77,10 @@ function awaitRouterAccess<T>(pending: Promise<T>, signal?: AbortSignal): Promis
 export class ModalCommandControl {
   private readonly routers = new Map<string, Promise<RouterEntry>>();
   private readonly routerLookups = new Map<Promise<RouterEntry>, RouterLookup>();
+  /** A Modal sandbox runs exactly one task for its lifetime, so its task id is
+   * fixed. Resolving it per command added a control-plane round trip to every
+   * Start. A failed Start retires the entry so the next one re-resolves. */
+  private readonly taskIds = new Map<string, Promise<string>>();
   private readonly controlHelpers = new Map<string, ControlHelper>();
   private readonly client: ReturnType<typeof commandControlPlane>;
   private readonly legacy: LegacyControl;
@@ -199,6 +203,7 @@ export class ModalCommandControl {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.taskIds.clear();
     for (const lookup of this.routerLookups.values())
       lookup.controller.abort(new Error("Modal command control is closed"));
     const entries = await Promise.allSettled(this.routers.values());
@@ -239,14 +244,48 @@ export class ModalCommandControl {
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
-      () => this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined),
+    const taskLookup = this.startTaskId(sandboxId);
+    const taskId = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => awaitRouterAccess(taskLookup, signal),
       signal,
     );
-    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    const taskId = task.taskId;
     if (this.sandboxId !== sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
+    try {
+      return await this.startOnTask(args, signal, supervised, sandboxId, workdir, taskId);
+    } catch (error) {
+      if (this.taskIds.get(sandboxId) === taskLookup) this.taskIds.delete(sandboxId);
+      throw error;
+    }
+  }
+
+  private startTaskId(sandboxId: string): Promise<string> {
+    let pending = this.taskIds.get(sandboxId);
+    if (pending) return pending;
+    // Shared by concurrent Starts, so it never inherits one caller's abort.
+    pending = (async () => {
+      const task = await this.client.sandboxGetTaskId(
+        { sandboxId },
+        { signal: AbortSignal.timeout(30_000) },
+      );
+      if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+      return task.taskId;
+    })();
+    this.taskIds.set(sandboxId, pending);
+    void pending.catch(() => {
+      if (this.taskIds.get(sandboxId) === pending) this.taskIds.delete(sandboxId);
+    });
+    return pending;
+  }
+
+  private async startOnTask(
+    args: ChannelAExecArgs,
+    signal: AbortSignal | undefined,
+    supervised: boolean,
+    sandboxId: string,
+    workdir: string,
+    taskId: string,
+  ): Promise<ModalRouterProviderCommand> {
     const execId = randomUUID();
     // PTY and runAs retain their existing explicit unsupported supervision
     // semantics. Never attach a fabricated descriptor to either path.

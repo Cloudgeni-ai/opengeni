@@ -110,6 +110,10 @@ const memberPermissions = [
   "artifacts:read",
   "artifacts:publish",
 ] as const;
+// A Site viewer: anyone with artifacts:publish manages any Site they can see.
+const viewerPermissions = memberPermissions.filter(
+  (permission) => permission !== "artifacts:publish",
+);
 const SQL_SETTINGS: Partial<Settings> = {
   sitesCloudflareStorageEnabled: true,
   sitesGatewayInternalOrigin: ORIGIN,
@@ -229,7 +233,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
     };
   };
   const owner = await person(memberPermissions);
-  const member = await person(memberPermissions);
+  const member = await person(viewerPermissions);
   const admin = await person([...memberPermissions, "workspace:admin"]);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-sql-test')`;

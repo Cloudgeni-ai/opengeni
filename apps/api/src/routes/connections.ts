@@ -293,6 +293,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       payload.metadata = { ...payload.metadata, directModelProvider: config.data };
+      // A direct model key is always workspace-owned: refuse before calling the provider.
+      requireWorkspaceIntegrationAdministration(grant);
       if (payload.verifyModelAccess) {
         await verifyDirectModelAccess(
           config.data,
@@ -348,6 +350,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      // Workspace model-provider keys decide what every session runs on: a
+      // settings action, unlike a member's own or shared integration credential.
+      if (subjectId === null && (workspaceProviderKind || directModelKey))
+        requireWorkspaceIntegrationAdministration(grant);
       if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
@@ -469,6 +475,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
+    // Installing the workspace's Slack bot configures the whole workspace.
+    requireWorkspaceIntegrationAdministration(grant);
     const payload = await parseRequestJson(c, OpenGeniSlackBotInstallRequest);
     return c.json(
       await withOrganizationIntegrationAcquisition(
@@ -518,7 +526,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               ...callbackOperation,
               expectedRevision: stored.attempt.revision,
               authorize: (tx, _attempt, origin) =>
-                requireConnectOwnerAuthority(tx, callbackState, "connections:write", origin),
+                requireConnectOwnerAuthority(
+                  tx,
+                  callbackState,
+                  SLACK_BOT_INSTALL_PERMISSION,
+                  origin,
+                ),
               authorizeAcquisition: async () => {
                 // Provider denial/cancellation acquires nothing; completed exact
                 // receipts replay before this callback is invoked.
@@ -551,7 +564,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         await finishConnectOperation(db, state, {
           ...operation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, SLACK_BOT_INSTALL_PERMISSION, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -622,7 +635,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           finishConnectOperation(policyTx, acceptedState, {
             ...acceptedOperation,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, acceptedState, SLACK_BOT_INSTALL_PERMISSION, origin),
             commit: async (tx, current) => {
               assertOrganizationIntegrationAllowed(policy, "slack-bot");
               const connection = await persist(tx);
@@ -1028,6 +1041,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
           // not take its row first or change that excluded lane's lock order.
+          if (initial?.subjectId === null && workspaceProviderApiKeyConnectionKind(initial))
+            requireWorkspaceIntegrationAdministration(grant);
           if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {
             await db.execute(
               sql`select id from connections where workspace_id = ${workspaceId}::uuid and id = ${c.req.param("connectionId")}::uuid and (subject_id is null or subject_id = ${grant.subjectId}) for update`,
@@ -1046,6 +1061,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
           assertNotReservedExternalVaultMetadata(existing?.metadata);
           if (existing && isOpenGeniSlackBotConnection(existing)) {
+            // The workspace Slack bot is workspace configuration, like its install.
+            requireWorkspaceIntegrationAdministration(grant);
             const destination = ConnectorDocumentDestinationSelection.safeParse(
               payload.metadata?.documentDestination,
             );
@@ -1362,6 +1379,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "connection not found" });
     }
     assertNotReservedExternalVaultMetadata(existing.metadata);
+    if (
+      existing.subjectId === null &&
+      (workspaceProviderApiKeyConnectionKind(existing) ||
+        existing.metadata.directModelProvider !== undefined ||
+        isOpenGeniSlackBotConnection(existing))
+    )
+      requireWorkspaceIntegrationAdministration(grant);
     const expectedVersion = c.req.query("expectedVersion");
     if (expectedVersion !== undefined) {
       if (!/^[1-9]\d*$/.test(expectedVersion) || !Number.isSafeInteger(Number(expectedVersion))) {
@@ -1833,11 +1857,15 @@ function slackInstallErrorReason(error: unknown): string {
   return "installation_failed";
 }
 
+/** Installing the workspace Slack bot is integration administration (see
+ * requireWorkspaceIntegrationAdministration); the callback re-checks the same authority. */
+const SLACK_BOT_INSTALL_PERMISSION = "capabilities:manage";
+
 async function requireSlackInstallCallbackGrant(
   db: ApiRouteDeps["db"],
   state: OpenGeniSlackInstallState,
 ): Promise<void> {
-  await requireConnectOwnerAuthority(db, state, "connections:write");
+  await requireConnectOwnerAuthority(db, state, SLACK_BOT_INSTALL_PERMISSION);
 }
 
 function assertNotDirectPersonalSlackOAuth(providerDomain: string, kind: string): void {
@@ -2005,6 +2033,20 @@ function assertNotReservedApiIntegrationOAuthMetadata(
       message: "API Integration OAuth metadata is reserved for the dedicated provider flow",
     });
   }
+}
+
+/**
+ * Members hold `connections:write` so they can connect their own accounts and
+ * add shared credentials. What the whole workspace runs on (its model-provider
+ * keys and its Slack bot) stays a settings action, held by workspace admins,
+ * Personal workspace owners and integration-management keys.
+ */
+export function requireWorkspaceIntegrationAdministration(grant: {
+  permissions: Parameters<typeof hasPermission>[0];
+  permissionMode?: Parameters<typeof hasPermission>[2];
+}): void {
+  if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
+    throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
 }
 
 function writableSubjectId(

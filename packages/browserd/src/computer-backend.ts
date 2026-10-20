@@ -1,5 +1,6 @@
 import type {
   ComputerAction,
+  ComputerActionBatch,
   ComputerNativeCallRequest,
   ComputerNativeResult,
   ComputerClipboard,
@@ -39,7 +40,8 @@ export type ComputerBackendActionCommand = {
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
   expectedFrameId: string | null;
-  action: ComputerAction;
+  /** A batch reaches only a backend whose capabilities include actionBatches. */
+  action: ComputerAction | ComputerActionBatch;
 };
 
 export type ComputerBackendFrame = {
@@ -79,6 +81,10 @@ export type ComputerBackendErrorCode =
   | "outcome_unknown";
 
 export class ComputerBackendError extends Error {
+  /** Optional structured facts about the failure, kept in the receipt's
+   * error (for a batch, how many of its actions completed). */
+  details: Record<string, string | number | boolean> | undefined = undefined;
+
   constructor(
     readonly code: ComputerBackendErrorCode,
     message: string,

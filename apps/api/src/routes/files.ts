@@ -8,6 +8,8 @@ import {
   FileListRequest,
   FileListResponse,
   FileDownloadUrlResponse,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RetainedArtifactMetadataSchema,
@@ -32,7 +34,9 @@ import {
   recordAuditEvent,
   getGeneratedVideoArtifact,
   getFilesForSubject,
+  isFilePrivateToAnother,
   listFilesForSubject,
+  requireWorkspace,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
   requireFileForSubject,
@@ -44,6 +48,8 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  changeFileVisibility,
+  fileAccessFor,
   fileOwnerContextForAccess,
   requireAccessGrantAuthorization,
   grantHasAgentAttemptAuthority,
@@ -70,7 +76,15 @@ import { parseRequestJson } from "../http/request-body";
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
 
-  const fileRequestAuthority = new WeakMap<Request, { owner: string | null; agent: boolean }>();
+  const fileRequestAuthority = new WeakMap<
+    Request,
+    { owner: string | null; agent: boolean; person: string | null }
+  >();
+  /** Who can open a file, for the person or agent that uploaded or shared it. */
+  const withFileAccess = async (workspaceId: string, file: FileAsset): Promise<FileAsset> => ({
+    ...file,
+    access: await fileAccessFor(db, { workspace: await requireWorkspace(db, workspaceId), file }),
+  });
   // This scope covers metadata, original bytes, range reads and finalization.
   // A service/agent subject string alone cannot unlock a personal attachment.
   for (const path of [
@@ -88,9 +102,14 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         permission,
       );
       const actor = await fileOwnerContextForAccess(deps, access, permission);
+      const agent = access.grant.principalKind === "agent_attempt";
       fileRequestAuthority.set(c.req.raw, {
         owner: actor.privateFileOwnerSubjectId ?? null,
-        agent: access.grant.principalKind === "agent_attempt",
+        agent,
+        // The human this request acts for: the caller, or an agent's turn initiator.
+        person: agent
+          ? (actor.initiatingHumanSubjectId ?? null)
+          : (actor.privateFileOwnerSubjectId ?? null),
       });
       return withSessionRlsActorContext(actor, next);
     });
@@ -159,12 +178,22 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = await parseRequestJson(c, CreateFileUploadRequest);
-    const privateOwner = fileRequestAuthority.get(c.req.raw)?.owner ?? null;
+    const authority = fileRequestAuthority.get(c.req.raw);
+    const privateOwner = authority?.owner ?? null;
+    const workspace = await requireWorkspace(db, workspaceId);
+    // A person's upload is shared unless they choose Only me. An agent's
+    // follows its chat (Only me in an Only me chat) unless it chooses, on its
+    // owner's behalf; a personal workspace keeps an agent's uploads private.
     const personal =
-      payload.scope === "personal" ||
-      (fileRequestAuthority.get(c.req.raw)?.agent && privateOwner !== null);
+      payload.scope && !(authority?.agent && workspace.kind === "personal")
+        ? payload.scope === "personal"
+        : Boolean(authority?.agent && privateOwner !== null);
     if (personal && !privateOwner)
-      throw new HTTPException(403, { message: "Personal uploads require the authenticated owner" });
+      throw new HTTPException(403, {
+        message: authority?.agent
+          ? "An agent in a shared chat can't upload an Only me file. Upload it, then limit it to its owner."
+          : "Personal uploads require the authenticated owner",
+      });
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -223,6 +252,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         requiredHeaders: signed.requiredHeaders,
         expiresAt: upload.expiresAt,
         maxSizeBytes: objectStorage.maxSinglePutSizeBytes,
+        access: await fileAccessFor(db, {
+          workspace,
+          file: { scope: personal ? "personal" : "workspace", ownerSubjectId: privateOwner },
+        }),
       }),
       201,
     );
@@ -335,7 +368,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     // died after completion committed but before `file.uploaded` was recorded.
     if (upload.status === "completed" && upload.file.status === "ready") {
       const file = await completeAndRecordUsage();
-      return c.json(CompleteFileUploadResponse.parse({ file }));
+      return c.json(
+        CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+      );
     }
     if (upload.status !== "pending") {
       throw new HTTPException(409, {
@@ -344,7 +379,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     if (upload.expiresAt.getTime() < Date.now()) {
       const file = await rejectAndCleanObject(409, "file upload has expired", "expired");
-      return c.json(CompleteFileUploadResponse.parse({ file }));
+      return c.json(
+        CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+      );
     }
     const head = await retryWhileMissing(async () => {
       if (!(await objectStorage.fileExists(upload.file))) return null;
@@ -359,7 +396,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         "uploaded object size does not match file metadata",
         "failed",
       );
-      return c.json(CompleteFileUploadResponse.parse({ file }));
+      return c.json(
+        CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+      );
     }
     if (
       upload.file.contentType &&
@@ -371,7 +410,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         "uploaded object content type does not match file metadata",
         "failed",
       );
-      return c.json(CompleteFileUploadResponse.parse({ file }));
+      return c.json(
+        CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+      );
     }
     if (upload.file.sha256 && head.Metadata?.sha256 !== upload.file.sha256) {
       const file = await rejectAndCleanObject(
@@ -379,10 +420,14 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         "uploaded object checksum metadata does not match file metadata",
         "failed",
       );
-      return c.json(CompleteFileUploadResponse.parse({ file }));
+      return c.json(
+        CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+      );
     }
     const file = await completeAndRecordUsage();
-    return c.json(CompleteFileUploadResponse.parse({ file }));
+    return c.json(
+      CompleteFileUploadResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/files", async (c) => {
@@ -438,6 +483,44 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(FileAsset.parse(file));
   });
 
+  /**
+   * A file the caller cannot open: Only me for someone else (403, so a person
+   * knows to ask its owner to share it, without learning whose it is or what
+   * it is called), or not found at all (404, as before).
+   */
+  const artifactNotVisible = async (
+    c: Context,
+    grant: { accountId: string; workspaceId: string },
+    artifactId: string,
+  ): Promise<Response> =>
+    (await isFilePrivateToAnother(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      fileId: artifactId,
+    }).catch(() => false))
+      ? c.json(retainedArtifactUnavailable(artifactId, "private"), 403)
+      : c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
+
+  // Who can open a file: Only me (its owner) or the workspace. Only its owner
+  // changes it, like a Site's audience; the change is audited.
+  app.put("/v1/workspaces/:workspaceId/files/:fileId/visibility", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const request = await parseRequestJson(c, UpdateFileVisibilityRequest);
+    const { file } = await changeFileVisibility({
+      db,
+      settings: deps.settings,
+      grant,
+      workspace: await requireWorkspace(db, workspaceId),
+      person: fileRequestAuthority.get(c.req.raw)?.person ?? null,
+      fileId: retainedArtifactId(c.req.param("fileId")),
+      visibility: request.visibility,
+    });
+    return c.json(
+      UpdateFileVisibilityResponse.parse({ file: await withFileAccess(workspaceId, file) }),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
@@ -448,9 +531,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
       artifactId,
     });
-    if (!artifact) {
-      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
-    }
+    if (!artifact) return await artifactNotVisible(c, grant, artifactId);
     return c.json(artifact.metadata);
   });
 
@@ -464,9 +545,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
       artifactId,
     });
-    if (!artifact) {
-      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
-    }
+    if (!artifact) return await artifactNotVisible(c, grant, artifactId);
 
     return await serveRetainedArtifactContent(
       c,
@@ -921,8 +1000,10 @@ function retainedScreenshotMetadata(
 
 function retainedArtifactUnavailableStatus(
   reason: RetainedOutputUnavailableReason,
-): 404 | 409 | 410 | 422 {
+): 403 | 404 | 409 | 410 | 422 {
   switch (reason) {
+    case "private":
+      return 403;
     case "deleted":
       return 404;
     case "expired":

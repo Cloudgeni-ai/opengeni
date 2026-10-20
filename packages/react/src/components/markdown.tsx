@@ -45,10 +45,18 @@ import {
   type OpenGeniLinkTarget,
 } from "@opengeni/sdk";
 import {
+  chainLinkRenderers,
   chainLinkResolvers,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
+  type OpenGeniLinkRenderer,
   type OpenGeniLinkResolver,
 } from "./open-geni-links";
+import {
+  rehypeStandaloneLinks,
+  STANDALONE_LINK_ATTRIBUTE,
+  STANDALONE_LINK_PROPERTY,
+} from "./rehype-standalone-links";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /**
@@ -115,6 +123,14 @@ export type MarkdownProps = {
    * `onSandboxFile` still win for their own kinds.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Draw the host's own links (its scheme, in-app paths, web URLs) instead of
+   * the default link. Asked before any `renderLink` on an
+   * {@link OpenGeniLinkProvider} above this body. A link that is the only
+   * content of its paragraph or list item arrives with `standalone: true`, and
+   * that paragraph renders as a block so the host may return block content.
+   */
+  renderLink?: OpenGeniLinkRenderer | undefined;
 };
 
 /** Exact target path plus optional 1-based line from a markdown href. */
@@ -257,7 +273,7 @@ const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
 const MarkdownLinkContext = createContext<
-  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink">
+  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink" | "renderLink">
 >({});
 
 const UNAVAILABLE_LABEL = (
@@ -305,24 +321,29 @@ const markdownComponents: Components = {
   ...baseComponents,
   span: MarkdownSpan,
   p: ({ children, node, ...props }) => {
-    const containsArtifact = node?.children.some(
+    // Retained images and host-drawn standalone links may be block content.
+    const containsBlock = node?.children.some(
       (child) =>
         child.type === "element" &&
-        child.tagName === "img" &&
-        typeof child.properties.src === "string" &&
-        retainedImageId(child.properties.src),
+        ((child.tagName === "img" &&
+          typeof child.properties.src === "string" &&
+          retainedImageId(child.properties.src)) ||
+          (child.tagName === "a" && child.properties[STANDALONE_LINK_PROPERTY] !== undefined)),
     );
-    const Tag = containsArtifact ? "div" : "p";
+    const Tag = containsBlock ? "div" : "p";
     return (
       <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
         {children}
       </Tag>
     );
   },
-  a: ({ children, href, ...props }) => {
+  a: ({ children, href, ...linkProps }) => {
     const t = useOpenGeniText();
-    const { onSandboxFile, artifactHref, resolveLink } = useContext(MarkdownLinkContext);
+    const { onSandboxFile, artifactHref, resolveLink, renderLink } =
+      useContext(MarkdownLinkContext);
     const inherited = useOpenGeniLinkResolver();
+    const { [STANDALONE_LINK_ATTRIBUTE]: standaloneMarker, ...props } =
+      linkProps as typeof linkProps & Record<typeof STANDALONE_LINK_ATTRIBUTE, unknown>;
     const target = parseOpenGeniLink(href);
     if (target) {
       // Explicit per-kind props keep their historical precedence.
@@ -383,7 +404,14 @@ const markdownComponents: Components = {
         </span>
       );
     }
-    if (isReservedOpenGeniLink(href) || !href) {
+    if (!isReservedOpenGeniLink(href) && href && renderLink) {
+      const drawn = renderLink({ href, children, standalone: standaloneMarker !== undefined });
+      if (drawn !== undefined) return <>{drawn}</>;
+    }
+    // The URL transform keeps every authored href for the host renderer, so
+    // the default link sanitizes here.
+    const safeHref = href ? defaultUrlTransform(href) : "";
+    if (isReservedOpenGeniLink(href) || !safeHref) {
       return (
         <span
           className="break-words text-og-fg-subtle"
@@ -403,7 +431,7 @@ const markdownComponents: Components = {
         className={MARKDOWN_LINK_CLASS}
         target="_blank"
         rel="noreferrer noopener"
-        href={href}
+        href={safeHref}
         {...props}
       >
         {children}
@@ -495,8 +523,10 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
   return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
 }
 
+// Link hrefs stay as authored: Opengeni object links and host renderers need
+// the exact destination, and the `a` renderer sanitizes the default link.
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  (key === "href" && node.tagName === "a" && isReservedOpenGeniLink(url)) ||
+  (key === "href" && node.tagName === "a") ||
   (key === "src" && node.tagName === "img" && retainedImageId(url))
     ? url
     : defaultUrlTransform(url);
@@ -701,6 +731,7 @@ function MarkdownImpl({
   renderInteractiveBlock,
   renderImage,
   resolveLink,
+  renderLink,
   suppressImages,
 }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
@@ -735,6 +766,11 @@ function MarkdownImpl({
   }
   const revealActive = reveal !== null && (streaming || reveal.hasActive(now));
   const secretsUi = useSecretsUi();
+  const inheritedRenderer = useOpenGeniLinkRenderer();
+  const linkRenderer = useMemo(
+    () => chainLinkRenderers(renderLink, inheritedRenderer) ?? undefined,
+    [renderLink, inheritedRenderer],
+  );
   // Secret references become chip placeholders before the ink split, so a
   // reference is never cut into ink spans. Without a host tokenizer, or when
   // the text names no reference, the pipeline is unchanged.
@@ -745,6 +781,7 @@ function MarkdownImpl({
   // The plugins walk the standard hast tree; structural local types keep the
   // modules dependency-free, at the cost of this narrowing cast at the seam.
   const rehypePluginList = [
+    ...(linkRenderer ? [rehypeStandaloneLinks] : []),
     ...secretRefs,
     ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
   ];
@@ -804,8 +841,8 @@ function MarkdownImpl({
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
   const linkContext = useMemo(
-    () => ({ onSandboxFile, artifactHref, resolveLink }),
-    [onSandboxFile, artifactHref, resolveLink],
+    () => ({ onSandboxFile, artifactHref, resolveLink, renderLink: linkRenderer }),
+    [onSandboxFile, artifactHref, resolveLink, linkRenderer],
   );
 
   const interactiveContext = useMemo(

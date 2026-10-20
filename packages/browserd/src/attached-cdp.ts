@@ -28,6 +28,9 @@ const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
 const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+// Retry bounds while the event stream is re-established after it broke.
+const RESYNC_RETRY_MIN_MS = 100;
+const RESYNC_RETRY_MAX_MS = 5_000;
 
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
@@ -83,6 +86,71 @@ type EventListener = (event: CdpEvent) => void;
 
 export type AttachedBrowserBridgeTransport = Pick<AttachedBrowserBridgeClient, "request" | "close">;
 
+/** One owner-local bridge connection that outlives a lost socket. A request
+ * in flight when the socket closed still fails, since its effect is unknown;
+ * the next request reconnects under the same profile fence. A profile that
+ * reconnected under a new generation is refused by that fence. */
+export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTransport {
+  private client: Promise<AttachedBrowserBridgeClient> | null;
+  private stopped = false;
+
+  private constructor(
+    private readonly options: AttachedBrowserBridgeOptions,
+    first: AttachedBrowserBridgeClient,
+  ) {
+    this.client = Promise.resolve(first);
+  }
+
+  static async connect(options: AttachedBrowserBridgeOptions): Promise<ReconnectingAttachedBridge> {
+    return new ReconnectingAttachedBridge(
+      options,
+      await AttachedBrowserBridgeClient.connect(options),
+    );
+  }
+
+  async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+    if (this.stopped)
+      throw new AttachedBrowserBridgeError(
+        "transport_failed",
+        "attached browser bridge closed by browserd",
+        true,
+      );
+    const pending = (this.client ??= AttachedBrowserBridgeClient.connect(this.options));
+    let client: AttachedBrowserBridgeClient;
+    try {
+      client = await pending;
+    } catch (error) {
+      if (this.client === pending) this.client = null;
+      throw error;
+    }
+    // Closed while reconnecting: nothing may be dispatched after close.
+    if (this.stopped) {
+      client.close();
+      throw new AttachedBrowserBridgeError(
+        "transport_failed",
+        "attached browser bridge closed by browserd",
+        true,
+      );
+    }
+    try {
+      return await client.request<T>(payload);
+    } catch (error) {
+      if (client.closed && this.client === pending) this.client = null;
+      throw error;
+    }
+  }
+
+  close(): void {
+    this.stopped = true;
+    const pending = this.client;
+    this.client = null;
+    void pending?.then(
+      (client) => client.close(),
+      () => undefined,
+    );
+  }
+}
+
 export type AttachedChromeDriverOptions = AttachedBrowserBridgeOptions & {
   browserName: string;
   browserVersion: string;
@@ -95,7 +163,7 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
   runner: BrowserCommandRunner;
   connection: AttachedChromeCdpConnection;
 }> {
-  const bridge = await AttachedBrowserBridgeClient.connect(options);
+  const bridge = await ReconnectingAttachedBridge.connect(options);
   const connection = new AttachedChromeCdpConnection(bridge, {
     browserName: options.browserName,
     browserVersion: options.browserVersion,
@@ -194,7 +262,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private wakePoll: (() => void) | null = null;
   private readonly flushWaiters = new Set<{ sequence: number; release: () => void }>();
   private stopped = false;
-  private failure: CdpTransportError | null = null;
+  // Set only by a failure no retry can repair: the profile reconnected.
+  private failure: Error | null = null;
+  // The event stream broke and its cursor is being re-established.
+  private resyncing = false;
+  // Counts stream breaks, so an attach that spans one is not trusted.
+  private streamBreaks = 0;
 
   constructor(
     private readonly bridge: AttachedBrowserBridgeTransport,
@@ -460,16 +533,35 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         // initialization cannot be discarded as pre-existing history.
         this.ensurePolling();
         await this.pollReady;
+        if (this.resyncing)
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser connection is recovering; observe the tab again",
+            true,
+          );
         this.assertAttachAllowed(targetId);
         const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
+        const streamBreaks = this.streamBreaks;
         await this.bridge.request({ type: "debugger.attach", tabId: targetId });
-        if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch)
+        // Chrome's attachment exists now, whatever this session makes of it:
+        // shutdown must detach it even if the session is refused below.
+        this.attachedTabs.add(targetId);
+        // Events of this attachment may be among those a break discarded.
+        if (this.streamBreaks !== streamBreaks || this.resyncing)
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser connection is recovering; observe the tab again",
+            true,
+          );
+        if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch) {
+          // Chrome itself ended the attachment.
+          this.attachedTabs.delete(targetId);
           throw new InteractionControllerError(
             "resource_unavailable",
             "Browser tab disconnected while attaching",
             !this.canceledTabs.has(targetId),
           );
-        this.attachedTabs.add(targetId);
+        }
         const sessionId = this.tabSessions.get(targetId) ?? `attached:${targetId}:${randomUUID()}`;
         this.sessionTabs.set(sessionId, targetId);
         this.tabSessions.set(targetId, sessionId);
@@ -503,11 +595,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.pollReady = this.pollEvents(Number.MAX_SAFE_INTEGER).then((initial) => {
       this.cursor = initial.cursor;
     });
-    this.pollTask = this.pollReady
-      .then(() => this.poll())
-      .catch((error) => {
-        if (!this.stopped) this.fail(mapBridgeError("debugger.poll", error));
-      });
+    this.pollTask = this.poll(this.pollReady);
   }
 
   private assertAttachAllowed(targetId: string): void {
@@ -525,24 +613,95 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       );
   }
 
-  private async poll(): Promise<void> {
-    while (!this.stopped) {
-      const batch = await this.pollEvents(this.cursor);
-      // Older extensions also mark a full continuation page as truncated.
-      // The sequence boundary is the authoritative proof of actual loss.
-      const firstSequence = batch.events[0]?.sequence;
-      if (
-        (firstSequence !== undefined && firstSequence !== this.cursor + 1) ||
-        (batch.truncated && firstSequence === undefined)
-      ) {
-        throw new CdpTransportError("attached Chrome debugger event history was truncated");
+  /**
+   * Delivers debugger events until the connection stops. A broken stream (lost
+   * history, a timed-out or failed poll, a lost bridge socket) never ends the
+   * session: the stream is re-established and every tab is treated as
+   * detached, since any event since the cursor may be lost. The driver then
+   * re-attaches and reads fresh page state on its next use. Only a profile
+   * that reconnected under a new generation fails the connection.
+   */
+  private async poll(ready: Promise<void>): Promise<void> {
+    let synced = true;
+    try {
+      await ready;
+    } catch (error) {
+      if (this.stopped || !this.streamBroke(error, true)) return;
+      synced = false;
+    }
+    let retryMs = RESYNC_RETRY_MIN_MS;
+    while (!this.stopped && !this.failure) {
+      try {
+        if (!synced) {
+          await this.resynchronize();
+          synced = true;
+          retryMs = RESYNC_RETRY_MIN_MS;
+        }
+        await this.pollOnce();
+      } catch (error) {
+        if (this.stopped || !this.streamBroke(error, synced)) return;
+        if (!synced) {
+          await delay(retryMs);
+          retryMs = Math.min(retryMs * 2, RESYNC_RETRY_MAX_MS);
+        }
+        synced = false;
       }
-      for (const event of batch.events) this.emit(event);
-      this.cursor = batch.cursor;
-      for (const waiter of this.flushWaiters) {
-        if (this.cursor >= waiter.sequence) waiter.release();
-      }
-      if (batch.events.length === 0 && this.flushWaiters.size === 0) await this.pollPause();
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
+    const batch = await this.pollEvents(this.cursor);
+    // Older extensions also mark a full continuation page as truncated.
+    // The sequence boundary is the authoritative proof of actual loss.
+    const firstSequence = batch.events[0]?.sequence;
+    if (
+      (firstSequence !== undefined && firstSequence !== this.cursor + 1) ||
+      (batch.truncated && firstSequence === undefined)
+    ) {
+      throw new CdpTransportError("attached Chrome debugger event history was truncated");
+    }
+    for (const event of batch.events) this.emit(event);
+    this.cursor = batch.cursor;
+    for (const waiter of this.flushWaiters) {
+      if (this.cursor >= waiter.sequence) waiter.release();
+    }
+    if (batch.events.length === 0 && this.flushWaiters.size === 0) await this.pollPause();
+  }
+
+  /** Whether the stream can be re-established; fails the connection if not. */
+  private streamBroke(error: unknown, wasSynced: boolean): boolean {
+    if (error instanceof AttachedBrowserBridgeError && error.code === "fenced") {
+      this.fail(profileReconnectedError());
+      return false;
+    }
+    if (wasSynced) {
+      console.error(
+        "attached Chrome debugger event stream broke; resynchronizing",
+        error instanceof Error ? error.message : "unknown failure",
+      );
+    }
+    this.resyncing = true;
+    this.streamBreaks += 1;
+    return true;
+  }
+
+  /** Re-establish the event cursor after a broken stream. Attachments that
+   * start meanwhile wait for it, so they never miss their own events. */
+  private async resynchronize(): Promise<void> {
+    this.resyncing = true;
+    const ready = (async () => {
+      for (const tabId of [...this.tabSessions.keys()])
+        this.detachLocally(tabId, "event_stream_resynchronized", { synthetic: true });
+      const { cursor } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
+      this.cursor = cursor;
+      this.resyncing = false;
+    })();
+    this.pollReady = ready;
+    try {
+      await ready;
+    } finally {
+      // Waiters for events from before the break cannot be satisfied.
+      this.releaseFlushWaiters();
     }
   }
 
@@ -592,17 +751,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private emit(input: BridgeDebuggerEvent): void {
     if (input.method === "OpenGeni.debuggerDetached") {
-      if ((this.pendingInput.get(input.tabId) ?? 0) > 0) this.uncertainTabs.add(input.tabId);
-      this.tabDetachEpochs.set(input.tabId, (this.tabDetachEpochs.get(input.tabId) ?? 0) + 1);
-      const sessionId = this.tabSessions.get(input.tabId);
-      if (input.params.reason === "canceled_by_user") this.canceledTabs.add(input.tabId);
-      this.removeTab(input.tabId);
-      if (sessionId)
-        this.emitEvent({
-          method: "Target.detachedFromTarget",
-          sessionId: null,
-          params: { sessionId, targetId: input.tabId, reason: input.params.reason },
-        });
+      this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
     const sessionId = input.sessionId ?? this.tabSessions.get(input.tabId) ?? null;
@@ -628,6 +777,32 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     }
   }
 
+  /** End this connection's session for a tab. Input still in flight leaves
+   * the tab uncertain, so nothing attaches underneath it. A synthetic detach
+   * (after a broken event stream) is not evidence that Chrome detached: it
+   * keeps Chrome's debugger attachment, which a later attach reuses and
+   * shutdown still detaches, and it leaves the detach epochs that only
+   * Chrome's own detach events advance (a refused navigation reads them). */
+  private detachLocally(
+    tabId: string,
+    reason: unknown,
+    { synthetic }: { synthetic: boolean },
+  ): void {
+    if ((this.pendingInput.get(tabId) ?? 0) > 0) this.uncertainTabs.add(tabId);
+    if (!synthetic) this.tabDetachEpochs.set(tabId, (this.tabDetachEpochs.get(tabId) ?? 0) + 1);
+    const sessionId = this.tabSessions.get(tabId);
+    if (reason === "canceled_by_user") this.canceledTabs.add(tabId);
+    const attached = this.attachedTabs.has(tabId);
+    this.removeTab(tabId);
+    if (synthetic && attached) this.attachedTabs.add(tabId);
+    if (sessionId)
+      this.emitEvent({
+        method: "Target.detachedFromTarget",
+        sessionId: null,
+        params: { sessionId, targetId: tabId, ...(reason ? { reason } : {}) },
+      });
+  }
+
   private removeTab(tabId: string): void {
     this.attachedTabs.delete(tabId);
     this.tabSessions.delete(tabId);
@@ -638,11 +813,21 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private fail(error: Error): void {
     if (this.failure) return;
-    this.failure =
-      error instanceof CdpTransportError ? error : new CdpTransportError(error.message);
+    this.failure = error;
     this.listeners.clear();
     this.releaseFlushWaiters();
   }
+}
+
+/** The profile's extension reconnected under a new connection generation, so
+ * this session's tab attachments and event stream belong to a connection that
+ * no longer exists. Retrying cannot help; a new session binds the new one. */
+function profileReconnectedError(): InteractionControllerError {
+  return new InteractionControllerError(
+    "resource_unavailable",
+    "The browser profile reconnected to Opengeni, so this browser session can no longer control it; open a new browser session",
+    false,
+  );
 }
 
 function parseDebuggerEvent(value: unknown): BridgeDebuggerEvent {
@@ -688,6 +873,7 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
     return error;
   if (error instanceof AttachedBrowserBridgeError) {
     if (error.code === "timeout" && sessionId) return new CdpCommandTimeoutError(method, sessionId);
+    if (error.code === "fenced") return profileReconnectedError();
     if (error.code === "debugger_unavailable")
       return new InteractionControllerError(
         "resource_unavailable",

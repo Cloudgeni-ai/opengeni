@@ -476,6 +476,93 @@ test("checkpoint validators cannot be attached to caller-owned tables or validat
   }
 });
 
+test("forward ACL repair preserves custom policy grantees before reprovisioning", async () => {
+  const migration = await readFile(
+    new URL("../drizzle/0852_maintenance_predicate_privileges.sql", import.meta.url),
+    "utf8",
+  );
+  const customRole = `maintenance_app_${crypto.randomUUID().replaceAll("-", "")}`;
+  const rollback = new Error("rollback ACL upgrade fixture");
+  await expect(
+    shared.admin.begin(async (tx) => {
+      await tx.unsafe(`CREATE ROLE ${customRole} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+      await tx.unsafe(
+        `GRANT EXECUTE ON FUNCTION session_private_actor_visible(uuid,uuid,uuid,text) TO ${customRole}`,
+      );
+      // Reconstruct 0849's effective PUBLIC grant and absence of direct app ACLs.
+      for (const signature of [
+        "maintenance_claim_active(text,text)",
+        "maintenance_title_event_visible(text,uuid)",
+      ]) {
+        await tx.unsafe(`GRANT EXECUTE ON FUNCTION opengeni_private.${signature} TO PUBLIC`);
+        await tx.unsafe(
+          `REVOKE EXECUTE ON FUNCTION opengeni_private.${signature} FROM opengeni_app`,
+        );
+      }
+      await tx.unsafe(
+        "CREATE POLICY maintenance_wakes_select ON workspaces FOR SELECT USING(false)",
+      );
+      await tx.unsafe(
+        "CREATE POLICY maintenance_wakes_update ON workspaces FOR UPDATE USING(false)",
+      );
+      await tx.unsafe(`SET LOCAL ROLE "${shared.ownerRole}"`);
+      await tx.unsafe(migration);
+      for (const signature of [
+        "maintenance_claim_active(text,text)",
+        "maintenance_title_event_visible(text,uuid)",
+      ]) {
+        const [acl] = await tx`SELECT
+        has_function_privilege('opengeni_app', ${`opengeni_private.${signature}`}, 'EXECUTE') AS app,
+        has_function_privilege(${customRole}, ${`opengeni_private.${signature}`}, 'EXECUTE') AS custom,
+        has_function_privilege('public', ${`opengeni_private.${signature}`}, 'EXECUTE') AS public`;
+        expect(acl).toEqual({ app: true, custom: true, public: false });
+      }
+      throw rollback;
+    }),
+  ).rejects.toBe(rollback);
+});
+
+test("posture rejects PUBLIC claim predicates and missing application EXECUTE", async () => {
+  const client = createDb(shared.appUrl, { searchPath: shared.schema });
+  const options = {
+    rlsStrategy: "force" as const,
+    expectedRole: "opengeni_app",
+    targetSchema: shared.schema,
+  };
+  try {
+    for (const signature of [
+      "maintenance_claim_active(text,text)",
+      "maintenance_title_event_visible(text,uuid)",
+    ]) {
+      try {
+        await shared.admin.unsafe(
+          `GRANT EXECUTE ON FUNCTION opengeni_private.${signature} TO PUBLIC`,
+        );
+        const publicDrift = await inspectRuntimeDatabasePosture(client.db, options);
+        expect(evaluateRuntimeDatabasePosture(publicDrift, options)).toContain(
+          `maintenance claim predicate ${signature.replaceAll(",", ", ")} is missing or unsafe`,
+        );
+        await shared.admin.unsafe(
+          `REVOKE EXECUTE ON FUNCTION opengeni_private.${signature} FROM PUBLIC, opengeni_app`,
+        );
+        const appDrift = await inspectRuntimeDatabasePosture(client.db, options);
+        expect(evaluateRuntimeDatabasePosture(appDrift, options)).toContain(
+          `maintenance claim predicate ${signature.replaceAll(",", ", ")} is missing or unsafe`,
+        );
+      } finally {
+        await shared.admin.unsafe(
+          `REVOKE EXECUTE ON FUNCTION opengeni_private.${signature} FROM PUBLIC`,
+        );
+        await shared.admin.unsafe(
+          `GRANT EXECUTE ON FUNCTION opengeni_private.${signature} TO opengeni_app`,
+        );
+      }
+    }
+  } finally {
+    await client.close();
+  }
+});
+
 test("posture rejects column-only capability grants", async () => {
   const client = createDb(shared.appUrl, { searchPath: shared.schema });
   const options = {
@@ -519,6 +606,14 @@ test("strict-owner backfill retains preexisting work and restores FORCE RLS", as
     new URL("../drizzle/0848_strict_owner_maintenance_probes.sql", import.meta.url),
     "utf8",
   );
+  // Later migrations that widen a projection for their probes. Replaying 0848
+  // at head rebuilds its projections with 0848's columns, so these run after it
+  // to widen them again, as on a database migrated in order.
+  const widening = await Promise.all(
+    ["0860_compute_commands_settle_by_push.sql"].map(
+      async (name) => await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8"),
+    ),
+  );
   const rollback = new Error("rollback backfill");
   await shared.admin
     .begin(async (tx) => {
@@ -535,9 +630,17 @@ test("strict-owner backfill retains preexisting work and restores FORCE RLS", as
       VALUES (${lease},${account},${workspace},${group},'warm','modal',now()+interval '10 minutes')`;
       await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
       await tx.unsafe(`SET LOCAL ROLE "${shared.ownerRole}"`);
+      // A probe a later migration widened names columns 0848 does not project
+      // until that migration runs again below.
+      await tx.unsafe("SET LOCAL check_function_bodies = off");
       await tx.unsafe(migration);
+      await tx.unsafe("SET LOCAL check_function_bodies = on");
+      for (const later of widening) await tx.unsafe(later);
       await tx.unsafe("SET LOCAL ROLE opengeni_app");
       const [due] = await tx`SELECT opengeni_private.sandbox_lease_reaper_due_v1() AS due`;
+      const [commands] =
+        await tx`SELECT opengeni_private.connected_command_reconciliation_due_v1() AS due`;
+      expect(typeof commands!.due).toBe("boolean");
       expect(due!.due).toBe(true);
       await tx.unsafe("RESET ROLE");
       const [table] =

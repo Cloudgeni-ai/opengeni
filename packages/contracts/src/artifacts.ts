@@ -306,6 +306,19 @@ export const RollbackWorkspaceArtifactRequest = /* @__PURE__ */ defineSchema(() 
 );
 export type RollbackWorkspaceArtifactRequest = z.infer<typeof RollbackWorkspaceArtifactRequest>;
 
+/**
+ * A new Site from another Site's current version: its HTML, source and
+ * requested tools. Its publication, data and history stay with the original.
+ */
+export const DuplicateWorkspaceArtifactRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Omitted: the original's title followed by "(copy)". */
+    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  }),
+);
+export type DuplicateWorkspaceArtifactRequest = z.infer<typeof DuplicateWorkspaceArtifactRequest>;
+
 export const SetWorkspaceArtifactStatusRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: WorkspaceArtifactStatus,

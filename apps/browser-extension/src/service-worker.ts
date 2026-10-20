@@ -1,3 +1,4 @@
+import { HANDSHAKE_TIMEOUT_ERROR, agentStatus } from "./agent-status";
 import {
   BRIDGE_PROTOCOL_VERSION,
   NATIVE_HOST_NAME,
@@ -5,9 +6,12 @@ import {
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
+  isAgentUnavailable,
   isAllowedDebuggerMethod,
+  parseAgentUnavailable,
   parseExtensionCommand,
   parseExtensionReady,
+  type AgentUnavailable,
   type AttachedTab,
   type BridgeCommand,
   type BridgeDebuggerEvent,
@@ -27,6 +31,8 @@ const DEBUGGER_PROTOCOL_VERSION = "1.3";
 // Once no agent command has arrived for this long, attached tabs are treated as
 // idle and a downloaded update is applied even though they are still attached.
 const UPDATE_IDLE_RELOAD_MS = 15 * 60_000;
+// Chrome throttles update checks; asking again sooner than this gains nothing.
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60_000;
 
 type StoredState = {
   deviceId?: string;
@@ -45,6 +51,11 @@ let inventoryPublication: Promise<void> = Promise.resolve();
 let currentDeviceId: string | null = null;
 let currentProfileLabel: string | null = null;
 let lastError: string | null = null;
+// The agent side's own explanation for the last refused connection.
+let lastRefusal: AgentUnavailable | null = null;
+let lastUpdateCheckAtMs = 0;
+// The agent accepted this profile at least once in this worker's lifetime.
+let everConnected = false;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Set<number>();
@@ -166,7 +177,7 @@ async function connect(): Promise<void> {
         connectionGeneration === generation &&
         readyGeneration !== generation
       ) {
-        disconnectPort(connectingPort, "Opengeni agent did not accept this browser profile");
+        disconnectPort(connectingPort, HANDSHAKE_TIMEOUT_ERROR);
       }
     }, HANDSHAKE_TIMEOUT_MS);
   } catch (error) {
@@ -175,6 +186,7 @@ async function connect(): Promise<void> {
       disconnectPort(port, message);
     } else if (!nativePort) {
       lastError = message;
+      lastRefusal = null;
       void setBadge(false);
       scheduleReconnect();
     }
@@ -183,13 +195,18 @@ async function connect(): Promise<void> {
 
 // Locally calling Port.disconnect() does not fire our onDisconnect listener.
 // Clear the exact port before closing it; stale events must not reset a successor.
-function disconnectPort(port: chrome.runtime.Port, error: string): void {
+function disconnectPort(
+  port: chrome.runtime.Port,
+  error: string,
+  refusal: AgentUnavailable | null = null,
+): void {
   if (nativePort !== port) return;
   clearHandshakeTimer();
   nativePort = null;
   connectionGeneration = null;
   readyGeneration = null;
   lastError = error;
+  lastRefusal = refusal;
   port.disconnect();
   void setBadge(false);
   scheduleReconnect();
@@ -215,6 +232,17 @@ function handleNativeMessage(message: unknown): void {
   const port = nativePort;
   const generation = connectionGeneration;
   if (!port || !generation) return;
+  if (isAgentUnavailable(message)) {
+    // The agent side cannot take this connection and says why before closing.
+    const refusal = parseAgentUnavailable(message);
+    if (refusal.reason === "extension_outdated") requestExtensionUpdate();
+    disconnectPort(
+      port,
+      `Opengeni agent unavailable: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ""}`,
+      refusal,
+    );
+    return;
+  }
   if (
     message !== null &&
     typeof message === "object" &&
@@ -228,8 +256,10 @@ function handleNativeMessage(message: unknown): void {
       }
       clearHandshakeTimer();
       readyGeneration = generation;
+      everConnected = true;
       reconnectDelayMs = 500;
       lastError = null;
+      lastRefusal = null;
       void setBadge(true);
       // Catch changes made during the handshake on the accepted generation.
       void sendInventory();
@@ -404,6 +434,17 @@ async function detachDebugger(tabId: number): Promise<void> {
  * it waits until no agent is driving a tab: nothing attached, or no agent
  * command for UPDATE_IDLE_RELOAD_MS, and never during a command.
  */
+// When the agent reports this extension as the outdated side, fetch the
+// update now instead of waiting for Chrome's periodic check. An available
+// update raises onUpdateAvailable, and with no agent connected nothing is
+// attached, so it applies at once.
+function requestExtensionUpdate(): void {
+  const now = Date.now();
+  if (now - lastUpdateCheckAtMs < UPDATE_CHECK_INTERVAL_MS) return;
+  lastUpdateCheckAtMs = now;
+  void chrome.runtime.requestUpdateCheck?.().catch(() => undefined);
+}
+
 function maybeApplyUpdate(): void {
   if (!updatePending || commandsInFlight > 0) return;
   const idleMs = Date.now() - lastAgentCommandAtMs;
@@ -581,12 +622,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
   const typed = message as { type: string; profileLabel?: unknown };
   if (typed.type === "status") {
+    const connected = nativePort !== null && readyGeneration === connectionGeneration;
+    const status = connected
+      ? null
+      : agentStatus(lastError ? { error: lastError, everConnected, refusal: lastRefusal } : null);
     respond({
-      connected: nativePort !== null && readyGeneration === connectionGeneration,
+      connected,
       deviceId: currentDeviceId,
       connectionGeneration,
       profileLabel: currentProfileLabel,
       error: lastError,
+      title: status?.title ?? null,
+      detail: status?.detail ?? null,
     });
     return false;
   }

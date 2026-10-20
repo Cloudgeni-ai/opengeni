@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -86,6 +87,10 @@ describe("opening at login", () => {
 describe.skipIf(process.platform === "win32")("noticing a disconnect", () => {
   test("tells the app when the last connection goes, but not when a read fails", async () => {
     const home = folder();
+    writeFileSync(
+      join(home, "this-computer.json"),
+      JSON.stringify({ adopted: true, management: "app" }),
+    );
     const listing = join(home, "connections.txt");
     mkdirSync(join(home, ".local", "bin"), { recursive: true });
     const agent = join(home, ".local", "bin", "opengeni-agent");
@@ -173,31 +178,42 @@ describe.skipIf(process.platform === "win32")("running the app's own agent", () 
   });
 });
 
-describe.skipIf(process.platform === "win32")("taking over the separate Mac agent app", () => {
-  test("carries screen control over and asks for its permissions again", async () => {
+describe.skipIf(process.platform === "win32")("preserving the separate Mac agent app", () => {
+  test("opening the desktop app never takes over an existing installation", async () => {
     const home = folder();
     const macApp = join(home, "Applications", "OpenGeni Agent.app");
     const binary = join(macApp, "Contents", "MacOS", "opengeni-agent");
     mkdirSync(join(macApp, "Contents", "MacOS"), { recursive: true });
-    // A stand-in agent: lists one connection and removes its service.
+    const calls = join(home, "agent-calls.txt");
+    // Record every call: a read-only launch must not uninstall, enroll, run,
+    // restart, or ask for permissions on behalf of the desktop app.
     writeFileSync(
       binary,
-      `#!/bin/sh\n[ "$1" = connections ] && printf 'Configured Opengeni connections (1):\\n  abc  https://server.example  workspace=w1  agent=a1\\n'\nexit 0\n`,
+      `#!/bin/sh\necho "$*" >> "${calls}"\ncase "$1" in\n  connections) printf 'Configured Opengeni connections (1):\\n  abc  https://server.example  workspace=w1  agent=a1\\n' ;;\n  --version) echo 'opengeni-agent 0.1.109' ;;\nesac\nexit 0\n`,
     );
     chmodSync(binary, 0o755);
+    mkdirSync(join(home, ".local", "bin"), { recursive: true });
+    const command = join(home, ".local", "bin", "opengeni-agent");
+    symlinkSync(binary, command);
+    const originalBinary = readFileSync(binary);
 
     let handedOver = 0;
     const machine = computer(home, undefined, () => handedOver++);
-    // Taking over happens before the app's own agent downloads (not available here).
-    await machine.boot();
-
-    const state = JSON.parse(readFileSync(join(home, "this-computer.json"), "utf8"));
-    expect(state.adopted).toBe(true);
-    expect(state.screenControl).toBe(true);
-    expect(handedOver).toBe(1);
-
-    // Only once: a later launch has nothing to take over.
-    await computer(home, undefined, () => handedOver++).boot();
-    expect(handedOver).toBe(1);
+    try {
+      await machine.boot();
+      await machine.summary();
+      await machine.status("https://server.example", "w1");
+      await machine.boot();
+      const invocations = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+      expect(invocations.every((call) => call === "connections" || call === "--version")).toBe(
+        true,
+      );
+      expect(readFileSync(binary)).toEqual(originalBinary);
+      expect(existsSync(command)).toBe(true);
+      expect(handedOver).toBe(0);
+      expect(existsSync(join(home, "this-computer.json"))).toBe(false);
+    } finally {
+      await machine.shutdown();
+    }
   });
 });

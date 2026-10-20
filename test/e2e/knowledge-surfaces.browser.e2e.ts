@@ -370,7 +370,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           { apiBaseUrl, workspaceId, taskId: task.id },
         );
       // Each schedule is its own page; Edit is a form page whose Agent learning
-      // controls live under Advanced.
+      // controls live under Settings.
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/schedules`);
       await page.getByRole("link", { name: task.name, exact: true }).waitFor();
       await page
@@ -380,7 +380,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       const knowledgeMode = page.getByRole("combobox", { name: "Knowledge", exact: true });
       const openLearning = async () => {
         await page.getByRole("heading", { level: 1, name: "Edit schedule", exact: true }).waitFor();
-        await page.getByRole("button", { name: /^Advanced/ }).click();
+        await page.getByRole("button", { name: /^Settings / }).click();
       };
       await openLearning();
       await knowledgeMode.selectOption("review_first");

@@ -16,6 +16,7 @@ import {
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
+import { createHash } from "node:crypto";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -616,24 +617,80 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     ].join("\n"),
     markerPath,
   );
+  // Carry the group-leader program once, verbatim. The setsid, python and
+  // in-place branches all run this same text, so embedding it per branch
+  // tripled every command's provider argv and forced callers to split payloads
+  // into more sandbox round trips. A quoted heredoc keeps the exact command
+  // bytes visible (secret delivery matches its command by that text); the
+  // in-place branch evaluates the identical text in the current shell.
+  const capture = heredocSourceCapture(groupLeaderCommand, markerPath);
   return [
     ...processInspectionCommandLines(),
+    ...capture.lines,
     '__opengeni_outer_pid="$$"',
     '__opengeni_outer_pgid="$(__opengeni_process_group_id "$__opengeni_outer_pid")"',
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
     "fi",
-    groupLeaderCommand,
+    `eval "$${capture.variable}"`,
   ].join("\n");
+}
+
+/** Read `source` byte-for-byte from a quoted heredoc into a shell variable,
+ * without external tools. The program starts by unsetting that variable, so
+ * code evaluated in the current shell never observes it. The delimiter is
+ * derived from the per-invocation marker, keeping the wrapper a pure function
+ * of its inputs, and is re-derived until it cannot collide with the source. */
+function heredocSourceCapture(source: string, seed: string): { lines: string[]; variable: string } {
+  const derive = (attempt: number) =>
+    createHash("sha256").update(`${seed}\0${attempt}`, "utf8").digest("hex").slice(0, 32);
+  let attempt = 0;
+  let token = derive(attempt);
+  let delimiter = `__OPENGENI_HEREDOC_${token}__`;
+  let sentinel = `__OPENGENI_END_${token}__`;
+  while (source.split("\n").includes(delimiter) || source.includes(sentinel)) {
+    attempt += 1;
+    token = derive(attempt);
+    delimiter = `__OPENGENI_HEREDOC_${token}__`;
+    sentinel = `__OPENGENI_END_${token}__`;
+  }
+  const variable = `__opengeni_program_${token}`;
+  const line = `${variable}_line`;
+  const found = `${variable}_found`;
+  return {
+    variable,
+    lines: [
+      `${variable}=""`,
+      `${line}=""`,
+      `${found}=0`,
+      `while IFS= read -r ${line}; do`,
+      `  case "$${line}" in`,
+      `    *${sentinel})`,
+      `      ${line}="\${${line}%${sentinel}}"`,
+      `      ${variable}="$${variable}$${line}"`,
+      `      ${found}=1`,
+      "      break ;;",
+      "    *)",
+      `      ${variable}="$${variable}$${line}
+"`,
+      "      ;;",
+      "  esac",
+      `done <<'${delimiter}'`,
+      `unset ${variable}\n${source}${sentinel}`,
+      delimiter,
+      `[ "$${found}" = 1 ] || exit 125`,
+      `unset ${line} ${found}`,
+    ],
+  };
 }
 
 /** Keep large internal synchronous commands out of the repeated process-group

@@ -15,6 +15,7 @@ import {
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import "@opengeni/react/this-computer.css";
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
@@ -35,6 +36,9 @@ function statusFor(name: string): ThisComputerStatus {
     busy: false,
     error: null,
     machineName: "Kari's MacBook Air",
+    ...(params.get("management") === "service"
+      ? { management: "service" as const, permissionAppName: "Opengeni Agent" }
+      : {}),
   };
   const perms = (granted: number) =>
     (["screenRecording", "accessibility", "inputMonitoring"] as const).map((id, index) => ({
@@ -104,7 +108,10 @@ class FakeHost implements ThisComputerHost {
     return this.current;
   }
   async pause() {
-    this.set(statusFor("paused"));
+    this.set({
+      ...statusFor("paused"),
+      ...(this.current.management === "service" ? { permissions: this.current.permissions } : {}),
+    });
   }
   async resume() {
     this.set(statusFor("resuming"));

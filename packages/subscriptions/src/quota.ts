@@ -169,6 +169,47 @@ export function quotaObservationApplies(
 }
 
 /**
+ * The stored quota once the provider has confirmed, at `resetAt`, that it
+ * reset the connection's rate limits (a redeemed reset credit). Every window
+ * reading and the stored exhaustion deadline were observed before the reset,
+ * so none of them describes the account any more: each window keeps its id
+ * with unknown usage and reset until a later reading reports it, and the
+ * deadline and its claim are dropped. A stale window that still said
+ * "exhausted until next week" would otherwise keep every waiter parked until
+ * that date. Model cooldowns are not rate-limit windows and stand. The
+ * observation time moves to `resetAt`, so a usage reading fetched before the
+ * reset can no longer replace this state with pre-reset windows. Returns the
+ * same object when nothing it records is invalidated.
+ */
+export function quotaAfterRateLimitReset(
+  quota: SubscriptionQuota,
+  resetAt: number,
+): SubscriptionQuota {
+  const invalidates =
+    quota.exhaustedUntil !== null ||
+    quota.exhaustedKind !== null ||
+    quota.windows.some(
+      (window) =>
+        window.status !== "unknown" || window.usedPercent !== null || window.resetsAt !== null,
+    );
+  if (!invalidates) return quota;
+  const next: SubscriptionQuota = {
+    ...quota,
+    windows: quota.windows.map((window) => ({
+      id: window.id,
+      usedPercent: null,
+      resetsAt: null,
+      status: "unknown" as const,
+    })),
+    exhaustedUntil: null,
+    exhaustedKind: null,
+    observedAt: Math.max(quota.observedAt ?? resetAt, resetAt),
+  };
+  delete next.exhaustedClaim;
+  return next;
+}
+
+/**
  * Apply an observation to the stored quota (design 2.2). It applies only to
  * the current credential generation, never replaces a newer or dated reading
  * with an older or undated one, and never shortens a running exhaustion

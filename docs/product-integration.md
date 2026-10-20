@@ -1230,6 +1230,17 @@ and its resolver also applies to `Markdown` rendered by a custom
 subtree. An unresolved target renders as text marked unavailable, never as a
 broken link, and the Site tool row hides its Open action.
 
+Your product's own links are separate from Opengeni objects. When your
+instructions or tools teach the agent to link your records and pages, for
+example `[order 42](myapp:order/42)` or an in-app path, pass `renderLink` to
+`Markdown` or `OpenGeniLinkProvider` to draw and open them yourself, such as a
+chip that navigates in place. It receives the exact authored `href`, the
+rendered link text, and `standalone: true` when the link is the only content of
+its paragraph or list item, which lets you draw a card. That paragraph then
+renders as a block. Return `undefined` to keep the default: web links open in
+a new tab and unknown schemes show as unavailable. The `href` is not sanitized,
+so check it before navigating. Opengeni object links never reach `renderLink`.
+
 A non-React frontend applies the same rule with `parseOpenGeniLink(href)` from
 `@opengeni/sdk`, which classifies an agent href into `file`, `sandbox-file`,
 `editable-artifact`, or `site` (or `null` for an ordinary link). Download a file

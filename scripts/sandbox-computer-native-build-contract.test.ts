@@ -34,6 +34,16 @@ function keepsComputerNativeBuildOnTheNativeRunner(source: string): boolean {
     build,
   );
   const verify = stage.indexOf("xx-verify /out/opengeni-computer-native", install);
+  // The sandbox's agent is built in the same cross-compiling step, installed
+  // from the target's directory and verified as target-native too.
+  const buildLineEnd = build < 0 ? -1 : stage.indexOf("\n", build);
+  const buildLine =
+    build < 0 ? "" : stage.slice(build, buildLineEnd < 0 ? undefined : buildLineEnd);
+  const agentInstall = stage.indexOf(
+    'install -m 0755 "target/${rust_target}/release/opengeni-agent" /out/opengeni-agent',
+    build,
+  );
+  const agentVerify = stage.indexOf("xx-verify /out/opengeni-agent", agentInstall);
 
   return (
     source.includes(xxStage) &&
@@ -46,7 +56,11 @@ function keepsComputerNativeBuildOnTheNativeRunner(source: string): boolean {
     build > triple &&
     install > build &&
     verify > install &&
+    /(^|\s)-p opengeni-agent(\s|;|$)/u.test(buildLine) &&
+    agentInstall > build &&
+    agentVerify > agentInstall &&
     !stage.includes("cargo build --locked --release -p opengeni-computer-native") &&
+    !stage.includes("target/release/opengeni-agent /out/opengeni-agent") &&
     !stage.includes("target/release/opengeni-computer-native /out/opengeni-computer-native")
   );
 }
@@ -75,5 +89,21 @@ describe("sandbox native computer image build contract", () => {
     expect(keepsComputerNativeBuildOnTheNativeRunner(unverifiedOutput)).toBe(false);
     expect(keepsComputerNativeBuildOnTheNativeRunner(unlockedBuild)).toBe(false);
     expect(keepsComputerNativeBuildOnTheNativeRunner(missingTargetLibraries)).toBe(false);
+
+    const agentNotBuilt = source.replace(" -p opengeni-agent;", ";");
+    const agentUnverified = source.replace(
+      "    xx-verify /out/opengeni-agent",
+      "    file /out/opengeni-agent",
+    );
+    const agentNotInstalled = source.replace(
+      '    install -m 0755 "target/${rust_target}/release/opengeni-agent" /out/opengeni-agent; \\\n',
+      "",
+    );
+    expect(agentNotBuilt).not.toBe(source);
+    expect(agentUnverified).not.toBe(source);
+    expect(agentNotInstalled).not.toBe(source);
+    expect(keepsComputerNativeBuildOnTheNativeRunner(agentNotBuilt)).toBe(false);
+    expect(keepsComputerNativeBuildOnTheNativeRunner(agentUnverified)).toBe(false);
+    expect(keepsComputerNativeBuildOnTheNativeRunner(agentNotInstalled)).toBe(false);
   });
 });

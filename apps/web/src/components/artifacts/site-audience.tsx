@@ -16,7 +16,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { userErrorText } from "@/lib/api-error";
 
-type Audience = "private" | "workspace";
+export type Audience = "private" | "workspace";
 
 /**
  * Whether this person may make something Only me here, from the same answer
@@ -42,67 +42,126 @@ function useCanLimitToMe(client: OpenGeniBrowserClient, workspaceId: string, ena
   return canLimit;
 }
 
+/** The words an audience control uses for one kind of thing. */
+type AudienceCopy = {
+  /** "Site" or "file", as it reads mid-sentence. */
+  noun: string;
+  /** Capitalized noun for toast titles: "Site", "File". */
+  Noun: string;
+  onlyMeDescription: string;
+  workspaceDescription: (workspaceName: string) => string;
+  shareConfirm: (workspaceName: string) => string;
+  limitConfirm: string;
+  /** "Who can see this Site", "Who can open this file". */
+  whoCan: string;
+  changeLabel: string;
+  limitedToast: string;
+};
+
+const SITE_COPY: AudienceCopy = {
+  noun: "Site",
+  Noun: "Site",
+  onlyMeDescription: "Only you can see and open this Site.",
+  workspaceDescription: (workspaceName) =>
+    `Everyone in ${workspaceName} can see and open this Site.`,
+  shareConfirm: (workspaceName) =>
+    `Everyone in ${workspaceName} will be able to open this Site and see its versions. The chat it was made in keeps its own audience.`,
+  limitConfirm:
+    "Only you will be able to see or open this Site. Other people in the workspace lose access to it.",
+  whoCan: "Who can see this Site",
+  changeLabel: "Change who can see it",
+  limitedToast: "Only you can see it now.",
+};
+
+export const FILE_AUDIENCE_COPY: AudienceCopy = {
+  noun: "file",
+  Noun: "File",
+  onlyMeDescription: "Only you can open this file.",
+  workspaceDescription: (workspaceName) => `Everyone in ${workspaceName} can open this file.`,
+  shareConfirm: (workspaceName) =>
+    `Everyone in ${workspaceName} will be able to open this file from its link. The chat it came from keeps its own audience.`,
+  limitConfirm:
+    "Only you will be able to open this file. Other people in the workspace lose access to it, and its link stops working for them.",
+  whoCan: "Who can open this file",
+  changeLabel: "Change who can open it",
+  limitedToast: "Only you can open it now.",
+};
+
+export type AudienceControls = {
+  chip: ReactNode;
+  shareButton: ReactNode;
+  dialog: ReactNode;
+  /** Opens the Share with workspace confirmation, while the owner's item is Only me. */
+  share: (() => void) | undefined;
+  /** Opens the Limit to me confirmation, while the owner's item is shared and Only me is allowed. */
+  limit: (() => void) | undefined;
+};
+
 /**
- * A Site's audience on its page, in the same words and shape as a chat's:
+ * An item's audience on its page, in the same words and shape as a chat's:
  * a chip saying who can see it ("Only me" or "Workspace") that opens the
- * owner's choices, and, while the Site is Only me, a clear "Share with
- * workspace" button. Every change is confirmed first. Only the owner can
- * change it; everyone else just sees the chip.
+ * owner's choices, and, while it is Only me, a clear "Share with workspace"
+ * button. Every change is confirmed first. Only the owner can change it;
+ * everyone else just sees the chip.
  */
-export function useSiteAudience({
+export function useArtifactAudience({
   client,
   workspaceId,
   workspaceName,
-  artifact,
+  title,
+  visibility,
   ownedByCurrentUser,
-  onChanged,
+  copy,
+  update,
+  canLimitToMe: knownCanLimitToMe,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   workspaceName: string;
-  artifact: WorkspaceArtifact;
-  /** The viewer owns the Site and may publish in this workspace. */
+  title: string;
+  visibility: Audience;
+  /** The viewer owns the item and may change it in this workspace. */
   ownedByCurrentUser: boolean;
-  onChanged: (artifact: WorkspaceArtifact) => void;
-}): {
-  chip: ReactNode;
-  shareButton: ReactNode;
-  dialog: ReactNode;
-  /** Opens the Share with workspace confirmation, while the owner's Site is Only me. */
-  share: (() => void) | undefined;
-} {
-  const audience: Audience = artifact.visibility === "private" ? "private" : "workspace";
-  const onlyMe = audience === "private";
-  const canLimitToMe = useCanLimitToMe(client, workspaceId, ownedByCurrentUser && !onlyMe);
+  copy: AudienceCopy;
+  /** Applies the change; throws when the server refuses it. */
+  update: (visibility: Audience) => Promise<void>;
+  /**
+   * Skip asking whether Only me is allowed (lists, where every row would
+   * ask) and offer Limit to me; the server still refuses it when it is off.
+   */
+  canLimitToMe?: boolean;
+}): AudienceControls {
+  const onlyMe = visibility === "private";
+  const fetchedCanLimitToMe = useCanLimitToMe(
+    client,
+    workspaceId,
+    knownCanLimitToMe === undefined && ownedByCurrentUser && !onlyMe,
+  );
+  const canLimitToMe = knownCanLimitToMe ?? fetchedCanLimitToMe;
   const [confirming, setConfirming] = useState<Audience | null>(null);
   const [busy, setBusy] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   const label = onlyMe ? "Only me" : "Workspace";
-  const description = onlyMe
-    ? "Only you can see and open this Site."
-    : `Everyone in ${workspaceName} can see and open this Site.`;
+  const description = onlyMe ? copy.onlyMeDescription : copy.workspaceDescription(workspaceName);
 
-  const change = async (visibility: Audience): Promise<boolean> => {
+  const change = async (next: Audience): Promise<boolean> => {
     setBusy(true);
     try {
-      const response = await client.updateWorkspaceArtifactVisibility(workspaceId, artifact.id, {
-        visibility,
-      });
-      onChanged(response.artifact);
+      await update(next);
       toast.success(
-        visibility === "workspace" ? "Site shared with workspace" : "Site limited to you",
+        next === "workspace" ? `${copy.Noun} shared with workspace` : `${copy.Noun} limited to you`,
         {
           description:
-            visibility === "workspace"
+            next === "workspace"
               ? `Everyone in ${workspaceName} can now open it.`
-              : "Only you can see it now.",
+              : copy.limitedToast,
         },
       );
       return true;
     } catch (error) {
       toast.error(
-        visibility === "workspace" ? "Couldn't share Site" : "Couldn't limit Site to you",
+        next === "workspace" ? `Couldn't share ${copy.noun}` : `Couldn't limit ${copy.noun} to you`,
         { description: userErrorText(error) },
       );
       return false;
@@ -133,7 +192,7 @@ export function useSiteAudience({
         <button
           ref={triggerRef}
           type="button"
-          aria-label={`Who can see this Site: ${label}. Change who can see it`}
+          aria-label={`${copy.whoCan}: ${label}. ${copy.changeLabel}`}
           aria-busy={busy}
           className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
@@ -170,7 +229,7 @@ export function useSiteAudience({
     <TooltipProvider delayDuration={300}>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span tabIndex={0} aria-label={`Who can see this Site: ${label}. ${description}`}>
+          <span tabIndex={0} aria-label={`${copy.whoCan}: ${label}. ${description}`}>
             {chipFace}
           </span>
         </TooltipTrigger>
@@ -187,7 +246,7 @@ export function useSiteAudience({
         variant="outline"
         disabled={busy}
         onClick={() => setConfirming("workspace")}
-        // Beside Edit and ⋯ on a phone, only the icon fits; the name stays.
+        // Beside the other actions on a phone, only the icon fits; the name stays.
         title="Share with workspace"
         className="rounded-[10px] pointer-coarse:h-11 max-sm:px-2.5 pointer-coarse:max-sm:w-11"
       >
@@ -204,13 +263,11 @@ export function useSiteAudience({
       }}
       title={
         confirming === "workspace"
-          ? `Share “${artifact.title}” with ${workspaceName}?`
-          : `Limit “${artifact.title}” to you?`
+          ? `Share “${title}” with ${workspaceName}?`
+          : `Limit “${title}” to you?`
       }
       description={
-        confirming === "workspace"
-          ? `Everyone in ${workspaceName} will be able to open this Site and see its versions. The chat it was made in keeps its own audience.`
-          : "Only you will be able to see or open this Site. Other people in the workspace lose access to it."
+        confirming === "workspace" ? copy.shareConfirm(workspaceName) : copy.limitConfirm
       }
       confirmLabel={confirming === "workspace" ? "Share with workspace" : "Limit to me"}
       // Like a chat, sharing widens who can see it; limiting it does not.
@@ -226,5 +283,44 @@ export function useSiteAudience({
     shareButton,
     dialog,
     share: ownedByCurrentUser && onlyMe ? () => setConfirming("workspace") : undefined,
+    limit:
+      ownedByCurrentUser && !onlyMe && canLimitToMe ? () => setConfirming("private") : undefined,
   };
+}
+
+/**
+ * A Site's audience on its page, in the same words and shape as a chat's.
+ * Only the owner can change it; everyone else just sees the chip.
+ */
+export function useSiteAudience({
+  client,
+  workspaceId,
+  workspaceName,
+  artifact,
+  ownedByCurrentUser,
+  onChanged,
+}: {
+  client: OpenGeniBrowserClient;
+  workspaceId: string;
+  workspaceName: string;
+  artifact: WorkspaceArtifact;
+  /** The viewer owns the Site and may publish in this workspace. */
+  ownedByCurrentUser: boolean;
+  onChanged: (artifact: WorkspaceArtifact) => void;
+}): AudienceControls {
+  return useArtifactAudience({
+    client,
+    workspaceId,
+    workspaceName,
+    title: artifact.title,
+    visibility: artifact.visibility === "private" ? "private" : "workspace",
+    ownedByCurrentUser,
+    copy: SITE_COPY,
+    update: async (visibility) => {
+      const response = await client.updateWorkspaceArtifactVisibility(workspaceId, artifact.id, {
+        visibility,
+      });
+      onChanged(response.artifact);
+    },
+  });
 }

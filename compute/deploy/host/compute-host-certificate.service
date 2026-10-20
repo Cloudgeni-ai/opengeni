@@ -1,0 +1,11 @@
+# Gets or renews the compute host's certificate from the control service
+# (compute-host-certificate). Installed by install.sh; run daily by its timer.
+[Unit]
+Description=Renew the compute host's certificate
+Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/compute/current/compute-host-certificate

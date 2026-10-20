@@ -32,7 +32,7 @@ import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmailChipsInput } from "@/components/ui/email-chips-input";
 import { Disclosure } from "@/components/ui/disclosure";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
+import { FormDialog, FormInline, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -134,7 +134,11 @@ function livePublication(load: SitePublicationLoad): SitePublication | null {
   return load.state === "ready" && load.publication.status === "active" ? load.publication : null;
 }
 
-/** The header's Publish button; hidden where the deployment can't publish. */
+/**
+ * The header's Publish button, while the Site isn't on the web yet. Hidden
+ * where the deployment can't publish, and once it is published or taken
+ * down: its address and settings are then in the Site's Settings tab.
+ */
 export function SitePublishButton({
   load,
   onOpen,
@@ -143,6 +147,7 @@ export function SitePublishButton({
   onOpen: () => void;
 }) {
   if (load.state === "unavailable" || load.state === "forbidden") return null;
+  if (load.state === "ready" && load.publication.status !== "unpublished") return null;
   return (
     <Button
       type="button"
@@ -240,10 +245,29 @@ export type SitePublishPageProps = {
   isAdmin: boolean;
   /** Offered while the Site is Only me and the viewer owns it. */
   onShareWithWorkspace?: (() => void) | undefined;
+  /**
+   * The Site is in a Personal workspace, where Only me and the workspace are
+   * the same one person: publishing an Only me Site shares it as it publishes.
+   */
+  personalWorkspace?: boolean;
   sites: SitesClientConfig;
   /** Fixed suffix for the suggested label, for previews and tests. */
   labelSuffix?: string;
+  /**
+   * `page` is Publish to web on a page of its own; `panel` is the same form
+   * inline, in the Site's Settings, with no back link.
+   */
+  layout?: "page" | "panel";
 };
+
+/** The publish form's frame: its own page, or a panel in the Site's Settings. */
+function PublishFrame({
+  layout = "page",
+  back,
+  ...props
+}: Omit<FormFrameProps, "variant"> & { layout?: "page" | "panel" | undefined }) {
+  return layout === "panel" ? <FormInline {...props} /> : <FormPage back={back} {...props} />;
+}
 
 /**
  * Publish a Site to the web: its address, who can open it, its embedded
@@ -251,26 +275,32 @@ export type SitePublishPageProps = {
  * own (`?view=publish`) with the Site page as its back link.
  */
 export function SitePublishPage(props: SitePublishPageProps) {
-  const { load, site, onBack } = props;
+  const { load, site, onBack, layout } = props;
   const back = { label: site.title, onClick: onBack };
   const blocked = (title: string, body: ReactNode, action?: ReactNode) => (
-    <FormPage back={back} title="Publish to web" submitLabel="Publish" footer={false}>
+    <PublishFrame
+      layout={layout}
+      back={back}
+      title="Publish to web"
+      submitLabel="Publish"
+      footer={false}
+    >
       <Notice title={title} action={action} actionLayout="responsive">
         {body}
       </Notice>
-    </FormPage>
+    </PublishFrame>
   );
   if (!props.canManage || load.state === "forbidden")
     return blocked(
       "You can't publish this Site",
-      "Only its owner and workspace admins can publish it.",
+      "You need permission to publish artifacts in this workspace.",
     );
   if (load.state === "unavailable")
     return blocked(
       "Publishing isn't set up on this server",
       "An administrator sets a Sites domain to turn it on.",
     );
-  if (site.visibility === "private" && load.state !== "ready")
+  if (site.visibility === "private" && load.state !== "ready" && !props.personalWorkspace)
     return blocked(
       "Share this Site with the workspace first",
       "A Site that only you can see can't be published.",
@@ -292,7 +322,8 @@ export function SitePublishPage(props: SitePublishPageProps) {
     );
   if (load.state === "loading")
     return (
-      <FormPage
+      <PublishFrame
+        layout={layout}
         back={back}
         title="Publish to web"
         submitLabel="Publish"
@@ -320,6 +351,7 @@ function SitePublishForm({
   sites,
   labelSuffix,
   isAdmin,
+  layout = "page",
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -334,6 +366,13 @@ function SitePublishForm({
   const [takedownOpen, setTakedownOpen] = useState(false);
   const update = (patch: Partial<SitePublishDraft>) =>
     setDraft((current) => ({ ...current, ...patch }));
+  const discard = () => {
+    setLabelError(null);
+    setEmailError(null);
+    setLimitError(null);
+    setAgentError(null);
+    setDraft(draftFromPublication(saved, suggestedLabel(site.title, labelSuffix), forceNoindex));
+  };
 
   const labelUnchanged = saved?.label === draft.label;
   // A taken-down Site keeps its address until it is restored.
@@ -460,14 +499,25 @@ function SitePublishForm({
 
   return (
     <>
-      <FormPage
+      <PublishFrame
+        layout={layout}
         back={{ label: site.title, onClick: onBack }}
-        title="Publish to web"
-        description={`Give “${site.title}” its own address on the web.`}
+        title={layout === "panel" && !publishing ? "Web address" : "Publish to web"}
+        description={
+          layout === "panel" && !publishing
+            ? "Its address, who can open it and its agent."
+            : `Give “${site.title}” its own address on the web.`
+        }
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
-        onCancel={onBack}
+        // In Settings there is nowhere to go back to: Discard puts the saved
+        // values back, so it shows only once a saved publication has changes.
+        {...(layout === "panel"
+          ? dirty && !publishing
+            ? { cancelLabel: "Discard", onCancel: discard }
+            : { cancelLabel: null }
+          : { onCancel: onBack })}
         footer={publishing || dirty ? undefined : false}
       >
         <FieldStack>
@@ -619,7 +669,7 @@ function SitePublishForm({
             />
           ) : null}
         </FieldStack>
-      </FormPage>
+      </PublishFrame>
       {saved ? (
         <TakedownDialog
           open={takedownOpen}

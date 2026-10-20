@@ -1,3 +1,4 @@
+import { ApiHttpError } from "../http/api-error";
 import {
   CapabilityCatalogResponse,
   CreateCapabilityCatalogItemRequest,
@@ -11,6 +12,7 @@ import {
 } from "@opengeni/contracts";
 import type { Hono } from "hono";
 import {
+  ConnectorConnectionRequiredError,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   getConnectorToolPermissions,
@@ -144,7 +146,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
           personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
           ...(c.req.query("connectionId") ? { connectionId: c.req.query("connectionId")! } : {}),
           ...(c.req.query("instanceKey") ? { instanceKey: c.req.query("instanceKey")! } : {}),
-        }),
+        }).catch(rethrowConnectorPermissionError),
       ),
     );
   });
@@ -169,7 +171,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
         capabilityId: decodeURIComponent(c.req.param("capabilityId")),
         personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
         payload: payload.data,
-      });
+      }).catch(rethrowConnectorPermissionError);
       return c.json({ saved: true });
     },
   );
@@ -245,4 +247,16 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.json(installation);
   });
+}
+
+function rethrowConnectorPermissionError(error: unknown): never {
+  if (error instanceof ConnectorConnectionRequiredError) {
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: false,
+      details: { code: "connector_connection_required" },
+    });
+  }
+  throw error;
 }

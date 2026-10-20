@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { userErrorText } from "@/lib/api-error";
 
+import { FormPage } from "@/components/ui/form-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -58,13 +59,15 @@ export function SlackChannelRoutingDialog({
   );
 }
 
-function SlackChannelRoutingDialogBody({
+export function SlackChannelRoutingDialogBody({
   workspaceId,
   connectionId,
   canManage,
   onClose,
   onSaved,
+  pageMode = false,
 }: {
+  pageMode?: boolean;
   workspaceId: string;
   connectionId: string;
   canManage: boolean;
@@ -222,6 +225,85 @@ function SlackChannelRoutingDialogBody({
     }
   }
 
+  const fields = (
+    <div className={pageMode ? "space-y-3" : "rounded-md border border-border bg-bg p-3"}>
+      {loading ? (
+        <p className="flex items-center gap-2 text-2xs text-fg-subtle">
+          <Loader2Icon className="size-3 animate-spin" /> Loading conversations Opengeni has joined
+        </p>
+      ) : error ? (
+        <p className="text-2xs text-danger">{error}</p>
+      ) : channels.length === 0 ? (
+        <p className="text-2xs text-fg-subtle">
+          Opengeni has not been invited anywhere yet. Tag @Opengeni in Slack, then return here.
+        </p>
+      ) : (
+        <div className={pageMode ? "grid gap-4" : "grid max-h-72 gap-2 overflow-y-auto"}>
+          {channels.map((channel) => (
+            <label
+              key={channel.id}
+              className="grid grid-cols-[1fr_auto] items-center gap-2 text-xs text-fg-muted"
+            >
+              <span className="truncate">
+                {channel.isPrivate ? "Private · " : "#"}
+                {channel.name ?? channel.id}
+              </span>
+              {reachable(channel.id) ? (
+                <Select
+                  value={draft[channel.id] ?? ASK_ONCE}
+                  disabled={!canManage || saving}
+                  onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
+                >
+                  <option value={ASK_ONCE}>Ask me</option>
+                  {choices.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name}
+                    </option>
+                  ))}
+                  {(() => {
+                    // Only ever the current value of a route set before a
+                    // channel could no longer point at a personal workspace.
+                    // Listed so the control shows what it is set to, and
+                    // named so it is obvious why it should change.
+                    const personal = personalRouteTarget(channel.id);
+                    return personal ? (
+                      <option value={personal.id}>{personal.name} · only you can see this</option>
+                    ) : null;
+                  })()}
+                </Select>
+              ) : (
+                // Somebody with access this admin does not have pointed this
+                // channel somewhere. Say so rather than rendering a blank
+                // control that cannot be saved.
+                <span className="text-2xs text-fg-subtle">
+                  {loadedRoutes?.[channel.id]?.targetWorkspaceName ?? "another workspace"} · set by
+                  someone else
+                </span>
+              )}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+  if (pageMode)
+    return (
+      <FormPage
+        title="Slack channels"
+        description="Choose the Opengeni workspace where each channel starts work."
+        back={{ label: "Slack", onClick: onClose }}
+        onCancel={onClose}
+        submitLabel="Save"
+        pending={saving}
+        submitDisabled={!canManage || loading || loadedRoutes === null}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          await save();
+        }}
+      >
+        {fields}
+      </FormPage>
+    );
   return (
     <DialogContent>
       <DialogHeader>
@@ -232,66 +314,7 @@ function SlackChannelRoutingDialogBody({
         </DialogDescription>
       </DialogHeader>
 
-      <div className="rounded-md border border-border bg-bg p-3">
-        {loading ? (
-          <p className="flex items-center gap-2 text-2xs text-fg-subtle">
-            <Loader2Icon className="size-3 animate-spin" /> Loading conversations Opengeni has
-            joined
-          </p>
-        ) : error ? (
-          <p className="text-2xs text-danger">{error}</p>
-        ) : channels.length === 0 ? (
-          <p className="text-2xs text-fg-subtle">
-            Opengeni has not been invited anywhere yet. Tag @Opengeni in Slack, then return here.
-          </p>
-        ) : (
-          <div className="grid max-h-72 gap-2 overflow-y-auto">
-            {channels.map((channel) => (
-              <label
-                key={channel.id}
-                className="grid grid-cols-[1fr_auto] items-center gap-2 text-xs text-fg-muted"
-              >
-                <span className="truncate">
-                  {channel.isPrivate ? "Private · " : "#"}
-                  {channel.name ?? channel.id}
-                </span>
-                {reachable(channel.id) ? (
-                  <Select
-                    value={draft[channel.id] ?? ASK_ONCE}
-                    disabled={!canManage || saving}
-                    onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
-                  >
-                    <option value={ASK_ONCE}>Ask me</option>
-                    {choices.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.name}
-                      </option>
-                    ))}
-                    {(() => {
-                      // Only ever the current value of a route set before a
-                      // channel could no longer point at a personal workspace.
-                      // Listed so the control shows what it is set to, and
-                      // named so it is obvious why it should change.
-                      const personal = personalRouteTarget(channel.id);
-                      return personal ? (
-                        <option value={personal.id}>{personal.name} · only you can see this</option>
-                      ) : null;
-                    })()}
-                  </Select>
-                ) : (
-                  // Somebody with access this admin does not have pointed this
-                  // channel somewhere. Say so rather than rendering a blank
-                  // control that cannot be saved.
-                  <span className="text-2xs text-fg-subtle">
-                    {loadedRoutes?.[channel.id]?.targetWorkspaceName ?? "another workspace"} · set
-                    by someone else
-                  </span>
-                )}
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
+      {fields}
 
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose}>

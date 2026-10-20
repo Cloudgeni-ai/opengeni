@@ -276,6 +276,7 @@ kube-prometheus-stack:
       - kube_deployment_spec_replicas
       - kube_deployment_status_condition
       - kube_deployment_status_observed_generation
+      - kube_deployment_status_replicas
       - kube_deployment_status_replicas_available
       - kube_deployment_status_replicas_updated
       - kube_horizontalpodautoscaler_labels
@@ -304,6 +305,7 @@ kube-prometheus-stack:
       - kube_pod_container_resource_requests
       - kube_pod_container_status_restarts_total
       - kube_pod_container_status_waiting_reason
+      - kube_pod_deletion_timestamp
       - kube_pod_info
       - kube_pod_labels
       - kube_pod_owner

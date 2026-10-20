@@ -113,6 +113,7 @@ import { connectedMachineComputerAccessError } from "../connected-machine-comput
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
+  controllerHasCacheableDataPlane,
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
@@ -1271,6 +1272,9 @@ export function registerComputerSessionRoutes(
       );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
+        // Addressed where the machine is enrolled, which can be another
+        // workspace its owner allowed it in.
+        controlWorkspaceId: enrollment.workspaceId,
         agentId: device.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
         workspaceRoot: enrollment.workspaceRoot,
@@ -1287,6 +1291,7 @@ export function registerComputerSessionRoutes(
         transactionalFsWriteMachineSupported:
           enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -1295,6 +1300,10 @@ export function registerComputerSessionRoutes(
                 transport: new NatsOpStreamTransport(
                   async () => deps.bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),
@@ -1496,7 +1505,7 @@ export function registerComputerSessionRoutes(
     if (
       placement.placement.kind !== "sandbox_group" ||
       !placement.lease?.instanceId ||
-      !placement.session.resolveExposedPort
+      !controllerHasCacheableDataPlane(placement.session)
     ) {
       return placement;
     }

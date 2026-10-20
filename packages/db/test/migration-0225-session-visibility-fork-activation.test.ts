@@ -630,7 +630,9 @@ describe("migration 0303 session tenancy product activation", () => {
       historyCount: 1,
       turnCount: 0,
       goalCount: 0,
-      mcpServerCount: 0,
+      // Session MCP servers are part of the agent's tools, so the fork keeps
+      // them; goals and turns are the source's own live state.
+      mcpServerCount: 1,
       reasoningEffort: "medium",
       latencyMode: "standard",
       title: "New conversation",
@@ -932,7 +934,6 @@ describe("migration 0303 session tenancy product activation", () => {
         (
           (select count(*) from session_turns row where row.session_id = destination.id) +
           (select count(*) from session_goals row where row.session_id = destination.id) +
-          (select count(*) from session_mcp_servers row where row.session_id = destination.id) +
           (select count(*) from organization_user_resource_grants row
             where row.session_id = destination.id) +
           (select count(*) from session_pins row where row.session_id = destination.id) +

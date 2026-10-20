@@ -1,3 +1,5 @@
+import { ToolDetailsProvider } from "./timeline/tool-details";
+import type { ToolDetails } from "./timeline/tool-presentation";
 import {
   OpenGeniApiContractMismatchError,
   OPENGENI_API_CONTRACT_REVISION,
@@ -66,6 +68,13 @@ export type OpenGeniProviderProps = {
    * Default "Opengeni".
    */
   productName?: string | undefined;
+  /**
+   * How much of each tool call the chat shows. `"full"` (default) shows commands,
+   * arguments, output and diffs. `"plain"` keeps every step visible with its plain
+   * name and status but never shows raw arguments, output or JSON: for products
+   * whose people are not developers.
+   */
+  toolDetails?: ToolDetails | undefined;
   children?: ReactNode;
 };
 
@@ -84,6 +93,7 @@ export function OpenGeniProvider({
   locale,
   messages,
   productName,
+  toolDetails = "full",
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -384,8 +394,10 @@ export function OpenGeniProvider({
     <OpenGeniMessagesProvider locale={locale} messages={messages} productName={productName}>
       <ErrorMessageContext.Provider value={formatError}>
         <OpenGeniContext.Provider value={value}>
-          {children}
-          {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
+          <ToolDetailsProvider value={toolDetails}>
+            {children}
+            {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
+          </ToolDetailsProvider>
         </OpenGeniContext.Provider>
       </ErrorMessageContext.Provider>
     </OpenGeniMessagesProvider>

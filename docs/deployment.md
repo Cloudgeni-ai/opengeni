@@ -1957,6 +1957,11 @@ and accepts its own commit or a normally merged ancestor with successful exact-s
 main CI. For an ancestor, its controller and package source remain separate and
 the signed provenance names both; the run's head SHA is not the package source.
 Select the source-named artifact from the successful canonical publisher run.
+The artifact is uploaded by the run's credential-free `confirm` job once npm serves
+every accepted version. npm processes accepted writes asynchronously, sometimes for
+more than 18 minutes; if `confirm` fails because a version is still invisible after
+its 30-minute window, re-run that failed job. It publishes nothing and completes
+the same run.
 Environment approval and ordinary image/CI/deployment checks remain mandatory.
 Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
 reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
@@ -1982,6 +1987,14 @@ rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
 `workflow_dispatch` candidate/acceptance/publication. Official source ancestry
 is `origin/production`. The `production` pointer already exists; do not
 recreate it and do not force-push.
+
+When first activating workspace default machines and scheduled
+`executionTarget: workspace_default`, replace the API and both worker roles
+without old/new runtime overlap before accepting those settings. Older binaries
+ignore the new placement fields and would use the deployment backend instead.
+Migration 0864 itself supports rolling schema compatibility; that does not make
+mixed-version placement semantics safe. Existing chats and already accepted
+occurrences retain their frozen machine.
 
 Protect `production`: no force-push; merge commits only (disable squash and
 rebase-and-merge); required checks `Admit production PR head` and
@@ -2245,15 +2258,20 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
-Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml` to
-`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>`.
-The publisher uses the existing `public-release` OIDC identity, verifies the tag's
-immutable digest and source label after registry logout, pulls anonymously, and
-runs the installed artifact runtime doctor while rejecting `.unavailable`.
-The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` and
-`canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
-error-tolerant job, not publication gates.
+Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd).
+Its browser controller must match the server revision, so protected main CI
+builds it with the other canary images, pushes
+`ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-<source-sha>`, verifies the
+tag resolves anonymously, and records the digest as `images.desktop` in the
+`canary-images-<source-sha>` receipt. A deployment that takes its images from
+that receipt should set Helm `desktop.imageRef` to
+`ghcr.io/cloudgeni-ai/opengeni-desktop@<images.desktop.digest>` in the same change.
+`.github/workflows/publish-desktop-image.yml` is dispatch-only. It publishes
+`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>` through
+the `public-release` OIDC identity, verifies the tag's immutable digest and
+source label after registry logout, pulls anonymously, and runs the installed
+artifact runtime doctor while rejecting `.unavailable`. Use it to refresh the
+default pin below. The workflow retains publication evidence.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override

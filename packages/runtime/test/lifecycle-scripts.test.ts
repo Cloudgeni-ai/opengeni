@@ -27,6 +27,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     statSync,
     readFileSync,
     readdirSync,
+    utimesSync,
   } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
@@ -128,8 +129,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     execFileSync("git", ["-C", origin, "commit", "-m", "init"], {
       env: gitEnv,
     });
-    // file:// partial clone (--filter=blob:none) needs the origin to allow it.
-    execFileSync("git", ["-C", origin, "config", "uploadpack.allowfilter", "true"]);
     return origin;
   }
 
@@ -362,6 +361,96 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       await refreshGitProviderTokenFiles(session as never, { github: "renewed-provider-token" });
       expect(readFileSync(join(tokenDirectory(home), "git-token"), "utf8")).toBe(
         "renewed-provider-token",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a box that already holds the verified clone program re-runs setup in one command", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-staged-clone-"));
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = "https://github.com/opengeni/staged.git";
+      const inner = hostShellSession(join(root, "home"), {
+        shell: "bash",
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: remote,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const commands: string[] = [];
+      const session = {
+        ...inner,
+        exec: async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          return await inner.exec(args as never);
+        },
+      };
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: remote,
+          ref: "main",
+          mountPath: "repos/test/staged",
+        },
+      ];
+      const runHook = async (token: string) => {
+        commands.length = 0;
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitTokenSeeds: { github: token },
+        });
+        return [...commands];
+      };
+
+      // Fresh box: the launcher reports the program missing, it is staged once
+      // under its content hash, then the same launcher clones.
+      const first = await runHook("first-token");
+      expect(first.length).toBeGreaterThan(2);
+      expect(readFileSync(join(workspace, "repos", "test", "staged", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      const programDirs = readdirSync(join(workspace, ".opengeni")).filter((name) =>
+        name.startsWith("setup-programs-"),
+      );
+      expect(programDirs).toHaveLength(1);
+      const programDir = join(workspace, ".opengeni", programDirs[0]!);
+      const programs = readdirSync(programDir).filter((name) => name.endsWith(".sh"));
+      expect(programs).toHaveLength(1);
+      expect(programs[0]).toMatch(/^[0-9a-f]{64}\.sh$/u);
+      const programFile = join(programDir, programs[0]!);
+      // No secret is written into the reusable program.
+      expect(readFileSync(programFile, "utf8")).not.toContain("first-token");
+
+      // Next turn on the same box: exactly one command, carrying this turn's seed.
+      // A day-old program from an earlier repository set is pruned in passing.
+      const staleProgram = join(programDir, `${"0".repeat(64)}.sh`);
+      writeFileSync(staleProgram, "exit 0\n");
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      utimesSync(staleProgram, twoDaysAgo, twoDaysAgo);
+      const second = await runHook("second-token");
+      expect(second).toHaveLength(1);
+      expect(second[0]).toContain("second-token");
+      expect(existsSync(staleProgram)).toBe(false);
+      expect(existsSync(programFile)).toBe(true);
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "second-token",
+      );
+
+      // A modified program is never executed: it is re-staged and verified again.
+      writeFileSync(programFile, "echo tampered; exit 0\n");
+      const third = await runHook("third-token");
+      expect(third.length).toBeGreaterThan(2);
+      expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "third-token",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1771,7 +1860,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ]);
     const lines = command.split("\n");
     const fetchIndex = lines.findIndex((line) =>
-      line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
+      line.includes('git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"'),
     );
     const guardIndex = lines.findIndex((line) =>
       line.includes(

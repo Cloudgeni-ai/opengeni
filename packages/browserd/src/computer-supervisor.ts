@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   ComputerNativeCommand,
@@ -11,6 +11,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
+import type { UpdateBlocker } from "./update-admission";
 import {
   ComputerInteractionController,
   InteractionControllerError,
@@ -93,6 +94,8 @@ type Runtime = {
   environmentLease: ComputerEnvironmentLease;
   journal: SqliteComputerOperationJournal;
   driver: ComputerSupervisorDriver;
+  /** What the session reports; see pinActionBatches. */
+  capabilities: ComputerSessionCapabilities;
   controller: ComputerInteractionController;
   lifecycle: "active" | "ending";
 };
@@ -205,18 +208,29 @@ export class ComputerSupervisor {
    * restart only drops the controller, which the next request recreates. An
    * isolated virtual seat owns its display and apps, so it still blocks. */
   isIdle(): boolean {
-    return (
-      !this.cleanupUncertain &&
-      this.displaceGate === null &&
-      this.creating.size === 0 &&
-      this.ending.size === 0 &&
-      [...this.sessions.values()].every(
-        (runtime) =>
-          runtime.lifecycle === "active" &&
-          runtime.environmentLease.rfbPort === null &&
-          runtime.controller.isIdle(),
-      )
-    );
+    return this.updateBlockers().length === 0;
+  }
+
+  updateBlockers(): UpdateBlocker[] {
+    const blockers: UpdateBlocker[] = [];
+    if (this.cleanupUncertain) blockers.push({ kind: "computer_cleanup", count: 1 });
+    if (this.displaceGate) blockers.push({ kind: "computer_seat_transfer", count: 1 });
+    for (const resourceId of this.creating.keys())
+      blockers.push({ kind: "computer_creation", resourceId, count: 1 });
+    for (const resourceId of this.ending.keys())
+      blockers.push({ kind: "computer_closing", resourceId, count: 1 });
+    for (const runtime of this.sessions.values()) {
+      const kind =
+        runtime.lifecycle !== "active"
+          ? "computer_session"
+          : runtime.environmentLease.rfbPort !== null
+            ? "computer_virtual_seat"
+            : !runtime.controller.isIdle()
+              ? "computer_action"
+              : null;
+      if (kind) blockers.push({ kind, resourceId: runtime.options.computerSessionId, count: 1 });
+    }
+    return blockers;
   }
 
   /** No session of any lifecycle remains and no work is in flight. */
@@ -241,7 +255,7 @@ export class ComputerSupervisor {
         adapter: runtime.driver.adapterId,
         seatId: runtime.environmentLease.seatId,
         displayId: runtime.environmentLease.displayId,
-        capabilities: runtime.driver.capabilities,
+        capabilities: runtime.capabilities,
       }));
   }
 
@@ -445,6 +459,15 @@ export class ComputerSupervisor {
       "computer-sessions",
       options.computerSessionId,
     );
+    // A session resumed after a restart keeps its journal and batch mode even
+    // when this attempt fails; only a directory this attempt created is removed.
+    const resumed = await lstat(sessionDirectory).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     await chmod(sessionDirectory, 0o700);
     const journal = await SqliteComputerOperationJournal.open({
@@ -472,6 +495,7 @@ export class ComputerSupervisor {
         displayId,
         environment,
       });
+      const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities, resumed);
       let runtime: Runtime | undefined;
       const controllerDriver = driver;
       const controller = journal.withRecoveredRecords(
@@ -503,6 +527,7 @@ export class ComputerSupervisor {
         environmentLease,
         journal,
         driver,
+        capabilities,
         controller,
         lifecycle: "active",
       };
@@ -531,7 +556,7 @@ export class ComputerSupervisor {
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      if (driverClosed && environmentClosed && failures.length === 1) {
+      if (!resumed && driverClosed && environmentClosed && failures.length === 1) {
         try {
           await rm(sessionDirectory, { recursive: true, force: true });
         } catch (cleanupError) {
@@ -557,7 +582,7 @@ export class ComputerSupervisor {
       adapter: runtime.driver.adapterId,
       seatId: runtime.environmentLease.seatId,
       displayId: runtime.environmentLease.displayId,
-      capabilities: runtime.driver.capabilities,
+      capabilities: runtime.capabilities,
       targets: await runtime.driver.listTargets(),
     };
   }
@@ -684,4 +709,42 @@ function boundedPositiveInteger(value: number, label: string): number {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+/**
+ * Whether a session runs a computer_act batch as one operation is fixed for
+ * the session's life, kept beside its operation journal. The two ways send a
+ * batch under different operation ids, so every try of one batch, including
+ * concurrent tries and tries on either side of an agent update, must choose
+ * the same way. An update that adds batch support applies to new sessions. A
+ * session that began with batches and lost support keeps reporting them; its
+ * batches are then refused before anything runs, instead of a retry repeating
+ * actions one by one. A resumed session without a record began before batch
+ * modes were recorded, when every batch ran one action at a time, so it keeps
+ * doing that.
+ */
+async function pinActionBatches(
+  sessionDirectory: string,
+  capabilities: ComputerSessionCapabilities,
+  resumed: boolean,
+): Promise<ComputerSessionCapabilities> {
+  const path = join(sessionDirectory, "action-batches.json");
+  let pinned: boolean;
+  try {
+    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as { actionBatches?: unknown }).actionBatches !== "boolean"
+    )
+      throw new Error("computer session batch mode record is invalid");
+    pinned = (value as { actionBatches: boolean }).actionBatches;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    pinned = !resumed && capabilities.actionBatches === true;
+    const staged = `${path}.${process.pid}.tmp`;
+    await writeFile(staged, JSON.stringify({ actionBatches: pinned }), { mode: 0o600 });
+    await rename(staged, path);
+  }
+  return { ...capabilities, actionBatches: pinned };
 }

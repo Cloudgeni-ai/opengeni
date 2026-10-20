@@ -649,18 +649,29 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     // Stub live box: records execs; its manifest mirrors the agent's default manifest
     // so applyManifestToProvidedSession sees no delta to apply.
     const execCalls: Array<{ cmd: string }> = [];
+    // A fresh box has no staged setup program until a staging command installs it.
+    const installedPrograms = new Set<string>();
+    const runStub = (cmd: string) => {
+      for (const match of cmd.matchAll(/mv -f '[^']+' '([^']+)'/gu))
+        installedPrograms.add(match[1]!);
+      const launched = cmd.match(/opengeni_setup_program='([^']+)'/u);
+      if (launched && !installedPrograms.has(launched[1]!)) {
+        return { exitCode: 86, stdout: "__OPENGENI_SETUP_PROGRAM_MISSING__\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
     const providedSession = {
       state: { manifest: buildManifest(settings, [repoResource], environment) },
       exec: async (args: { cmd: string }) => {
         execCalls.push(args);
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return runStub(args.cmd);
       },
       // The SDK's filesystem/shell/skills capabilities require these at prepare
       // time even when the scripted turn never touches a tool.
       createEditor: () => ({}),
       execCommand: async (args: { cmd: string }) => {
         execCalls.push(args);
-        return { exitCode: 0, stdout: "", stderr: "" };
+        return runStub(args.cmd);
       },
       listDir: async () => [],
       readFile: async () => "",
@@ -683,21 +694,27 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     }
     await result.completed;
 
-    // The clone/seed program is transferred to the PROVIDED box, then executed
-    // exactly once before the turn. Inspect the decoded program, not its transport.
+    // The token-free clone program is transferred to the PROVIDED box once under
+    // its content hash; this turn's token seed rides only the inline launcher.
+    // Inspect the decoded program, not its transport.
     const chunks = execCalls.flatMap(({ cmd }) => {
       const match = cmd.match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
       return match ? [match[1]!] : [];
     });
     expect(chunks.length).toBeGreaterThan(0);
     const cloneProgram = Buffer.from(chunks.join(""), "base64").toString("utf8");
-    const cloneExecs = execCalls.filter((c) =>
-      c.cmd.includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    const launches = execCalls.filter((c) => c.cmd.includes("opengeni_setup_program="));
+    // Missing on the fresh box, then installed and run.
+    expect(launches.length).toBe(2);
+    expect(launches[0]!.cmd).toBe(launches[1]!.cmd);
+    expect(launches[0]!.cmd).toContain("/workspace/.opengeni/setup-programs-");
+    expect(launches[0]!.cmd).toContain("seed-token-e2e");
+    expect(execCalls.some((c) => c.cmd.includes("/tmp/opengeni/repository-setup-payloads/"))).toBe(
+      false,
     );
-    expect(cloneExecs.length).toBe(1);
     expect(cloneProgram).toContain("clone_repository");
     expect(cloneProgram).toContain("OPENGENI_GIT_TOKEN_SEED");
-    expect(cloneProgram).toContain("seed-token-e2e");
+    expect(cloneProgram).not.toContain("seed-token-e2e");
     expect(cloneProgram).toContain("repos/example/repo");
   });
 

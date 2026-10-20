@@ -27,6 +27,8 @@ import {
   parseMcpServers,
   McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
+  computeGatewayConfigured,
+  computeSettingsIssues,
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
@@ -2648,6 +2650,51 @@ describe("backend-gated sandbox required-credential validation", () => {
     );
   });
 
+  test("compute is validated only when selected and needs the gateway and relay", () => {
+    // Not selected: nothing compute-related is required.
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
+    ).not.toThrow();
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "compute" }, () => getSettings())).toThrow(
+      "OPENGENI_COMPUTE_API_URL is required",
+    );
+    const ready = {
+      OPENGENI_SANDBOX_BACKEND: "compute",
+      OPENGENI_COMPUTE_API_URL: "http://compute.test:8080",
+      OPENGENI_COMPUTE_API_KEY: "k",
+      OPENGENI_COMPUTE_LINK_URL: "wss://opengeni.test/v1/compute/agent-link",
+      OPENGENI_SELFHOSTED_RELAY_URL: "wss://relay.opengeni.test",
+      OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    };
+    const settings = withEnv(ready, () => getSettings());
+    expect(computeSettingsIssues(settings)).toEqual([]);
+    expect(computeGatewayConfigured(settings)).toBe(true);
+    expect(settings.computeVcpus).toBe(2);
+    expect(settings.computeMemoryMib).toBe(4096);
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_LINK_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_LINK_URL is required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_SELFHOSTED_RELAY_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_MEMORY_REQUEST_MIB: "8192" }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed");
+    const production = {
+      ...settings,
+      environment: "production" as const,
+      computeLinkUrl: "ws://opengeni.test/v1/compute/agent-link",
+    };
+    expect(
+      computeSettingsIssues(production).some((issue) => issue.includes("must use https")),
+    ).toBe(true);
+    expect(computeSettingsIssues(production).some((issue) => issue.includes("wss:// URL"))).toBe(
+      true,
+    );
+    // Modal stays the default and compute is never required by default.
+    expect(computeGatewayConfigured(withEnv({}, () => getSettings()))).toBe(false);
+  });
+
   test("SANDBOX_REQUIRED_ENV + requiredSandboxEnvForBackend agree", () => {
     expect(requiredSandboxEnvForBackend("modal")).toEqual([
       "OPENGENI_MODAL_APP_NAME",
@@ -2778,7 +2825,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(250_001);
-    expect(settings.sandboxIdleGraceMs).toBe(150_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
   });
 
   test("default rotation lead reserves the larger ordinary capture when drain timeout is shorter", () => {
@@ -2810,8 +2857,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       },
       () => getSettings(),
     );
-    // Derived strictly between the 150s idle grace and the 250.001s lead.
-    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+    // Derived strictly between the 60s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(155_000);
   });
 
   test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
@@ -2874,8 +2921,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         .sandboxIdleCommandContainmentMs,
     ).toBe(2_400_000);
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
-    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "60000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(60000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
     ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
@@ -2901,10 +2948,17 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
     // A derived window that cannot fit disables idle containment instead of
     // failing boot: these idle timeouts boot exactly as before.
+    // A long explicit idle grace leaves no room under these idle timeouts.
     for (const seconds of ["960", "1000"]) {
       expect(
-        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
-          .sandboxIdleCommandContainmentMs,
+        withEnv(
+          {
+            ...modal,
+            OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+            OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds,
+          },
+          () => getSettings(),
+        ).sandboxIdleCommandContainmentMs,
       ).toBeUndefined();
     }
     // Without an explicit idle timeout the hard lifetime governs and 30m fits.
@@ -3074,7 +3128,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       providerIdleTimeoutMs: null,
       rotationLeadMs: null,
     });
-    expect(settings.sandboxIdleGraceMs).toBe(900_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
   });
 

@@ -1,0 +1,32 @@
+[package]
+# Derived from SPACE's archcheck (https://github.com/perplexityai/SPACE,
+# crates/tools/archcheck at c788098f), Copyright 2026 Perplexity AI, Apache-2.0.
+# Changed for Opengeni compute: renamed, standalone dependency versions, and
+# `dir/*` workspace members expanded. See compute/NOTICE.
+name = "compute-archcheck"
+description = "Checks compute's structure rules in ARCHITECTURE.toml against a ratcheting baseline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "archcheck"
+path = "src/main.rs"
+
+[dependencies]
+globset = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

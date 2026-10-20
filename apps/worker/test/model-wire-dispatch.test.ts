@@ -219,7 +219,7 @@ describe("attempt-local initial wire dispatch clock", () => {
     ]);
   });
 
-  test("production wiring is synchronous, generic-only and bound in both runtime branches", () => {
+  test("production wiring is synchronous, shared by native and generic routes, and bound in both runtime branches", () => {
     const worker = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
     const conditional = worker.nodes.find(
       (node) =>
@@ -235,10 +235,8 @@ describe("attempt-local initial wire dispatch clock", () => {
             child.key.name === "onModelTransportDispatched",
         ),
     );
-    expect(conditional).toBeDefined();
-    if (conditional?.type !== "ConditionalExpression")
-      throw new Error("Missing generic dispatch binding");
-    const diagnostic = nodes(conditional.consequent).find(
+    expect(conditional).toBeUndefined();
+    const diagnostic = worker.nodes.find(
       (node) =>
         node.type === "Property" &&
         node.key.type === "Identifier" &&

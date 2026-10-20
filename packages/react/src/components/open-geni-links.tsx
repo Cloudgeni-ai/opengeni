@@ -24,6 +24,50 @@ export type OpenGeniLinkResolver = (
 
 const OpenGeniLinkContext = createContext<OpenGeniLinkResolver | null>(null);
 
+/**
+ * One ordinary link in an agent's Markdown that the host may draw itself:
+ * its own scheme (`myapp:order/42`), an in-app path, or a web URL.
+ */
+export type OpenGeniHostLink = {
+  /** The destination exactly as the agent wrote it. It is not sanitized: check it before use. */
+  href: string;
+  /** The rendered link text. */
+  children: ReactNode;
+  /**
+   * The link is the only content of its paragraph or list item, so the host
+   * can draw it as a block (a card or preview) instead of inline text.
+   */
+  standalone: boolean;
+};
+
+/**
+ * Draw a host-owned link in agent Markdown. Return `undefined` to keep the
+ * default rendering (web links open in a new tab; other schemes are shown as
+ * unavailable). Opengeni object links (`artifact:`, `sandbox:`) never reach
+ * it; use {@link OpenGeniLinkResolver} for those.
+ */
+export type OpenGeniLinkRenderer = (link: OpenGeniHostLink) => ReactNode | undefined;
+
+const OpenGeniLinkRendererContext = createContext<OpenGeniLinkRenderer | null>(null);
+
+/** First renderer that draws a link wins. */
+export function chainLinkRenderers(
+  ...renderers: ReadonlyArray<OpenGeniLinkRenderer | null | undefined>
+): OpenGeniLinkRenderer | null {
+  const active = renderers.filter((renderer): renderer is OpenGeniLinkRenderer =>
+    Boolean(renderer),
+  );
+  if (active.length === 0) return null;
+  if (active.length === 1) return active[0]!;
+  return (link) => {
+    for (const renderer of active) {
+      const rendered = renderer(link);
+      if (rendered !== undefined) return rendered;
+    }
+    return undefined;
+  };
+}
+
 /** First resolver that handles a target wins. */
 export function chainLinkResolvers(
   ...resolvers: ReadonlyArray<OpenGeniLinkResolver | null | undefined>
@@ -46,22 +90,42 @@ export function chainLinkResolvers(
  * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable artifacts,
  * Sites) for every {@link Markdown} body below. An inner provider is asked
  * before an outer one, so a host can override a single kind and keep defaults.
+ * `renderLink` draws the host's own links (its scheme, in-app paths, web
+ * URLs) in the same bodies, inner provider first.
  */
 export function OpenGeniLinkProvider({
   resolveLink,
+  renderLink,
   children,
 }: {
-  resolveLink: OpenGeniLinkResolver | null | undefined;
+  resolveLink?: OpenGeniLinkResolver | null | undefined;
+  renderLink?: OpenGeniLinkRenderer | null | undefined;
   children: ReactNode;
 }) {
   const parent = useContext(OpenGeniLinkContext);
+  const parentRenderer = useContext(OpenGeniLinkRendererContext);
   const value = useMemo(() => chainLinkResolvers(resolveLink, parent), [resolveLink, parent]);
-  return <OpenGeniLinkContext.Provider value={value}>{children}</OpenGeniLinkContext.Provider>;
+  const renderer = useMemo(
+    () => chainLinkRenderers(renderLink, parentRenderer),
+    [renderLink, parentRenderer],
+  );
+  return (
+    <OpenGeniLinkContext.Provider value={value}>
+      <OpenGeniLinkRendererContext.Provider value={renderer}>
+        {children}
+      </OpenGeniLinkRendererContext.Provider>
+    </OpenGeniLinkContext.Provider>
+  );
 }
 
 /** The effective resolver from the nearest {@link OpenGeniLinkProvider}. */
 export function useOpenGeniLinkResolver(): OpenGeniLinkResolver | null {
   return useContext(OpenGeniLinkContext);
+}
+
+/** The effective host link renderer from the nearest {@link OpenGeniLinkProvider}. */
+export function useOpenGeniLinkRenderer(): OpenGeniLinkRenderer | null {
+  return useContext(OpenGeniLinkRendererContext);
 }
 
 // Every sandbox read the proxy forwards is bounded by the API's own maximum.

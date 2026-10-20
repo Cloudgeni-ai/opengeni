@@ -94,7 +94,11 @@ export function useThisComputer(
     };
   }, [host, refresh]);
 
-  const pollMs = options.pollMs;
+  // A service outlives this desktop process; its state changes without the
+  // hosted-child notifications (including pause/resume from another client).
+  const pollMs =
+    options.pollMs ??
+    (status?.management === "service" && status.state !== "not_connected" ? 5_000 : undefined);
   useEffect(() => {
     if (!host || !pollMs) return;
     const timer = window.setInterval(refresh, pollMs);

@@ -571,7 +571,17 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         try {
           message = await this.request<GmailMessage>("get_message", url, {}, true);
         } catch (error) {
-          if (error instanceof GmailRestProviderError && error.status === 404) return null;
+          // Samples only enrich the review card. A message Gmail cannot read for
+          // the card (missing, malformed id, rate limit, outage, transport) is
+          // left out, and the action itself reports any real problem when it
+          // runs. Authentication and access refusals still fail closed: the
+          // grant cannot act on this message either.
+          if (
+            error instanceof GmailRestProviderError &&
+            error.status !== 401 &&
+            error.status !== 403
+          )
+            return null;
           throw error;
         }
         if (message.id !== id)
@@ -1741,6 +1751,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         );
       throw new GmailRestProviderError(
         `Gmail returned an unreadable response (${response.status}): ${safeErrorMessage(error)}`,
+        // Keep a refusal's status even when its body is not JSON, so 401/403
+        // are still recognized as authentication and access refusals.
+        response.ok ? undefined : response.status,
       );
     });
     if (!response.ok) {

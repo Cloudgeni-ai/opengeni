@@ -209,6 +209,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fan
 export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
+  "file_private_to_another(uuid, uuid, uuid)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
 export const ARTIFACT_PIN_RUNTIME_ROUTINES = [
@@ -221,6 +222,8 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
   "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[])",
+  "read_slack_bot_workspace_access(uuid, uuid, uuid)",
   "read_organization_slack_bot_access(uuid, uuid, uuid)",
   "list_organization_slack_bots(uuid, uuid)",
   "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
@@ -879,6 +882,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
@@ -1470,6 +1474,7 @@ export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",
@@ -1543,6 +1548,9 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
+  "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+  "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
   "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
   "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
@@ -1574,6 +1582,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
   "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
@@ -5636,6 +5645,19 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
+    const enrollmentInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
+    );
+    if (
+      enrollmentInventory &&
+      (!enrollmentInventory.execute ||
+        enrollmentInventory.publicExecute ||
+        !enrollmentInventory.securityDefiner ||
+        enrollmentInventory.owner !== capability.owner ||
+        !enrollmentInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Compute enrollment inventory has unsafe owner, ACL or runtime privileges");
+    }
   }
   if (organizationUsageCapability) {
     const capability = organizationUsageCapability;
@@ -5850,6 +5872,8 @@ export function evaluateRuntimeDatabasePosture(
         !capability ||
         capability.owner !== owner ||
         !capability.securityDefiner ||
+        !capability.execute ||
+        capability.publicExecute ||
         !capability.configuration?.includes("search_path=pg_catalog")
       ) {
         violations.push(`maintenance claim predicate ${name} is missing or unsafe`);
