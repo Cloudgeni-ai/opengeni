@@ -37,9 +37,9 @@ export type SessionRealtimeClientLike = CodexRealtimeControllerClient & {
 };
 
 /**
- * Codex Live and Azure live voice negotiate WebRTC; every other voice model is
- * reached over one provider WebSocket. `gateway` and `xai-subscription` are
- * deprecated names that are no longer returned.
+ * Stable public transport kinds. Gateway and SuperGrok keep their existing
+ * names even though their implementation shares the provider WebSocket engine.
+ * New WebSocket model families use `websocket`.
  */
 export type SessionRealtimeTransportKind =
   | "codex"
@@ -71,6 +71,9 @@ export function sessionRealtimeTransportKind(
 ): SessionRealtimeTransportKind {
   if (model === "opengeni-azure/gpt-live-1") return "azure-live";
   if (model === "gpt-live-1-boulder-alpha") return "codex";
+  if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-subscription";
+  if (model.startsWith("opengeni-gateway/") || model.startsWith("workspace-gateway/"))
+    return "gateway";
   return "websocket";
 }
 

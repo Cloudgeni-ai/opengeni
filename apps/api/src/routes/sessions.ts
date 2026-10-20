@@ -2050,9 +2050,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ),
       );
       connectionCompleted = true;
-      // Billing already admitted this call; settling minutes observed so far is
-      // idempotent and retried on every heartbeat, so it does not delay the call.
-      void settleRealtimeVoice({
+      // Finish the first-minute settlement before returning the usable connection.
+      // A heartbeat may never arrive; do not detach this debit from the request.
+      await settleRealtimeVoice({
         grant,
         attribution: creditDebitAttributionForGrant(grant),
         workspaceId,
