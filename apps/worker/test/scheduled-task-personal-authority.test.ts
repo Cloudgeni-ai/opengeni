@@ -1,5 +1,6 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
@@ -1914,10 +1915,8 @@ describe("scheduled task personal MCP authority", () => {
       // These learning-scope repairs rewrite routines installed by withheld
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0813_preserve_accepted_learning_scope.sql'),
-        ('0819_explicit_workspace_learning_destination.sql'),
-        ('0824_explicit_learning_destination_symmetry.sql')`;
+      for (const name of knowledgeActorMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // 0832 also extends the producer fence (generated default tool policy).
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0832_schedule_defaults_and_turn_notifications.sql')`;
