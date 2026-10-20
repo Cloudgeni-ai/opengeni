@@ -30,6 +30,9 @@
 //! Every guest's name server is its gateway, where the host answers inside
 //! the namespace ([`dns`]): names the host lists, with their addresses, and
 //! the rest through public name servers, never through the host's own.
+//! A query a guest sends to a name server it may not reach, such as a
+//! private one an older host named before guests were told their gateway,
+//! is answered by that same name server instead of being refused.
 //!
 //! Setting up a namespace takes two `ip` runs and one `nft` run, a few
 //! milliseconds each, when a sandbox is created; when the agent restarts,
@@ -292,17 +295,30 @@ table inet {HOST_TABLE} {{
     /// any rate limit, so a guest learns at once even when it probes many
     /// blocked addresses; everything else gets ICMP admin-prohibited. The
     /// guest may reach the namespace itself only for its name server.
+    ///
+    /// A query to port 53 of any address the guest may not reach goes to
+    /// its name server instead, which answers as the address would have:
+    /// a guest that kept a private name server from an older host, or an
+    /// image that names one, still resolves, and learns only what its own
+    /// name server tells it. Queries to name servers it may reach, public
+    /// ones or a `reach` entry's, go where they were sent.
     fn sandbox_rules(&self, mtu: u32, allowed: &Allowed) -> String {
         let blocked = self.blocked().join(", ");
         let reach = allowed.accept_rules(&format!(
             "iifname \"{TAP}\" oifname \"{UPLINK}\" ip saddr {GUEST_IP}"
         ));
+        let reached = allowed.accept_rules(&format!("iifname \"{TAP}\" ip saddr {GUEST_IP}"));
         let dns = dns::PORT;
         let mss = mtu.saturating_sub(40);
         format!(
             "table inet {SANDBOX_TABLE}
 delete table inet {SANDBOX_TABLE}
 table inet {SANDBOX_TABLE} {{
+    chain prerouting {{
+        type nat hook prerouting priority dstnat; policy accept;
+{reached}        iifname \"{TAP}\" ip saddr {GUEST_IP} ip daddr != {GATEWAY_IP} ip daddr {{ {blocked} }} udp dport {dns} dnat ip to {GATEWAY_IP}
+        iifname \"{TAP}\" ip saddr {GUEST_IP} ip daddr != {GATEWAY_IP} ip daddr {{ {blocked} }} tcp dport {dns} dnat ip to {GATEWAY_IP}
+    }}
     chain input {{
         type filter hook input priority filter; policy drop;
         iifname \"lo\" accept

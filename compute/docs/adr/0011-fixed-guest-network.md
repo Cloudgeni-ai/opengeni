@@ -1,7 +1,8 @@
 # 11. The same guest network everywhere, firewalled per sandbox
 
 Status: Accepted, 2026-10-16; amended 2026-10-20 (listed destinations and
-the sandboxes' name server replace the `trusted` switch)
+the sandboxes' name server replace the `trusted` switch; queries to
+unreachable name servers are answered by the sandbox's own)
 
 ## Context
 
@@ -33,6 +34,13 @@ Sandboxes run untrusted code next to each other and next to the host.
   resolved when the agent starts, so what guests are told and what the
   firewalls open always agree; a name that moves takes effect at the next
   agent start, which leaves sandboxes running (ADR 9).
+- A query to port 53 of an address the guest may not reach is sent to its
+  own name server, which answers in that address's place. A guest booted
+  under an older host that named a private name server (an overlay's, a
+  cloud's), or an image that names one, keeps resolving after it is
+  restored behind these rules, and learns no more than any other guest.
+  Queries to name servers it may reach, public ones or a listed
+  destination, go where they were sent.
 - The rules are enforced twice: inside the namespace, which the VMM joins
   without the privilege to change it, and again on the host.
 - After a restore, when the guest runs a notice handler on the configured
@@ -46,9 +54,9 @@ Sandboxes run untrusted code next to each other and next to the host.
   repaired after restore. Open connections do not survive. Its name server
   is the same address everywhere, so a guest restored from a template, after
   a move or on a host with other upstream name servers still resolves.
-- A guest booted under an older host that named other name servers keeps
-  them until it next boots; if they are private, it resolves nothing until
-  then.
+- A guest booted under an older host keeps the name servers it was told
+  until it next boots: public ones it asks directly, private ones are
+  answered by its own name server, so it resolves either way.
 - Guest ports relay bytes and add no identity: every sandbox's forwarded
   connections reach their upstream from the host's address. The upstream
   authenticates each one by a credential only that sandbox holds, never by
