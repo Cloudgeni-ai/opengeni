@@ -496,7 +496,7 @@ function buildScheduledTaskDetailMcp(
           task.agentConfig.slackBotConnectionId && task.agentConfig.slackBotChannelId,
         ),
         setup:
-          "Use the available Opengeni bot tools with the requested Slack workspace and channel. Saved destinations are defaults for older tasks. Personal Slack tools send as the connected person and must not substitute for a requested bot.",
+          "Use the available workspace Slack bot tools with the requested Slack workspace and channel. Saved destinations are defaults for older tasks. Personal Slack tools send as the connected person and must not substitute for a requested bot.",
       },
     },
     detailProjection: {

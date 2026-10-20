@@ -136,7 +136,7 @@ export const PROVIDER_RATE_LIMIT_DEFAULT_BACKOFF_MS = 15 * 60_000;
 function incompleteInventory(): VaultProviderError {
   return new VaultProviderError(
     "provider_inventory_incomplete",
-    `This vault has more than ${VAULT_LIMITS.itemsPerVault} items, more than Opengeni mirrors. The previous inventory was kept.`,
+    `This vault has more than ${VAULT_LIMITS.itemsPerVault} items, more than can be mirrored. The previous inventory was kept.`,
   );
 }
 
@@ -144,7 +144,7 @@ function oversizedItem(): VaultProviderError {
   // Never name the item: provider names are untrusted and may be sensitive.
   return new VaultProviderError(
     "provider_inventory_incomplete",
-    `An item in this vault has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors. The previous inventory was kept.`,
+    `An item in this vault has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than can be mirrored. The previous inventory was kept.`,
   );
 }
 
@@ -152,8 +152,8 @@ function unprovenInventory(listing: "vaults" | "items"): VaultProviderError {
   return new VaultProviderError(
     "provider_inventory_incomplete",
     listing === "items"
-      ? "The provider listed this vault in several pages without a snapshot, so Opengeni cannot tell which items were removed. The previous inventory was kept."
-      : "The provider listed its vaults in several pages without a snapshot and this vault was not among them, so Opengeni cannot confirm it was removed.",
+      ? "The provider listed this vault in several pages without a snapshot, so it cannot be told which items were removed. The previous inventory was kept."
+      : "The provider listed its vaults in several pages without a snapshot and this vault was not among them, so its removal cannot be confirmed.",
   );
 }
 

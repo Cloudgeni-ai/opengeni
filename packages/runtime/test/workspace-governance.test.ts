@@ -190,7 +190,7 @@ describe("exact-attempt workspace governance prompt", () => {
     expect(governance).not.toContain("preference_registry_get");
     expect(governance).not.toContain("lane=preference");
     expect(governance).not.toContain("Skill snapshot evidence");
-    expect(governance).not.toContain("opengeni-skills");
+    expect(governance).not.toContain("skill-management");
   });
 
   test("equivalent authority stays byte-identical across accepted attempts", () => {

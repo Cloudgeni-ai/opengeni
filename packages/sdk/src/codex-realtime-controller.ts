@@ -148,7 +148,7 @@ export function codexRealtimeRefusal(error: unknown): CodexRealtimeRefusal | nul
     message:
       message ??
       (error.code === "insufficient_credits"
-        ? "Live voice needs Opengeni credits. Add credits to continue."
+        ? "Live voice needs credits. Add credits to continue."
         : "Live voice is unavailable right now."),
   };
 }

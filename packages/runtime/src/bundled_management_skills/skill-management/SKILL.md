@@ -1,5 +1,5 @@
 ---
-name: opengeni-skills
+name: skill-management
 description: Find, install, create, edit, and permanently remove Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
 ---
 

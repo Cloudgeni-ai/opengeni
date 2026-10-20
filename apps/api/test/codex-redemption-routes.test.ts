@@ -982,7 +982,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
       },
     });

@@ -173,7 +173,7 @@ export function refuseProviderOperation(
   operation: Extract<ProviderWriteOperation, "deleteItem" | "restoreItem" | "restoreFieldHistory">,
 ): never {
   const messages = {
-    deleteItem: `Opengeni never permanently deletes items in ${vault.name}. Archive the item, or delete it in the provider itself.`,
+    deleteItem: `Items in ${vault.name} are never permanently deleted from here. Archive the item, or delete it in the provider itself.`,
     restoreItem: `Items archived in ${vault.name} are restored in the provider itself; the restored item appears after the next sync.`,
     restoreFieldHistory: `${vault.name} keeps field history in the provider; restore an earlier value there.`,
   } as const;
@@ -210,11 +210,11 @@ function planFieldWrites(
       return refuseProviderOperation(vault, "restoreFieldHistory");
     }
     if (input.fileBase64 !== undefined || kind === "file" || current?.kind === "file") {
-      throw new VaultError(
-        "provider_unavailable",
-        "files in connected vaults are read-only in Opengeni",
-        { field: input.name, vaultId: vault.id, operation: "writeFiles" },
-      );
+      throw new VaultError("provider_unavailable", "files in connected vaults are read-only here", {
+        field: input.name,
+        vaultId: vault.id,
+        operation: "writeFiles",
+      });
     }
     const totp = kind === "totp" || current?.kind === "totp";
     if (input.remove) {
@@ -391,7 +391,7 @@ export async function writeProviderVaultItemOutcome(
   assertProviderVaultWritable(vault);
   const type = change.type ?? existing?.type ?? "login";
   if (type === "passkey") {
-    throw new VaultError("vault_permission_denied", "passkeys live only in Opengeni vaults");
+    throw new VaultError("vault_permission_denied", "passkeys live only in workspace vaults");
   }
   const provider = await providerFor(deps, vault);
   const operations = effectiveProviderOperations(vault, provider);
@@ -460,7 +460,7 @@ export function savedNotListedError(
 ): VaultError {
   return new VaultError(
     "provider_inventory_incomplete",
-    `Saved ${itemName} in ${vault.name}, but Opengeni could not list it yet. Do not save it again: it appears after the next successful sync.`,
+    `Saved ${itemName} in ${vault.name}, but it could not be listed yet. Do not save it again: it appears after the next successful sync.`,
     { saved: true, vaultId: outcome.vaultId, itemName, sync: outcome.sync },
   );
 }
@@ -506,12 +506,12 @@ export async function assertProviderVaultAccepts(
 ): Promise<void> {
   assertProviderVaultWritable(vault);
   if (item.type === "passkey") {
-    throw new VaultError("vault_permission_denied", "passkeys live only in Opengeni vaults");
+    throw new VaultError("vault_permission_denied", "passkeys live only in workspace vaults");
   }
   if (item.fields.some((field) => field.kind === "file")) {
     throw new VaultError(
       "provider_unavailable",
-      "files in connected vaults are read-only in Opengeni; copy the item into an Opengeni vault instead",
+      "files in connected vaults are read-only here; copy the item into a workspace vault instead",
       { vaultId: vault.id, operation: "writeFiles" },
     );
   }

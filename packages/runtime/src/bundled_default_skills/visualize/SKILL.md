@@ -1,5 +1,5 @@
 ---
-name: opengeni-visualize
+name: visualize
 description: "Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore 'what happens when' or 'what changes', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."
 ---
 
@@ -23,7 +23,7 @@ Reload this Skill before creating or updating an inline visualization after comp
 
 - Write the visualization directly into your reply in an `opengeni-html` fenced code block. The timeline retains and renders this HTML; no sandbox file or upload is required.
 - Ordinary `html` code blocks remain source code. Use the dedicated fence for visuals rendered in chat, including static galleries and diagrams.
-- For workspace tools, include `<script src="/__opengeni/site-tools/client.js"></script>` before your own scripts, then call `createOpenGeniSiteClient()`. Discover exact tool names and schemas before authoring calls. This uses the existing viewer permissions and approval flow. Never put credentials, workspace ids, or deployment URLs in the fragment. Use `opengeni-sites` for a saved, reusable page or app.
+- For workspace tools, include `<script src="/__opengeni/site-tools/client.js"></script>` before your own scripts, then call `createOpenGeniSiteClient()`. Discover exact tool names and schemas before authoring calls. This uses the existing viewer permissions and approval flow. Never put credentials, workspace ids, or deployment URLs in the fragment. Use `sites` for a saved, reusable page or app.
 - Build the visual in the conversation. Use the open project when the user asks for a site, app page, component, or change to existing project files.
 - Do not create a Site or publish a file merely to show a self-contained visualization.
 
@@ -46,7 +46,7 @@ Call `$catalog({ refresh: true })` on a Refresh action; without `refresh`, the
 client may reuse its snapshot. Render loading and errors, and disable a button
 while its request is in flight. Never invent `listTools()` or `tools.catalog()`.
 For ordinary REST SDK operations use `site.client` and `site.workspaceId`; read
-`opengeni-sites` for those workflows and package types. No real workspace id or
+`sites` for those workflows and package types. No real workspace id or
 API endpoint is needed in authored HTML.
 
 Read-only data can load when the visual opens. Run operations that change data
@@ -57,10 +57,10 @@ plain JSON. Close the client on page exit.
 
 - Write only an HTML fragment: no `<!doctype>`, `<html>`, `<head>`, or `<body>`.
 - Write literal markup: use `<div class="card">Hi</div>` plus a real newline, never `<div class=\"card\">Hi</div>\n`. Never embed the fragment in an inline Python, JavaScript, or shell string. Read it back; rewrite literal `\"` or `\n`.
-- Keep CSS and JavaScript in the fragment only when base classes are insufficient. Use version-pinned libraries when useful. Network requests are allowed; handle loading and failures. Use the Opengeni client for authenticated workspace tools instead of copying credentials or calling provider APIs directly.
+- Keep CSS and JavaScript in the fragment only when base classes are insufficient. Use version-pinned libraries when useful. Network requests are allowed; handle loading and failures. Use the site-tools client for authenticated workspace tools instead of copying credentials or calling provider APIs directly.
 - Give the fragment root a unique ID and select it with `document.getElementById(...)`. Never derive the root from `document.currentScript`; scripts may sit outside the root.
 - Keep visualizations under 1 MB. Aggregate, bin, downsample, reduce precision, or drop unused fields from large inline datasets.
-- Do not open a browser or run a separate validation pass by default. Validate when the user explicitly asks or the Maps guidance below requires it. For validation, check out this skill and wrap a temporary copy with assets/base.css in a style tag and assets/helpers.html after the fragment. These are the same styles and helpers supplied by chat. Inspect it with the browser tools; the final visualization still belongs directly in the reply. For tool-using previews, follow the existing Codemode host setup in opengeni-sites when available.
+- Do not open a browser or run a separate validation pass by default. Validate when the user explicitly asks or the Maps guidance below requires it. For validation, check out this skill and wrap a temporary copy with assets/base.css in a style tag and assets/helpers.html after the fragment. These are the same styles and helpers supplied by chat. Inspect it with the browser tools; the final visualization still belongs directly in the reply. For tool-using previews, follow the existing Codemode host setup in sites when available.
 
 ### Content and response
 
@@ -116,7 +116,7 @@ and request a fresh URL when retrying. Close the client on page exit.
 
 Keep durable file IDs in the fragment, not signed URLs from an earlier tool call:
 those expire. Use the exact File ID returned by a tool; do not guess one from an
-arbitrary artifact. Generated images in Opengeni have a backing File with the
+arbitrary artifact. Generated images have a backing File with the
 same ID. Public image URLs can be used directly.
 
 This workflow needs no package installation, SDK-source inspection, shell commands,
@@ -131,8 +131,8 @@ this workflow, include the Files tool identity in their requested tools.
 ## Exporting an existing visualization
 
 - Keep the reply fragment as the editable inline source. When the user asks to save or export it, write a standalone HTML document in the sandbox, include assets/base.css and assets/helpers.html from this skill plus the fragment, and publish the exact file with sandbox_file_publish.
-- A downloaded HTML file has no Opengeni tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
-- When the user asks to publish or host an existing visualization, use opengeni-sites. A Site can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
+- A downloaded HTML file has no workspace tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
+- When the user asks to publish or host an existing visualization, use sites. A Site can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
 - For a general website request, build a responsive Site directly rather than applying the inline visualization workflow.
 - Do not claim an export or Site was published before its tool confirms success.
 

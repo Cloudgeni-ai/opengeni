@@ -198,7 +198,7 @@ export async function runKeeperOperation<T>(input: {
     onDecryptionError: () => {
       throw new VaultProviderError(
         "provider_inventory_incomplete",
-        "Keeper returned a folder Opengeni could not decrypt",
+        "Keeper returned a folder that could not be decrypted",
       );
     },
   };
@@ -246,7 +246,7 @@ export function createKeeperVaultProvider(
     } catch {
       throw new VaultProviderError(
         "provider_unavailable",
-        "Opengeni could not save the updated Keeper configuration",
+        "The updated Keeper configuration could not be saved",
       );
     }
     persisted = next;
@@ -338,7 +338,7 @@ export function createKeeperVaultProvider(
   function incomplete(): never {
     throw new VaultProviderError(
       "provider_inventory_incomplete",
-      "Keeper returned records Opengeni could not decrypt; the listing is incomplete",
+      "Keeper returned records that could not be decrypted; the listing is incomplete",
     );
   }
 
@@ -379,7 +379,7 @@ export function createKeeperVaultProvider(
       if (keeper.console.skippedSomething) {
         throw new VaultProviderError(
           "provider_unavailable",
-          "Opengeni could not decrypt this Keeper record",
+          "This Keeper record could not be decrypted",
         );
       }
       throw new VaultProviderError("provider_not_found", "No such Keeper record");
@@ -416,7 +416,7 @@ export function createKeeperVaultProvider(
     if (size === null || size > limit) {
       throw new VaultProviderError(
         "provider_unavailable",
-        `"${field.name}" is larger than Opengeni reads from Keeper`,
+        `"${field.name}" is larger than can be read from Keeper`,
       );
     }
     if (!file.url)
@@ -432,7 +432,7 @@ export function createKeeperVaultProvider(
     if (plain.byteLength > limit) {
       throw new VaultProviderError(
         "provider_unavailable",
-        `"${field.name}" is larger than Opengeni reads from Keeper`,
+        `"${field.name}" is larger than can be read from Keeper`,
       );
     }
     return new Uint8Array(plain);
@@ -504,7 +504,7 @@ export function createKeeperVaultProvider(
       if (metas.length > VAULT_LIMITS.itemsPerVault) {
         throw new VaultProviderError(
           "provider_inventory_incomplete",
-          "The Keeper shared folder has more records than Opengeni mirrors at once",
+          "The Keeper shared folder has more records than can be mirrored at once",
         );
       }
       for (const meta of metas) assertMirrorable(meta);
@@ -675,7 +675,7 @@ function assertMirrorable(meta: ProviderItemMeta): void {
   ) {
     throw new VaultProviderError(
       "provider_inventory_incomplete",
-      `A Keeper record has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors`,
+      `A Keeper record has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than can be mirrored`,
     );
   }
 }

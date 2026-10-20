@@ -125,7 +125,7 @@ export class OnePasswordQuota {
     if (waitMs > 0) {
       throw new VaultProviderError(
         "provider_rate_limited",
-        `Opengeni paused 1Password calls to stay inside the ${this.planTier} plan quota`,
+        `1Password calls are paused to stay inside the ${this.planTier} plan quota`,
         waitMs,
       );
     }

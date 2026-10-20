@@ -208,7 +208,7 @@ export function readableToolError(text: string): string {
     value
       .trim()
       .replace(/^An error occurred while running the tool\. Please try again\.\s*(Error:\s*)?/, "")
-      .replace(/^[A-Za-z][\w.-]{0,40} API \d{3}:\s*/, "");
+      .replace(/^(?:[A-Za-z][\w.-]{0,40} )?API \d{3}:\s*/, "");
   let message = stripTransport(text);
   const parsed = tryParseJson(message);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {

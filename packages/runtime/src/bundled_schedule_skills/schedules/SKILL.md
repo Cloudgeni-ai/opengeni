@@ -1,6 +1,6 @@
 ---
-name: opengeni-schedules
-description: Create a schedule, recurring task, reminder, or monitor in Opengeni. Read this before turning a user's request into scheduled work, including Create with Opengeni from Schedules. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
+name: schedules
+description: Create a schedule, recurring task, reminder, or monitor. Read this before turning a user's request into scheduled work, including a create request from the Schedules page. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
 ---
 
 # Create a schedule
@@ -44,7 +44,7 @@ switch computers.
   `capability_catalog_search` and the available tool discovery to find the
   capability and exact operations. Follow returned connection/setup and approval
   requirements. Do not claim that discovery means the integration is ready.
-- For posting as the Opengeni Slack bot, verify the available bot and channel
+- For posting as the workspace Slack bot, verify the available bot and channel
   through its tools. Record the exact Slack workspace and channel in the task
   instructions; use an explicit connection ID when multiple bots are available.
   Scheduled and interactive work use the same bot capability. No separate

@@ -4259,7 +4259,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "unsupported",
         `these files total ${formatMegabytes(totalBytes)}; without file access this Chrome can ` +
           `receive at most ${formatMegabytes(ATTACHED_TRANSFER_UPLOAD_MAX_BYTES)} per upload. ` +
-          'The person can turn on "Allow access to file URLs" for the Opengeni extension in ' +
+          'The person can turn on "Allow access to file URLs" for the browser extension in ' +
           "chrome://extensions to upload larger files",
       );
     }

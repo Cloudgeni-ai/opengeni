@@ -1853,7 +1853,7 @@ export async function assertWorkspaceModelPolicyAllows(
     throw new HTTPException(422, {
       message:
         verdict.reason === "credits"
-          ? `model "${canonicalModel}" uses Opengeni credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on`
+          ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
           : verdict.reason === "provider"
             ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
             : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
@@ -5241,7 +5241,7 @@ export async function updateSessionToolPolicy(
           );
           if (widenedFirstPartyTool) {
             throw new HTTPException(403, {
-              message: `session Opengeni tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
+              message: `session first-party tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
             });
           }
           nextFirstPartyMcpTools = explicitRequestedFirstPartyTools!;
@@ -5378,7 +5378,7 @@ export async function updateSessionToolPolicy(
         );
         if (widenedFirstPartyTool) {
           throw new HTTPException(403, {
-            message: `an agent may only narrow its session Opengeni tools: ${widenedFirstPartyTool}`,
+            message: `an agent may only narrow its session first-party tools: ${widenedFirstPartyTool}`,
           });
         }
       }

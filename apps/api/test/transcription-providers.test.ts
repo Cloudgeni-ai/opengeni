@@ -371,12 +371,12 @@ describe("transcription providers", () => {
         billing: {
           admit: async () => {
             admits++;
-            // Opengeni credits are turned off in this workspace.
+            // Credits are turned off in this workspace.
             throw new TranscriptionServiceError({
               code: "policy_blocked",
               status: 403,
               fallbackSafe: true,
-              message: "Opengeni credits are turned off in this workspace.",
+              message: "Credits are turned off in this workspace.",
             });
           },
           settle: async () => {

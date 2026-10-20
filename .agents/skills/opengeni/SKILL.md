@@ -444,7 +444,7 @@ placement; missing or unavailable selected machines never silently fall back.
 See `docs/connected-machines.md` for resolution and replay boundaries.
 
 The stock Schedules chat shortcut sends the request and time zone. Its setup
-procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+procedure lives in `packages/runtime/src/bundled_schedule_skills/schedules/SKILL.md`,
 selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:

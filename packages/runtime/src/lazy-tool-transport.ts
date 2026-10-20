@@ -870,7 +870,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
     const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
     if (SEARCH_MARKER_KEY in providerData) {
-      throw new Error("Provider function call collided with Opengeni lazy-search metadata");
+      throw new Error("Provider function call collided with lazy-search metadata");
     }
     return [
       {
@@ -897,7 +897,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (DISPATCH_MARKER_KEY in providerData) {
-    throw new Error("Provider function call collided with Opengeni lazy-dispatch metadata");
+    throw new Error("Provider function call collided with lazy-dispatch metadata");
   }
   return [
     {

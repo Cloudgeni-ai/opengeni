@@ -15,7 +15,7 @@ and a `hint`. Fix the reference and retry the same action.
 | `no_primary_field` | The item has no default field (passkeys). Name the field: `{{secret:Item/field}}`. |
 | `provider_unavailable` | The connected password manager or vault store is unreachable. Retry once shortly, continue other work, and report it if it persists. |
 | `provider_rate_limited` | The password manager's quota is spent. Do not loop; wait until the limit clears, reuse references within one call, and continue other work. |
-| `provider_auth_expired` | The password-manager connection needs reconnecting. Tell the user to reconnect it under Settings, Secrets; meanwhile save new items to an Opengeni vault. |
+| `provider_auth_expired` | The password-manager connection needs reconnecting. Tell the user to reconnect it under Settings, Secrets; meanwhile save new items to a workspace vault. |
 | `too_large` | The value (or all values in one command) is too big for an environment variable. Use `{{secretfile:...}}`. |
 | `binary_value` | The value is binary. Use `{{secretfile:...}}`. |
 | `unsupported_shell` | `cmd.exe`, `fish` or an unknown shell. Run the command with `sh`/`bash` or `powershell`, or use `{{secretfile:...}}`. |
@@ -40,7 +40,7 @@ the inventory; never automatically repeat the create.
 
 | Error | What to do |
 |---|---|
-| `vault_read_only` | A connected vault is read-only. Save to an Opengeni vault (`saveTo` without `vault`) or ask the user to make it writable. |
+| `vault_read_only` | A connected vault is read-only. Save to a workspace vault (`saveTo` without `vault`) or ask the user to make it writable. |
 | `vault_item_name_conflict` | `mode: "create"` hit an existing item. Use `update` or `upsert`, or another name. |
 | `human_auth_required` | `saveTo: "user"` needs a person in the turn (schedules and automations have none). Use `task` or `workspace`. |
 | `vault_permission_denied`, `secret_save_forbidden` | This session cannot write there. Pick another `saveTo` or vault. |

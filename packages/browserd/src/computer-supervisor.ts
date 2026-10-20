@@ -407,7 +407,7 @@ export class ComputerSupervisor {
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
       throw new InteractionControllerError(
         "capacity_exhausted",
-        `This machine is already running its limit of ${this.maxSessions} Opengeni computer sessions. End computer sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
+        `This machine is already running its limit of ${this.maxSessions} computer sessions. End computer sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
     const creation = this.buildRuntime(options);

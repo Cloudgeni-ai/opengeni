@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+Agent-facing text no longer names the product, so an embedding product's agent
+only ever sees and repeats its own product's name. Bundled Skills take neutral
+names (`documents`, `spreadsheets`, `presentations`, `sites`, `visualize`,
+`secrets`, `schedules`, `projects`, `skill-management`, `video-generation`), and
+the instructions that point at them use those names. "Inline in the Opengeni
+console" is now "inline in the chat", and the native-capability check asks
+whether the workspace already provides a capability. Both compositions change
+identically; legacy prompt digests are refreshed for this reviewed change. The
+default identity, provenance markers such as `[Opengeni internal updates]`,
+the `opengeni__` tool namespace and Codemode identifiers are unchanged.
+
 The CAPTCHA rule moved from the secrets doctrine into the descriptions of the
 two interaction entry tools, `browser_open` and `computer_open`. The secrets
 block renders only with the `secrets` capability and runtime reference
@@ -255,7 +266,7 @@ through connected tools, create the account with a generated password when
 account creation is allowed), never ask for secret values in chat, use the
 ready ask card from a missing-secret error, and hand the browser over only for
 push approvals or hardware keys. It is at most six
-lines under its heading; playbooks live in the `opengeni-secrets` Skill. Clause
+lines under its heading; playbooks live in the `secrets` Skill. Clause
 gating: the `secret_search` sentence and the Skill pointer need
 `secret_search` (the Skill pointer also needs Skills); the 2FA-enrollment and
 account-creation rungs need `secret_save`; the ask-card sentence needs the
@@ -272,7 +283,7 @@ so "never request credentials in chat" comes with the supported alternative.
 + Never ask for passwords, keys or codes in chat or in a plain text question.
 + Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.
 + Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.
-+ For playbooks, read the `opengeni-secrets` skill.
++ For playbooks, read the `secrets` Skill.
 + For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.
 ```
 

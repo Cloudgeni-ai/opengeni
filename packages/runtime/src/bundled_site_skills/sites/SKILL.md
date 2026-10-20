@@ -1,23 +1,23 @@
 ---
-name: opengeni-sites
-description: Build, edit, and publish Opengeni Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
+name: sites
+description: Build, edit, and publish Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
 ---
 
-# Opengeni Sites
+# Sites
 
-An Opengeni Site is an ordinary Bun web application with retained editable
+A Site is an ordinary Bun web application with retained editable
 source (when supplied) and one published runtime file. React is the default,
 not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
 
 Do not invent a Site framework, deployment service, App Host, custom domain
-setup, provider-specific API wrapper, or Opengeni-only build CLI. Putting a
+setup, provider-specific API wrapper, or platform-only build CLI. Putting a
 Site on the web is built in (see "Publish to the web").
 
 ## Sites have no server; AI comes from the host
 
 A Site never needs its own server, API key, or hosting provider to reach
-Opengeni. Model access, agent conversations, and workspace tools all come from
+the workspace. Model access, agent conversations, and workspace tools all come from
 the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site`. Use its
 `ai.run` helper for inline results, or `@opengeni/react/session-ui` when the app
 needs a conversation surface. The parent page owns the
@@ -26,12 +26,12 @@ credentials server-side" is already satisfied by that bridge.
 
 When the user asks for AI, chat, an assistant, "Ask the data", or a "backend"
 inside a Site, that bridge is the design. Do not propose Vercel, another
-server, a tunnel, or a Connected Machine for Opengeni access, do not spawn a
+server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
 Site Data (below) gives every published Site persistent collections and files,
 and scheduled tasks feed them through agent tools. A separate server is only
-relevant for a genuinely non-Opengeni need: a third-party API that requires a
+relevant for a genuinely external need: a third-party API that requires a
 secret the viewer's browser must not hold, relational queries or volumes Site
 Data cannot serve, or live server-side compute. If the request seems to need
 one of those, or you cannot tell where the user wants the AI to run,
@@ -44,7 +44,7 @@ say which designs are possible and ask before building.
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
   when that is all the user requests. The Site link opens only for workspace
-  members; to share it wider, publish it to the web. Opengeni AI and tool access are
+  members; to share it wider, publish it to the web. Workspace AI and tool access are
   never such a backend (see above). If the app genuinely requires server-side
   compute that Sites cannot host, explain that constraint and ask how the user
   wants to proceed instead of dropping functionality or choosing a host.
@@ -115,7 +115,7 @@ bun build --compile --target=browser ./index.html --outdir=dist
 
 Install Opengeni packages from the npm registry using the exact versions in
 this Skill's `package-versions.json`. With `skill_read`, request
-`{"skill":"opengeni-sites","paths":["package-versions.json"]}` and use the
+`{"skill":"sites","paths":["package-versions.json"]}` and use the
 returned package/version pairs in `bun add --exact package@version ...`.
 Reading a Skill does not create local files: do not assume a `/workspace/.agents`
 path exists. If this Skill is already checked out, read the file at its actual
@@ -321,7 +321,7 @@ Use the lower-level hooks/components only for intentionally custom behavior.
 The host owns the chat's available space; `SessionConversation` fills it.
 The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
 on its wrapper; changing the Site's body background does not select the SDK
-theme, and the outer Opengeni app's theme does not cross the iframe. Keep
+theme, and the outer app's theme does not cross the iframe. Keep
 foreground and background on the same SDK tokens rather than overriding
 message/button colors individually. Check a real assistant reply, expanded
 steps, composer and menus for readable contrast in the chosen theme.
@@ -356,7 +356,7 @@ identities. Friendly names are never authority.
 
 ## Save data with Site Data
 
-Every published Site can keep persistent JSON records and files in Opengeni.
+Every published Site can keep persistent JSON records and files in the workspace.
 Data belongs to the Site, not a version: it survives new versions and
 rollbacks. An archived Site keeps its data but its page cannot reach it. There
 is no live push; read on load or when the viewer refreshes.
@@ -486,7 +486,7 @@ Site HTML never sends SQL:
    viewers signed in as a person) or `managers` (never from the page).
 
 `:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
-`:viewer_kind` and `:viewer_signed_in` are bound by Opengeni from the signed-in
+`:viewer_kind` and `:viewer_signed_in` are bound by the host from the signed-in
 viewer. Use `:viewer` for ownership and per-person rows; never take a person's
 identity from a page parameter, and never pass `viewer*` params from the page
 (they are refused):
@@ -608,7 +608,7 @@ access limitation. Missing publishing access itself still blocks publication.
 ## Show a visualization or Site inside chat
 
 For an inline visualization stored directly in a chat response, read
-`opengeni-visualize`. That path does not require publishing a Site.
+`visualize`. That path does not require publishing a Site.
 
 To embed a published Site, use a fenced `opengeni-site` block containing JSON:
 
@@ -681,8 +681,7 @@ Site page. Publishing is off when the deployment has no Sites domain
 (`sites_publishing_disabled`), and an Only me Site must be shared with the
 workspace first.
 
-- Access: `members`, `invited` (members plus listed emails, who sign in to
-  Opengeni) or `public` (anyone; visitors who don't sign in are guests).
+- Access: `members`, `invited` (members plus listed emails, who sign in first) or `public` (anyone; visitors who don't sign in are guests).
 - Viewer: `const viewer = await site.viewer` gives `{ kind, id, name, email,
   signedIn }` (`kind`: `member`, `invited`, `user` or `guest`), or `null` on
   hosts that don't report viewers. Guests have no name or email. Offer a

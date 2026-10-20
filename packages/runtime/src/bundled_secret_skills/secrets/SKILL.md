@@ -1,5 +1,5 @@
 ---
-name: opengeni-secrets
+name: secrets
 description: Use when signing in, creating accounts, storing or using passwords, API keys, TOTP codes or other secrets, or when a secret is missing.
 ---
 
@@ -21,7 +21,7 @@ task allows it, enroll 2FA, fetch codes and solve CAPTCHAs yourself.
 | `\{{secret:Item}}` | the literal text, left unresolved |
 
 A reference resolves wherever it is used: shell commands, typing, file writes
-and every tool call, including Opengeni's own tools. To hand one on for later
+and every tool call, including built-in tools. To hand one on for later
 work (a schedule prompt, a message to another session, a goal, a note or
 comment), escape it as `\{{secret:Item}}`; it arrives as `{{secret:Item}}`.
 The `secret_*` tools take references as names and never resolve them.

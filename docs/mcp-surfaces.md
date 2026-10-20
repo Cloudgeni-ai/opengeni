@@ -284,7 +284,7 @@ authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
 `opengeni_tool_gateway_preparation_duration_seconds` expose the
 preparation/execution split without content.
 
-First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.

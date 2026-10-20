@@ -169,6 +169,8 @@ describe("tryParseJson", () => {
 
 describe("isCreditExhaustion", () => {
   test("matches the engine error text, bare and wrapped, case-insensitively", () => {
+    expect(isCreditExhaustion("insufficient workspace credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient workspace credits")).toBe(true);
     expect(isCreditExhaustion("insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("Activity task failed: insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);

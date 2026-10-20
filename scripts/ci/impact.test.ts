@@ -466,19 +466,17 @@ describe("fail-closed change impact", () => {
     });
 
     const skill = createImpactPlan([
-      "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+      "packages/runtime/src/bundled_artifact_skills/documents/SKILL.md",
     ]);
     expect(skill.mode).toBe("focused");
     expect(skill.affectedPackages).toContain("@opengeni/runtime");
     expect(skill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
     expect(skill.reasons).toContainEqual({
-      path: "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+      path: "packages/runtime/src/bundled_artifact_skills/documents/SKILL.md",
       reason: "bundled artifact skill source boundary",
     });
 
-    const siteSkill = createImpactPlan([
-      "packages/runtime/src/bundled_site_skills/opengeni-sites/SKILL.md",
-    ]);
+    const siteSkill = createImpactPlan(["packages/runtime/src/bundled_site_skills/sites/SKILL.md"]);
     expect(siteSkill.mode).toBe("focused");
     expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
     expect(siteSkill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
