@@ -67,6 +67,7 @@ export {
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
   CODEX_LIVE_MODEL,
+  prestartSessionRealtime,
   sessionRealtimeLifecycleIsActive,
   useRealtimeModelSelection,
   useSessionRealtime,
@@ -180,7 +181,7 @@ export function SessionRealtimeControl(props: {
   const autostartStartedRef = useRef(false);
 
   const { models, selectedModel: selectedRealtimeModel, selectModel } = selection;
-  const { canStart, start } = realtime;
+  const { canStart, start, prestarted } = realtime;
   const onRealtimeAutostartConsumed = props.onRealtimeAutostartConsumed;
   const onVoiceActiveChange = props.onVoiceActiveChange;
   const voiceActive = realtime.snapshot.mode?.state === "active";
@@ -192,7 +193,18 @@ export function SessionRealtimeControl(props: {
 
   useEffect(() => {
     const pending = autostartModelRef.current;
-    if (!pending || autostartStartedRef.current || lifecycleActive) return;
+    if (!pending || autostartStartedRef.current) return;
+    const consume = () => {
+      autostartModelRef.current = null;
+      onRealtimeAutostartConsumed?.();
+    };
+    if (prestarted && selectedRealtimeModel.id === pending) {
+      // The host started this call before the view mounted; it is the autostart.
+      autostartStartedRef.current = true;
+      consume();
+      return;
+    }
+    if (lifecycleActive) return;
     const available = models.some((model) => model.id === pending && model.available);
     if (!available) return;
     if (selectedRealtimeModel.id !== pending) {
@@ -203,15 +215,12 @@ export function SessionRealtimeControl(props: {
     autostartStartedRef.current = true;
     // One automatic attempt. A failed start stays visible with its reason and
     // the user retries explicitly; re-arming would loop on a definitive refusal.
-    const consume = () => {
-      autostartModelRef.current = null;
-      onRealtimeAutostartConsumed?.();
-    };
     void start().then(consume, consume);
   }, [
     canStart,
     lifecycleActive,
     models,
+    prestarted,
     props.sessionId,
     props.workspaceId,
     onRealtimeAutostartConsumed,

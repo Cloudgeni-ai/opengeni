@@ -205,6 +205,90 @@ export type SessionRealtimeControllerFactory = (
   options: CreateSessionRealtimeControllerOptions,
 ) => SessionRealtimeController;
 
+type PrestartedSessionRealtime = {
+  model: SessionRealtimeModel;
+  controller: Promise<SessionRealtimeController>;
+  /** Filled in by the session view that adopts the call. */
+  modelContext: { current: (() => string | undefined) | undefined };
+};
+
+const prestartedSessionRealtime = new Map<string, PrestartedSessionRealtime>();
+/** Calls being ended after their host abandoned them, per session. */
+const abandonedSessionRealtime = new Map<string, Promise<void>>();
+
+function prestartKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+/**
+ * Start voice for a session the host has just created, before its session view
+ * mounts. The connection comes up while the host navigates, and the view's
+ * `useSessionRealtime` (with the same workspace, session and model) adopts the
+ * running call instead of starting another. Call it from the action that
+ * created the session, so the microphone prompt follows the user's gesture.
+ *
+ * Returns `abandon`, which ends the call if no view adopted it yet (for
+ * example when navigation to the session failed).
+ */
+export function prestartSessionRealtime(input: {
+  client: RealtimeControllerClient;
+  workspaceId: string;
+  sessionId: string;
+  model: SessionRealtimeModel;
+  controllerFactory?: SessionRealtimeControllerFactory | undefined;
+}): () => void {
+  const key = prestartKey(input.workspaceId, input.sessionId);
+  const existing = prestartedSessionRealtime.get(key);
+  // A retried handoff keeps the call already starting for the same model.
+  if (existing?.model === input.model) return abandonPrestarted(key, existing);
+  if (existing) abandonPrestarted(key, existing)();
+  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: undefined };
+  // An abandoned call for this session ends before the next one begins.
+  const controller = (abandonedSessionRealtime.get(key) ?? Promise.resolve())
+    .then(() => import("@opengeni/sdk/realtime"))
+    .then(({ createSessionRealtimeController }) => {
+      const created = (input.controllerFactory ?? createSessionRealtimeController)({
+        client: input.client,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        // The adopting view's audio element does not exist yet; a detached
+        // element plays the same way.
+        ...(typeof Audio === "undefined" ? {} : { remoteAudio: new Audio() }),
+        model: input.model,
+        getModelContext: () => modelContext.current?.(),
+      });
+      // The call's state (including a failed start) is read from the
+      // controller by the view that adopts it.
+      void created.start().catch(() => undefined);
+      return created;
+    });
+  const entry: PrestartedSessionRealtime = { model: input.model, controller, modelContext };
+  prestartedSessionRealtime.set(key, entry);
+  controller.catch(() => {
+    if (prestartedSessionRealtime.get(key) === entry) prestartedSessionRealtime.delete(key);
+  });
+  return abandonPrestarted(key, entry);
+}
+
+function abandonPrestarted(key: string, entry: PrestartedSessionRealtime): () => void {
+  return () => {
+    if (prestartedSessionRealtime.get(key) !== entry) return;
+    prestartedSessionRealtime.delete(key);
+    const ended = entry.controller.then(
+      (abandoned) =>
+        abandoned
+          .stop()
+          .catch(() => undefined)
+          .finally(() => abandoned.close()),
+      () => undefined,
+    );
+    abandonedSessionRealtime.set(key, ended);
+    void ended.finally(() => {
+      if (abandonedSessionRealtime.get(key) === ended) abandonedSessionRealtime.delete(key);
+    });
+  };
+}
+
 type AdmissionInput = {
   sessionStatus: SessionStatus;
   controlState: "active" | "paused";
@@ -288,25 +372,47 @@ export function useSessionRealtime(options: {
   lifecycleRef.current = lifecycle;
   eventsReadyRef.current = options.eventsReady;
   const lifecycleActive = sessionRealtimeLifecycleIsActive(lifecycle);
+  const [prestarted, setPrestarted] = useState(false);
 
   useEffect(() => {
     let disposed = false;
     let controller: SessionRealtimeController | null = null;
     let unsubscribe: (() => void) | null = null;
-    void import("@opengeni/sdk/realtime")
-      .then(({ createSessionRealtimeController }) => {
-        if (disposed) return;
-        const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
-        controller = controllerFactory({
-          client,
-          workspaceId,
-          sessionId: options.sessionId,
-          ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
-          model,
-          getModelContext: () => modelContextProviderRef.current?.(),
+    const key = prestartKey(workspaceId, options.sessionId);
+    const adopted = prestartedSessionRealtime.get(key);
+    // A call started before this view mounted owns the session's voice. Wait
+    // for the selection to reach its model rather than racing it with another
+    // controller.
+    if (adopted && adopted.model !== model) return;
+    if (adopted) {
+      prestartedSessionRealtime.delete(key);
+      adopted.modelContext.current = () => modelContextProviderRef.current?.();
+    }
+    const pending: Promise<SessionRealtimeController | null> = adopted
+      ? adopted.controller
+      : import("@opengeni/sdk/realtime").then(({ createSessionRealtimeController }) => {
+          if (disposed) return null;
+          const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
+          return controllerFactory({
+            client,
+            workspaceId,
+            sessionId: options.sessionId,
+            ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
+            model,
+            getModelContext: () => modelContextProviderRef.current?.(),
+          });
         });
+    void pending
+      .then((created) => {
+        if (!created) return;
+        if (disposed) {
+          created.close();
+          return;
+        }
+        controller = created;
         controllerRef.current = controller;
         controllerModelRef.current = model;
+        setPrestarted(adopted !== undefined);
         unsubscribe = controller.subscribe(setSnapshot);
         if (eventsReadyRef.current) {
           void controller.observeLifecycle(lifecycleRef.current).catch(() => undefined);
@@ -357,6 +463,20 @@ export function useSessionRealtime(options: {
     void controllerRef.current?.observeLifecycle(lifecycle).catch(() => undefined);
   }, [lifecycle, options.eventsReady]);
 
+  // A delegated turn's result reaches the voice model through the realtime
+  // ledger. Pull it as soon as the session reports the turn's outcome instead
+  // of waiting for the next periodic sync.
+  const delegationOutcomeSequence = useMemo(
+    () => latestDelegationOutcomeSequence(options.events),
+    [options.events],
+  );
+  const flushedOutcomeSequenceRef = useRef(delegationOutcomeSequence);
+  useEffect(() => {
+    if (delegationOutcomeSequence <= flushedOutcomeSequenceRef.current) return;
+    flushedOutcomeSequenceRef.current = delegationOutcomeSequence;
+    void controllerRef.current?.flush().catch(() => undefined);
+  }, [delegationOutcomeSequence]);
+
   const start = useCallback(async () => {
     const controller = controllerRef.current;
     if (!controller || controllerModelRef.current !== model) {
@@ -400,6 +520,8 @@ export function useSessionRealtime(options: {
   return {
     snapshot,
     lifecycleActive,
+    /** The current call was started before this view mounted and adopted here. */
+    prestarted,
     canStart,
     admissionBlocker,
     codexConnected: options.codexConnected,
@@ -411,6 +533,23 @@ export function useSessionRealtime(options: {
     setInputMuted,
     setOutputMuted,
   };
+}
+
+const DELEGATION_OUTCOME_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "agent.message.completed",
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "turn.superseded",
+]);
+
+/** The newest event that can settle a delegated turn's spoken result. */
+function latestDelegationOutcomeSequence(events: readonly SessionEvent[]): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (DELEGATION_OUTCOME_EVENT_TYPES.has(event.type)) return event.sequence;
+  }
+  return 0;
 }
 
 export function sessionRealtimeLifecycleIsActive(
