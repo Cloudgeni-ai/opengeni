@@ -3433,6 +3433,75 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("many pending preflight failures never let an earlier call fall through to execution", async () => {
+      let failing = true;
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        prepare: async () => {
+          if (failing) throw new Error("connector policy store is unavailable");
+          return { managed: true, decision: "allow" };
+        },
+      });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        for (let index = 0; index < 300; index++) {
+          expect(await tool.needsApproval(new RunContext(), { query: "x" }, `batch-${index}`)).toBe(
+            false,
+          );
+        }
+        // The dependency recovers before the earliest call is invoked.
+        failing = false;
+        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "x" }), {
+          toolCall: { callId: "batch-0" },
+        } as any);
+        expect(JSON.stringify(output)).toContain("The tool was not run");
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("tools without an Opengeni approval hook keep their own approval policy", async () => {
+      const mcp = startTestMcpServer({});
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [{ id: "plain", name: "Plain", url: mcp.url, cacheToolsList: false }],
+      });
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "plain" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+      });
+      try {
+        const name = "plain__search_documents";
+        const model = new ScriptedModel([
+          { output: [{ ...scriptedFunctionCall(name, {}, "malformed-call"), arguments: "{" }] },
+          { outputText: "Recovered." },
+        ]);
+        const agent = buildOpenGeniAgent(settings, [], { model, mcpServers: prepared.mcpServers });
+        const result = await runAgentStream(agent, "Search documents", settings);
+        for await (const _event of result.toStream()) {
+          // Drain the run.
+        }
+        await result.completed;
+        // Malformed JSON still returns to the model; it is not turned into an approval request.
+        expect(result.interruptions).toHaveLength(0);
+        expect(model.calls).toBe(2);
+        expect(mcp.calls).toHaveLength(0);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
     test("connector Allow executes once and overrides an Ask recommendation", async () => {
       const fixture = await connectorPolicyFixture({
         connectorDecision: "allow",

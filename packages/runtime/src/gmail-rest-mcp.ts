@@ -1751,6 +1751,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         );
       throw new GmailRestProviderError(
         `Gmail returned an unreadable response (${response.status}): ${safeErrorMessage(error)}`,
+        // Keep a refusal's status even when its body is not JSON, so 401/403
+        // are still recognized as authentication and access refusals.
+        response.ok ? undefined : response.status,
       );
     });
     if (!response.ok) {

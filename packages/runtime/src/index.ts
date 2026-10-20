@@ -2873,7 +2873,14 @@ export async function secretQuestionRejection(
       return `Question "${question.id}" saves to "Only me", but no person is acting in this run. Use saveTo "task" or "workspace" and call request_human_input again.`;
     }
     if (spec.vault && context.validateQuestionVault) {
-      const reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      let reason: string | null;
+      try {
+        reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      } catch (error) {
+        // This runs in a tool input guardrail, and a guardrail that throws fails
+        // the whole turn. A vault lookup that cannot complete is a tool error.
+        return `Question "${question.id}" names vault "${spec.vault}", which could not be checked, so nothing was asked. Omit vault to use the default vault for saveTo, or call request_human_input again. Error: ${exactErrorMessage(error)}`;
+      }
       if (reason) {
         return `Question "${question.id}" names vault "${spec.vault}": ${reason} Omit vault to use the default vault for saveTo, then call request_human_input again.`;
       }
@@ -3578,7 +3585,19 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 }
 
 const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
-const TOOL_PREFLIGHT_FAILURE_RETENTION_MAX = 256;
+
+/**
+ * Dynamic approval hooks installed by Opengeni's own approval wrappers. Only
+ * these run fallible preflight work (bindings, previews, policy prepare), so
+ * only these are contained. Every other tool keeps its original approval
+ * function identity: the SDK recognizes static policies by identity and
+ * handles, for example, malformed JSON differently for dynamic ones.
+ */
+const opengeniApprovalHooks = new WeakSet<object>();
+function opengeniApprovalHook<T extends object>(hook: T): T {
+  opengeniApprovalHooks.add(hook);
+  return hook;
+}
 
 /** Model-facing result for a call whose approval preflight failed. Nothing ran. */
 export function toolPreflightFailureOutput(error: unknown): {
@@ -3615,7 +3634,10 @@ export function toolPreflightFailureOutput(error: unknown): {
  * no approval is needed; the matching `invoke` then returns the failure as an
  * ordinary tool error without calling any inner wrapper, so the action never
  * executes and the model can correct itself. A call without an id cannot be
- * correlated and keeps the original behavior.
+ * correlated and keeps the original behavior. A remembered failure is only
+ * cleared by its own invoke or by a later successful preflight of the same
+ * call: evicting it early would let a still-pending call fall through to
+ * execution. Entries live only as long as this agent instance (one turn).
  *
  * This must be installed last so it wraps every other approval wrapper, and is
  * reinstalled on each clone for the same reason as the approval policy.
@@ -3625,7 +3647,7 @@ function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) =>
     (await listMcpTools(resolutionContext)).map((tool) => {
-      if (tool.type !== "function") return tool;
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
       const needsApproval = tool.needsApproval.bind(tool);
       const invoke = tool.invoke.bind(tool);
       return {
@@ -3641,13 +3663,7 @@ function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
             return required;
           } catch (error) {
             if (!callId) throw error;
-            failures.delete(callId);
             failures.set(callId, error);
-            while (failures.size > TOOL_PREFLIGHT_FAILURE_RETENTION_MAX) {
-              const oldest = failures.keys().next().value;
-              if (oldest === undefined) break;
-              failures.delete(oldest);
-            }
             return false;
           }
         },
@@ -3780,37 +3796,39 @@ function installMcpApprovalPolicy(
       };
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return (
-              recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return (
+                recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
+              );
+            }
+            if (!callId) {
+              throw new Error("Connector action is missing its durable approval identity");
+            }
+            const preparation = await prepareConnectorReview(
+              connectorCall(callId, parsedInput),
+              connectorActionPolicy,
+              identity?.readReview,
             );
-          }
-          if (!callId) {
-            throw new Error("Connector action is missing its durable approval identity");
-          }
-          const preparation = await prepareConnectorReview(
-            connectorCall(callId, parsedInput),
-            connectorActionPolicy,
-            identity?.readReview,
-          );
-          preparations.set(callId, preparation);
-          if (preparation.managed && preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          // An explicit Allow is a decision, not an exemption from one of several floors.
-          const requiresApproval = preparation.managed
-            ? preparation.decision === "ask"
-            : recommendsApproval;
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+            preparations.set(callId, preparation);
+            if (preparation.managed && preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            // An explicit Allow is a decision, not an exemption from one of several floors.
+            const requiresApproval = preparation.managed
+              ? preparation.decision === "ask"
+              : recommendsApproval;
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           if (!connectorActionPolicy && !policy.connectorBacked) {
             throw new Error(
@@ -3903,40 +3921,42 @@ function installAttemptConnectorActionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return await originalNeedsApproval(runContext, parsedInput, callId);
-          }
-          if (!callId) {
-            throw new Error("Attempt connector action is missing its durable approval identity");
-          }
-          let call: ConnectorActionToolCall;
-          try {
-            call = binding.call(callId, parsedInput);
-          } catch (error) {
-            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
-            // Exact-resource and connection bindings are evaluated before the
-            // provider can run. A model can name a repository outside the
-            // accepted turn resources; that is an ordinary rejected tool call,
-            // not an Agents SDK lifecycle failure.
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const preparation = await connectorActionPolicy.prepare(call);
-          preparations.set(callId, preparation);
-          if (!preparation.managed || preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const requiresApproval = preparation.decision === "ask";
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return await originalNeedsApproval(runContext, parsedInput, callId);
+            }
+            if (!callId) {
+              throw new Error("Attempt connector action is missing its durable approval identity");
+            }
+            let call: ConnectorActionToolCall;
+            try {
+              call = binding.call(callId, parsedInput);
+            } catch (error) {
+              if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+              // Exact-resource and connection bindings are evaluated before the
+              // provider can run. A model can name a repository outside the
+              // accepted turn resources; that is an ordinary rejected tool call,
+              // not an Agents SDK lifecycle failure.
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const preparation = await connectorActionPolicy.prepare(call);
+            preparations.set(callId, preparation);
+            if (!preparation.managed || preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const requiresApproval = preparation.decision === "ask";
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           const callId = details?.toolCall?.callId;
           if (!callId) {

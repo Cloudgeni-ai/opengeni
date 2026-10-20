@@ -849,6 +849,19 @@ describe("Gmail review snapshots", () => {
       Response.json({ error: { message: "Denied" } }, { status: 403 }),
     );
     await expect(denied.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow();
+    // Refusals still refuse when their body is not JSON.
+    for (const status of [401, 403]) {
+      const htmlRefusal = make(
+        async () =>
+          new Response("<html>refused</html>", {
+            status,
+            headers: { "content-type": "text/html" },
+          }),
+      );
+      await expect(
+        htmlRefusal.reviewContext("trash_message", { messageId: "one" }),
+      ).rejects.toThrow();
+    }
   });
   test("send-draft facts include original recipients and body only after exact content hash matches", async () => {
     const bytes = Buffer.from(
