@@ -43,11 +43,7 @@ describe("@opengeni/sdk/realtime", () => {
           ? "azure-live"
           : model === "gpt-live-1-boulder-alpha"
             ? "codex"
-            : model === "supergrok/grok-voice-think-fast-2.0"
-              ? "xai-subscription"
-              : model.startsWith("opengeni-gateway/") || model.startsWith("workspace-gateway/")
-                ? "gateway"
-                : "websocket";
+            : "websocket";
       expect(sessionRealtimeTransportKind(model)).toBe(expected);
       // Persisted owner keys keep their historical per-provider namespaces.
       const namespace =
