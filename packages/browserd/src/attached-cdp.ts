@@ -123,6 +123,15 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
       if (this.client === pending) this.client = null;
       throw error;
     }
+    // Closed while reconnecting: nothing may be dispatched after close.
+    if (this.stopped) {
+      client.close();
+      throw new AttachedBrowserBridgeError(
+        "transport_failed",
+        "attached browser bridge closed by browserd",
+        true,
+      );
+    }
     try {
       return await client.request<T>(payload);
     } catch (error) {
@@ -257,6 +266,8 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private failure: Error | null = null;
   // The event stream broke and its cursor is being re-established.
   private resyncing = false;
+  // Counts stream breaks, so an attach that spans one is not trusted.
+  private streamBreaks = 0;
 
   constructor(
     private readonly bridge: AttachedBrowserBridgeTransport,
@@ -530,7 +541,15 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
           );
         this.assertAttachAllowed(targetId);
         const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
+        const streamBreaks = this.streamBreaks;
         await this.bridge.request({ type: "debugger.attach", tabId: targetId });
+        // Events of this attachment may be among those a break discarded.
+        if (this.streamBreaks !== streamBreaks || this.resyncing)
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser connection is recovering; observe the tab again",
+            true,
+          );
         if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch)
           throw new InteractionControllerError(
             "resource_unavailable",
@@ -657,6 +676,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       );
     }
     this.resyncing = true;
+    this.streamBreaks += 1;
     return true;
   }
 
@@ -666,7 +686,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.resyncing = true;
     const ready = (async () => {
       for (const tabId of [...this.tabSessions.keys()])
-        this.detachLocally(tabId, "event_stream_resynchronized", true);
+        this.detachLocally(tabId, "event_stream_resynchronized", { synthetic: true });
       const { cursor } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
       this.cursor = cursor;
       this.resyncing = false;
@@ -726,7 +746,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private emit(input: BridgeDebuggerEvent): void {
     if (input.method === "OpenGeni.debuggerDetached") {
-      this.detachLocally(input.tabId, input.params.reason, false);
+      this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
     const sessionId = input.sessionId ?? this.tabSessions.get(input.tabId) ?? null;
@@ -753,17 +773,23 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   }
 
   /** End this connection's session for a tab. Input still in flight leaves
-   * the tab uncertain, so nothing attaches underneath it. A resynchronized tab
+   * the tab uncertain, so nothing attaches underneath it. A synthetic detach
+   * (after a broken event stream) is not evidence that Chrome detached: it
    * keeps Chrome's debugger attachment, which a later attach reuses and
-   * shutdown still detaches. */
-  private detachLocally(tabId: string, reason: unknown, keepAttachment: boolean): void {
+   * shutdown still detaches, and it leaves the detach epochs that only
+   * Chrome's own detach events advance (a refused navigation reads them). */
+  private detachLocally(
+    tabId: string,
+    reason: unknown,
+    { synthetic }: { synthetic: boolean },
+  ): void {
     if ((this.pendingInput.get(tabId) ?? 0) > 0) this.uncertainTabs.add(tabId);
-    this.tabDetachEpochs.set(tabId, (this.tabDetachEpochs.get(tabId) ?? 0) + 1);
+    if (!synthetic) this.tabDetachEpochs.set(tabId, (this.tabDetachEpochs.get(tabId) ?? 0) + 1);
     const sessionId = this.tabSessions.get(tabId);
     if (reason === "canceled_by_user") this.canceledTabs.add(tabId);
     const attached = this.attachedTabs.has(tabId);
     this.removeTab(tabId);
-    if (keepAttachment && attached) this.attachedTabs.add(tabId);
+    if (synthetic && attached) this.attachedTabs.add(tabId);
     if (sessionId)
       this.emitEvent({
         method: "Target.detachedFromTarget",

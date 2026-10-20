@@ -133,6 +133,25 @@ describe("AttachedBrowserBridgeClient", () => {
       await expect(bridge.request({ type: "ping" })).rejects.toMatchObject({
         code: "transport_failed",
       });
+
+      // Closing while a reconnect is still under way dispatches nothing.
+      const reopened = await ReconnectingAttachedBridge.connect({
+        deviceId: DEVICE_ID,
+        connectionGeneration: GENERATION,
+        authorityFile: fixture.authorityFile,
+      });
+      fixture.dropConnections();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(reopened.request({ type: "ping" })).rejects.toMatchObject({
+        code: "transport_failed",
+      });
+      const late = reopened.request({ type: "insert" });
+      reopened.close();
+      await expect(late).rejects.toMatchObject({ code: "transport_failed" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        fixture.messages.filter((message) => (message.payload as JsonRecord)?.type === "insert"),
+      ).toHaveLength(0);
     } finally {
       bridge.close();
       await fixture.close();

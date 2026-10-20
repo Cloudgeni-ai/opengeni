@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { InteractionControllerError } from "@opengeni/interaction";
+import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
-import { CdpCommandTimeoutError, CdpProtocolError, CdpTransportError } from "../src/cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpProtocolError,
+  CdpSessionDetachedError,
+  CdpTransportError,
+} from "../src/cdp";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
@@ -343,6 +348,7 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   failingPolls = 0;
   pollFailure: Error = new AttachedBrowserBridgeError("timeout", "poll timed out", true);
   heldInput: Promise<void> | null = null;
+  heldNavigation: Promise<void> | null = null;
 
   push(method: string, params: Record<string, unknown> = {}): void {
     this.sequence += 1;
@@ -378,6 +384,10 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
         return { detached: true } as T;
       case "debugger.command":
         if (payload.method === "Input.dispatchMouseEvent" && this.heldInput) await this.heldInput;
+        if (payload.method === "Page.navigate" && this.heldNavigation) {
+          await this.heldNavigation;
+          throw new AttachedBrowserBridgeError("bridge_failed", "navigation reply lost", true);
+        }
         return { result: {} } as T;
       case "debugger.poll": {
         if (this.failingPolls > 0) {
@@ -556,6 +566,39 @@ describe("attached Chrome event stream recovery", () => {
       ).rejects.toMatchObject({ code: "resource_unavailable", retryable: false });
     } finally {
       releaseInput();
+      connection.close();
+    }
+  });
+
+  test("does not mistake a resynchronization for Chrome refusing a navigation", async () => {
+    const bridge = new StreamBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    let releaseNavigation = () => {};
+    bridge.heldNavigation = new Promise<void>((resolveNavigation) => {
+      releaseNavigation = resolveNavigation;
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+      });
+      const navigation = connection
+        .send("Page.navigate", { url: "https://example.com/next" }, { sessionId })
+        .catch((error: unknown) => error);
+      const detached = new Promise<void>((resolveEvent) => {
+        connection.on("Target.detachedFromTarget", () => resolveEvent());
+      });
+      bridge.overflow();
+      await detached;
+      releaseNavigation();
+      const failure = await navigation;
+      // The navigation may have run: its outcome is unknown, not a refusal.
+      expect(failure).not.toBeInstanceOf(InteractionDefiniteDriverError);
+      expect(failure).toBeInstanceOf(CdpSessionDetachedError);
+    } finally {
+      releaseNavigation();
       connection.close();
     }
   });
