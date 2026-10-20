@@ -8325,7 +8325,8 @@ export const CodexRealtimeWebrtcResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
 
-export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
+/** Open (or rotate) the provider WebSocket connection of an active realtime mode. */
+export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
     realtimeId: z.string().uuid(),
     operationId: z.string().uuid(),
@@ -8334,19 +8335,43 @@ export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
     rotate: z.boolean(),
   }).strict(),
 );
-export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export const GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export const GatewayRealtimeInitialItem = /* @__PURE__ */ defineSchema(() =>
+export const SessionRealtimeWebsocketInitialItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     role: z.enum(["user", "developer", "assistant"]),
     text: z.string().min(1).max(131_072),
   }),
 );
-export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+export type SessionRealtimeWebsocketInitialItem = z.infer<
+  typeof SessionRealtimeWebsocketInitialItem
+>;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export const GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export const RealtimeWebsocketProtocol = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["openai", "ai-gateway"]),
+);
+export type RealtimeWebsocketProtocol = z.infer<typeof RealtimeWebsocketProtocol>;
+
+export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      protocol: RealtimeWebsocketProtocol,
+      /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+      protocols: z.array(z.string().min(1).max(16_384)).min(1).max(8),
+      /** First client event to send once the socket opens; null when the mint configured it. */
+      sessionUpdate: z.record(z.string(), z.unknown()).nullable(),
       token: z.string().min(1).max(16_384),
       url: z.string().url(),
       upstreamModelId: z.string().min(1).max(256),
@@ -8355,13 +8380,17 @@ export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
-      initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+      initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       replay: z.literal(false),
     })
     .strict(),
 );
-export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+export type SessionRealtimeWebsocketResponse = z.infer<typeof SessionRealtimeWebsocketResponse>;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export const GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export const ActivateCodexRealtimeConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({

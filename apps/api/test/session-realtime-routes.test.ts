@@ -702,12 +702,17 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       connectionEpoch: number;
       initialItems: unknown[];
       instructions: string;
+      protocol: string;
+      protocols: string[];
+      sessionUpdate: Record<string, unknown> | null;
       replay: boolean;
     };
     expect(connected).toMatchObject({
       token: "vcst_test_token",
       upstreamModelId: "openai/gpt-realtime-2.1",
       connectionEpoch: 1,
+      protocol: "ai-gateway",
+      protocols: ["ai-gateway-realtime.v1", "ai-gateway-auth.vcst_test_token"],
       replay: false,
     });
     expect(connected.url).toBe(
@@ -715,6 +720,41 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     );
     expect(connected.initialItems).toBeArray();
     expect(connected.instructions).toContain("realtime conversational interface");
+    // The server now builds the session update; it must stay byte-identical to
+    // the event clients sent before, so the provider sees the same prefix.
+    expect(JSON.stringify(connected.sessionUpdate)).toBe(
+      JSON.stringify({
+        type: "session-update",
+        config: {
+          instructions: connected.instructions,
+          outputModalities: ["audio"],
+          inputAudioFormat: { type: "audio/pcm", rate: 24_000 },
+          outputAudioFormat: { type: "audio/pcm", rate: 24_000 },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          turnDetection: { type: "server-vad", prefixPaddingMs: 300, silenceDurationMs: 500 },
+          tools: [
+            {
+              type: "function",
+              name: "delegate_to_session",
+              description:
+                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+              parameters: {
+                type: "object",
+                properties: {
+                  request: {
+                    type: "string",
+                    description: "Complete standalone task for the session agent",
+                  },
+                },
+                required: ["request"],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      }),
+    );
     expect(providerCalls).toBe(callsBefore + 1);
 
     const replay = await app.request(`${base}/gateway`, {

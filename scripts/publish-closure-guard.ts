@@ -780,6 +780,7 @@ if (existsSync(sdkDistDir)) {
     "realtime.js",
     "codex-realtime-controller.js",
     "gateway-realtime-transport.js",
+    "realtime-websocket-transport.js",
   ].map((entry) => join(sdkDistDir, entry));
   const { externalImports, files } = await builtRuntimeClosure(nonArtifactSdkEntries);
   for (const [imported, sourcePath] of externalImports) {

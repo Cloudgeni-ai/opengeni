@@ -804,6 +804,12 @@ describe("createSessionProxyHandler", () => {
       ],
       [
         "POST",
+        "realtime/websocket",
+        connect,
+        () => browser.negotiateRealtimeWebsocket(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
         "realtime/gateway",
         connect,
         () => browser.negotiateGatewayRealtime(WORKSPACE_ID, SESSION_ID, connect),

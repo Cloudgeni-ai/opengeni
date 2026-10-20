@@ -54,6 +54,7 @@ export default defineConfig({
     "src/interaction.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
+    "src/realtime-websocket-transport.ts",
     "src/model-picker-order.ts",
     "src/model-display.ts",
   ],

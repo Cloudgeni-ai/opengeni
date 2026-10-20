@@ -1285,7 +1285,12 @@ const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
-const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set(["webrtc", "gateway", "supergrok"]);
+const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set([
+  "webrtc",
+  "websocket",
+  "gateway",
+  "supergrok",
+]);
 /** Ledger entries that become (or join) messages and so accept `modelContext`. */
 const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "delegation_call",

@@ -115,7 +115,7 @@ export type CodexRealtimeWebrtcResponse = {
   replay: boolean;
 };
 
-export type GatewayRealtimeConnectRequest = {
+export type SessionRealtimeWebsocketRequest = {
   realtimeId: string;
   operationId: string;
   browserInstanceId: string;
@@ -124,13 +124,28 @@ export type GatewayRealtimeConnectRequest = {
   expectedConnectionEpoch: number;
   rotate: boolean;
 };
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export type GatewayRealtimeInitialItem = {
+export type SessionRealtimeWebsocketInitialItem = {
   role: "user" | "developer" | "assistant";
   text: string;
 };
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export type GatewayRealtimeConnectResponse = {
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export type RealtimeWebsocketProtocol = "openai" | "ai-gateway";
+
+export type SessionRealtimeWebsocketResponse = {
+  protocol: RealtimeWebsocketProtocol;
+  /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+  protocols: string[];
+  /** First client event to send once the socket opens; null when the mint configured it. */
+  sessionUpdate: Record<string, unknown> | null;
   token: string;
   url: string;
   upstreamModelId: string;
@@ -139,10 +154,12 @@ export type GatewayRealtimeConnectResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
-  initialItems: GatewayRealtimeInitialItem[];
+  initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
   replay: false;
 };
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export type ToolGatewayIdentity = {
   serverId: string;
