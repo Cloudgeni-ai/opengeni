@@ -129,6 +129,12 @@ export type SessionRealtimeWebsocketRequest = {
    * detect the spoken language themselves.
    */
   language?: string | undefined;
+  /**
+   * Voice settings for this connection. Each set field overrides the
+   * workspace's saved settings for the model; `voiceSettings.language` also
+   * overrides `language`.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
 };
 /** @deprecated Use SessionRealtimeWebsocketRequest. */
 export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
@@ -403,6 +409,33 @@ export type WorkspaceRealtimeModelCatalogItem = {
    * language codes. Absent when the model detects the spoken language itself.
    */
   languages?: string[] | undefined;
+  /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+  voices?: { id: string; label: string }[] | undefined;
+  /** Whether any provider voice id is accepted as `voice`, beyond the listed `voices`. */
+  customVoice?: boolean | undefined;
+  /** Turn eagerness values this model accepts. Absent when it cannot be chosen. */
+  turnEagerness?: RealtimeTurnEagerness[] | undefined;
+  /** The provider's defaults for the settings it offers, other than language. */
+  voiceDefaults?: RealtimeVoiceSettings | undefined;
+  /** The workspace's saved voice settings for this model. */
+  workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+};
+
+/** How readily a realtime voice model decides the speaker is done and answers. */
+export type RealtimeTurnEagerness = "low" | "medium" | "high";
+
+/**
+ * Voice settings for a realtime voice model. Unset fields keep the provider's
+ * default. A model offers only the settings its catalog entry lists
+ * (`voices`/`customVoice`, `languages`, `turnEagerness`); a value it does not
+ * offer is ignored rather than failing the call.
+ */
+export type RealtimeVoiceSettings = {
+  /** A listed voice id, or any provider voice id where `customVoice` is offered. */
+  voice?: string | undefined;
+  /** Conversation language (a catalog `languages` code or a BCP 47 tag), for models that need one. */
+  language?: string | undefined;
+  turnEagerness?: RealtimeTurnEagerness | undefined;
 };
 
 export type WorkspaceRealtimeModelCatalogResponse = {
@@ -5944,6 +5977,11 @@ export type WorkspaceSettings = {
   busySend?: "queue" | "steer" | undefined;
   /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Realtime voice settings by realtime model id. Read one model's settings
+   * from the realtime model catalog's `workspaceVoiceSettings`.
+   */
+  realtimeVoice?: Record<string, unknown> | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6043,6 +6081,13 @@ export type UpdateWorkspaceSettingsRequest = {
   agentHumanInputEnabled?: boolean | undefined;
   busySend?: "queue" | "steer" | undefined;
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Voice settings by realtime model id, for example
+   * `{ "workspace-elevenlabs/eleven_realtime_v1_max": { voice: "<voice id>", language: "no" } }`.
+   * Each listed model's settings are replaced; null removes that model's
+   * settings; models not listed keep theirs.
+   */
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */

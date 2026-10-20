@@ -5453,6 +5453,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/office/workbook-tickets",
+    "method": "POST",
+    "path": "/v1/office/workbook-tickets",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",

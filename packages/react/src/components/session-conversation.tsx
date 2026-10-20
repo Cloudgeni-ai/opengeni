@@ -165,6 +165,7 @@ export type SessionConversationProps = ClientOverride &
             | "onRealtimeAutostartConsumed"
             | "onVoiceActiveChange"
             | "modelMenu"
+            | "voiceSettings"
           >
         >
       | undefined;

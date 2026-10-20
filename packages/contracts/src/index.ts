@@ -2964,6 +2964,69 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** How readily a realtime voice model decides the speaker is done and answers. */
+export const RealtimeTurnEagerness = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["low", "medium", "high"]),
+);
+export type RealtimeTurnEagerness = z.infer<typeof RealtimeTurnEagerness>;
+
+/**
+ * Voice settings for a realtime voice model. Every field is optional; an unset
+ * field keeps the provider's default. A model offers only the settings its
+ * catalog entry lists (`voices`/`customVoice`, `languages`, `turnEagerness`),
+ * and a value it does not offer is ignored rather than failing the call.
+ */
+export const RealtimeVoiceSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Voice the model speaks with: a listed voice id, or any provider voice id where `customVoice` is offered. */
+      voice: z.string().trim().min(1).max(128).optional(),
+      /** Conversation language (a catalog `languages` code or a BCP 47 tag), for models that need one. */
+      language: z.string().trim().min(1).max(64).optional(),
+      turnEagerness: RealtimeTurnEagerness.optional(),
+    })
+    .strict(),
+);
+export type RealtimeVoiceSettings = z.infer<typeof RealtimeVoiceSettings>;
+
+const realtimeVoiceModelKey = () =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .refine((key) => !["__proto__", "constructor", "prototype"].includes(key), "Invalid model ID");
+
+/**
+ * PATCH value of the workspace setting `realtimeVoice`: voice settings by
+ * realtime model id. Each listed model's settings are replaced; null removes
+ * that model's settings; unlisted models keep theirs.
+ */
+export const WorkspaceRealtimeVoicePatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .record(realtimeVoiceModelKey(), RealtimeVoiceSettings.nullable())
+    .refine((value) => Object.keys(value).length <= 64, "At most 64 voice models per patch"),
+);
+export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoicePatch>;
+
+/**
+ * The workspace's saved voice settings for one realtime model, or null when
+ * none are saved. Read leniently: a malformed entry reads as unset.
+ */
+export function resolveWorkspaceRealtimeVoiceSettings(
+  settings: unknown,
+  model: string,
+): RealtimeVoiceSettings | null {
+  const byModel =
+    settings !== null && typeof settings === "object"
+      ? (settings as { realtimeVoice?: unknown }).realtimeVoice
+      : undefined;
+  if (byModel === null || typeof byModel !== "object" || !Object.hasOwn(byModel, model)) {
+    return null;
+  }
+  const parsed = RealtimeVoiceSettings.safeParse((byModel as Record<string, unknown>)[model]);
+  return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : null;
+}
+
 /** Placement inherited by new top-level chats and schedules that follow the workspace. */
 export const WorkspaceDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -3041,6 +3104,9 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // working: "queue" (absent) runs it after the current turn, "steer" has
       // the agent read it at its next model step. Read leniently.
       busySend: WorkspaceBusySend.optional().catch(undefined),
+      // Realtime voice settings by realtime model id. Read leniently per model
+      // through resolveWorkspaceRealtimeVoiceSettings.
+      realtimeVoice: z.record(z.string(), z.unknown()).optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3239,6 +3305,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       // False blocks every model billed in Opengeni credits in this workspace.
       allowCreditModels: z.boolean().optional(),
       busySend: WorkspaceBusySend.optional(),
+      // Voice settings by realtime model id, merged per model; null removes one.
+      realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
     })
     .passthrough(),
 );
@@ -8386,6 +8454,12 @@ export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =
      * detect the spoken language themselves.
      */
     language: z.string().min(1).max(64).optional(),
+    /**
+     * Voice settings for this connection. Each set field overrides the
+     * workspace's saved settings for the model; `voiceSettings.language` also
+     * overrides `language`.
+     */
+    voiceSettings: RealtimeVoiceSettings.optional(),
   }).strict(),
 );
 export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
@@ -8621,6 +8695,18 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      * language codes. Absent when the model detects the spoken language itself.
      */
     languages: z.array(z.string().min(1).max(64)).optional(),
+    /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+    voices: z
+      .array(z.object({ id: z.string().min(1).max(128), label: z.string().min(1).max(128) }))
+      .optional(),
+    /** Whether any provider voice id is accepted as `voice`, beyond the listed `voices`. */
+    customVoice: z.boolean().optional(),
+    /** Turn eagerness values this model accepts. Absent when it cannot be chosen. */
+    turnEagerness: z.array(RealtimeTurnEagerness).optional(),
+    /** The provider's defaults for the settings it offers, other than language. */
+    voiceDefaults: RealtimeVoiceSettings.optional(),
+    /** The workspace's saved voice settings for this model. */
+    workspaceVoiceSettings: RealtimeVoiceSettings.optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;

@@ -15,6 +15,7 @@ import {
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
+import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
   ModelAccountSettingValues,
   OrganizationModelProviderKind,
@@ -1309,13 +1310,18 @@ export function WorkspaceModelsPageBody({
                 {workspacePage ? (
                   <Section
                     title="Voice"
-                    description="Use your own ElevenLabs key for Eleven Realtime voices in this workspace."
+                    description="Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens in this workspace."
                   >
                     <ElevenLabsVoiceConnection
                       key={workspaceId}
                       workspaceId={workspaceId}
                       canManage={canManageWorkspaceKeys}
                       onConnectionChange={connectionChanged}
+                    />
+                    <RealtimeVoiceSettingsRows
+                      key={`voice-settings:${workspaceId}`}
+                      workspaceId={workspaceId}
+                      canManage={canManageSettings}
                     />
                   </Section>
                 ) : null}

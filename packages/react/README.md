@@ -802,7 +802,39 @@ language. By default that is the `OpenGeniProvider` locale, else the browser's
 language; the model menu's Language page stores another choice on the device
 (`useRealtimeLanguagePreference`). Custom layouts pass
 `useRealtimeModelSelection().languageFor(model)` as `useSessionRealtime`'s
-`language` (and to `prestartSessionRealtime`).
+`language` and `voiceSettingsFor(model, hostSettings)` as its `voiceSettings`
+(and both to `prestartSessionRealtime`).
+
+The voice, conversation language and turn eagerness are configurable wherever
+the selected model offers them (see the catalog entry's `voices`/`customVoice`,
+`languages` and `turnEagerness`; settings a model does not offer are ignored).
+To set them for every voice session in a workspace, save them once with the
+SDK; Settings > Models > Voice edits the same setting:
+
+```ts
+await client.updateWorkspaceSettings(workspaceId, {
+  realtimeVoice: {
+    "workspace-elevenlabs/eleven_realtime_v1_max": {
+      voice: "<ElevenLabs voice id>",
+      language: "no",
+      turnEagerness: "high",
+    },
+  },
+});
+```
+
+For Eleven Realtime, the voice is one of the built-in names in the catalog
+entry's `voices` or the id of a voice in the ElevenLabs account's My Voices. A
+voice from the ElevenLabs voice library must be added to My Voices first;
+otherwise ElevenLabs rejects it and voice fails to start with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`.
+
+To set them per session instead, pass `voiceSettings` to the stock control,
+for example `<OpenGeniChat conversationProps={{ realtimeVoiceProps: {
+voiceSettings: { voice: "<ElevenLabs voice id>", language: "no" } } }} />`, or
+to `SessionRealtimeControl`, `useSessionRealtime` or `prestartSessionRealtime`
+(SDK controllers take `getVoiceSettings`). Each set field overrides the
+workspace's value; a language the person picks in the voice menu overrides both.
 
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for

@@ -1346,6 +1346,7 @@ function SessionsIndexRouteContent({
                   sessionId,
                   model: realtimeModel,
                   language: voiceSelection.languageFor(realtimeModel),
+                  voiceSettings: voiceSelection.voiceSettingsFor(realtimeModel),
                 })
               : null;
             try {

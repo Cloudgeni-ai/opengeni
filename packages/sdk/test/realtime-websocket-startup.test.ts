@@ -299,6 +299,28 @@ describe("WebSocket startup cleanup (controlled browser primitives)", () => {
     expect(f.tracks.map((track) => track.stopCalls)).toEqual([0, 0, 0]);
   });
 
+  test("the connect request carries the host's language and voice settings", async () => {
+    const requests: unknown[] = [];
+    const f = fixture();
+    (f.input as { client: unknown }).client = {
+      negotiateRealtimeWebsocket: async (_w: string, _s: string, request: unknown) => {
+        requests.push(request);
+        return answer;
+      },
+    };
+    const withSettings = {
+      ...f.input,
+      language: "nb-NO",
+      voiceSettings: { voice: "library-voice-id", language: "no", turnEagerness: "high" },
+    } as Input;
+    const connection = await createRealtimeWebsocketTransportStarter()(withSettings);
+    connection.stop();
+    expect(requests[0]).toMatchObject({
+      language: "nb-NO",
+      voiceSettings: { voice: "library-voice-id", language: "no", turnEagerness: "high" },
+    });
+  });
+
   test("capture still overlaps negotiation without transmitting audio before the socket is ready", async () => {
     const negotiation = Promise.withResolvers<typeof answer>();
     const f = fixture(() => negotiation.promise);
