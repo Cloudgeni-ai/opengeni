@@ -132,6 +132,10 @@ lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,
 hold session `FOR KEY SHARE`, serialize cursors, never update sessions. Legacy
 SQL rebases at the DB boundary; late raw events roll back/retry semantic admission
 before rejected audit persistence.
+The cursor trigger projects semantic sequence and activity together in one
+session-row update. Plain appends do not repeat that write; real lifecycle
+mutations still update their own fields. Activity uses PostgreSQL statement time
+without moving an existing session timestamp backwards.
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only

@@ -85701,15 +85701,16 @@ export async function appendSessionEvents(
             ),
           )
           .returning();
-        await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sequence,
-            ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: new Date() } : {}),
-          })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
+        // Semantic inserts project sequence and activity in the cursor trigger.
+        // Keep the generic raw writer's compatibility projection unchanged.
+        if (!sessionEventTypesAdvanceActivity(values)) {
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: sequence })
+            .where(
+              and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+            );
+        }
         return inserted.map(mapEvent);
       });
     },
@@ -86810,12 +86811,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 observer,
                 { ...phaseInput, phase: "sequence_update" },
                 async () =>
-                  advancesActivity || !rawLaneIsolated
+                  !advancesActivity && !rawLaneIsolated
                     ? await tx
                         .update(schema.sessions)
                         .set({
                           lastSequence: sequence,
-                          ...(advancesActivity ? { updatedAt: now } : {}),
                         })
                         .where(
                           and(
@@ -86824,7 +86824,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                           ),
                         )
                     : undefined,
-                () => (rawLaneIsolated ? "projection_skipped" : "ok"),
+                () => (advancesActivity || rawLaneIsolated ? "projection_skipped" : "ok"),
               );
               return {
                 events: inserted.map(mapEvent),
@@ -87070,22 +87070,21 @@ export async function appendSessionEventToSandboxGroup(
             ),
           )
           .returning();
-        const lockedSessionIds = rows.map((row) => row.id);
-        const updated = await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sql`${schema.sessions.lastSequence} + 1`,
-            ...(sessionEventTypesAdvanceActivity([input]) ? { updatedAt: new Date() } : {}),
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, workspaceId),
-              inArray(schema.sessions.id, lockedSessionIds),
-            ),
-          )
-          .returning({ id: schema.sessions.id });
-        if (updated.length !== lockedSessionIds.length) {
-          throw new Error("Sandbox-group event sequence update did not match locked sessions");
+        if (!sessionEventTypesAdvanceActivity([input])) {
+          const lockedSessionIds = rows.map((row) => row.id);
+          const updated = await tx
+            .update(schema.sessions)
+            .set({ lastSequence: sql`${schema.sessions.lastSequence} + 1` })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, workspaceId),
+                inArray(schema.sessions.id, lockedSessionIds),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (updated.length !== lockedSessionIds.length) {
+            throw new Error("Sandbox-group event sequence update did not match locked sessions");
+          }
         }
         return inserted.map(mapEvent);
       }),
