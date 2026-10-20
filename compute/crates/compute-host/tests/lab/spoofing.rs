@@ -311,9 +311,9 @@ async fn send(client: &Client, script: &str, targets: &[String]) -> Vec<String> 
 /// Forged packets from the first sandbox's guest reach no listener on the
 /// host, in its own namespace or in the second sandbox's namespace, and
 /// forged ARP claims change no neighbour table; after them, the probes of
-/// `targets` (the first is `lan`) still meet the firewall as
-/// [`check_probes`] expects.
-pub(super) async fn check_spoofing(client: &Client, targets: &[String], lan: &str, trusted: bool) {
+/// `targets` still meet the firewall as [`check_probes`] expects, those in
+/// `open` connecting.
+pub(super) async fn check_spoofing(client: &Client, targets: &[String], open: &[&str]) {
     let received = Received::default();
     let port = listen_on_host(&received);
     let _own = NamespaceInbox::start(id(0), port, &received);
@@ -368,13 +368,7 @@ pub(super) async fn check_spoofing(client: &Client, targets: &[String], lan: &st
     tokens.extend(sent(client, &send_from("-", "after-arp", &v4), "after-arp", &v4).await);
     let (output, _) = exec(client, id(0), &probe_script(targets)).await;
     let lines: Vec<&str> = output.lines().collect();
-    let open: &[&str] = if trusted { &[lan] } else { &[] };
-    check_probes(
-        &format!("after ARP, trusted={trusted}"),
-        &lines,
-        targets,
-        open,
-    );
+    check_probes(&format!("after ARP, open={open:?}"), &lines, targets, open);
 
     // Every forged frame entered the host, and none got further.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

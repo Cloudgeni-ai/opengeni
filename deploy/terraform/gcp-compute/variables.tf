@@ -176,7 +176,7 @@ variable "ssh_source_ranges" {
 }
 
 variable "host_args" {
-  description = "Further compute-host serve flags, space separated, such as --otlp-endpoint http://collector:4318 --canary-every 10m."
+  description = "Further compute-host serve flags, space separated, such as --otlp-endpoint http://collector:4318 --canary-every 10m, or --reach api.internal:443 for each private destination sandboxes may open (compute/docs/operations.md, Security)."
   type        = string
   default     = ""
 }
