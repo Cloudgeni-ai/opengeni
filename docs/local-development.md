@@ -469,3 +469,14 @@ request needs.
 - The console uses finite event batches until HTTP/2 or HTTP/3 is observed. Cross-origin APIs can hide the protocol from ResourceTiming, so missing timing information retains the bounded fallback and prevents several local tabs from exhausting HTTP/1 connections needed by browser controls.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
 - Read [`../AGENTS.md`](../AGENTS.md) before changing the session workflow, the agent turn activity, or memory; [`run-lifecycle.md`](run-lifecycle.md) is the canonical lifecycle reference.
+
+## Deployment environment instructions
+
+`OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` adds operator context to every agent
+session execution instruction build, including child agents and custom workspace/session identities.
+It is additive to persona templates, workspace governance and session instructions;
+blank/unset preserves existing prompts. Set it before starting API and workers.
+It contains plain text, not a filename to load, and must not contain secrets.
+Use a short environment description and explicit instructions to read canonical
+operator files. Existing accepted attempts retain their captured instructions;
+new attempts receive the configured context.

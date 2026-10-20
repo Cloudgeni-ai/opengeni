@@ -588,3 +588,40 @@ describe("modular composer: prompt-cache stability", () => {
     );
   });
 });
+
+describe("deployment environment instructions", () => {
+  test("survive workspace and child identity overrides, governance and legacy rendering", () => {
+    const settings = testSettings({
+      deploymentAgentInstructions: "Read /operator/AGENTS.md before host work.",
+    });
+    for (const identity of [null, "Research specialist", "Child critic"]) {
+      const result = inspectPersistentAgentInstructions(settings, {
+        agentConfig: { ...config(allAgentCapabilities()), identity },
+        workspaceAgentIdentity: "Project workspace",
+        workspaceGovernance: "Project charter",
+        sessionInstructions: "Investigate the dataset",
+      });
+      expect(result.composed).toContain(
+        "# Deployment environment\n\nRead /operator/AGENTS.md before host work.",
+      );
+      expect(result.composed).toContain(identity ?? "Project workspace");
+      expect(result.composed).toContain("Project charter");
+      expect(result.composed.match(/Read \/operator\/AGENTS.md/g)).toHaveLength(1);
+    }
+    expect(
+      inspectPersistentAgentInstructions(settings, {
+        instructionsTemplate: "Custom legacy persona",
+      }).composed,
+    ).toContain("Read /operator/AGENTS.md before host work.");
+  });
+
+  test("blank deployment instructions preserve the existing prompt bytes", () => {
+    const options = { agentConfig: config(allAgentCapabilities()) };
+    expect(
+      inspectPersistentAgentInstructions(
+        testSettings({ deploymentAgentInstructions: "  " }),
+        options,
+      ),
+    ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
+  });
+});

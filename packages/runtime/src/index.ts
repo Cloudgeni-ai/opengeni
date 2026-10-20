@@ -2608,6 +2608,11 @@ export function agentPromptExperimentsFor(settings: Settings): {
     : {};
 }
 
+function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
+  const instructions = settings.deploymentAgentInstructions?.trim();
+  return instructions ? `${content}\n\n# Deployment environment\n\n${instructions}` : content;
+}
+
 function inspectModularAgentInstructions(
   settings: Settings,
   config: ResolvedAgentConfig,
@@ -2621,7 +2626,7 @@ function inspectModularAgentInstructions(
   const composed = composeModularAgentInstructions({
     capabilities: config.capabilities,
     renderer: config.renderer,
-    identity,
+    identity: appendDeploymentAgentInstructions(identity, settings),
     resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
@@ -2652,11 +2657,14 @@ export function inspectPersistentAgentInstructions(
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
   const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
-  const personaAndCore = composeAgentInstructions(
-    personaTemplate,
-    options.workspaceEnvironment,
-    options.rig,
-    agentPromptExperimentsFor(settings).experiments,
+  const personaAndCore = appendDeploymentAgentInstructions(
+    composeAgentInstructions(
+      personaTemplate,
+      options.workspaceEnvironment,
+      options.rig,
+      agentPromptExperimentsFor(settings).experiments,
+    ),
+    settings,
   );
   if (settings.experimentSystemPromptCacheSplit) {
     // The deployment persona with no workspace environment or sandbox

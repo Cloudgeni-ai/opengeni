@@ -2961,3 +2961,8 @@ their established placement. Removed targets fail without choosing another
 computer. Workspace defaults may name only shared or organization machines;
 ordinary live machine authority still applies. See
 [Connected Machines](connected-machines.md).
+
+Deployment operator context is configured through
+`OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` and composed by runtime persistent
+instruction inspection for both modular and legacy agents. Persona overrides
+do not remove it. See `docs/local-development.md`.
