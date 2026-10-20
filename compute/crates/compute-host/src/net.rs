@@ -34,9 +34,16 @@
 //! private one an older host named before guests were told their gateway,
 //! is answered by that same name server instead of being refused.
 //!
+//! What the rules installed now refuse, they also stop: a connection an
+//! older version of them let through, which the kernel would otherwise
+//! keep letting through for as long as the guest keeps using it, is
+//! forgotten when they are installed ([`conntrack`]), so its next packet is
+//! decided by them.
+//!
 //! Setting up a namespace takes two `ip` runs and one `nft` run, a few
 //! milliseconds each, when a sandbox is created; when the agent restarts,
-//! re-checking it takes one `nft` run. Neither happens on a wake.
+//! re-checking it takes one `nft` run and one look at the connections the
+//! namespace tracks. Neither happens on a wake.
 
 use std::fmt::{self, Write as _};
 use std::fs::File;
@@ -52,11 +59,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::Id;
 
+mod conntrack;
 mod dns;
 pub mod reach;
 
-use reach::Allowed;
 pub use reach::Reach;
+use reach::{Allowed, Ports};
 
 /// The guest's address, the same in every sandbox.
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 21);
@@ -122,6 +130,11 @@ pub struct Ipv4Net {
 impl Ipv4Net {
     fn size(self) -> u64 {
         1_u64 << (32 - u32::from(self.prefix))
+    }
+
+    /// Whether `address` is in the network.
+    fn contains(self, address: Ipv4Addr) -> bool {
+        u32::from(address) & Self::mask(self.prefix) == u32::from(self.address)
     }
 
     /// The network's mask; `/0` has none.
@@ -233,6 +246,23 @@ impl NetworkConfig {
         blocked.push(self.pool.to_string());
         blocked.extend(self.blocked.iter().map(ToString::to_string));
         blocked
+    }
+
+    /// [`Self::blocked`], as ranges.
+    fn blocked_nets(&self) -> Vec<Ipv4Net> {
+        self.blocked()
+            .iter()
+            .filter_map(|net| net.parse().ok())
+            .collect()
+    }
+
+    /// What the rules made of this and `allowed` refuse guests.
+    fn refusals(&self, allowed: &Allowed) -> Refusals {
+        Refusals {
+            pool: self.pool,
+            blocked: self.blocked_nets(),
+            open: allowed.open.clone(),
+        }
     }
 
     /// The ranges `reach` may not open: everything blocked but the local
@@ -350,6 +380,75 @@ table inet {SANDBOX_TABLE} {{
 }}
 "
         )
+    }
+}
+
+/// What the rules refuse guests, to forget the connections an older
+/// version of them let through ([`conntrack`]).
+#[derive(Clone, Debug)]
+struct Refusals {
+    /// The links between the host and the namespaces.
+    pool: Ipv4Net,
+    /// Every range guests may not reach, but for `open`.
+    blocked: Vec<Ipv4Net>,
+    /// Each destination `--reach` opens, with its TCP ports.
+    open: Vec<(Ipv4Net, Vec<Ports>)>,
+}
+
+impl Refusals {
+    /// Whether the rules refuse a guest's connection that went `original`:
+    /// to a blocked destination, unless TCP to a port `--reach` opens there.
+    fn refuse(&self, original: &conntrack::Direction) -> bool {
+        const TCP: u8 = 6;
+        let destination = original.destination;
+        let opened = original.protocol == TCP
+            && original.port.is_some_and(|port| {
+                self.open.iter().any(|(net, ports)| {
+                    net.contains(destination) && ports.iter().any(|ports| ports.contains(port))
+                })
+            });
+        !opened && self.blocked.iter().any(|net| net.contains(destination))
+    }
+
+    /// Whether a namespace's rules refuse `connection`: its guest's, to a
+    /// destination refused, unless redirected to the guest's name server,
+    /// which answers it.
+    fn in_namespace(&self, connection: &conntrack::Connection) -> bool {
+        connection.original.source == GUEST_IP
+            && connection.reply.source != GATEWAY_IP
+            && self.refuse(&connection.original)
+    }
+
+    /// Whether the host's rules refuse `connection`: one from a sandbox's
+    /// namespace to a destination refused.
+    fn on_host(&self, connection: &conntrack::Connection) -> bool {
+        self.pool.contains(connection.original.source) && self.refuse(&connection.original)
+    }
+}
+
+/// Forgets the connections tracked where the calling thread is that
+/// `refused` picks, ones an older version of the rules let through, at
+/// `place`. Warns rather than fails, as the rules hold either way: the
+/// host's drop every guest packet to a refused destination, tracked or not,
+/// so a connection left behind sends nothing further, and only its
+/// destination can still send to it, until it idles.
+fn forget_refused(place: &str, refused: impl Fn(&conntrack::Connection) -> bool) {
+    match conntrack::forget(refused) {
+        Ok(0) => {}
+        Ok(forgotten) => {
+            tracing::info!(
+                place,
+                forgotten,
+                "forgot connections the rules no longer let through"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                place,
+                %error,
+                "could not forget connections the rules no longer let through"
+            );
+        }
     }
 }
 
@@ -610,13 +709,14 @@ pub(crate) struct Networks {
     /// The MTU of the host's route to the internet.
     mtu: u32,
     sandbox_rules: String,
+    refusals: Refusals,
     names: dns::NameServer,
 }
 
 impl Networks {
     /// Resolves what sandboxes may reach, turns on forwarding, installs
-    /// the host's rules and measures the host's uplink MTU. The sandboxes'
-    /// name servers run on `runtime`.
+    /// the host's rules, forgets the connections they refuse and measures
+    /// the host's uplink MTU. The sandboxes' name servers run on `runtime`.
     pub fn prepare(
         config: &NetworkConfig,
         runtime: tokio::runtime::Handle,
@@ -625,6 +725,8 @@ impl Networks {
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .map_err(|error| NetError::new("enable forwarding", error))?;
         run("nft", &["-f", "-"], Some(&config.host_rules(&allowed)))?;
+        let refusals = config.refusals(&allowed);
+        forget_refused("host", |connection| refusals.on_host(connection));
         warn_of_foreign_forward_drops();
         let mtu = uplink_mtu().unwrap_or_else(|error| {
             tracing::warn!(%error, "could not find the host's uplink MTU; assuming 1500");
@@ -632,6 +734,7 @@ impl Networks {
         });
         Ok(Self {
             sandbox_rules: config.sandbox_rules(mtu, &allowed),
+            refusals,
             mtu,
             names: dns::NameServer::new(allowed.names, &config.dns, runtime),
         })
@@ -640,7 +743,8 @@ impl Networks {
     /// Makes sure `link` exists, complete, with the current rules and its
     /// name server: what is missing is added and every setting set,
     /// whatever an earlier attempt cut short left. Nothing that exists is
-    /// replaced, so a VM using the network keeps running.
+    /// replaced, so a VM using the network keeps running, but connections
+    /// the current rules refuse are forgotten.
     pub fn ensure(&self, link: &Link) -> Result<(), NetError> {
         let path = link.namespace_path();
         let namespace_exists = path.exists();
@@ -651,7 +755,8 @@ impl Networks {
             let inner = link.namespace_commands(Tap::find(link.uid, link.gid)?);
             run("ip", &["-batch", "-"], Some(&inner))
         })?;
-        self.configure(link)?;
+        // A namespace just made tracks nothing yet.
+        self.configure(link, namespace_exists)?;
         self.names.serve(&link.namespace, &path)
     }
 
@@ -694,21 +799,31 @@ impl Networks {
         Ok(false)
     }
 
-    /// Sets the namespace's kernel settings and rules to the current ones.
+    /// Sets the namespace's kernel settings and rules to the current ones,
+    /// then, if it may be `tracking` connections, forgets those the rules
+    /// refuse. They go after the rules, so none is made again meanwhile
+    /// under the old ones.
     ///
     /// The only host a namespace sends ICMP errors to is its own guest, so
     /// the per-destination ICMP rate limit is off: with it, a guest probing
     /// several blocked addresses at once would see all but the first few
     /// refusals arrive a second late, as timeouts. The namespace-wide cap
     /// (`icmp_msgs_per_sec`) still bounds them.
-    fn configure(&self, link: &Link) -> Result<(), NetError> {
+    fn configure(&self, link: &Link, tracking: bool) -> Result<(), NetError> {
+        let refusals = &self.refusals;
         in_namespace(&link.namespace_path(), || {
             for (setting, value) in NAMESPACE_SETTINGS {
                 let path = Path::new("/proc/sys/net").join(setting);
                 std::fs::write(&path, value)
                     .map_err(|error| NetError::new(&path.display().to_string(), error))?;
             }
-            run("nft", &["-f", "-"], Some(&self.sandbox_rules))
+            run("nft", &["-f", "-"], Some(&self.sandbox_rules))?;
+            if tracking {
+                forget_refused(&link.namespace, |connection| {
+                    refusals.in_namespace(connection)
+                });
+            }
+            Ok(())
         })
     }
 

@@ -41,6 +41,16 @@ Sandboxes run untrusted code next to each other and next to the host.
   restored behind these rules, and learns no more than any other guest.
   Queries to name servers it may reach, public ones or a listed
   destination, go where they were sent.
+- Rules decide a connection by its first packet; the kernel lets the rest
+  follow it for as long as packets keep coming. So whenever the agent
+  installs rules, as when an upgraded one starts under running sandboxes
+  (ADR 9), it forgets every connection the kernel tracks that they refuse:
+  in a namespace, its guest's to a refused destination that its own name
+  server does not answer; on the host, any from a namespace to a refused
+  destination. The next packet is then a new connection, refused or
+  redirected by the rules in place. A failure to list or forget them is
+  logged, not fatal: the host's rules drop guest packets to refused
+  destinations whatever is tracked.
 - The rules are enforced twice: inside the namespace, which the VMM joins
   without the privilege to change it, and again on the host.
 - After a restore, when the guest runs a notice handler on the configured
@@ -56,7 +66,11 @@ Sandboxes run untrusted code next to each other and next to the host.
   a move or on a host with other upstream name servers still resolves.
 - A guest booted under an older host keeps the name servers it was told
   until it next boots: public ones it asks directly, private ones are
-  answered by its own name server, so it resolves either way.
+  answered by its own name server, so it resolves either way, even from a
+  socket it kept asking from before the upgrade.
+- An agent upgrade leaves a guest's connections the new rules allow and
+  ends the ones they refuse, so what an older version let through stops
+  at once rather than once idle.
 - Guest ports relay bytes and add no identity: every sandbox's forwarded
   connections reach their upstream from the host's address. The upstream
   authenticates each one by a credential only that sandbox holds, never by

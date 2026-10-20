@@ -832,6 +832,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   asked for them; do not accept routes or use an exit node on hosts, and
   give hosts an overlay identity that may reach only the service's host
   endpoint and Opengeni's endpoints.
+- **Upgrading a host in place.** An agent that starts forgets the
+  connections sandboxes made under an older version that its rules refuse
+  ([ADR 11](adr/0011-fixed-guest-network.md)), such as queries a guest
+  keeps sending one private name server from one socket, which would
+  otherwise keep going there rather than to the guest's own; the log says
+  how many per namespace (`forgot connections the rules no longer let
+  through`). It reads them through the kernel's netlink interface to
+  connection tracking (`nf_conntrack_netlink`, loaded on demand); without
+  it the agent warns and such connections end only once idle.
 
 ## Capacity and cost
 
