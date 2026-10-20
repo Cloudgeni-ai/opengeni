@@ -64,6 +64,17 @@ export type BrowserDownloadProgressResult = {
   cancelReason: "download_quota_exceeded" | null;
 };
 
+/** A completed download whose bytes are kept but not yet settled, because
+ * another download with the same name was still running when it completed
+ * and could have replaced its file before it was kept. */
+type HeldCompletion = {
+  fileName: string | null;
+  sizeBytes: number;
+  sha256: string;
+  dev: number;
+  ino: number;
+};
+
 export type BrowserDownloadStoreOptions = {
   rootDirectory: string;
   browserSessionId: string;
@@ -102,6 +113,7 @@ export class BrowserDownloadStore {
   private readonly maxSessionBytes: number;
   private readonly maxExportEntries: number;
   private readonly database: Database;
+  private readonly held = new Map<string, HeldCompletion>();
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -249,8 +261,8 @@ export class BrowserDownloadStore {
         // resource settled as anything other than completed, no late event may
         // resurrect placement-private bytes or leave an orphan behind.
         if (row.status !== "completed")
-          await this.removePhysicalFiles(
-            guid,
+          await this.removeUnownedCompletion(
+            row,
             event.filePath ? downloadedFileName(this.filesDirectory, event.filePath) : null,
           );
         return { cancelReason: null };
@@ -268,17 +280,19 @@ export class BrowserDownloadStore {
         // saved file is removed here; the caller then rejects the download.
         if (event.state === "completed" && event.filePath) {
           const fileName = downloadedFileName(this.filesDirectory, event.filePath);
-          if (fileName) await this.removePhysicalFiles(guid, fileName);
+          if (fileName) await this.removeUnownedCompletion(row, fileName);
         }
         return { cancelReason: "download_quota_exceeded" };
       }
       if (event.state === "canceled") {
         await this.removePhysicalFiles(guid);
         this.settle(guid, "cancelled", receivedBytes, totalBytes, null, null);
+        await this.releaseHeld();
         return { cancelReason: null };
       }
       if (event.state === "completed") {
         await this.complete(row, receivedBytes, totalBytes, event.filePath ?? null);
+        await this.releaseHeld();
         return { cancelReason: null };
       }
       if (receivedBytes !== row.received_bytes || totalBytes !== row.total_bytes) {
@@ -299,10 +313,12 @@ export class BrowserDownloadStore {
       const guid = requireGuid(guidInput);
       const failureCode = requireFailureCode(failureCodeInput);
       const row = this.requireRowByGuid(guid);
+      this.held.delete(guid);
       await this.removePhysicalFiles(guid);
       if (row.status === "in_progress") {
         this.settle(guid, "failed", row.received_bytes, row.total_bytes, null, failureCode);
       }
+      await this.releaseHeld();
     });
   }
 
@@ -314,6 +330,7 @@ export class BrowserDownloadStore {
           "SELECT guid FROM browser_downloads WHERE status = 'in_progress' ORDER BY sequence",
         )
         .all();
+      this.held.clear();
       for (const row of rows) {
         await this.removePhysicalFiles(row.guid);
         const current = this.requireRowByGuid(row.guid);
@@ -566,6 +583,56 @@ export class BrowserDownloadStore {
       // file cannot be replaced, which would fail a later download with the
       // same name, so the read-only mode is applied elsewhere only.
       if (process.platform !== "win32") await chmod(path, 0o400);
+      const kept = await lstat(path);
+      const completion: HeldCompletion = {
+        fileName,
+        sizeBytes,
+        sha256,
+        dev: kept.dev,
+        ino: kept.ino,
+      };
+      const peers = this.runningPeers(row);
+      // Two downloads holding the same bytes means one of them was replaced
+      // before it was kept, and nothing tells which: neither is trusted.
+      const twinGuid = [...this.held].find(
+        ([, other]) => other.dev === kept.dev && other.ino === kept.ino,
+      )?.[0];
+      const twin = twinGuid === undefined ? null : this.rowByGuid(twinGuid);
+      if (twin) {
+        this.held.delete(twin.guid);
+        await this.removePhysicalFiles(twin.guid);
+        this.settle(
+          twin.guid,
+          "failed",
+          twin.received_bytes,
+          twin.total_bytes,
+          null,
+          "download_integrity_failed",
+        );
+        await this.removePhysicalFiles(row.guid);
+        this.settle(
+          row.guid,
+          "failed",
+          eventReceivedBytes,
+          eventTotalBytes,
+          null,
+          "download_integrity_failed",
+        );
+        return;
+      }
+      if (peers.some((peer) => !this.held.has(peer.guid))) {
+        // A running download with the same name may already have replaced
+        // the file; settle once it has settled and its bytes are known.
+        this.held.set(row.guid, completion);
+        this.database
+          .query<unknown, [number, number, string]>(
+            `UPDATE browser_downloads
+                SET received_bytes = ?, total_bytes = ?, version = version + 1
+              WHERE guid = ? AND status = 'in_progress'`,
+          )
+          .run(sizeBytes, sizeBytes, row.guid);
+        return;
+      }
       this.settle(row.guid, "completed", sizeBytes, sizeBytes, sha256, null, fileName);
     } catch {
       await this.discardCompletion(row.guid, fileName);
@@ -740,6 +807,59 @@ export class BrowserDownloadStore {
   /** The file as Chromium saved it in its downloads folder. */
   private chromiumPath(row: Pick<DownloadRow, "guid" | "file_name">): string {
     return join(this.filesDirectory, row.file_name ?? requireGuid(row.guid));
+  }
+
+  /** Other unsettled downloads Chromium may save under the same name. */
+  private runningPeers(row: Pick<DownloadRow, "guid" | "filename">): DownloadRow[] {
+    return this.database
+      .query<DownloadRow, [string, string]>(
+        `SELECT * FROM browser_downloads
+          WHERE guid <> ? AND filename = ? AND status = 'in_progress'
+          ORDER BY sequence`,
+      )
+      .all(row.guid, row.filename);
+  }
+
+  /** Settle held completions that no running download can affect any more. */
+  private async releaseHeld(): Promise<void> {
+    for (const [guid, completion] of [...this.held]) {
+      const row = this.rowByGuid(guid);
+      if (!row || row.status !== "in_progress") {
+        this.held.delete(guid);
+        continue;
+      }
+      if (this.runningPeers(row).some((peer) => !this.held.has(peer.guid))) continue;
+      this.held.delete(guid);
+      this.settle(
+        guid,
+        "completed",
+        completion.sizeBytes,
+        completion.sizeBytes,
+        completion.sha256,
+        null,
+        completion.fileName,
+      );
+    }
+  }
+
+  /** Remove what a download that is no longer wanted left behind. Chromium's
+   * named file is removed only while no other download can own that name. */
+  private async removeUnownedCompletion(
+    row: Pick<DownloadRow, "guid" | "filename">,
+    fileName: string | null,
+  ): Promise<void> {
+    await this.removePhysicalFiles(row.guid);
+    if (fileName === null) return;
+    const owner = this.database
+      .query<{ guid: string }, [string, string, string]>(
+        `SELECT guid FROM browser_downloads
+          WHERE guid <> ?
+            AND ((status = 'in_progress' AND filename = ?)
+              OR (status = 'completed' AND file_name = ?))
+          LIMIT 1`,
+      )
+      .get(row.guid, row.filename, fileName);
+    if (!owner) await rm(join(this.filesDirectory, fileName), { force: true });
   }
 
   /** Remove a completion that is not accepted. Chromium's file is removed
