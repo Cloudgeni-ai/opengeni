@@ -32,6 +32,9 @@ export const Windows = z.object({
         title: text,
         app_name: text,
         bounds: Rect,
+        // macOS only: false for a minimized or hidden window, or one on
+        // another Space or beyond every display.
+        is_on_screen: z.boolean().nullish(),
       }),
     )
     .max(4096),

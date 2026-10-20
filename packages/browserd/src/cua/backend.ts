@@ -34,6 +34,8 @@ type Target = {
   /** The window's own title and app, as CUA names them in its reports. */
   title: string;
   appName: string;
+  /** False when CUA lists the window as not on screen. */
+  onScreen: boolean;
 };
 type Frame = {
   targetId: string;
@@ -177,13 +179,13 @@ export class CuaComputerBackend implements ComputerBackend {
     return this.run(() => this.discover());
   }
   observe(targetId: string): Promise<ComputerBackendObservation> {
-    return this.run(() => this.observeTarget(targetId));
+    return this.run(() => this.readOnScreen(targetId, () => this.observeTarget(targetId)));
   }
   capture(
     targetId: string,
     options?: ComputerBackendCaptureOptions,
   ): Promise<ComputerBackendFrame> {
-    return this.run(() => this.captureTarget(targetId, options));
+    return this.run(() => this.readOnScreen(targetId, () => this.captureTarget(targetId, options)));
   }
   captureStill(
     targetId: string,
@@ -371,6 +373,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const windows = Windows.parse(data).windows;
     const live = new Set<string>();
     for (const window of windows) {
+      // Another CUA worker's cursor overlay (another computer session, or
+      // another agent on this desktop) spans the screen above every app. It
+      // is never a window a person or an agent works in.
+      if (window.app_name === CUA_WORKER_APP) continue;
       const id = `cua:window:${window.pid}:${window.window_id}`;
       live.add(id);
       const old = this.targetsById.get(id);
@@ -379,6 +385,9 @@ export class CuaComputerBackend implements ComputerBackend {
         windowId: window.window_id,
         title: window.title,
         appName: window.app_name,
+        // Only macOS cannot read a window that is off screen; Windows and
+        // Linux read minimized or covered windows through their trees.
+        onScreen: this.identity.platform !== "macos" || window.is_on_screen !== false,
         native: {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
@@ -412,6 +421,48 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     return target;
+  }
+
+  /** A window that is not on screen (minimized, hidden, on another Space or
+   * beyond every display) has neither pixels nor, often, controls CUA can
+   * read, and CUA can take half a minute to find that out. A window listed
+   * off screen is refused at once, and a failed read of a window that left
+   * the screen since says so instead of reporting a driver failure. */
+  private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
+    const offScreen = () =>
+      new ComputerBackendError(
+        "unsupported",
+        "This window is not on screen (it is minimized, hidden, or on another Space or display), so it can be neither captured nor read. Observe a window that is on screen instead.",
+        false,
+        false,
+      );
+    if (!(await this.target(targetId)).onScreen) {
+      // The listing may predate the window coming back on screen.
+      await this.discover();
+      if (!(await this.target(targetId)).onScreen) throw offScreen();
+    }
+    try {
+      return await read();
+    } catch (error) {
+      if (
+        !(error instanceof ComputerBackendError) ||
+        error.dispatched ||
+        (error.code !== "driver_failed" && error.code !== "target_stale")
+      )
+        throw error;
+      // The listing may predate the window leaving the screen.
+      await this.discover().catch(() => undefined);
+      const target = this.targetsById.get(targetId);
+      if (!target)
+        throw new ComputerBackendError(
+          "target_not_found",
+          "CUA window is no longer present",
+          false,
+          false,
+        );
+      if (target.onScreen) throw error;
+      throw offScreen();
+    }
   }
 
   private args(target: Target): Record<string, unknown> {
@@ -1094,6 +1145,8 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+/** The app name CUA's worker process lists its own overlay windows under. */
+const CUA_WORKER_APP = "cua-driver";
 
 /** Whether two readings show the same window (title, process, generation,
  * place) with the same elements in the same order: everything but the
