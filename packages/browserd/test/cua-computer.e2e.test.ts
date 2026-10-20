@@ -331,18 +331,18 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         // A computer_act batch is one operation: every action is resolved in
         // one observation, CUA runs them in one run_steps call, and a replay
         // does not act again.
-        const label = (text: string) => ({ kind: "label" as const, text, exact: true });
+        const id = (value: string) => ({ kind: "identifier" as const, value });
         const batch = makeCommand(await supervisor.observe(reference, target.id), {
           type: "batch",
           actions: [
             {
               type: "semantic",
-              locator: label("Fixture text"),
+              locator: id("fixture-text"),
               action: "set_value",
               value: "Batched",
             },
-            { type: "semantic", locator: label("Increment"), action: "invoke" },
-            { type: "semantic", locator: label("Increment"), action: "invoke" },
+            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
+            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
           ],
         });
         const batchReceipt = await supervisor.action(batch);
