@@ -55,7 +55,9 @@
 //! is higher, and the epoch is what a moved guest's memory is ordered by.
 //! The attempts of one notice share the order, so a retry is applied
 //! again; the time sets only the clock, and a host clock that steps back
-//! orders nothing. A template's guest is told no notice before its
+//! orders nothing. A retry moves the guest's clock only forward: the guest
+//! may get to it after the attempt before it, with the time it was sent
+//! at. A template's guest is told no notice before its
 //! snapshot, so a clone's first notice is the first its memory knows of.
 //!
 //! The same port answers one more question, asked before a running sandbox

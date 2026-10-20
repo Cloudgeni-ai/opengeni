@@ -26,8 +26,11 @@ fi
 
 install -d -m 700 /etc/compute
 cd /etc/compute
-gcloud storage cp "gs://$BUCKET/fleet/ca.pem" "gs://$BUCKET/fleet/control.pem" \
-  "gs://$BUCKET/fleet/control.key" "gs://$BUCKET/fleet/keys" .
+# The hosts' authority: the service issues its own certificate from it.
+install -d -m 700 /etc/compute/authority
+gcloud storage cp "gs://$BUCKET/fleet/ca.pem" /etc/compute/authority/ca.crt
+gcloud storage cp "gs://$BUCKET/fleet/ca.key" /etc/compute/authority/ca.key
+gcloud storage cp "gs://$BUCKET/fleet/keys" .
 gcloud storage cp "gs://$BUCKET/fleet/compute-control" /usr/local/bin/compute-control
 chmod 755 /usr/local/bin/compute-control
 
@@ -40,7 +43,7 @@ Requires=postgresql.service
 Environment=RUST_LOG=info
 ExecStart=/usr/local/bin/compute-control serve \\
   --database "host=localhost user=fleet password=fleet dbname=fleet" \\
-  --cert /etc/compute/control.pem --key /etc/compute/control.key --host-ca /etc/compute/ca.pem \\
+  --host-authority /etc/compute/authority --host-url https://$(meta instance/name):8443 \\
   --archive gs://$BUCKET/archive --keys-file /etc/compute/keys \\
   --gcp-group projects/$PROJECT/zones/$ZONE/instanceGroupManagers/$GROUP $SCALE
 Restart=always

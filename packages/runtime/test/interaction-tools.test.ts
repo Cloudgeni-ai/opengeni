@@ -3208,6 +3208,58 @@ describe("interaction attempt tools", () => {
     expect(observed).toBe(1);
   });
 
+  test("an action naming its observation is fenced from the target list without a re-read", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const requests: ComputerActionRequest[] = [];
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerTargets: async () => ({ computerSessionId, targets: [target] }),
+        observeComputerTarget: async () => {
+          observed += 1;
+          return observation;
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, observation);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const act = async (fences: Record<string, unknown>) =>
+      await environment.callModel({
+        operationId: randomUUID(),
+        modelName: "interaction__computer_act",
+        subjectId: "model:test",
+        arguments: {
+          computerSessionId,
+          targetId: target.id,
+          ...fences,
+          action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
+        },
+      });
+    // Reading the window again would retire the ref the caller holds.
+    await act({ expectedObservationId: observation.observationId });
+    expect(observed).toBe(0);
+    expect(requests[0]).toMatchObject({
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: observation.observationId,
+    });
+    // With no fences at all, the current observation supplies them.
+    await act({});
+    expect(observed).toBe(1);
+    expect(requests[1]).toMatchObject({ expectedObservationId: observation.observationId });
+  });
+
   test("reads only the exact ComputerSession native clipboard", async () => {
     const clipboard = {
       computerSessionId,

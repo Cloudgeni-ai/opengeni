@@ -6,14 +6,15 @@
 #     Temporal, NATS (auth callout) and Garage fixtures, the relay, the
 #     compute backend as the deployment's default, and computeControl:
 #     its own schema and role in that Postgres, API over HTTPS from an e2e
-#     authority Opengeni trusts, the hosts endpoint as a NodePort with the
-#     fleet authority's certificate, an Ed25519 link key and Opengeni's
-#     team link, the fleet's archive and group;
+#     authority Opengeni trusts, the hosts endpoint as a NodePort, the
+#     hosts' authority (the service issues host certificates against GCE
+#     identity tokens), an Ed25519 link key and Opengeni's team link, the
+#     hosts' archive and group;
 #   - Caddy in front, with Let's Encrypt certificates for sslip.io names of
 #     the VM's address: opengeni.<ip> (web and API, the agent gateway),
 #     relay.<ip> and files.<ip> (object storage).
-# A model's settings (env.sh model-up) arrive on stdin. Waits until the
-# control service reports HOSTS hosts.
+# A model's settings (env.sh model-up) arrive on stdin. The hosts come
+# after it (env.sh hosts, stack/hosts.sh).
 set -euo pipefail
 : "${STACK_IP:?}" "${HOSTS:?}" "${ZONE:?}" "${HOSTS_PORT:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
@@ -96,9 +97,8 @@ put opengeni-postgres POSTGRES_PASSWORD "$(cat "$sec/postgres")"
 put compute-db COMPUTE_DATABASE_PASSWORD "$(cat "$sec/compute-db")"
 put compute-keys keys "$(printf 'opengeni %s\noperator %s' "$(cat "$sec/compute-opengeni-key")" "$(cat "$sec/compute-operator-key")")"
 put compute-link link.pem "$(cat "$sec/link.pem")"
-put compute-hosts-tls tls.crt "$(cat "$fleet/control_certificate_pem")"
-put compute-hosts-tls tls.key "$(cat "$fleet/control_private_key_pem")"
-put compute-hosts-tls ca.crt "$(cat "$fleet/fleet_ca_pem")"
+put compute-hosts-tls ca.crt "$(cat "$fleet/host_authority_pem")"
+put compute-hosts-tls ca.key "$(cat "$fleet/host_authority_key_pem")"
 put compute-api-tls tls.crt "$(cat "$sec/api.pem")"
 put compute-api-tls tls.key "$(cat "$sec/api.key")"
 put compute-api-tls ca.crt "$(cat "$sec/api-ca.pem")"
@@ -125,7 +125,8 @@ sudo systemctl restart e2e-diagnostics
 log "values"
 jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$nats" --arg ogtag "$OPENGENI_TAG" \
   --arg cmtag "$COMPUTE_TAG" --arg archive "$(cat "$fleet/archive")" --arg group "$(cat "$fleet/host_group")" \
-  --argjson hostmib "$(cat "$fleet/host_memory_mib")" \
+  --argjson hostmib "$(cat "$fleet/host_memory_mib")" --arg hosturl "$(cat "$fleet/control_url")" \
+  --argjson identity "$(cat "$fleet/identity_tokens.json")" \
   --arg sandbox "$SANDBOX_IMAGE" --arg desktop "$DESKTOP_IMAGE" --arg hosts "$HOSTS" \
   --argjson port "$HOSTS_PORT" --arg model "${MODEL_DEPLOYMENT:-}" --arg base "${AZURE_OPENAI_BASE_URL:-}" \
   --arg diagnostics "http://$internal:4319" '
@@ -174,7 +175,9 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$na
       image: {repository: "opengeni-compute-control", tag: $cmtag, pullPolicy: "IfNotPresent"},
       database: {existingSecret: "compute-db"},
       keys: {existingSecret: "compute-keys"},
+      hostUrl: $hosturl,
       hostsTls: {secretName: "compute-hosts-tls"},
+      hostIdentity: {gcpProject: $identity.project, gcpAccount: $identity.account},
       apiTls: {secretName: "compute-api-tls"},
       link: {existingSecret: "compute-link"},
       teamLinks: {opengeni: "wss://\($app)/v1/compute/agent-link"},
@@ -236,23 +239,6 @@ sudo systemctl reload caddy || sudo systemctl restart caddy
 for _ in $(seq 60); do curl -fsS "https://$app/healthz" >/dev/null 2>&1 && break; sleep 5; done
 curl -fsS "https://$app/healthz" >/dev/null
 
-log "waiting for $HOSTS hosts"
-key=$(cat "$sec/compute-operator-key")
-# The service's address on the cluster network, which the node reaches
-# directly (a port-forward would stay bound to one replica as it rolls).
-control=$(ip "$full-compute-control")
-for _ in $(seq 120); do
-  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:8080:$control" \
-    -H "X-API-Key: $key" "https://$full-compute-control.$ns.svc:8080/v1/hosts" 2>/dev/null |
-    jq '[.[] | select(.state == "live")] | length' 2>/dev/null || echo 0)
-  [ "${count:-0}" -ge "$HOSTS" ] && break
-  sleep 10
-done
-if [ "${count:-0}" -lt "$HOSTS" ]; then
-  log "only ${count:-0} of $HOSTS hosts are live after 20 minutes"
-  exit 1
-fi
-log "hosts ready: $count of $HOSTS"
 cat >"$HOME/e2e/endpoints.env" <<EOF
 OPENGENI_URL=https://$app
 RELAY_URL=wss://$relay

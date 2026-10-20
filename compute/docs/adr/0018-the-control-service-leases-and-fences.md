@@ -226,8 +226,10 @@ can be built and tested.
   record before it acts: an earlier one is refused as stale, a later one
   the host never held as not found, and a create or adopt under a later
   epoch first drops the copy held under the earlier one. The host API
-  also listens on TCP with mutual TLS for the service, each side trusting
-  only the other's authority; the Unix socket stays for local tools, which
+  also listens on TCP with mutual TLS for the service, both sides trusting
+  only the hosts' authority, which the service is: it issues hosts their
+  certificates and itself its own (operations.md, Keys and certificates);
+  the Unix socket stays for local tools, which
   on a host in a fleet never create, adopt, hand off or remove sandboxes.
   A host with sandboxes it cannot read (blocked) does not register until
   they are readable or removed, since it cannot rule on them.

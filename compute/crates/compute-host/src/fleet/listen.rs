@@ -1,5 +1,7 @@
 //! The host API for the control service: the agent's own requests, one per
-//! connection, over mutual TLS, each in an [`Envelope`] that bounds it.
+//! connection, over mutual TLS, each in an [`Envelope`] that bounds it. Only
+//! a caller whose certificate is valid for the service's name is served:
+//! other hosts hold certificates of the same authority.
 //!
 //! A request goes through only while the host holds the registration it
 //! names, its lease has not run out, and it is no more than the request
@@ -31,6 +33,7 @@ use std::time::Duration;
 
 use compute_protocol::fleet::{Answer, Answered, Envelope, Sent};
 use compute_protocol::host::{ErrorCode, Reply, Request};
+use rustls::pki_types::ServerName;
 use tokio::io::{
     AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
 };
@@ -39,6 +42,7 @@ use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 
 use super::gate::{Admission, LeaseGate};
+use super::tls::names_service;
 use crate::agent::Handle;
 use crate::server::serve_one;
 use crate::store::OwnerEpoch;
@@ -54,6 +58,9 @@ const ACCEPT_BACKOFF: (Duration, Duration) = (Duration::from_millis(10), Duratio
 #[derive(Clone)]
 pub(crate) struct Listening {
     pub(crate) acceptor: TlsAcceptor,
+    /// The name the control service is reached by: only a certificate
+    /// valid for it is the service's.
+    pub(crate) service: ServerName<'static>,
     /// A handle of the host's own origin; each request runs under the
     /// owner epoch it names.
     pub(crate) handle: Handle,
@@ -91,7 +98,21 @@ impl Listening {
         let Ok(tls) = tokio::time::timeout(REQUEST_TIMEOUT, self.acceptor.accept(tcp)).await else {
             return Ok(());
         };
-        let mut caller = BufReader::new(tls?);
+        let tls = tls?;
+        let is_service = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .is_some_and(|certificate| names_service(certificate, &self.service));
+        if !is_service {
+            tracing::warn!(
+                service = ?self.service,
+                "refused a caller whose certificate is not the control service's"
+            );
+            return Ok(());
+        }
+        let mut caller = BufReader::new(tls);
         let mut line = String::new();
         let mut limited = (&mut caller).take(MAX_REQUEST);
         match tokio::time::timeout(REQUEST_TIMEOUT, limited.read_line(&mut line)).await {

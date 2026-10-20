@@ -16,12 +16,19 @@
 //!
 //! Sandboxes that run Opengeni's agent are reached through their hosts'
 //! links to Opengeni, whose tokens the service signs ([`link`]).
+//!
+//! The service is the hosts' certificate authority ([`authority`]): it
+//! issues its own host-endpoint certificate and each host's, for the
+//! instance an identity token proves ([`identity`]) or the name a current
+//! certificate holds.
 
 pub mod api;
+pub mod authority;
 pub mod e2b;
 pub mod group;
 pub mod hostapi;
 pub mod hosts;
+pub mod identity;
 pub mod init;
 pub mod keys;
 pub mod leader;
@@ -64,6 +71,9 @@ pub struct Config {
     /// Where hosts reach the service.
     pub hosts: SocketAddr,
     pub tls: Tls,
+    /// What checks the instance identity tokens hosts on Google Cloud prove
+    /// themselves with; `None` takes none.
+    pub identity: Option<identity::GceIdentity>,
     /// The object store hosts archive to, if they do.
     pub archive: Option<ChunkStore>,
     pub settings: Settings,
@@ -122,7 +132,17 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     let hosts = host_listener.local_addr()?;
     let api = api_listener.local_addr()?;
     let acceptor = TlsAcceptor::from(Arc::clone(&config.tls.server));
-    let host_router = hostapi::router(Arc::clone(&store), terms, service.settings().links.clone());
+    let certificates = Arc::new(hostapi::Certificates {
+        authority: Arc::clone(&config.tls.authority),
+        identity: config.identity,
+        reserved: config.tls.own.names().to_vec(),
+    });
+    let host_router = hostapi::router(
+        Arc::clone(&store),
+        terms,
+        service.settings().links.clone(),
+        certificates,
+    );
     let api_router = api::router(Arc::clone(&service), config.operator);
     let mut tasks = vec![
         tokio::spawn(view::follow(Arc::clone(&view), Arc::clone(&store))),
@@ -133,6 +153,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             config.scaling,
         )),
         tokio::spawn(hostapi::serve(host_listener, acceptor, host_router)),
+        tokio::spawn(Arc::clone(&config.tls.own).keep_fresh()),
         tokio::spawn(tls::serve(
             api_listener,
             api_router,

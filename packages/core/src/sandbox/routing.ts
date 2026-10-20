@@ -310,6 +310,14 @@ async function resolveSelfhostedConnection(
     },
     authority,
   );
+  return channelAConnectionBinding(services, enrollment);
+}
+
+/** One live enrollment as the exact route a Channel-A request addresses. */
+export function channelAConnectionBinding(
+  services: Pick<ChannelARoutingServices, "settings" | "bus">,
+  enrollment: EnrollmentRecord | null,
+): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
   const opStream: SelfhostedOpStreamDeps | undefined =
     services.settings.agentOpStreamEnabled === true &&
@@ -326,12 +334,21 @@ async function resolveSelfhostedConnection(
         }
       : undefined;
   return {
+    // The machine is addressed in the workspace it is enrolled in. A personal
+    // machine its owner allowed in another workspace keeps one connection,
+    // subscribed under its own workspace, so the session's workspace would
+    // address no one.
+    workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
     workspaceRoot: enrollment.workspaceRoot,
     ...(opStream ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
   };
 }
 

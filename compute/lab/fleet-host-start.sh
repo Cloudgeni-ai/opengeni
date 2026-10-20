@@ -7,8 +7,8 @@
 #
 # Lab arrangement, not a production one: the hosts' certificate authority's
 # key sits in the fleet's bucket and each host signs its own certificate
-# with it at boot. A production fleet issues host certificates from a
-# certificate service that checks the instance's identity.
+# with it at boot. Production hosts get theirs from the control service,
+# which checks the instance's identity token (deploy/host/compute-host-certificate).
 set -euo pipefail
 export PATH=$PATH:/snap/bin
 

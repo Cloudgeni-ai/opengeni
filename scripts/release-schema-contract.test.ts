@@ -2873,6 +2873,7 @@ describe("release schema contract", () => {
       "0854_file_visibility.sql",
       "0855_session_fork_agent_parity.sql",
       "0856_session_fork_workflow_identity.sql",
+      "0857_connection_origin_workspace_cascade.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

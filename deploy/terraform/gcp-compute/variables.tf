@@ -15,7 +15,7 @@ variable "name_prefix" {
 }
 
 variable "region" {
-  description = "Region of the archive bucket and the certificate authority."
+  description = "Region of the archive bucket and the hosts."
   type        = string
   default     = "europe-west4"
 }
@@ -131,14 +131,14 @@ variable "base_image_ref" {
 }
 
 variable "control_url" {
-  description = "The control service's host endpoint hosts dial, such as https://compute-control.example.com:8443. Its certificate must name this host."
+  description = "The control service's host endpoint hosts dial, such as https://compute-control.example.com:8443: computeControl.hostUrl in the Helm chart, exactly. The service's certificate is for its host, and hosts' identity tokens are for it."
   type        = string
 }
 
-variable "control_dns_names" {
-  description = "DNS names on the control service's host-endpoint certificate this root issues. Empty: no certificate is issued (bring one from the same authority)."
-  type        = list(string)
-  default     = []
+variable "previous_host_authority_pem" {
+  description = "While the hosts' authority is replaced: the authority being retired (its certificate, PEM), which new hosts trust beside the current one. Empty otherwise. See operations.md, Keys and certificates."
+  type        = string
+  default     = ""
 }
 
 variable "control_source_ranges" {
@@ -170,6 +170,24 @@ variable "host_args" {
   default     = ""
 }
 
+variable "host_startup_prelude" {
+  description = "A shell script each host runs as root at every boot, before it installs or reaches the network for anything else: for example joining an overlay network that the control service and Opengeni are reached on. It runs again on every attempt, so it must be safe to repeat. Empty: none."
+  type        = string
+  default     = ""
+}
+
+variable "advertise_interface" {
+  description = "Network interface whose IPv4 address each host gives the control service to dial (port 7443), waiting up to two minutes for it: for example tailscale0 when the service reaches hosts over an overlay network. Empty: the host's VPC address."
+  type        = string
+  default     = ""
+}
+
+variable "host_readable_secrets" {
+  description = "Secret Manager secret IDs in this project that the hosts' service account may read, so the prelude can fetch credentials (such as an overlay network's join key) instead of carrying them in instance metadata."
+  type        = list(string)
+  default     = []
+}
+
 variable "archive_bucket" {
   description = "Name of the archive bucket to create (globally unique)."
   type        = string
@@ -191,7 +209,7 @@ variable "control_workload_identity" {
 }
 
 variable "for_tests" {
-  description = "Let terraform destroy remove the bucket with its objects and the certificate authority at once. Never in production."
+  description = "Let terraform destroy remove the bucket with its objects. Never in production."
   type        = bool
   default     = false
 }

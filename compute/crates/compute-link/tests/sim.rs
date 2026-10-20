@@ -441,10 +441,11 @@ impl Sim {
     }
 
     /// The no-wake request the host takes, for a session it still holds:
-    /// its sandbox, reply subject, message and whether the host must
+    /// its sandbox, reply subject, message, whether the session is open
+    /// (the host then delivers it or answers it) and whether the host must
     /// answer it at once (it does not say the sandbox runs, and the
     /// session is open).
-    fn quiet_for(&self, input: &Input) -> Option<(usize, String, u64, bool)> {
+    fn quiet_for(&self, input: &Input) -> Option<(usize, String, u64, bool, bool)> {
         match input {
             Input::Gateway {
                 link,
@@ -462,9 +463,9 @@ impl Sim {
                 let session = self.sessions.get(&(*link, *s))?;
                 let n = self.index(&session.sandbox);
                 let id = u64::from_be_bytes(payload.as_ref().try_into().unwrap());
-                let must = self.sandboxes[n].told != Some(Running::Awake)
-                    && self.host_open.contains(&(*link, *s));
-                Some((n, reply.clone(), id, must))
+                let open = self.host_open.contains(&(*link, *s));
+                let must = open && self.sandboxes[n].told != Some(Running::Awake);
+                Some((n, reply.clone(), id, open, must))
             }
             _ => None,
         }
@@ -501,7 +502,7 @@ impl Sim {
     fn check_unanswered(
         &mut self,
         effects: &[Effect],
-        quiet_for: Option<&(usize, String, u64, bool)>,
+        quiet_for: Option<&(usize, String, u64, bool, bool)>,
         fell_asleep: Option<(usize, bool, bool)>,
         quiet_due: Option<HashSet<String>>,
     ) {
@@ -540,7 +541,7 @@ impl Sim {
                 "the host answered {subject} after its agent's answer"
             );
             match quiet_for {
-                Some((_, reply, _, must)) if reply == subject => {
+                Some((_, reply, _, _, must)) if reply == subject => {
                     assert!(
                         !must || why == "asleep",
                         "{subject} answered {why} for a sandbox not said to run"
@@ -560,7 +561,7 @@ impl Sim {
             }
             answered.insert(subject.clone());
         }
-        if let Some((n, reply, id, must)) = quiet_for {
+        if let Some((n, reply, id, open, must)) = quiet_for {
             let delivered = effects.iter().any(|effect| {
                 matches!(effect, Effect::ToGuest { op: ServerOp::Msg(delivery), .. }
                     if delivery.payload.as_ref() == id.to_be_bytes())
@@ -574,6 +575,10 @@ impl Sim {
             assert!(
                 !(delivered && answered.contains(reply)),
                 "{reply} was answered and delivered"
+            );
+            assert!(
+                !*open || delivered || answered.contains(reply),
+                "{reply} for an open session was neither delivered nor answered"
             );
             if delivered {
                 self.quiet_taken

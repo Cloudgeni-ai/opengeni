@@ -109,13 +109,6 @@ certificates() {
   cd "$STATE"
   [ -f ca.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
     -keyout ca.key -out ca.pem -subj "/CN=$PREFIX fleet authority" 2>/dev/null
-  if [ ! -f control.pem ]; then
-    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout control.key \
-      -out control.csr -subj "/CN=$CONTROL" 2>/dev/null
-    openssl x509 -req -in control.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -out control.pem \
-      -extfile <(printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth,clientAuth\n' "$CONTROL") 2>/dev/null
-    rm -f control.csr
-  fi
   if [ ! -f keys ]; then
     printf 'test %s\noperator %s\n' "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" >keys
     chmod 600 keys
@@ -145,7 +138,7 @@ up() {
   g iam service-accounts add-iam-policy-binding "$HOST_SA" --member "serviceAccount:$CONTROL_SA" \
     --role roles/iam.serviceAccountUser >/dev/null
   certificates
-  g storage cp "$STATE/ca.pem" "$STATE/ca.key" "$STATE/control.pem" "$STATE/control.key" "$STATE/keys" \
+  g storage cp "$STATE/ca.pem" "$STATE/ca.key" "$STATE/keys" \
     "$bin/compute-host" "$bin/compute-control" "gs://$BUCKET/fleet/"
   log "instance template $TEMPLATE and group $GROUP"
   g compute instance-templates describe "$TEMPLATE" >/dev/null 2>&1 ||

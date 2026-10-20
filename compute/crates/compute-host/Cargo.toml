@@ -34,6 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustix = { version = "1", features = ["event", "fs", "param", "process", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

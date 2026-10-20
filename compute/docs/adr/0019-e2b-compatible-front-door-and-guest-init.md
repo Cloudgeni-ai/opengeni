@@ -126,8 +126,11 @@ an init system of its own.
   vsock streams to TCP ports in the guest (so `connect` reaches envd and
   any program listening, on localhost too), reaps orphans and shuts down
   cleanly. It calls envd's `/init` after a create (environment, access
-  token, default user and directory) and after a restore, with the time
-  and the access token the sandbox keeps, which envd checks first. A clone
+  token, default user and directory) and after a restore, with the access
+  token the sandbox keeps, which envd checks first. It sends no time:
+  envd silently skips an `/init` whose time is not later than the last it
+  applied, which after a clock step would drop a create's token, and the
+  guest sets its own clock from the restore notice. A clone
   of a ready template is a create: it gets its own `/init`, with its own
   environment and token, before anyone can reach it. The sandbox is ready,
   and the service routes to it, only once `/init` succeeded.

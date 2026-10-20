@@ -118,7 +118,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         ),
       );
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -158,7 +158,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
       });
       return this.typedSecrets.redact(this.projectObservation(observation));
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -173,7 +173,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         );
       await client.validateNative(command);
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -218,7 +218,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
       this.assertClickContinuation(command, client);
       await client.validate(nativeCommand(command));
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -277,7 +277,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         0,
       );
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -293,7 +293,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         }),
       );
     } catch (error) {
-      throw predispatchError(error);
+      throw predispatchError(error, this.typedSecrets.merged());
     }
   }
 
@@ -820,13 +820,18 @@ async function pasteText(
   return await client.dispatch(paste);
 }
 
-function predispatchError(error: unknown): Error {
+/** A read or validation failure as the caller sees it; the backend's text
+ * (which can carry CUA's own words) is redacted like any other error. */
+function predispatchError(
+  error: unknown,
+  secretValues: Parameters<typeof redactInteractionSecretValues>[1],
+): Error {
   if (!(error instanceof ComputerBackendError)) {
     return error instanceof Error ? error : new Error(String(error));
   }
   return new InteractionControllerError(
     interactionErrorCode(error.code),
-    error.message,
+    driverErrorMessage(error.message, secretValues),
     error.retryable,
   );
 }

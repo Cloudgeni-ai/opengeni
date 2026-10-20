@@ -1,4 +1,6 @@
-//! `compute-control`: the control service, and adding API keys to its store.
+//! `compute-control`: the control service, adding API keys to its store,
+//! and the hosts' authority: making one and issuing a host's first
+//! certificate where Google Cloud's identity tokens cannot.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -9,13 +11,16 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 use compute_control::api::key_digest;
+use compute_control::authority::{self, Authority};
 use compute_control::e2b;
-use compute_control::group::{COMPUTE_API, GcpGroup, METADATA};
+use compute_control::group::{COMPUTE_API, Credentials, GcpGroup, METADATA, ServiceAccountKey};
+use compute_control::hostapi::Certificates;
+use compute_control::identity::{Expected, GOOGLE_KEYS, GceIdentity, GoogleKeys};
 use compute_control::leader::Scaling;
 use compute_control::link::Links;
 use compute_control::service::Settings;
 use compute_control::store::{MemoryStore, PostgresStore, Store};
-use compute_control::tls::{Tls, TlsFiles, database_client};
+use compute_control::tls::{Tls, database_client};
 use compute_control::{Config, start};
 use compute_fleet::ScalePolicy;
 use compute_protocol::host::{ImageId, SleepConfig};
@@ -39,6 +44,30 @@ enum Command {
         /// The team the key acts for.
         #[arg(long)]
         team: String,
+    },
+    /// Makes a new hosts' authority, `ca.crt` and `ca.key`, in a directory:
+    /// for a deployment without the Terraform module, which makes one.
+    NewHostAuthority {
+        /// The directory to write them to; it must not hold a key yet.
+        #[arg(long)]
+        out: PathBuf,
+        /// The authority's common name.
+        #[arg(long, default_value = "Opengeni compute hosts")]
+        name: String,
+    },
+    /// Issues the first certificate of a host off Google Cloud, where the
+    /// authority's key is, and prints it (PEM). The host renews it with
+    /// itself from then on.
+    IssueHostCertificate {
+        /// The host's name in the fleet, its only DNS name.
+        #[arg(long)]
+        name: String,
+        /// The host's certificate request, PEM; only its key is used.
+        #[arg(long)]
+        csr: PathBuf,
+        /// The directory holding the authority: `ca.crt` and `ca.key`.
+        #[arg(long, default_value = ".")]
+        authority: PathBuf,
     },
 }
 
@@ -79,18 +108,33 @@ struct Serve {
     /// The key of `--api-tls-cert`, PEM.
     #[arg(long, requires = "api_tls_cert")]
     api_tls_key: Option<PathBuf>,
-    /// Where hosts reach the service, over mutual TLS.
+    /// Where hosts reach the service, over TLS.
     #[arg(long, default_value = "0.0.0.0:8443")]
     hosts: SocketAddr,
-    /// The service's certificate chain (PEM), which hosts check.
+    /// The URL hosts reach the service at, such as
+    /// `https://compute-control.example.com:8443`, exactly as they are given
+    /// it: the service's own certificate is for its host, and hosts' identity
+    /// tokens are for it.
     #[arg(long)]
-    cert: PathBuf,
-    /// The service's private key (PEM).
+    host_url: String,
+    /// A further name hosts reach the service by, in its certificate; repeat
+    /// for more.
+    #[arg(long = "host-name")]
+    host_names: Vec<String>,
+    /// The directory holding the hosts' authority: `ca.crt` (its
+    /// certificate, then any other authority trusted beside it) and `ca.key`
+    /// (its key, PKCS#8 PEM).
     #[arg(long)]
-    key: PathBuf,
-    /// The authority that signs hosts' certificates (PEM).
-    #[arg(long)]
-    host_ca: PathBuf,
+    host_authority: PathBuf,
+    /// The Google Cloud project whose instances may prove themselves hosts
+    /// with an instance identity token.
+    #[arg(long, requires = "gce_host_account")]
+    gce_project: Option<String>,
+    /// The service account those instances run as.
+    #[arg(long, requires = "gce_project")]
+    gce_host_account: Option<String>,
+    #[arg(long, default_value = GOOGLE_KEYS, hide = true)]
+    gce_keys: String,
     /// The object store hosts archive to, as they are given it.
     #[arg(long)]
     archive: Option<String>,
@@ -140,6 +184,11 @@ struct Serve {
     gcp_api: String,
     #[arg(long, default_value = METADATA, hide = true)]
     gcp_metadata: String,
+    /// A service account key file whose account manages the group, for a
+    /// service that runs off Google Cloud. Without one, its tokens come from
+    /// the metadata server (the instance's or the GKE workload's account).
+    #[arg(long, env = "GOOGLE_APPLICATION_CREDENTIALS")]
+    gcp_credentials: Option<PathBuf>,
     /// Fewest hosts the group keeps.
     #[arg(long, default_value_t = 1)]
     scale_min: u32,
@@ -217,7 +266,56 @@ fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
     ))
 }
 
+/// The service's names in `url`, an `https://` URL, and `extra`.
+fn host_names(url: &str, extra: &[String]) -> anyhow::Result<Vec<String>> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("--host-url {url:?}"))?;
+    anyhow::ensure!(
+        parsed.scheme() == "https",
+        "--host-url must be https://host[:port], not {url:?}"
+    );
+    // An IPv6 address comes in brackets.
+    let host = parsed
+        .host_str()
+        .with_context(|| format!("--host-url {url:?} names no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    // "control.example." is another name than "control.example" to a host
+    // checking the certificate, so one form is configured, never both.
+    anyhow::ensure!(
+        !host.ends_with('.'),
+        "--host-url {url:?}: give the host without its trailing dot"
+    );
+    let mut names = vec![host.to_owned()];
+    for name in extra {
+        anyhow::ensure!(
+            !name.ends_with('.'),
+            "--host-name {name:?}: give the name without its trailing dot"
+        );
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
+}
+
 impl Serve {
+    fn tls(&self) -> anyhow::Result<(Tls, Option<GceIdentity>)> {
+        let authority = Arc::new(Authority::load(&self.host_authority)?);
+        let tls = Tls::new(authority, host_names(&self.host_url, &self.host_names)?)?;
+        let identity = match (&self.gce_project, &self.gce_host_account) {
+            (Some(project), Some(account)) => Some(GceIdentity::new(
+                Expected {
+                    audience: self.host_url.clone(),
+                    project: project.clone(),
+                    account: account.clone(),
+                },
+                Arc::new(GoogleKeys::new(&self.gce_keys)?),
+            )),
+            _ => None,
+        };
+        Ok((tls, identity))
+    }
+
     fn links(&self) -> anyhow::Result<Option<Arc<Links>>> {
         let Some(key) = &self.link_key else {
             anyhow::ensure!(
@@ -285,7 +383,11 @@ impl Serve {
             "--scale-host-memory-mib is needed to grow a group"
         );
         Ok(Some(Scaling {
-            group: std::sync::Arc::new(GcpGroup::new(path, &self.gcp_api, &self.gcp_metadata)?),
+            group: std::sync::Arc::new(GcpGroup::new(
+                path,
+                &self.gcp_api,
+                self.gcp_credentials()?,
+            )?),
             policy: ScalePolicy {
                 spare_per_mille: self.scale_spare_per_mille,
                 spare_largest: self.scale_spare_largest,
@@ -297,6 +399,17 @@ impl Serve {
             every: Duration::from_secs(self.scale_every_s),
             boot_within: Duration::from_secs(self.scale_boot_within_s),
         }))
+    }
+
+    /// Where the group's tokens come from: the key file, if one is named.
+    fn gcp_credentials(&self) -> anyhow::Result<Credentials> {
+        let Some(file) = &self.gcp_credentials else {
+            return Ok(Credentials::Metadata(self.gcp_metadata.clone()));
+        };
+        let json = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        let key = ServiceAccountKey::from_json(&json)
+            .with_context(|| format!("the key file {}", file.display()))?;
+        Ok(Credentials::Key(Box::new(key)))
     }
 }
 
@@ -326,11 +439,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
     if let Some(file) = &args.keys_file {
         add_keys(&*store, file).await?;
     }
-    let tls = Tls::load(&TlsFiles {
-        cert: args.cert.clone(),
-        key: args.key.clone(),
-        host_ca: args.host_ca.clone(),
-    })?;
+    let (tls, identity) = args.tls()?;
     let archive = match &args.archive {
         Some(url) => Some(
             ChunkStore::from_url(url)
@@ -348,6 +457,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         api_tls,
         hosts: args.hosts,
         tls,
+        identity,
         archive,
         settings: Settings {
             disk_mib: args.disk_mib,
@@ -440,12 +550,158 @@ async fn main() -> anyhow::Result<()> {
             println!("{key}");
             Ok(())
         }
+        Command::NewHostAuthority { out, name } => new_host_authority(&out, &name),
+        Command::IssueHostCertificate {
+            name,
+            csr,
+            authority,
+        } => {
+            let csr = std::fs::read_to_string(&csr)
+                .with_context(|| format!("reading {}", csr.display()))?;
+            let certificates = Certificates {
+                authority: Arc::new(Authority::load(&authority)?),
+                identity: None,
+                reserved: Vec::new(),
+            };
+            let issued = certificates
+                .issue(
+                    &name,
+                    &csr,
+                    std::time::SystemTime::now(),
+                    authority::Proven::Certificate,
+                )
+                .map_err(|(_, message)| anyhow::anyhow!(message))?;
+            print!("{}", issued.certificate);
+            eprintln!(
+                "issued a certificate for {}, serial {}",
+                issued.name, issued.serial
+            );
+            Ok(())
+        }
     }
+}
+
+/// Writes a new authority to `out`, refusing to replace one there.
+fn new_host_authority(out: &Path, name: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    let (certificate, key) = authority::generate(name)?;
+    let write = |file: &str, mode: u32, contents: &str| -> anyhow::Result<()> {
+        let path = out.join(file);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "creating {} (an authority is never replaced in place)",
+                    path.display()
+                )
+            })?
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
+    };
+    write(authority::KEY_FILE, 0o600, &key)?;
+    write(authority::CERTIFICATE_FILE, 0o644, &certificate)?;
+    eprintln!(
+        "wrote {} and {} to {}",
+        authority::CERTIFICATE_FILE,
+        authority::KEY_FILE,
+        out.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_service_is_named_by_its_host_url_and_extra_names() {
+        assert_eq!(
+            host_names("https://control.example:8443", &["10.0.0.2".into()]).unwrap(),
+            ["control.example", "10.0.0.2"]
+        );
+        assert_eq!(
+            host_names("https://10.0.0.2:8443/", &["10.0.0.2".into()]).unwrap(),
+            ["10.0.0.2"]
+        );
+        assert!(host_names("http://control.example:8443", &[]).is_err());
+        assert!(host_names("control.example", &[]).is_err());
+        // A trailing dot, in the URL or an extra name, is refused at start.
+        let error = host_names("https://control.example.:8443", &[]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+        let error =
+            host_names("https://control.example:8443", &["extra.example.".into()]).unwrap_err();
+        assert!(format!("{error:#}").contains("trailing dot"), "{error:#}");
+    }
+
+    #[test]
+    fn a_new_authority_issues_host_certificates_and_is_never_overwritten() {
+        use rustls::pki_types::pem::PemObject as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("authority");
+        new_host_authority(&out, "test hosts").unwrap();
+        assert!(new_host_authority(&out, "again").is_err());
+        let authority = Authority::load(&out).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr = rcgen::CertificateParams::new(vec!["asked.example".to_owned()])
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let certificates = Certificates {
+            authority: Arc::new(authority),
+            identity: None,
+            reserved: Vec::new(),
+        };
+        let issued = certificates
+            .issue(
+                "host-9",
+                &csr,
+                std::time::SystemTime::now(),
+                authority::Proven::Certificate,
+            )
+            .unwrap();
+        assert_eq!(issued.name, "host-9");
+        let der = rustls::pki_types::CertificateDer::from_pem_slice(issued.certificate.as_bytes())
+            .unwrap();
+        authority::verify(
+            &certificates.authority.roots(),
+            &der,
+            std::time::SystemTime::now(),
+            "host-9",
+        )
+        .unwrap();
+        assert!(
+            authority::verify(
+                &certificates.authority.roots(),
+                &der,
+                std::time::SystemTime::now(),
+                "asked.example"
+            )
+            .is_err(),
+            "never the name the request asks for"
+        );
+        let mode = |file: &str| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::metadata(out.join(file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(authority::KEY_FILE), 0o600);
+    }
 
     #[test]
     fn a_password_given_apart_needs_no_quoting_in_quoted_settings() {

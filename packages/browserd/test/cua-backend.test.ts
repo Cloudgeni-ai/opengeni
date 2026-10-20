@@ -28,6 +28,9 @@ class Fixture implements CuaDesktopRuntime {
   captures = 0;
   live = true;
   stopped = false;
+  applyLabel = "Apply";
+  fieldLabel = "Password";
+  title = "Fixture";
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -42,7 +45,7 @@ class Fixture implements CuaDesktopRuntime {
               {
                 pid: 42,
                 window_id: 1,
-                title: "Fixture",
+                title: this.title,
                 app_name: "Fixture",
                 bounds: { x: 50, y: 50, width: 200, height: 100 },
               },
@@ -68,14 +71,15 @@ class Fixture implements CuaDesktopRuntime {
               element_index: 0,
               element_token: `s${snapshot}:0`,
               role: "AXButton",
-              label: "Apply",
+              label: this.applyLabel,
               actions: ["AXPress"],
+              frame: { x: 60, y: 60, w: 40, h: 20 },
             },
             {
               element_index: 1,
               element_token: `s${snapshot}:1`,
               role: "AXSecureTextField",
-              label: "Password",
+              label: this.fieldLabel,
               value: "must-not-leak",
               actions: [],
             },
@@ -610,18 +614,20 @@ describe("CUA desktop boundary", () => {
       const target = (await backend.targets())[0]!;
       const first = await backend.observe(target.id);
       expect(JSON.stringify(first)).not.toContain("must-not-leak");
-      await backend.observe(target.id);
-      await expect(backend.dispatch(command(first))).rejects.toMatchObject({
-        code: "observation_stale",
-        dispatched: false,
+      const second = await backend.observe(target.id);
+      // CUA honours only its latest tokens: the ref is sent as the same
+      // element's token from the latest observation.
+      await backend.dispatch(command(first));
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: second.roots[0]!.ref,
       });
       const fresh = await backend.observe(target.id);
       await backend.validate(command(fresh));
       await backend.dispatch(command(fresh));
-      await expect(backend.dispatch(command(fresh))).rejects.toMatchObject({
-        code: "observation_stale",
-      });
-      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      // The same ref acts again while its element is unchanged, as a page ref
+      // does in a browser.
+      await backend.dispatch(command(fresh));
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(3);
       expect(
         fixture.calls.every((call) => !call.name.startsWith("browser_") && call.name !== "page"),
       ).toBe(true);
@@ -724,14 +730,15 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("a ref from an earlier observation of the window still resolves; an unknown one says what is current", async () => {
+  test("a ref from an earlier observation names the same element in the latest one; an unknown one says what is current", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture);
     try {
       const target = (await backend.targets())[0]!;
       const seen = await backend.observe(target.id);
       // An action without fences is checked against a fresh observation,
-      // which mints new refs; the ref the model read still names its element.
+      // which mints new refs and retires the old ones in CUA; the ref the
+      // model read is rebased to the same element in the fresh observation.
       const fresh = await backend.observe(target.id);
       expect(fresh.roots[0]!.ref).not.toBe(seen.roots[0]!.ref);
       await backend.dispatch({
@@ -745,8 +752,82 @@ describe("CUA desktop boundary", () => {
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
       ).toMatchObject({
-        element_token: seen.roots[0]!.ref,
+        element_token: fresh.roots[0]!.ref,
       });
+      // A ref action may name the observation its ref came from, even after
+      // the window was read again.
+      const again = await backend.observe(target.id);
+      await backend.dispatch({ ...command(seen), targetId: again.target.id });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({ element_token: again.roots[0]!.ref });
+      // Other actions still need the latest observation.
+      await expect(
+        backend.dispatch({
+          ...command(seen),
+          action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
+      // Once anything in the window changed, even another element or only
+      // the window's title (a Delete button can look the same for a different
+      // row or document), an earlier ref is refused before any input, without
+      // quoting any label.
+      const clicks = fixture.calls.filter((call) => call.name === "click").length;
+      for (const change of [
+        async () => {
+          fixture.fieldLabel = "Password again";
+        },
+        async () => {
+          fixture.applyLabel = "Apply all";
+        },
+        async () => {
+          fixture.title = "Another document";
+          await backend.targets();
+        },
+      ]) {
+        const before = await backend.observe(target.id);
+        await change();
+        const changed = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(changed),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: before.roots[0]!.ref },
+              action: "invoke",
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: "observation_stale",
+          dispatched: false,
+          message: `CUA ref ${before.roots[0]!.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${changed.observationId.split(":").pop()})`,
+        });
+      }
+      expect(fixture.calls.filter((call) => call.name === "click").length).toBe(clicks);
+      // CUA's own stale refusal says what the caller does, not CUA's tool names.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "stale_element_token",
+            message: "element_token is stale; call get_window_state again to refresh",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe(target.id))),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message:
+          "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+      });
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      fixture.applyLabel = "Apply";
+      fixture.fieldLabel = "Password";
+      fixture.title = "Fixture";
+      await backend.targets();
       const latest = await backend.observe(target.id);
       await expect(
         backend.dispatch({
@@ -800,6 +881,193 @@ describe("CUA desktop boundary", () => {
         dispatched: false,
         message:
           "CUA hotkey refused the operation: Save is disabled while TextEdit is in the background",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a macOS sheet is reached through its window, and refusals say how", async () => {
+    // A Save sheet has its own window id inside its document window, but its
+    // controls are in the document window's tree. While the sheet has focus,
+    // CUA refuses background keys to either window.
+    class SheetFixture extends Fixture {
+      sheet = true;
+      showSheet = true;
+      other = false;
+      // Another window of the app that the sheet also lies within.
+      decoy = { x: 90, y: 55, width: 130, height: 70 };
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "list_windows") {
+          this.calls.push({ name, args });
+          return result({
+            windows: [
+              {
+                pid: 42,
+                window_id: 1,
+                title: "Untitled",
+                app_name: "TextEdit",
+                bounds: { x: 50, y: 50, width: 200, height: 100 },
+              },
+              ...(this.sheet
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 2,
+                      title: "Save",
+                      app_name: "TextEdit",
+                      bounds: { x: 101, y: 60, width: 100, height: 60 },
+                    },
+                    {
+                      pid: 42,
+                      window_id: 4,
+                      title: "Decoy",
+                      app_name: "TextEdit",
+                      bounds: this.decoy,
+                    },
+                  ]
+                : []),
+              ...(this.other
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 3,
+                      title: "Other",
+                      app_name: "TextEdit",
+                      bounds: { x: 400, y: 50, width: 200, height: 100 },
+                    },
+                  ]
+                : []),
+            ],
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 2) {
+          // CUA produces neither its pixels nor its accessibility tree.
+          if (!args.include_accessibility_tree)
+            return {
+              text: "No content produced (neither AX tree nor screenshot succeeded)",
+              images: [],
+              isError: true,
+              degraded: false,
+              rawJson: "{}",
+            };
+          this.calls.push({ name, args });
+          return result({
+            pid: 42,
+            window_id: 2,
+            degraded_reason:
+              "ax_window_unresolved: window_id 2 exists and is owned by pid 42, but none of the AXWindow elements reports it",
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        // The other window reads normally, without the sheet.
+        if (name === "get_window_state" && args.window_id === 4) {
+          const state = JSON.parse(response.structuredJson!);
+          response.structuredJson = JSON.stringify({
+            ...state,
+            window_id: 4,
+            window_bounds: this.decoy,
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 1 && this.sheet && this.showSheet) {
+          const state = JSON.parse(response.structuredJson!);
+          if (state.elements) {
+            state.elements.push({
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role: "AXSheet",
+              label: "save",
+              actions: ["AXRaise"],
+              frame: { x: 101, y: 60, w: 100, h: 60 },
+            });
+            response.structuredJson = JSON.stringify(state);
+          }
+        }
+        return response;
+      }
+    }
+    const fixture = new SheetFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      await backend.targets();
+      // The sheet's own window has no tree: point at the window it belongs to,
+      // the one whose reading now shows the sheet, though another window of
+      // the app holds it too and is centered on it exactly.
+      fixture.decoy = { x: 76, y: 55, width: 150, height: 70 };
+      await backend.targets();
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 is a sheet attached to the window cua:window:42:1, and its controls are read and used through that window: observe cua:window:42:1 and act on its refs",
+      });
+      // The other window was read too, and does not show the sheet.
+      expect(
+        (await backend.observe("cua:window:42:4")).roots.some((node) => node.role === "AXSheet"),
+      ).toBe(false);
+      // When no window shows it now, no parent is guessed.
+      fixture.showSheet = false;
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of cua:window:42:1, cua:window:42:4) and act on its refs",
+      });
+      fixture.showSheet = true;
+      const keys = (value: string, observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "type", value },
+        });
+      const refused = (code: string) =>
+        result({ effect: "refused", code, reason: "CUA's own reason" }, true);
+      // Keys aimed at the document window while its sheet has focus.
+      fixture.mutation = refused("window_not_key");
+      await expect(
+        keys("name.txt", await backend.observe("cua:window:42:1")),
+      ).rejects.toMatchObject({
+        code: "driver_failed",
+        dispatched: false,
+        message:
+          "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+      });
+      // Keys aimed at the sheet's own window, which cannot be observed, stop
+      // before any input with the same direction.
+      const dispatched = fixture.calls.length;
+      await expect(
+        backend.dispatch({
+          targetId: "cua:window:42:2",
+          expectedTargetGeneration: (await backend.targets()).find(
+            (target) => target.id === "cua:window:42:2",
+          )!.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          action: { type: "keyboard", action: "press", value: "Enter" },
+        }),
+      ).rejects.toMatchObject({
+        code: "target_stale",
+        dispatched: false,
+        message: expect.stringContaining("observe cua:window:42:1 and act on its refs"),
+      });
+      expect(fixture.calls.slice(dispatched).some((call) => call.name === "press_key")).toBe(false);
+      // Without a sheet, another window of the app has focus: name it.
+      fixture.sheet = false;
+      fixture.other = true;
+      await backend.targets();
+      fixture.mutation = refused("window_not_key");
+      await expect(keys("text", await backend.observe("cua:window:42:1"))).rejects.toMatchObject({
+        dispatched: false,
+        message:
+          "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:3), so none were sent: act on that window, or close it first",
+      });
+      // There is no focus action; work happens in the background.
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "focus", targetId: "cua:window:42:1" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        message: expect.stringContaining("it has no focus action"),
       });
     } finally {
       await backend.close();
@@ -1099,6 +1367,19 @@ describe("CUA desktop boundary", () => {
     await expect(callDesktop(fixture, "click", {}, true)).rejects.toMatchObject({
       code: "frame_stale",
       dispatched: false,
+    });
+    // A failure CUA reports only as text keeps CUA's reason.
+    fixture.mutation = {
+      text: "Failed to launch: The system cannot find the file specified.",
+      images: [],
+      isError: true,
+      degraded: false,
+      rawJson: "{}",
+    };
+    await expect(callDesktop(fixture, "launch_app", {}, "caller-settles")).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message:
+        "CUA launch_app did not return a valid result: Failed to launch: The system cannot find the file specified.",
     });
     // The failure carries CUA's own reason and hint, not only that it refused.
     fixture.mutation = result(

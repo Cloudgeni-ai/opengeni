@@ -73,6 +73,18 @@ export class ControlConnectionReplacedError extends Error {
   }
 }
 
+/** Marks a no-responder that outlasted the whole recovery window, so callers
+ * know the wait for this exact process already happened. */
+function windowExhausted(error: unknown): unknown {
+  if ((error as { code?: unknown } | null)?.code !== "503") return error;
+  return Object.assign(error as object, { responderWaitExhausted: true });
+}
+
+/** Whether a no-responder came after the full recovery window. */
+export function responderWaitExhausted(error: unknown): boolean {
+  return (error as { responderWaitExhausted?: unknown } | null)?.responderWaitExhausted === true;
+}
+
 /** Negotiates against one exact process, never an enrollment or a replacement
  * process. Retries keep the entire subject and payload immutable. The native
  * journal atomically joins duplicates and refuses expired deliveries even after
@@ -191,7 +203,7 @@ export class ControlReplyRecovery {
           const keepTrying = await this.onNoResponders(target).catch(() => false);
           if (!keepTrying) throw uncertain ?? error;
         }
-        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? error;
+        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? windowExhausted(error);
         await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
       }
     }

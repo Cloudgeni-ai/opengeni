@@ -38,7 +38,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use compute_guest::{ENVD_PORT, GATEWAY_PORT};
+use compute_guest::{ENVD_PORT, GATEWAY_PORT, gateway};
 use compute_protocol::host::{Id, PriorityName};
 use http_body_util::{BodyExt as _, StreamBody};
 use hyper::body::{Body as _, Frame, Incoming};
@@ -403,7 +403,8 @@ struct Sent {
 enum Dialed {
     Sent(Sent),
     PortClosed,
-    /// The sandbox stopped running while its stream was being opened.
+    /// The sandbox stopped running while its stream was being opened, or
+    /// its envd was starting again.
     NotRunning,
 }
 
@@ -441,8 +442,10 @@ async fn send<S: Store>(
     // and nothing is forwarded unless the sandbox still runs.
     let dialed = dial(front, team, target).await;
     let running = ops::fence_wake(front, target.id).await?;
-    let Some(mut sender) = dialed? else {
-        return Ok(Dialed::PortClosed);
+    let mut sender = match dialed? {
+        Dial::Open(sender) => sender,
+        Dial::Closed => return Ok(Dialed::PortClosed),
+        Dial::EnvdNotUp => return Ok(Dialed::NotRunning),
     };
     if !running {
         return Ok(Dialed::NotRunning);
@@ -456,12 +459,18 @@ async fn send<S: Store>(
     Ok(Dialed::Sent(Sent { response, sender }))
 }
 
-/// Opens a stream to the guest port; `None` when nothing listens there.
-async fn dial<S: Store>(
-    front: &Front<S>,
-    team: &str,
-    target: Target,
-) -> Result<Option<SendRequest<Body>>, Refused> {
+/// What opening a stream to a guest port came to.
+enum Dial {
+    Open(SendRequest<Body>),
+    /// Nothing listens there.
+    Closed,
+    /// envd starts again and takes no stream until it has the sandbox's
+    /// token: as for a sandbox still changing state, the caller retries.
+    EnvdNotUp,
+}
+
+/// Opens a stream to the guest port.
+async fn dial<S: Store>(front: &Front<S>, team: &str, target: Target) -> Result<Dial, Refused> {
     let reached = front
         .service
         .connect(team, target.id, GATEWAY_PORT, PriorityName::Interactive)
@@ -480,9 +489,13 @@ async fn dial<S: Store>(
     .await
     .map_err(|_| Refused::new(502, "the sandbox's gateway did not answer in time"))?
     .map_err(|error| Refused::new(502, format!("reaching the sandbox's gateway: {error}")))?;
-    if answer.trim_end() != "ok" {
-        tracing::debug!(id = %target.id, port = target.port, answer = answer.trim_end(), "a guest port refused");
-        return Ok(None);
+    let answer = answer.trim_end();
+    if answer.strip_prefix("error ") == Some(gateway::ENVD_NOT_UP) {
+        return Ok(Dial::EnvdNotUp);
+    }
+    if answer != "ok" {
+        tracing::debug!(id = %target.id, port = target.port, answer, "a guest port refused");
+        return Ok(Dial::Closed);
     }
     let (sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
@@ -492,7 +505,7 @@ async fn dial<S: Store>(
             tracing::debug!(%error, "a stream to a guest port ended");
         }
     });
-    Ok(Some(sender))
+    Ok(Dial::Open(sender))
 }
 
 /// A stream to give back once the response it carries is read.

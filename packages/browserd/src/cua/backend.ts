@@ -19,6 +19,7 @@ import {
 } from "../computer-backend";
 import {
   callDesktop,
+  CuaFailure,
   walkIncompleteness,
   Windows,
   WindowState,
@@ -67,6 +68,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private pending = 0;
   private nativeTools: CuaNativeTools | null = null;
   private nativeObservations = false;
+  /** Windows CUA could not read because they are sheets of another window. */
+  private readonly unreadableSheets = new Set<string>();
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -240,6 +243,7 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
+      const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
@@ -253,6 +257,20 @@ export class CuaComputerBackend implements ComputerBackend {
               false,
               true,
             );
+          // CUA's own wording names its raw tools; say what the caller does.
+          if (
+            error instanceof ComputerBackendError &&
+            error.code === "observation_stale" &&
+            !error.dispatched
+          )
+            throw new ComputerBackendError(
+              "observation_stale",
+              "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+              false,
+              false,
+            );
+          if (error instanceof CuaFailure && !error.dispatched)
+            throw this.keyboardRefusal(command, error, observed) ?? error;
           throw error;
         }
       }
@@ -352,6 +370,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (!live.has(id)) {
         this.targetsById.delete(id);
         this.observations.delete(id);
+        this.unreadableSheets.delete(id);
         for (const [frameId, frame] of this.frames)
           if (frame.targetId === id) this.frames.delete(frameId);
       }
@@ -374,13 +393,109 @@ export class CuaComputerBackend implements ComputerBackend {
     return { pid: target.pid, window_id: target.windowId, session: this.session };
   }
 
+  /** Other windows of the same macOS app that a window lies within: where a
+   * sheet (a Save panel, a Go to Folder prompt) it may be is attached. */
+  private sheetHosts(target: Target): Target[] {
+    const inner = target.native.bounds;
+    if (this.identity.platform !== "macos" || !inner) return [];
+    return [...this.targetsById.values()].filter((other) => {
+      const outer = other.native.bounds;
+      return (
+        other !== target &&
+        other.pid === target.pid &&
+        !!outer &&
+        inner.x >= outer.x &&
+        inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width &&
+        inner.y + inner.height <= outer.y + outer.height &&
+        inner.width * inner.height < outer.width * outer.height
+      );
+    });
+  }
+
+  /** A sheet has a window id of its own, but CUA reads its controls only
+   * through the window it is attached to, as an AXSheet with the sheet's
+   * bounds. Geometry cannot tell which window that is (or whether this is a
+   * sheet at all), so read the windows it lies within and name a parent only
+   * when exactly one of them shows it now. */
+  private async sheetError(target: Target): Promise<ComputerBackendError> {
+    const inner = target.native.bounds!;
+    const hosts = this.sheetHosts(target).slice(0, 4);
+    const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+    const shown: Target[] = [];
+    for (const host of hosts) {
+      const reading = await this.observeTarget(host.native.id).catch(() => null);
+      if (
+        reading?.roots.some(
+          (node) =>
+            node.role === "AXSheet" &&
+            !!node.bounds &&
+            near(node.bounds.x, inner.x) &&
+            near(node.bounds.y, inner.y) &&
+            near(node.bounds.width, inner.width) &&
+            near(node.bounds.height, inner.height),
+        )
+      )
+        shown.push(host);
+    }
+    return new ComputerBackendError(
+      "target_stale",
+      shown.length === 1
+        ? `${target.native.id} is a sheet attached to the window ${shown[0]!.native.id}, and its controls are read and used through that window: observe ${shown[0]!.native.id} and act on its refs`
+        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hosts
+            .map((host) => host.native.id)
+            .join(", ")}) and act on its refs`,
+      false,
+      false,
+    );
+  }
+
+  /** CUA's refusals of background input name CUA's own options (a foreground
+   * delivery mode the caller does not have). Say what the caller can do. */
+  private keyboardRefusal(
+    command: ComputerBackendActionCommand,
+    error: CuaFailure,
+    observed: ComputerBackendObservation | undefined,
+  ): ComputerBackendError | null {
+    const target = this.targetsById.get(command.targetId);
+    if (
+      !target ||
+      this.identity.platform !== "macos" ||
+      error.cuaCode !== "window_not_key" ||
+      command.action.type !== "keyboard"
+    )
+      return null;
+    if (observed?.roots.some((node) => node.role === "AXSheet"))
+      return new ComputerBackendError(
+        error.code,
+        "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+        false,
+        false,
+      );
+    const others = [...this.targetsById.values()]
+      .filter((other) => other !== target && other.pid === target.pid)
+      .map((other) => other.native.id);
+    return new ComputerBackendError(
+      error.code,
+      `Keys reach only the focused window of a background app, and another of its windows has focus${
+        others.length ? ` (one of ${others.slice(0, 5).join(", ")})` : ""
+      }, so none were sent: act on that window, or close it first`,
+      false,
+      false,
+    );
+  }
+
   private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
     const target = await this.target(targetId);
     if (
       this.initialCapabilities.windowCapture &&
       ![...this.frames.values()].some((frame) => frame.targetId === targetId)
     )
-      await this.captureTarget(targetId);
+      await this.captureTarget(targetId).catch((error: unknown) => {
+        // CUA captures nothing for a sheet's own window; its tree read below
+        // says whether this is one.
+        if (!this.sheetHosts(target).length) throw error;
+      });
     // Viewer polling must never retire a native CUA element-token snapshot.
     // Once native tools own observations, the legacy viewer receives geometry
     // and pixels only. The native result carries its exact tree unchanged.
@@ -415,13 +530,21 @@ export class CuaComputerBackend implements ComputerBackend {
       max_depth: 25,
     });
     const state = WindowState.parse(data);
-    if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id)
+    if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
+      if (
+        this.sheetHosts(target).length &&
+        String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")
+      ) {
+        this.unreadableSheets.add(targetId);
+        throw await this.sheetError(target);
+      }
       throw new ComputerBackendError(
         "target_stale",
         `CUA observation did not bind the requested window (snapshot=${state.snapshot_id ?? "missing"}, reason=${data.degraded_reason ?? "none"})`,
         false,
         false,
       );
+    }
     const roots = projectElements(
       state.elements,
       this.identity.platform,
@@ -673,20 +796,36 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       throw unsupported("CUA's move_cursor controls its overlay, not native hover input");
     }
+    if (action.type === "focus")
+      throw unsupported(
+        "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
+      );
     if (action.type !== "semantic" && action.type !== "keyboard")
       throw unsupported("This CUA operation is not admitted by the desktop adapter");
     const observed = this.observations.get(command.targetId);
+    // A ref is its own fence: it resolves only to the same element, unchanged,
+    // in the latest reading of the window (see locateObserved). So a ref
+    // action may name any recent observation of this window.
+    const refFenced =
+      action.type === "semantic" &&
+      action.locator.kind === "ref" &&
+      (this.recentObservations.get(command.targetId) ?? []).some(
+        (recent) => recent.observationId === command.expectedObservationId,
+      );
     if (
       !observed ||
       !command.expectedObservationId ||
-      observed.observationId !== command.expectedObservationId
-    )
+      (observed.observationId !== command.expectedObservationId && !refFenced)
+    ) {
+      if (this.unreadableSheets.has(command.targetId) && this.sheetHosts(target).length)
+        throw await this.sheetError(target);
       throw new ComputerBackendError(
         "observation_stale",
         "CUA action requires the current semantic observation",
         false,
         false,
       );
+    }
     if (action.type === "semantic") {
       const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))
@@ -842,8 +981,11 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** The element a locator names. A ref from an earlier observation of the
-   * same window resolves there (its token stays CUA's to accept or reject as
-   * stale); a ref seen nowhere says which observation is current. */
+   * same window names the same element in the latest one only while the
+   * window is unchanged: CUA honours only the tokens of its latest reading,
+   * so when every element still reads the same, in the same order, the ref
+   * acts through its element's current token. Otherwise it is refused. A ref
+   * seen nowhere says which observation is current. */
   private locateObserved(
     targetId: string,
     observed: ComputerBackendObservation,
@@ -858,9 +1000,21 @@ export class CuaComputerBackend implements ComputerBackend {
         error.code !== "locator_not_found"
       )
         throw error;
-      for (const earlier of [...(this.recentObservations.get(targetId) ?? [])].reverse()) {
+      const recent = this.recentObservations.get(targetId) ?? [];
+      const latest = recent.at(-1);
+      for (const earlier of [...recent].reverse()) {
         const node = earlier.roots.find((candidate) => candidate.ref === locator.ref);
-        if (node) return node;
+        if (!node) continue;
+        if (earlier === latest) return node;
+        if (!locator.ref.startsWith("read-only:") && sameContent(earlier, latest!))
+          return latest!.roots[earlier.roots.indexOf(node)]!;
+        // Names no label: one could be a typed secret.
+        throw new ComputerBackendError(
+          "observation_stale",
+          `CUA ref ${locator.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${latest!.observationId.split(":").pop()})`,
+          false,
+          false,
+        );
       }
       throw new ComputerBackendError(
         "locator_not_found",
@@ -884,6 +1038,23 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+
+/** Whether two readings show the same window (title, process, generation,
+ * place) with the same elements in the same order: everything but the
+ * snapshot-bound tokens. Then an element's position is its identity. */
+function sameContent(
+  earlier: ComputerBackendObservation,
+  latest: ComputerBackendObservation,
+): boolean {
+  const content = (node: InteractionSemanticNodeValue) =>
+    JSON.stringify({ ...node, ref: node.ref.startsWith("read-only:") ? node.ref : null });
+  return (
+    JSON.stringify(earlier.target) === JSON.stringify(latest.target) &&
+    earlier.roots.length === latest.roots.length &&
+    (earlier.incomplete === undefined) === (latest.incomplete === undefined) &&
+    earlier.roots.every((node, index) => content(node) === content(latest.roots[index]!))
+  );
+}
 /** A Linux process's parent from /proc, or null when it cannot be read. */
 function procParentPid(pid: number): number | null {
   try {

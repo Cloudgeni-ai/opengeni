@@ -211,6 +211,10 @@ pub(crate) struct Job<E: Engine, S> {
     pub pager: crate::PagerConfig,
     /// VM processes this job has started; zero when it is issued.
     pub launches: u32,
+    /// The clock of the sandbox's agent-link streams, told before each VM
+    /// process the step starts: its guest is a new one (see
+    /// [`crate::resume::RunClock::launched`]).
+    pub link_clock: Option<crate::resume::RunClock>,
     /// Whether the step is certain it wrote nothing to the host's local
     /// disk: so until its work begins, and again where a step ends before
     /// writing anything, as a checkpoint cancelled before its capture.
@@ -268,6 +272,15 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
+    /// Tells the sandbox's agent-link streams that a VM process for it is
+    /// about to start. None of its VM processes runs then. On an error the
+    /// process must not start (see [`crate::resume::RunClock::launched`]).
+    fn launching(&self) -> io::Result<()> {
+        self.link_clock
+            .as_ref()
+            .map_or(Ok(()), crate::resume::RunClock::launched)
+    }
+
     /// Runs `step` and reports how it went and what VM remains. A step that
     /// lost the VM's memory leaves no VM process: it is ended before the
     /// step reports, since the core may start a replacement on the same disk
@@ -822,6 +835,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         // On any failure below the VM process is gone before its memory's
         // pager and hydration are stopped and joined, so a retry never
         // fills the same file beside them.
+        if let Err(error) = self.launching() {
+            live_memory.close().await;
+            return (io_failure(OP, error), After::NoVm);
+        }
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => {
                 self.launches += 1;
@@ -1212,6 +1229,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return (io_failure("boot", error), After::NoVm),
         };
         notes::phase("prepare");
+        if let Err(error) = self.launching() {
+            return (io_failure("boot", error), After::NoVm);
+        }
         match self.engine.boot(&self.spec).await {
             Ok(vm) => {
                 self.launches += 1;

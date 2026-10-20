@@ -58,8 +58,9 @@ impl Unanswered {
     }
 }
 
-/// Whether `headers` carry `name`, compared as NATS compares header names,
-/// without case.
+/// Whether `headers` carry `name`. Names are compared without case: NATS
+/// itself keeps header names as sent, but the agent link's own headers are
+/// matched however a client spells them, so none slips past the host.
 #[must_use]
 pub fn has_header(headers: Option<&Headers>, name: &str) -> bool {
     headers.is_some_and(|headers| {

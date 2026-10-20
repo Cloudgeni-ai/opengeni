@@ -6,11 +6,19 @@
 //! against the digest the registry reports), the config and each layer
 //! against the digests the manifest gives, and each layer's uncompressed
 //! contents against the config's `diff_ids` when they are applied.
+//!
+//! A request that fails in a way that can pass (the connection failed,
+//! reset or timed out, or the registry or its token service said it is
+//! overloaded or briefly unavailable) is sent again after a growing wait,
+//! so one dropped connection does not fail a host's install. Any other
+//! answer, and a redirect loop, is reported at once. A layer whose
+//! download breaks off is asked for again.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use base64::Engine as _;
@@ -30,8 +38,19 @@ const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+j
 
 /// The largest manifest or config read.
 const MAX_DOCUMENT: usize = 8 * 1024 * 1024;
-/// Attempts per blob download.
+/// Attempts per blob download, for a download that breaks off or arrives
+/// wrong after the registry has answered.
 const ATTEMPTS: u32 = 3;
+/// Times one request is sent before a transient failure is reported.
+const SEND_ATTEMPTS: u32 = 6;
+/// The wait after a first transient failure, doubled after each later
+/// one; a registry's own `Retry-After` (seconds or an HTTP date) replaces
+/// it, but never for more than [`MAX_WAIT`].
+const FIRST_WAIT: Duration = Duration::from_millis(500);
+const MAX_WAIT: Duration = Duration::from_secs(30);
+/// A connection not made in this time failed; nor one silent this long.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Blobs downloaded at once.
 const PARALLEL: usize = 4;
 
@@ -265,6 +284,8 @@ impl Registry {
     pub fn new(credentials: Option<Credentials>) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent("opengeni-compute-image")
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()?;
         Ok(Self {
             client,
@@ -390,25 +411,32 @@ impl Registry {
     }
 
     /// Downloads a blob to `path`, checking its size and digest as it
-    /// streams; tries again on failure.
+    /// streams; asks for it again when the download breaks off or arrives
+    /// wrong. A request the registry refused, or one that failed for good
+    /// (after its own tries), is reported at once.
     async fn blob_to_file(&self, base: &str, blob: &Descriptor, path: &Path) -> Result<()> {
         ensure!(valid_digest(&blob.digest), "bad digest {}", blob.digest);
         let url = format!("{base}/blobs/{}", blob.digest);
-        let mut last = None;
-        for attempt in 1..=ATTEMPTS {
-            match self.download(&url, blob, path).await {
+        let mut wait = FIRST_WAIT;
+        let mut attempt = 1;
+        loop {
+            let response = self.send(|client| client.get(&url)).await?;
+            match Self::save(response, blob, path).await {
                 Ok(()) => return Ok(()),
+                Err(error) if attempt == ATTEMPTS => return Err(error),
                 Err(error) => {
                     tracing::warn!(attempt, digest = %blob.digest, %error, "layer download failed");
-                    last = Some(error);
                 }
             }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(MAX_WAIT);
+            attempt += 1;
         }
-        Err(last.unwrap_or_else(|| anyhow!("no attempt")))
     }
 
-    async fn download(&self, url: &str, blob: &Descriptor, path: &Path) -> Result<()> {
-        let response = self.send(|client| client.get(url)).await?;
+    /// Writes the blob `blob` that `response` carries to `path`, checking
+    /// its size and digest as it streams.
+    async fn save(response: Response, blob: &Descriptor, path: &Path) -> Result<()> {
         let mut file = tokio::fs::File::create(path).await?;
         let mut hasher = Sha256::new();
         let mut length = 0_u64;
@@ -449,23 +477,20 @@ impl Registry {
             .lock()
             .map_err(|_| anyhow!("poisoned"))?
             .clone();
-        let mut builder = request(&self.client);
-        if let Some(value) = &current {
-            builder = builder.header(AUTHORIZATION, value);
-        }
-        let response = builder.send().await?;
+        let response = retried(|| {
+            let builder = request(&self.client);
+            match &current {
+                Some(value) => builder.header(AUTHORIZATION, value),
+                None => builder,
+            }
+        })
+        .await?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return checked(response).await;
         }
         let value = self.answer(response.headers()).await?;
         *self.authorization.lock().map_err(|_| anyhow!("poisoned"))? = Some(value.clone());
-        checked(
-            request(&self.client)
-                .header(AUTHORIZATION, value)
-                .send()
-                .await?,
-        )
-        .await
+        checked(retried(|| request(&self.client).header(AUTHORIZATION, &value)).await?).await
     }
 
     /// The `Authorization` value that answers the challenge in `headers`.
@@ -492,11 +517,17 @@ impl Registry {
                         query.push((key, value));
                     }
                 }
-                let mut builder = self.client.get(realm).query(&query);
-                if let Some(credentials) = &self.credentials {
-                    builder = builder.header(AUTHORIZATION, credentials.basic());
-                }
-                let response = checked(builder.send().await?).await?;
+                let response = checked(
+                    retried(|| {
+                        let builder = self.client.get(realm).query(&query);
+                        match &self.credentials {
+                            Some(credentials) => builder.header(AUTHORIZATION, credentials.basic()),
+                            None => builder,
+                        }
+                    })
+                    .await?,
+                )
+                .await?;
                 let token: Token =
                     serde_json::from_slice(&read_limited(response, MAX_DOCUMENT).await?)?;
                 let token = token
@@ -516,6 +547,72 @@ struct Token {
     token: Option<String>,
     #[serde(default)]
     access_token: Option<String>,
+}
+
+/// Sends the request `build` makes, and again after each transient
+/// failure up to [`SEND_ATTEMPTS`] times. Returns the first answer that is
+/// not a transient failure (whatever its status), or the last failure. A
+/// request that cannot be built and a redirect loop fail at once.
+async fn retried(build: impl Fn() -> RequestBuilder) -> Result<Response> {
+    let mut wait = FIRST_WAIT;
+    let mut attempt = 1;
+    loop {
+        let last = attempt == SEND_ATTEMPTS;
+        let pause = match build().send().await {
+            Ok(response) if last || !transient(response.status()) => return Ok(response),
+            Ok(response) => {
+                tracing::warn!(
+                    attempt,
+                    host = response.url().host_str().unwrap_or_default(),
+                    path = response.url().path(),
+                    status = %response.status(),
+                    "registry request failed; sending it again"
+                );
+                retry_after(response.headers()).unwrap_or(wait)
+            }
+            Err(error) if last || error.is_builder() || error.is_redirect() => {
+                return Err(error.into());
+            }
+            Err(error) => {
+                tracing::warn!(attempt, %error, "registry request failed; sending it again");
+                wait
+            }
+        };
+        tokio::time::sleep(pause).await;
+        wait = (wait * 2).min(MAX_WAIT);
+        attempt += 1;
+    }
+}
+
+/// Whether an answer with `status` says to try again later.
+fn transient(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+/// The wait a `Retry-After` header asks for, in seconds or until an HTTP
+/// date (none for a date passed), at most [`MAX_WAIT`].
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let wait = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default(),
+    };
+    Some(wait.min(MAX_WAIT))
 }
 
 async fn checked(response: Response) -> Result<Response> {
@@ -642,6 +739,214 @@ mod tests {
                 .is_err()
         );
         assert!(config("").platform().is_err());
+    }
+
+    /// A registry on a local port that answers its connections in turn
+    /// with the script `script` makes from its address: `None` closes the
+    /// connection unanswered, `Some((head, body))` answers with that status
+    /// line and headers, and that body. Returns the address and, once the
+    /// script is done, the requests it read (their lines and headers).
+    async fn scripted(
+        script: impl FnOnce(&str) -> Vec<Option<(String, &'static str)>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::AsyncReadExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let script = script(&address);
+        let served = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for answer in script {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "the client hung up mid-request");
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                requests.push(String::from_utf8(request).unwrap().to_lowercase());
+                if let Some((head, body)) = answer {
+                    let length = body.len();
+                    let reply = format!(
+                        "{head}\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{body}"
+                    );
+                    stream.write_all(reply.as_bytes()).await.unwrap();
+                }
+            }
+            requests
+        });
+        (address, served)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_and_an_unavailable_token_service_are_tried_again() {
+        // A registry behind a token service, as Docker Hub is: the first
+        // connection drops, the registry asks for a token, the token
+        // service is briefly unavailable and its next answer gives the
+        // token, which the registry takes.
+        let (address, served) = scripted(|address| {
+            vec![
+                None,
+                Some((
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{address}/token\",service=\"r\""
+                    ),
+                    "",
+                )),
+                Some(("HTTP/1.1 503 Service Unavailable".into(), "")),
+                None,
+                Some(("HTTP/1.1 200 OK".into(), r#"{"token":"t1"}"#)),
+                Some(("HTTP/1.1 200 OK".into(), "ok")),
+            ]
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let url = format!("{address}/v2/a/manifests/latest");
+        let response = registry.send(|client| client.get(&url)).await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        let requests = served.await.unwrap();
+        let lines: Vec<&str> = requests
+            .iter()
+            .map(|request| request.lines().next().unwrap())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "get /v2/a/manifests/latest http/1.1",
+                "get /v2/a/manifests/latest http/1.1",
+                "get /token?service=r http/1.1",
+                "get /token?service=r http/1.1",
+                "get /token?service=r http/1.1",
+                "get /v2/a/manifests/latest http/1.1",
+            ]
+        );
+        assert!(
+            requests[5].contains("authorization: bearer t1"),
+            "{}",
+            requests[5]
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_answers_are_tried_again_and_others_are_not() {
+        let (address, served) = scripted(|_| {
+            vec![
+                None,
+                Some(("HTTP/1.1 503 Service Unavailable".into(), "")),
+                Some((
+                    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 0".into(),
+                    "",
+                )),
+                Some(("HTTP/1.1 200 OK".into(), "ok")),
+                Some(("HTTP/1.1 404 Not Found".into(), "")),
+            ]
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let url = format!("{address}/v2/a/manifests/latest");
+        let response = registry.send(|client| client.get(&url)).await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        // A 404 is the registry's answer, reported at once.
+        let missing = registry.send(|client| client.get(&url)).await.unwrap_err();
+        assert!(missing.to_string().contains("404"), "{missing}");
+        assert_eq!(served.await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_loop_is_reported_at_once() {
+        // The client follows ten redirects and stops at the eleventh; the
+        // twelfth connection would answer, so sending again would succeed.
+        let (address, served) = scripted(|address| {
+            let mut script: Vec<_> = (0..11)
+                .map(|_| {
+                    Some((
+                        format!("HTTP/1.1 302 Found\r\nlocation: {address}/v2/a/manifests/latest"),
+                        "",
+                    ))
+                })
+                .collect();
+            script.push(Some(("HTTP/1.1 200 OK".into(), "late")));
+            script
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let url = format!("{address}/v2/a/manifests/latest");
+        let looped = registry.send(|client| client.get(&url)).await.unwrap_err();
+        assert!(
+            looped
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_redirect),
+            "{looped:#}"
+        );
+        assert!(!served.is_finished());
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_blob_is_reported_at_once_and_a_broken_one_asked_for_again() {
+        let blob = Descriptor {
+            media_type: String::new(),
+            digest: sha256_digest(b"layer"),
+            size: 5,
+            platform: None,
+        };
+        let (address, served) = scripted(|_| {
+            vec![
+                Some(("HTTP/1.1 200 OK".into(), "lay")),
+                Some(("HTTP/1.1 200 OK".into(), "layer")),
+                Some(("HTTP/1.1 404 Not Found".into(), "")),
+                Some(("HTTP/1.1 200 OK".into(), "layer")),
+            ]
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blob");
+        let base = format!("{address}/v2/a");
+        registry.blob_to_file(&base, &blob, &path).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"layer");
+        let missing = registry
+            .blob_to_file(&base, &blob, &path)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("404"), "{missing:#}");
+        assert!(!served.is_finished());
+        served.abort();
+    }
+
+    #[test]
+    fn retry_after_is_read_in_seconds_or_as_a_date_and_bounded() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_after(&headers), None);
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(2)));
+        headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(MAX_WAIT));
+        // A date passed asks for no wait; one far ahead for the most.
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), Some(Duration::ZERO));
+        let soon = std::time::SystemTime::now() + Duration::from_secs(20);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(soon).parse().unwrap(),
+        );
+        let wait = retry_after(&headers).unwrap();
+        assert!(
+            wait > Duration::from_secs(17) && wait <= Duration::from_secs(20),
+            "{wait:?}"
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Fri, 01 Jan 2100 00:00:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), Some(MAX_WAIT));
+        headers.insert(reqwest::header::RETRY_AFTER, "soon".parse().unwrap());
+        assert_eq!(retry_after(&headers), None);
+        assert!(transient(StatusCode::BAD_GATEWAY) && !transient(StatusCode::NOT_FOUND));
+        assert!(!transient(StatusCode::UNAUTHORIZED) && !transient(StatusCode::FORBIDDEN));
     }
 
     #[test]

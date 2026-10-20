@@ -895,7 +895,7 @@ fn send_quiet(core: &mut Core, now: u64, (s, sid): (u32, u32), reply: &str, payl
                 sid,
                 subject: format!("{}.rpc", scope()),
                 reply: Some(reply.into()),
-                // Header names compare without case, as NATS compares them.
+                // The agent link's headers match however they are spelled.
                 headers: Some(vec![(NO_WAKE_HEADER.to_lowercase(), "1".into())]),
             },
             payload,

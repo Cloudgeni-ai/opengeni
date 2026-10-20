@@ -159,7 +159,10 @@ say "making certificates"
     openssl x509 -req -in "$1.csr" -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 \
       -extfile "$1.ext" -out "$1.pem" 2>/dev/null
   }
-  issue service "DNS:localhost,IP:127.0.0.1"
+  # The service is the hosts' authority and issues its own certificate.
+  mkdir -m 700 authority
+  cp ca.pem authority/ca.crt
+  cp ca.key authority/ca.key
   issue h1 "DNS:h1,IP:127.0.0.1"
   issue front "DNS:api.$DOMAIN,DNS:*.$DOMAIN"
 )
@@ -187,7 +190,7 @@ printf 'conformance %s\noperator %s\n' "$KEY" "$OPERATOR_KEY" > "$WORK/run/keys"
 say "starting the control service"
 RUST_LOG=${RUST_LOG:-info} "$CONTROL_BIN" serve --database memory \
   --api "$API" --hosts "$HOSTS" \
-  --cert "$WORK/tls/service.pem" --key "$WORK/tls/service.key" --host-ca "$WORK/tls/ca.pem" \
+  --host-authority "$WORK/tls/authority" --host-url "https://localhost:${HOSTS##*:}" \
   --archive "$STORE" --keys-file "$WORK/run/keys" \
   --stored-image "minimal=$MINIMAL_ID" \
   --e2b-listen "$FRONT" --e2b-domain "$DOMAIN" \

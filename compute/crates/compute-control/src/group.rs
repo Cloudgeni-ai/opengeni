@@ -4,31 +4,145 @@
 //!
 //! The service reads the group's target size and base instance name, sets
 //! its size, and resets, reads and starts its instances, through the
-//! Compute Engine API with the instance's own service account token from
-//! the metadata server. Hosts belong to the group by name: the group names
-//! its instances after its base name. Only zonal groups are supported:
-//! their instances live in the group's zone.
+//! Compute Engine API. Its tokens come from the metadata server (the
+//! instance's own service account, or a GKE workload's), or, for a service
+//! that runs off Google Cloud, from a service account key file, with
+//! which it signs its own token requests ([`Credentials`]). Hosts belong to
+//! the group by name: the group names its instances after its base name.
+//! Only zonal groups are supported: their instances live in the group's
+//! zone.
 
+use std::fmt;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ring::rand::SystemRandom;
+use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+use rustls::pki_types::PrivatePkcs8KeyDer;
+use rustls::pki_types::pem::PemObject as _;
 use serde::Deserialize;
 
 /// Where the Compute Engine API is.
 pub const COMPUTE_API: &str = "https://compute.googleapis.com";
 /// Where the metadata server is.
 pub const METADATA: &str = "http://169.254.169.254";
+/// What a key's token is for: the Compute Engine API.
+const SCOPE: &str = "https://www.googleapis.com/auth/compute";
+/// How long a signed token request is good for, at most an hour.
+const ASSERTION_LIFETIME: u64 = 3600;
 
 /// How long before its expiry a token is fetched again.
 const TOKEN_SLACK: Duration = Duration::from_secs(60);
+
+/// Where the group's API tokens come from.
+#[derive(Debug)]
+pub enum Credentials {
+    /// The metadata server at this URL ([`METADATA`] outside tests).
+    Metadata(String),
+    /// A service account's key.
+    Key(Box<ServiceAccountKey>),
+}
+
+/// A service account's key, as Google Cloud writes it to a key file
+/// (`gcloud iam service-accounts keys create`). Its account signs its own
+/// token requests (OAuth 2.0's JWT bearer grant).
+pub struct ServiceAccountKey {
+    email: String,
+    key_id: Option<String>,
+    token_uri: String,
+    key: RsaKeyPair,
+}
+
+impl fmt::Debug for ServiceAccountKey {
+    /// Never shows the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceAccountKey")
+            .field("email", &self.email)
+            .field("key_id", &self.key_id)
+            .field("token_uri", &self.token_uri)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+struct KeyFile {
+    #[serde(rename = "type")]
+    kind: String,
+    client_email: String,
+    #[serde(default)]
+    private_key_id: Option<String>,
+    private_key: String,
+    token_uri: String,
+}
+
+impl ServiceAccountKey {
+    /// Reads a key file's contents.
+    ///
+    /// # Errors
+    ///
+    /// It is not a service account key file (other credential files, such
+    /// as workload identity federation's, are not supported), or its key
+    /// is not an RSA key in PKCS #8.
+    pub fn from_json(json: &[u8]) -> anyhow::Result<Self> {
+        let file: KeyFile = serde_json::from_slice(json).context("a service account key file")?;
+        anyhow::ensure!(
+            file.kind == "service_account",
+            "a credentials file of type {:?}, not a service account key",
+            file.kind
+        );
+        let der = PrivatePkcs8KeyDer::from_pem_slice(file.private_key.as_bytes())
+            .map_err(|error| anyhow::anyhow!("the key file's private key: {error}"))?;
+        let key = RsaKeyPair::from_pkcs8(der.secret_pkcs8_der())
+            .map_err(|error| anyhow::anyhow!("the key file's private key: {error}"))?;
+        Ok(Self {
+            email: file.client_email,
+            key_id: file.private_key_id,
+            token_uri: file.token_uri,
+            key,
+        })
+    }
+
+    /// The signed token request for the Compute Engine API at Unix time
+    /// `now`.
+    fn assertion(&self, now: u64) -> anyhow::Result<String> {
+        let mut header = serde_json::json!({"alg": "RS256", "typ": "JWT"});
+        if let Some(kid) = &self.key_id {
+            header["kid"] = kid.as_str().into();
+        }
+        let claims = serde_json::json!({
+            "iss": self.email,
+            "scope": SCOPE,
+            "aud": self.token_uri,
+            "iat": now,
+            "exp": now + ASSERTION_LIFETIME,
+        });
+        let signed = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header.to_string()),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let mut signature = vec![0; self.key.public().modulus_len()];
+        self.key
+            .sign(
+                &RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                signed.as_bytes(),
+                &mut signature,
+            )
+            .map_err(|_| anyhow::anyhow!("signing a token request failed"))?;
+        Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
+    }
+}
 
 /// A managed instance group.
 #[derive(Debug)]
 pub struct GcpGroup {
     http: reqwest::Client,
     api: String,
-    metadata: String,
+    credentials: Credentials,
     /// Its resource path, such as
     /// `projects/p/zones/z/instanceGroupManagers/hosts`.
     path: String,
@@ -130,9 +244,9 @@ pub struct Member {
 const POLL_EVERY: Duration = Duration::from_secs(1);
 
 impl GcpGroup {
-    /// The group at resource `path`, reached through `api` with tokens
-    /// from `metadata` ([`COMPUTE_API`] and [`METADATA`] outside tests).
-    pub fn new(path: &str, api: &str, metadata: &str) -> anyhow::Result<Self> {
+    /// The group at resource `path`, reached through `api` ([`COMPUTE_API`]
+    /// outside tests) with tokens from `credentials`.
+    pub fn new(path: &str, api: &str, credentials: Credentials) -> anyhow::Result<Self> {
         anyhow::ensure!(
             path.starts_with("projects/")
                 && path.contains("/zones/")
@@ -146,7 +260,7 @@ impl GcpGroup {
         Ok(Self {
             http,
             api: api.trim_end_matches('/').to_owned(),
-            metadata: metadata.trim_end_matches('/').to_owned(),
+            credentials,
             path: path.trim_matches('/').to_owned(),
             token: Mutex::new(None),
         })
@@ -164,19 +278,33 @@ impl GcpGroup {
                 return Ok(token.clone());
             }
         }
-        let url = format!(
-            "{}/computeMetadata/v1/instance/service-accounts/default/token",
-            self.metadata
-        );
-        let token: Token = self
-            .http
-            .get(url)
-            .header("Metadata-Flavor", "Google")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let request = match &self.credentials {
+            Credentials::Metadata(metadata) => self
+                .http
+                .get(format!(
+                    "{}/computeMetadata/v1/instance/service-accounts/default/token",
+                    metadata.trim_end_matches('/')
+                ))
+                .header("Metadata-Flavor", "Google"),
+            Credentials::Key(key) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("the clock is before 1970")?
+                    .as_secs();
+                let body = form_urlencoded::Serializer::new(String::new())
+                    .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
+                    .append_pair("assertion", &key.assertion(now)?)
+                    .finish();
+                self.http
+                    .post(&key.token_uri)
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(body)
+            }
+        };
+        let token: Token = request.send().await?.error_for_status()?.json().await?;
         let until =
             Instant::now() + Duration::from_secs(token.expires_in).saturating_sub(TOKEN_SLACK);
         *self

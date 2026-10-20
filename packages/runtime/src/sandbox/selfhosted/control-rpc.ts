@@ -29,6 +29,7 @@ import {
   ControlConnectionReplacedError,
   ControlReplyRecovery,
   NO_WAKE_HEADER,
+  responderWaitExhausted,
 } from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
@@ -462,6 +463,12 @@ export function commandOutcomeUnknownAfterReplacementAgentError(options: {
   };
 }
 
+/** The reserved `detail` key the transport sets to "1" when a no-responder fault
+ *  comes after it already waited out its reconnect window for that exact process.
+ *  Re-issuing would only wait the same window again. Reserved (never sent by the
+ *  agent). */
+export const RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY = "_responder_wait_exhausted";
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
  *  when no agent responds on the subject at all. `neverSent` marks that the request
  *  provably never reached the machine (no connection / no responder), which makes it
@@ -779,7 +786,13 @@ export class NatsControlRpc implements ControlRpc {
       if (noResponders) {
         // No subscriber on the subject at all → the request reached no responder and
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
-        return offlineControlResponse(req.requestId, true);
+        const offline = offlineControlResponse(req.requestId, true);
+        // The reply recovery already waited its whole window for this process
+        // to come back; say so, so callers do not wait it again.
+        if (responderWaitExhausted(err) && offline.error) {
+          offline.error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] = "1";
+        }
+        return offline;
       }
       if (lostLink || isRequestTimeoutError(err)) {
         // A responder may exist but the request timed out → a transient blip. AMBIGUOUS

@@ -7,7 +7,9 @@
 //! connection by port.
 //!
 //! The listeners belong to the sandbox, not to one VM process, so they stay
-//! in place while the sandbox sleeps at any level and across restores.
+//! in place while the sandbox sleeps at any level and across restores. The
+//! agent link's listener tells which VM process made each connection by the
+//! launch it came in under (see [`crate::resume::Door`]).
 //!
 //! A forwarded connection carries no proof of which sandbox opened it. Every
 //! sandbox's relay reaches the upstream from the same host address, and
@@ -188,7 +190,8 @@ pub(crate) fn listen<A: Activity>(
 /// streams end with the listeners. At most [`MAX_CONNECTIONS`] connections
 /// are open at once, and as many streams; more connections are closed as
 /// they come. `clock` counts the time the guest could run, by which streams
-/// it no longer takes up end. Must run inside a Tokio runtime.
+/// it no longer takes up end, and its VM's launches, which close the
+/// connections an earlier VM process left. Must run inside a Tokio runtime.
 pub(crate) fn listen_link(
     sandbox: Arc<str>,
     vsock: &Path,
@@ -201,7 +204,10 @@ pub(crate) fn listen_link(
         tasks: Vec::with_capacity(1),
         sockets: Vec::with_capacity(1),
     };
-    let listener = bind(vsock, port, owner, &mut listeners)?;
+    let door = crate::resume::Door::new(
+        bind_socket(vsock, port, owner, &mut listeners)?,
+        clock.clone(),
+    )?;
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let streams = crate::resume::Streams::new(
         Arc::clone(&sandbox),
@@ -216,15 +222,16 @@ pub(crate) fn listen_link(
         let mut hellos = JoinSet::new();
         let mut over_limit = false;
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
+            match door.accept().await {
+                Ok((stream, launch)) => {
                     while hellos.try_join_next().is_some() {}
                     if let Ok(permit) = Arc::clone(&open).try_acquire_owned() {
                         over_limit = false;
-                        hellos.spawn(streams.clone().take(Counted {
+                        let connection = Counted {
                             stream,
                             _permit: permit,
-                        }));
+                        };
+                        hellos.spawn(streams.clone().take(connection, launch));
                     } else {
                         drop(stream);
                         if !over_limit {
@@ -261,6 +268,16 @@ fn bind(
     owner: (u32, u32),
     listeners: &mut Listeners,
 ) -> io::Result<UnixListener> {
+    UnixListener::from_std(bind_socket(vsock, port, owner, listeners)?)
+}
+
+/// [`bind`], as a non-blocking standard listener.
+fn bind_socket(
+    vsock: &Path,
+    port: u32,
+    owner: (u32, u32),
+    listeners: &mut Listeners,
+) -> io::Result<std::os::unix::net::UnixListener> {
     if let Some(dir) = vsock.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -274,7 +291,7 @@ fn bind(
     give_to(&socket, owner)?;
     listeners.sockets.push(socket);
     listener.set_nonblocking(true)?;
-    UnixListener::from_std(listener)
+    Ok(listener)
 }
 
 /// A guest connection that counts against its port's limit until dropped.

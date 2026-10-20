@@ -1,20 +1,74 @@
 #!/usr/bin/env bash
 # A compute host's startup script on Google Cloud, run as root at every
-# boot from the instance template's metadata (main.tf). It prepares the
-# state volume, fetches and checks the host bundle the template names,
-# makes sure the host has a current certificate from the fleet's authority,
-# writes /etc/compute/host.env and runs the bundle's install.sh, which
-# starts the guard and the agent. A new bundle reaches a host when the host
-# is replaced or rebooted with a template naming it.
+# boot from the instance template's metadata (main.tf). It runs the
+# deployment's prelude if it has one, prepares the state volume, fetches and checks the host bundle the template names,
+# writes /etc/compute/host.env and runs the bundle's install.sh with the
+# hosts' authority from the metadata, which gets the host its certificate
+# from the control service and starts the guard and the agent. A new
+# bundle reaches a host when the host is replaced or rebooted with a
+# template naming it.
 set -euo pipefail
 export PATH=$PATH:/snap/bin
 
 meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
 attr() { meta "instance/attributes/$1"; }
+# An attribute the template may leave out: empty when the metadata server
+# says it is not there, a failed attempt (tried again) on any other error,
+# so a configured setting is never mistaken for an absent one.
+optional_attr() {
+  local body status
+  body=$(mktemp)
+  status=$(curl -sS -o "$body" -w '%{http_code}' -H Metadata-Flavor:Google \
+    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1") || status=error
+  case "$status" in
+    200) cat "$body" ;;
+    404) ;;
+    *) rm -f "$body"; log "reading the attribute $1 failed ($status)" >&2; return 1 ;;
+  esac
+  rm -f "$body"
+}
 log() { echo "compute-startup: $*"; }
 
+# Every step below is safe to run again, and several reach the network
+# (the bundle's store, the control service, the base image's registry),
+# so a failed attempt runs again, after a wait growing to five minutes, until the host is installed. A host whose one attempt failed
+# would otherwise run without ever registering, and nothing would replace
+# it: the instance group has no health check (main.tf).
+if [ -z "${COMPUTE_STARTUP_ATTEMPT:-}" ]; then
+  attempt=1 wait=15
+  until COMPUTE_STARTUP_ATTEMPT=$attempt bash "$0"; do
+    log "attempt $attempt failed; trying again in ${wait}s"
+    sleep "$wait"
+    attempt=$((attempt + 1)) wait=$((wait * 2 > 300 ? 300 : wait * 2))
+  done
+  exit 0
+fi
+
+# --- The deployment's own prelude (host_startup_prelude), such as joining
+# an overlay network, before anything else reaches the network.
+prelude=$(optional_attr compute-prelude)
+if [ -n "$prelude" ]; then
+  log "running the prelude"
+  bash -euo pipefail -c "$prelude"
+fi
+
 NAME=$(meta instance/name)
-ADDRESS=$(meta instance/network-interfaces/0/ip)
+# The address the control service dials: the VPC's, or that of the
+# interface advertise_interface names once it has one.
+interface=$(optional_attr compute-advertise)
+if [ -n "$interface" ]; then
+  ADDRESS=
+  for _ in $(seq 120); do
+    # Until the interface exists, ip fails; that is waited out too.
+    ADDRESS=$({ ip -4 -o addr show dev "$interface" 2>/dev/null || true; } |
+      awk '{ sub("/.*", "", $4); print $4; exit }')
+    [ -n "$ADDRESS" ] && break
+    sleep 1
+  done
+  [ -n "$ADDRESS" ] || { log "$interface has no IPv4 address"; exit 1; }
+else
+  ADDRESS=$(meta instance/network-interfaces/0/ip)
+fi
 ZONE=$(meta instance/zone)
 ZONE=${ZONE##*/}
 BUNDLE_URL=$(attr compute-bundle-url)
@@ -22,7 +76,10 @@ BUNDLE_SHA256=$(attr compute-bundle-sha256)
 
 # --- The state volume: local NVMe SSDs, striped, or the "state" disk.
 state_device=
-if [ ! -f /etc/compute/state-volume.uuid ]; then
+# install.sh records the volume it set up; a record with no UUID in it
+# is none (the same test as install.sh's).
+recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
+if [ -z "$recorded" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
   if [ "${#nvme[@]}" -eq 1 ]; then
     state_device=${nvme[0]}
@@ -43,7 +100,11 @@ fi
 # --- The bundle.
 bundle=/opt/compute/bundles/$BUNDLE_SHA256
 if [ ! -f "$bundle/install.sh" ]; then
-  work=$(mktemp -d)
+  # One fixed place, emptied first, so failed attempts leave at most one
+  # partial download behind.
+  work=/opt/compute/bundles/.download
+  rm -rf "$work" "$bundle.part"
+  install -d -m 700 "$work"
   case "$BUNDLE_URL" in
     gs://*) gcloud storage cp --quiet "$BUNDLE_URL" "$work/bundle.tar.gz" ;;
     *) curl -fsSL --retry 5 -o "$work/bundle.tar.gz" "$BUNDLE_URL" ;;
@@ -56,66 +117,15 @@ if [ ! -f "$bundle/install.sh" ]; then
   mv "$bundle.part" "$bundle"
 fi
 
-# --- The host's certificate, renewed by a daily timer.
+# --- The hosts' authority, the host's first trust in the control service;
+# install.sh gets the host its certificate, for its instance name, with the
+# instance's identity token, and renews it daily.
 install -d -m 700 /etc/compute
-cat >/usr/local/sbin/compute-host-certificate <<'CERT'
-#!/usr/bin/env bash
-# Gets this host a 30-day certificate from the fleet's authority when it
-# has none or its own expires within 10 days, then restarts the agent to
-# use it (its VMs keep running). The authority's certificate is the trust
-# root for the control service.
-set -euo pipefail
-export PATH=$PATH:/snap/bin
-meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
-NAME=$(meta instance/name)
-POOL=$(meta instance/attributes/compute-ca-pool)
-LOCATION=$(meta instance/attributes/compute-ca-location)
-cd /etc/compute
-if [ -f host.pem ] && openssl x509 -in host.pem -noout -checkend 864000 >/dev/null; then
-  exit 0
-fi
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout host.key.new \
-  -subj "/CN=$NAME" -addext "subjectAltName=DNS:$NAME" -out host.csr 2>/dev/null
-gcloud privateca certificates create --quiet --issuer-pool "$POOL" --issuer-location "$LOCATION" \
-  --csr host.csr --cert-output-file host.pem.new --validity P30D
-gcloud privateca pools get-ca-certs "$POOL" --location "$LOCATION" --output-file ca.pem.new
-chmod 600 host.key.new host.pem.new
-chmod 644 ca.pem.new
-mv host.key.new host.key
-mv host.pem.new host.pem
-mv ca.pem.new ca.pem
-rm -f host.csr
-if systemctl is-active -q compute-host.service; then
-  systemctl restart compute-host.service
-fi
-CERT
-chmod 755 /usr/local/sbin/compute-host-certificate
-cat >/etc/systemd/system/compute-host-certificate.service <<'UNIT'
-[Unit]
-Description=Renew the compute host's certificate
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/compute-host-certificate
-UNIT
-cat >/etc/systemd/system/compute-host-certificate.timer <<'UNIT'
-[Unit]
-Description=Renew the compute host's certificate daily
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload
-systemctl enable -q --now compute-host-certificate.timer
-/usr/local/sbin/compute-host-certificate
+attr compute-host-authority >/etc/compute/authority.pem.new
 
 # --- The host's configuration.
 huge_pages=0
-args=$(attr compute-host-args || true)
+args=$(optional_attr compute-host-args)
 if [ "$(attr compute-nested)" = true ]; then
   percent=$(attr compute-huge-pages-pct)
   huge_pages=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo) * percent / 100 / 2048))
@@ -134,5 +144,6 @@ COMPUTE_HOST_ARGS="$args"
 ENV
 
 log "installing $(cat "$bundle/VERSION") as $NAME"
-"$bundle/install.sh" --config /etc/compute/host.env.new ${state_device:+--state-device "$state_device"}
-rm -f /etc/compute/host.env.new
+"$bundle/install.sh" --config /etc/compute/host.env.new --authority /etc/compute/authority.pem.new \
+  ${state_device:+--state-device "$state_device"}
+rm -f /etc/compute/host.env.new /etc/compute/authority.pem.new
