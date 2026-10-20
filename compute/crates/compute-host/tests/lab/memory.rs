@@ -241,6 +241,113 @@ async fn a_running_guest_gives_back_memory_it_frees() {
     host.finish("reclaim");
 }
 
+/// What a guest writes to its disk passes through the host's page cache,
+/// which the kernel charges to its VM's group. Once written back, the host
+/// can drop it at once and already counts it as available, so it is not
+/// memory the VM holds: a sandbox that wrote a lot to disk is neither
+/// booked above its request for it nor the one relieved when memory runs
+/// short.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guests_disk_writes_are_not_memory_it_holds() {
+    const WRITE: u64 = 1024 * MIB;
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    let host = Host::new(&lab, "cache", &[]);
+    let agent = host.start().await;
+    let sandbox = id(0);
+    create_sized(&agent.client, sandbox, 2048).await;
+    hold_running(&agent, sandbox).await;
+    let group = Path::new(CGROUP).join(sandbox.to_string());
+    let charged = || -> u64 {
+        std::fs::read_to_string(group.join("memory.current"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    agent
+        .wait_until("the guest's memory to be sampled", |status| {
+            resident(status, sandbox).is_some()
+        })
+        .await;
+    let before = resident(&agent.status().await, sandbox).expect("sampled");
+    let charged_before = charged();
+    // Straight to the disk, past the guest's own page cache.
+    let (output, _) = exec(
+        &agent.client,
+        sandbox,
+        &format!(
+            "dd if=/dev/urandom of=/written bs=1M count={} oflag=direct 2>/dev/null; echo dd=$?",
+            WRITE / MIB
+        ),
+    )
+    .await;
+    assert_eq!(output.trim(), "dd=0");
+    // The positive control: the writes are in the VM's group.
+    let cached = charged().saturating_sub(charged_before);
+    assert!(
+        cached >= WRITE / 2,
+        "writing {} MiB left only {} MiB in the VM's group",
+        WRITE / MIB,
+        cached / MIB
+    );
+    // Cache still to be written is held until the host writes it back,
+    // which it does in its own time: the drives pass the guest no flush.
+    let unwritten = || -> u64 {
+        let stat = std::fs::read_to_string(group.join("memory.stat")).unwrap();
+        stat.lines()
+            .filter_map(|line| line.split_once(' '))
+            .filter(|(name, _)| matches!(*name, "file_dirty" | "file_writeback"))
+            .map(|(_, value)| value.trim().parse::<u64>().unwrap())
+            .sum()
+    };
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while unwritten() > 32 * MIB {
+        assert!(
+            Instant::now() < deadline,
+            "the host never wrote the guest's disk writes back: {} MiB unwritten",
+            unwritten() / MIB
+        );
+        sleep(Duration::from_millis(500)).await;
+    }
+    // The agent samples every running VM each second.
+    sleep(Duration::from_secs(3)).await;
+    let after = resident(&agent.status().await, sandbox).expect("sampled");
+    // The cache is still in the group after the agent's reading, so the
+    // reading saw it: the guest writes nothing more, and cache once
+    // dropped stays so.
+    let still = charged().saturating_sub(charged_before);
+    assert!(
+        still >= WRITE / 2,
+        "the host dropped the guest's disk writes before the agent read them, so the check \
+         proves nothing: {} MiB left in the VM's group",
+        still / MIB
+    );
+    assert!(
+        after < before + WRITE / 4,
+        "the agent counts the disk's page cache as held: {} MiB before, {} MiB after \
+         ({} MiB charged to the group; huge pages: {})",
+        before / MIB,
+        after / MIB,
+        cached / MIB,
+        nested()
+    );
+    eprintln!(
+        "wrote {} MiB to disk: {} MiB charged to the VM's group, held {} MiB before and {} MiB \
+         after (huge pages: {})",
+        WRITE / MIB,
+        cached / MIB,
+        before / MIB,
+        after / MIB,
+        nested()
+    );
+    agent.remove_all().await;
+    agent.kill();
+    host.finish("cache");
+}
+
 /// A cgroup the test creates, ended and removed with everything below it
 /// when dropped.
 struct Group(PathBuf);

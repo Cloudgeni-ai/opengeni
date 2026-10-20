@@ -207,7 +207,9 @@ pub trait Engine: Send + Sync + 'static {
     }
 
     /// Bytes of host memory the VM holds right now; with huge-page guest
-    /// memory, the huge pages it holds.
+    /// memory, the huge pages it holds. Page cache the host can drop at
+    /// once, such as what its disk writes and saved images leave, is not
+    /// held.
     fn resident_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
 
     /// Processor time the VM has used since it started, counting every

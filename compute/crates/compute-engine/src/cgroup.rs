@@ -63,6 +63,32 @@ impl Cgroup {
         read_u64(&self.path.join("memory.current"))
     }
 
+    /// Bytes of memory charged to the group that the kernel cannot drop
+    /// at once: [`Self::memory_current`] less the page cache that is clean
+    /// and mapped by no process (`file` less `shmem`, `file_mapped`,
+    /// `file_dirty` and `file_writeback` in `memory.stat`), and never less
+    /// than what `memory.stat` alone names as held.
+    ///
+    /// A VMM's page cache is what its block devices read and write and the
+    /// images it saves, never guest memory, which is anonymous or mapped.
+    /// The kernel charges it to the group that touched it first, yet drops
+    /// it whenever memory is short, and `MemAvailable` already counts it,
+    /// less the kernel's low watermark, as available: counting it as held
+    /// as well would count it twice. Without the fields (an older kernel),
+    /// nothing is left out.
+    ///
+    /// The two files are separate reads, so cache the VMM adds between
+    /// them would be subtracted from a total that never had it, leaving
+    /// out memory the VM still holds. What `memory.stat` names as held
+    /// (`anon`, `kernel`, `sock`, `hugetlb` and the cache that stays) comes
+    /// from one read and has no such gap; `memory.current` adds whatever
+    /// the file does not name. The larger of the two is never too small.
+    pub fn memory_held(&self) -> io::Result<u64> {
+        let current = self.memory_current()?;
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        Ok(held_memory(current, &stat))
+    }
+
     /// Bytes of huge pages the group's processes map. The kernel charges
     /// huge pages to a group's `memory.current` only on a cgroup v2 mount
     /// with `memory_hugetlb_accounting`; counting them by process works on
@@ -440,6 +466,70 @@ fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
     stats
 }
 
+/// Bytes of a group's memory the kernel cannot drop at once, from its
+/// `memory.current` read before its `memory.stat`; see
+/// [`Cgroup::memory_held`].
+fn held_memory(current: u64, stat: &str) -> u64 {
+    let cache = Cache::of(stat);
+    current
+        .saturating_sub(cache.droppable())
+        .max(cache.named_held)
+}
+
+/// Bytes of a group's page cache that is clean and mapped by no process,
+/// from its `memory.stat`: what the kernel can drop without writing or
+/// unmapping anything.
+#[cfg(test)]
+fn droppable_cache(stat: &str) -> u64 {
+    Cache::of(stat).droppable()
+}
+
+/// A group's page cache, and what its `memory.stat` names as held, from
+/// one read of the file.
+struct Cache {
+    /// `file`: page cache, shared memory (tmpfs) included.
+    file: u64,
+    /// The part of `file` the kernel cannot drop at once: shared memory,
+    /// mapped files and cache still to be written. A page that is two of
+    /// these may be counted twice, which only counts more as held.
+    kept: u64,
+    /// `anon`, `kernel`, `sock` and `hugetlb` (each charged apart from the
+    /// others and from `file`) and the part of `file` that is kept.
+    named_held: u64,
+}
+
+impl Cache {
+    fn of(stat: &str) -> Self {
+        let (mut file, mut kept, mut other) = (0_u64, 0_u64, 0_u64);
+        for line in stat.lines() {
+            let Some((name, value)) = line.split_once(' ') else {
+                continue;
+            };
+            let Ok(value) = value.trim().parse::<u64>() else {
+                continue;
+            };
+            match name {
+                "file" => file = value,
+                "shmem" | "file_mapped" | "file_dirty" | "file_writeback" => {
+                    kept = kept.saturating_add(value);
+                }
+                "anon" | "kernel" | "sock" | "hugetlb" => other = other.saturating_add(value),
+                _ => {}
+            }
+        }
+        Self {
+            file,
+            kept,
+            named_held: other.saturating_add(file.min(kept)),
+        }
+    }
+
+    /// Bytes of `file` that are clean and mapped by no process.
+    fn droppable(&self) -> u64 {
+        self.file.saturating_sub(self.kept)
+    }
+}
+
 /// Bytes of huge pages a process maps, from its `/proc/<pid>/status`.
 fn parse_hugetlb_bytes(status: &str) -> u64 {
     status
@@ -693,6 +783,70 @@ mod tests {
             parse_memory_stats("anon 4096\n", None),
             MemoryStats::default()
         );
+    }
+
+    #[test]
+    fn page_cache_the_host_can_drop_is_not_held() {
+        // A paused VM just after its 8 GiB image was saved: 330 MB of guest
+        // memory, and the image's page cache charged to its group.
+        let stat = "anon 329879552\nfile 8237420544\nkernel 22253568\nshmem 8192\n\
+                    file_mapped 40960\nfile_dirty 0\nfile_writeback 0\n\
+                    active_file 8235515904\ninactive_file 1896448\n";
+        assert_eq!(droppable_cache(stat), 8_237_420_544 - 8192 - 40960);
+        let group = tempfile::tempdir().unwrap();
+        fs::write(group.path().join("memory.current"), "8589553664\n").unwrap();
+        fs::write(group.path().join("memory.stat"), stat).unwrap();
+        assert_eq!(
+            Cgroup::at(group.path()).memory_held().unwrap(),
+            8_589_553_664 - (8_237_420_544 - 8192 - 40960)
+        );
+        // Cache still to be written, shared memory (tmpfs) and mapped files
+        // stay held.
+        let busy = "file 3000\nshmem 1000\nfile_mapped 500\nfile_dirty 700\nfile_writeback 300\n";
+        assert_eq!(droppable_cache(busy), 500);
+        // More kept than cached (a page both mapped and dirty) drops nothing.
+        assert_eq!(
+            droppable_cache("file 100\nfile_mapped 80\nfile_dirty 80\n"),
+            0
+        );
+        // An older kernel's file without the fields leaves everything held.
+        assert_eq!(droppable_cache("anon 4096\n"), 0);
+        fs::write(group.path().join("memory.stat"), "anon 4096\n").unwrap();
+        assert_eq!(
+            Cgroup::at(group.path()).memory_held().unwrap(),
+            8_589_553_664
+        );
+    }
+
+    #[test]
+    fn cache_added_between_the_two_reads_leaves_nothing_held_out() {
+        const MIB: u64 = 1 << 20;
+        // 512 MiB held when `memory.current` is read; 1 GiB of clean cache
+        // arrives before `memory.stat` is.
+        let stat = format!(
+            "anon {}\nfile {}\nkernel {}\nsock 0\nshmem 0\nfile_mapped 0\n\
+             file_dirty 0\nfile_writeback 0\n",
+            500 * MIB,
+            1024 * MIB,
+            12 * MIB
+        );
+        assert_eq!(held_memory(512 * MIB, &stat), 512 * MIB);
+        // Read at the same moment, the two agree.
+        assert_eq!(held_memory(1536 * MIB, &stat), 512 * MIB);
+        // Cache dropped between the reads is in the total but not in the
+        // file, and only counts more as held.
+        assert_eq!(held_memory(1600 * MIB, &stat), 576 * MIB);
+        // Mapped, shared and unwritten cache is named as held too, at most
+        // the cache there is.
+        let busy = format!(
+            "anon {}\nfile {}\nshmem {}\nfile_mapped {}\nfile_dirty {}\n",
+            100 * MIB,
+            300 * MIB,
+            200 * MIB,
+            100 * MIB,
+            50 * MIB
+        );
+        assert_eq!(held_memory(0, &busy), 400 * MIB);
     }
 
     #[test]
