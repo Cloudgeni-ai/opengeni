@@ -993,11 +993,11 @@ export function createInteractionAttemptToolDefinitions(
     return published;
   };
   // Whether a ComputerSession runs a computer_act batch as one operation.
-  // Support comes with the computer's agent version, so a yes is kept; a no
-  // (or a session whose controller has not reported yet) is asked again. An
-  // unreadable answer runs the batch one action at a time, which every
-  // computer supports; a retried batch runs the way its first try did
-  // whatever the answer (see actInComputerBatch).
+  // The computer's controller reports it, so every call to the same
+  // controller picks the same way and two tries of one batch cannot send its
+  // actions under both ways' operation IDs. A yes is kept; a no is asked
+  // again, since an agent update brings a new controller. An unreadable or
+  // not yet reported answer sends nothing (see actInComputerBatch).
   const actionBatchSupport = new Map<string, Promise<boolean>>();
   const supportsActionBatches = (computerSessionId: string): Promise<boolean> => {
     let known = actionBatchSupport.get(computerSessionId);
@@ -1005,12 +1005,29 @@ export function createInteractionAttemptToolDefinitions(
       known = Promise.resolve()
         .then(() => input.transport.getComputerSession(input.workspaceId, computerSessionId))
         .then(
-          (session) => session.capabilities?.actionBatches === true,
-          () => false,
+          (session) => {
+            if (!session.capabilities)
+              throw new Error(
+                "this computer session has not reported what it supports yet, so the batch was not sent; retry the call",
+              );
+            return session.capabilities.actionBatches === true;
+          },
+          (error: unknown) => {
+            throw new Error(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+                0,
+                8_192,
+              ),
+            );
+          },
         )
         .then((supported) => {
           if (!supported) actionBatchSupport.delete(computerSessionId);
           return supported;
+        })
+        .catch((error: unknown) => {
+          actionBatchSupport.delete(computerSessionId);
+          throw error;
         });
       actionBatchSupport.set(computerSessionId, known);
     }
@@ -2252,7 +2269,7 @@ export function createInteractionAttemptToolDefinitions(
           value,
           action.actions,
           context.operationId,
-          await supportsActionBatches(value.computerSessionId),
+          () => supportsActionBatches(value.computerSessionId),
         );
       }
       // A launch acts on no window's contents, and an action that names the
@@ -2626,8 +2643,8 @@ async function actInComputerBatch(
   value: z.output<typeof ComputerActInput>,
   actions: ComputerAction[],
   operationId: string,
-  /** The computer runs the whole batch as one operation. */
-  nativeBatch = false,
+  /** Whether the computer runs the whole batch as one operation. */
+  runsNatively: () => Promise<boolean> = async () => false,
 ): Promise<z.output<typeof ComputerActionBatchReceipt>> {
   type Observation = z.output<typeof ComputerObservation>;
   type Receipt = z.output<typeof ComputerActionReceipt>;
@@ -2647,23 +2664,27 @@ async function actInComputerBatch(
     }
   };
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
-  // A retried call runs its batch the way its first try did. Whether the
-  // computer runs batches as one operation can change between tries (its
-  // controller reports late, or its agent is updated), and the two ways derive
-  // different operation IDs, so running the other way would send the actions
-  // again. Both first receipts are read together before anything is sent.
+  // The two ways derive different operation IDs. Every call to one
+  // controller picks the same way, from what that controller reports. A
+  // retried call still runs the way its first try did, even if an agent
+  // update changed the answer since: both first receipts are read before
+  // anything is sent, and running the other way would send the actions again.
   const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
   const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
   const [nativePrior, firstStepPrior] = await Promise.all([
     recorded(nativeOperationId),
     recorded(firstStepOperationId),
   ]);
+  let nativeBatch: boolean;
   if (typeof nativePrior === "object") nativeBatch = true;
   else if (typeof firstStepPrior === "object") nativeBatch = false;
-  else if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
-    throw new Error(
-      "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
-    );
+  else {
+    nativeBatch = await runsNatively();
+    if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
+      throw new Error(
+        "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
+      );
+  }
   if (nativeBatch)
     return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
       operationId: nativeOperationId,
