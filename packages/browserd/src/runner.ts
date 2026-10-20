@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
+import { setProfileDownloadDirectory } from "./profile-exit-state";
 import {
   BROWSER_SHARED_NETWORK_NOTICE,
   browserNetworkIsolationScript,
@@ -114,6 +115,11 @@ export type AgentBrowserRunnerOptions = {
   socketDirectory: string;
   profileDirectory: string;
   downloadDirectory: string;
+  /** Chromium manages its own downloads: `downloadDirectory` becomes the
+   * profile's downloads folder and the launcher installs no CDP download
+   * behavior, so Chromium's Downloads page opens finished files as in any
+   * Chrome. Otherwise the launcher directs downloads through CDP. */
+  nativeDownloads?: boolean;
   screenshotDirectory: string;
   headed: boolean;
   /** Run a headed managed browser without any native window. On a person's
@@ -282,6 +288,13 @@ export class AgentBrowserJsonRunner {
         profileDirectory: resolve(options.profileDirectory),
         executablePath: browserLaunch.backgroundBrowserExecutable,
       });
+    }
+    // No browser uses the profile now; the next one launches with it.
+    if (options.nativeDownloads) {
+      await setProfileDownloadDirectory(
+        resolve(options.profileDirectory),
+        resolve(options.downloadDirectory),
+      );
     }
     const { recoverOwnedProcess: _recoverOwnedProcess, ...launchOptions } = options;
     return new AgentBrowserJsonRunner(
@@ -1661,7 +1674,9 @@ function isolatedEnvironment(
     AGENT_BROWSER_SESSION: options.sessionName,
     AGENT_BROWSER_SOCKET_DIR: resolve(options.socketDirectory),
     AGENT_BROWSER_PROFILE: resolve(options.profileDirectory),
-    AGENT_BROWSER_DOWNLOAD_PATH: resolve(options.downloadDirectory),
+    ...(options.nativeDownloads
+      ? {}
+      : { AGENT_BROWSER_DOWNLOAD_PATH: resolve(options.downloadDirectory) }),
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: windowedBrowser(options) ? "1" : "0",

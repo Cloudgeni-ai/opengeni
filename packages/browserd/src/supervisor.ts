@@ -314,6 +314,7 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
     begin: BrowserDownloadStore["begin"];
     progress: BrowserDownloadStore["progress"];
     reject: BrowserDownloadStore["reject"];
+    followUnreported: BrowserDownloadStore["followUnreported"];
   };
 };
 
@@ -1756,6 +1757,7 @@ export class BrowserSupervisor {
               begin: downloadStore.begin.bind(downloadStore),
               progress: downloadStore.progress.bind(downloadStore),
               reject: downloadStore.reject.bind(downloadStore),
+              followUnreported: downloadStore.followUnreported.bind(downloadStore),
             },
           }
         : {}),
@@ -2950,6 +2952,10 @@ async function createBrowserDriver(
   // A Linux host without a graphical display (a server, or an agent running
   // outside the desktop session) cannot open a window at all: windowed Chrome
   // would exit before DevTools starts. There a headed browser is offscreen too.
+  // A full Chrome manages its own downloads, so its Downloads page opens a
+  // finished file as Chrome does. The headless shell has no Downloads page and
+  // saves nothing unless told to through CDP.
+  const nativeDownloads = !useHeadlessShell;
   const offscreen =
     context.headed &&
     !context.linkedComputer &&
@@ -2964,6 +2970,7 @@ async function createBrowserDriver(
     socketDirectory: context.socketDirectory,
     profileDirectory: context.profileDirectory,
     downloadDirectory: context.downloadDirectory,
+    ...(nativeDownloads ? { nativeDownloads: true } : {}),
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
     ...(networkIsolation ? {} : { networkIsolation: false }),
@@ -3014,6 +3021,7 @@ async function createBrowserDriver(
     ...(useHeadlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+    ...(nativeDownloads ? { nativeDownloads: true } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
     ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     ...(route

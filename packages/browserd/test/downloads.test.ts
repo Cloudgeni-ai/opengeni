@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { BrowserDownloadStore } from "../src";
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { BrowserDownloadStore, chromiumCopyNumber } from "../src";
 
 const browserSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -111,6 +111,97 @@ describe("BrowserDownloadStore", () => {
     });
     await expect(readFile(path)).rejects.toThrow();
     await store.close();
+  });
+
+  test("finds the file Chromium named when the page reports no path", async () => {
+    const { store } = await fixture();
+    // An earlier download already owns "report.pdf".
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.pdf" });
+    await writeFile(join(store.filesDirectory, "report.pdf"), "first");
+    await store.progress({ guid: "first", state: "completed", receivedBytes: 5, totalBytes: 5 });
+    await store.begin({ guid: "second", targetId: "t", suggestedFilename: "report.pdf" });
+    await writeFile(join(store.filesDirectory, "report (1).pdf"), "second!");
+    await writeFile(join(store.filesDirectory, "report (2).pdf.crdownload"), "partial");
+    await store.progress({ guid: "second", state: "completed", receivedBytes: 7, totalBytes: 7 });
+    const [second, first] = await store.list();
+    expect(first).toMatchObject({ status: "completed", receivedBytes: 5 });
+    expect(second).toMatchObject({ status: "completed", receivedBytes: 7 });
+    expect(basename((await store.completedFile(first!.id)).path)).toBe("report.pdf");
+    expect(basename((await store.completedFile(second!.id)).path)).toBe("report (1).pdf");
+    await store.close();
+  });
+
+  test("fails a page-reported completion whose file cannot be found", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "lost", targetId: null, suggestedFilename: "lost.txt" });
+    await store.progress({ guid: "lost", state: "completed", receivedBytes: 4, totalBytes: 4 });
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    await store.close();
+  });
+
+  test("settles a cancellation that reports no bytes", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "stop", targetId: null, suggestedFilename: "big.bin" });
+    await store.progress({
+      guid: "stop",
+      state: "inProgress",
+      receivedBytes: 40,
+      totalBytes: null,
+    });
+    await store.progress({ guid: "stop", state: "canceled", receivedBytes: 0, totalBytes: 0 });
+    expect((await store.list())[0]).toMatchObject({ status: "cancelled" });
+    await store.close();
+  });
+
+  test("follows a download whose page closed until Chromium names its file", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "popup", targetId: "closed", suggestedFilename: "Popup report.pdf" });
+    const cancelled: string[] = [];
+    store.followUnreported("popup", async (reason) => {
+      cancelled.push(reason);
+    });
+    await writeFile(join(store.filesDirectory, "Popup report.pdf.crdownload"), "%PDF");
+    await Bun.sleep(250);
+    expect((await store.list())[0]).toMatchObject({ status: "in_progress", receivedBytes: 4 });
+    await rename(
+      join(store.filesDirectory, "Popup report.pdf.crdownload"),
+      join(store.filesDirectory, "Popup report.pdf"),
+    );
+    const settled = await settledDownload(store);
+    expect(settled).toMatchObject({ status: "completed", receivedBytes: 4 });
+    expect(basename((await store.completedFile(settled.id)).path)).toBe("Popup report.pdf");
+    expect(cancelled).toEqual([]);
+    await store.close();
+  });
+
+  test("cancels a followed download whose partial file outgrows its quota", async () => {
+    const { store } = await fixture({ maxFileBytes: 5, maxSessionBytes: 20 });
+    await store.begin({ guid: "huge", targetId: "closed", suggestedFilename: "huge.bin" });
+    const cancelled: string[] = [];
+    store.followUnreported("huge", async (reason) => {
+      cancelled.push(reason);
+      await store.reject("huge", reason);
+    });
+    await writeFile(join(store.filesDirectory, "huge.bin.crdownload"), "ten bytes!");
+    expect(await settledDownload(store)).toMatchObject({
+      status: "failed",
+      failureCode: "download_quota_exceeded",
+    });
+    expect(cancelled).toEqual(["download_quota_exceeded"]);
+    await store.close();
+  });
+
+  test("recognizes the names Chromium gives a download", () => {
+    expect(chromiumCopyNumber("report.pdf", "report.pdf")).toBe(0);
+    expect(chromiumCopyNumber("report.pdf", "report (3).pdf")).toBe(3);
+    expect(chromiumCopyNumber("archive.tar.gz", "archive (1).tar.gz")).toBe(1);
+    expect(chromiumCopyNumber("README", "README (2)")).toBe(2);
+    expect(chromiumCopyNumber("report.pdf", "report (x).pdf")).toBeNull();
+    expect(chromiumCopyNumber("report.pdf", "other.pdf")).toBeNull();
+    expect(chromiumCopyNumber("report.pdf", "report.pdf.crdownload")).toBeNull();
   });
 
   test("never follows a reported file outside its folder", async () => {
@@ -352,4 +443,13 @@ async function newRoot(): Promise<string> {
   const root = await mkdtemp("/tmp/opengeni-browser-downloads-");
   roots.push(root);
   return root;
+}
+
+async function settledDownload(store: BrowserDownloadStore) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const download = (await store.list())[0];
+    if (download && download.status !== "in_progress") return download;
+    await Bun.sleep(50);
+  }
+  throw new Error("browser download did not settle");
 }

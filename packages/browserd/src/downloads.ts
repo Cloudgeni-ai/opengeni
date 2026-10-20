@@ -81,10 +81,12 @@ export type CompletedBrowserDownloadFile = {
 };
 
 /** Placement-private download authority. Chromium saves files into `files/`
- * under the names it gives them, as it would in any downloads folder, and
- * reports each completed file's path; downloads from before that were saved
- * under their GUID. SQLite retains only bounded metadata and the file's name
- * in `files/`, never a source URL or a public local path. All event and
+ * under the names it gives them, as it would in any downloads folder.
+ * Browser-level CDP events report each completed file's path; page-level
+ * events (a browser that manages its own downloads) do not, and the file is
+ * then found by the name Chromium gave it. Downloads from before either were
+ * saved under their GUID. SQLite retains only bounded metadata and the file's
+ * name in `files/`, never a source URL or a public local path. All event and
  * export work is serialized so a completion, cancellation, and caller read
  * cannot observe half-settled state. */
 export class BrowserDownloadStore {
@@ -101,6 +103,9 @@ export class BrowserDownloadStore {
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
   private closed = false;
+  /** Downloads followed through `files/` because their page can no longer
+   * report them. */
+  private readonly followed = new Set<string>();
 
   private constructor(options: BrowserDownloadStoreOptions, database: Database) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -247,7 +252,8 @@ export class BrowserDownloadStore {
           );
         return { cancelReason: null };
       }
-      if (receivedBytes < row.received_bytes) {
+      // Chromium reports a cancelled download with no bytes.
+      if (event.state !== "canceled" && receivedBytes < row.received_bytes) {
         throw new Error("download byte progress moved backwards");
       }
       const projectedBytes = this.otherActiveBytes(guid) + receivedBytes;
@@ -319,6 +325,65 @@ export class BrowserDownloadStore {
         );
       }
     });
+  }
+
+  /** Follow an in-progress download that its page can no longer report.
+   * Chromium closes a tab that only started a download, and that tab's
+   * session with it, while the download itself continues. It completes when
+   * Chromium gives its file its final name in `files/`. A partial file that
+   * outgrows the quota is cancelled through `cancel`, which must also reject
+   * the download. Following stops when the download settles or the store
+   * closes. */
+  followUnreported(
+    guidInput: string,
+    cancel: (reason: "download_quota_exceeded") => Promise<void>,
+  ): void {
+    const guid = requireGuid(guidInput);
+    if (this.closed || this.followed.has(guid)) return;
+    this.followed.add(guid);
+    let delayMs = 100;
+    const step = async (): Promise<void> => {
+      let next: "done" | "wait" | "cancel" = "done";
+      try {
+        next = await this.enqueue(async () => {
+          const row = this.rowByGuid(guid);
+          if (!row || row.status !== "in_progress") return "done";
+          const fileName = await this.locateNamedFile(row, null);
+          if (fileName !== null) {
+            const { size } = await exactRegularFile(join(this.filesDirectory, fileName));
+            await this.complete(row, size, size, join(this.filesDirectory, fileName));
+            return "done";
+          }
+          const partialBytes = await this.partialBytes(row);
+          if (partialBytes === null || partialBytes <= row.received_bytes) return "wait";
+          if (
+            partialBytes > this.maxFileBytes ||
+            this.otherActiveBytes(guid) + partialBytes > this.maxSessionBytes
+          ) {
+            return "cancel";
+          }
+          this.database
+            .query<unknown, [number, string]>(
+              `UPDATE browser_downloads
+                  SET received_bytes = ?, version = version + 1
+                WHERE guid = ? AND status = 'in_progress'`,
+            )
+            .run(partialBytes, guid);
+          return "wait";
+        });
+      } catch {
+        // A closed store ends following; anything else is retried.
+        next = this.closed ? "done" : "wait";
+      }
+      if (next === "cancel") await cancel("download_quota_exceeded").catch(() => undefined);
+      if (next !== "wait" || this.closed) {
+        this.followed.delete(guid);
+        return;
+      }
+      delayMs = Math.min(delayMs * 2, 2_000);
+      setTimeout(() => void step(), delayMs).unref?.();
+    };
+    setTimeout(() => void step(), delayMs).unref?.();
   }
 
   list(): Promise<BrowserDownloadValue[]> {
@@ -501,11 +566,16 @@ export class BrowserDownloadStore {
     reportedPath: string | null,
   ): Promise<void> {
     // Chromium names the file; it must be a plain entry of `files/`.
-    const fileName =
+    let fileName =
       reportedPath === null ? null : downloadedFileName(this.filesDirectory, reportedPath);
     try {
       if (reportedPath !== null && fileName === null)
         throw new Error("download was saved outside its folder");
+      if (reportedPath === null && !(await regularFileExists(this.filePath(row)))) {
+        // A page-level completion names no file: find the one Chromium named.
+        fileName = await this.locateNamedFile(row, eventReceivedBytes);
+        if (fileName === null) throw new Error("download file was not found");
+      }
       const path = this.filePath({ guid: row.guid, file_name: fileName });
       const facts = await exactRegularFile(path);
       const sizeBytes = facts.size;
@@ -584,6 +654,64 @@ export class BrowserDownloadStore {
         requireFailureCode(failureCode),
         guid,
       );
+  }
+
+  /** The completed file Chromium saved for this download under the name it
+   * suggested, or that name with the " (N)" Chromium adds when a file of that
+   * name already exists. Files another download already owns, partial files
+   * and, when the size is known, files of another size are not candidates.
+   * The lowest copy number wins: Chromium picks the first free name when a
+   * download starts. When no file carries such a name, a known size picks
+   * the one unowned completed file of exactly that size. */
+  private async locateNamedFile(
+    row: DownloadRow,
+    sizeBytes: number | null,
+  ): Promise<string | null> {
+    // Files saved under their GUID belong to downloads from before Chromium
+    // named them.
+    const owned = new Set(
+      this.database
+        .query<{ name: string }, []>(
+          `SELECT file_name AS name FROM browser_downloads WHERE file_name IS NOT NULL
+           UNION SELECT guid AS name FROM browser_downloads`,
+        )
+        .all()
+        .map((entry) => entry.name),
+    );
+    const named: Array<{ name: string; copy: number }> = [];
+    const sized: string[] = [];
+    for (const name of await readdir(this.filesDirectory)) {
+      if (owned.has(name) || name.endsWith(".crdownload")) continue;
+      let size: number;
+      try {
+        size = (await exactRegularFile(join(this.filesDirectory, name))).size;
+      } catch {
+        continue;
+      }
+      if (sizeBytes !== null && size !== sizeBytes) continue;
+      const copy = chromiumCopyNumber(row.filename, name);
+      if (copy !== null) named.push({ name, copy });
+      else if (sizeBytes !== null) sized.push(name);
+    }
+    named.sort((left, right) => left.copy - right.copy);
+    if (named[0]) return named[0].name;
+    return sized.length === 1 ? sized[0]! : null;
+  }
+
+  /** The size of this download's partial file, when exactly one partial file
+   * in `files/` carries a name Chromium could have given it. */
+  private async partialBytes(row: DownloadRow): Promise<number | null> {
+    const partials = (await readdir(this.filesDirectory)).filter(
+      (name) =>
+        name.endsWith(".crdownload") &&
+        chromiumCopyNumber(row.filename, name.slice(0, -".crdownload".length)) !== null,
+    );
+    if (partials.length !== 1) return null;
+    try {
+      return (await exactRegularFile(join(this.filesDirectory, partials[0]!))).size;
+    } catch {
+      return null;
+    }
   }
 
   private otherActiveBytes(guid: string): number {
@@ -827,4 +955,33 @@ function downloadedFileName(filesDirectory: string, reportedPath: string): strin
   if (dirname(path) !== filesDirectory || !name || name === "." || name === "..") return null;
   if (name.length > 1_024 || /[\u0000-\u001f\u007f]/u.test(name)) return null;
   return name;
+}
+
+async function regularFileExists(path: string): Promise<boolean> {
+  try {
+    await exactRegularFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 0 when `name` is exactly the suggested file name, N when it is that name
+ * with the " (N)" Chromium inserts before an extension to keep an existing
+ * file, otherwise null. Every dot is tried as the extension boundary, so
+ * multi-part extensions such as ".tar.gz" match too. */
+export function chromiumCopyNumber(suggested: string, name: string): number | null {
+  if (name === suggested) return 0;
+  const match = / \((\d{1,9})\)/u;
+  for (let index = 0; index <= suggested.length; index++) {
+    if (index < suggested.length && suggested[index] !== ".") continue;
+    const stem = suggested.slice(0, index);
+    const extension = suggested.slice(index);
+    if (name.length <= stem.length + extension.length) continue;
+    if (!name.startsWith(stem) || !name.endsWith(extension)) continue;
+    const middle = name.slice(stem.length, name.length - extension.length);
+    const copy = match.exec(middle);
+    if (copy && copy[0] === middle) return Number(copy[1]);
+  }
+  return null;
 }

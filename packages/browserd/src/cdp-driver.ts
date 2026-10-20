@@ -453,7 +453,20 @@ export type AgentBrowserDriverOptions = {
     begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
     progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
     reject(guid: string, failureCode: string): Promise<void>;
+    /** Follow a download whose page closed before reporting its end. */
+    followUnreported?(
+      guid: string,
+      cancel: (reason: "download_quota_exceeded") => Promise<void>,
+    ): void;
   };
+  /** Chromium itself manages this browser's downloads: its launcher made
+   * `downloadDirectory` the profile's downloads folder, and no CDP download
+   * behavior is installed. A CDP download behavior makes Chromium skip its
+   * own handling of a finished download, so its Downloads page could not
+   * open the file the way any Chrome does (a PDF in a new tab). Downloads are
+   * observed through each page's auto-attached session instead. Requires
+   * target auto-attach; never applies to an ephemeral context. */
+  nativeDownloads?: boolean;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
   /** Whether the lifecycle runner or this controller-owned CDP connection
@@ -583,6 +596,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     | undefined;
   private readonly downloadDirectory: string | null;
   private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
+  private readonly nativeDownloads: boolean;
+  /** Auto-attached page sessions observing downloads natively: their
+   * listeners and the downloads they reported starting but not ending. */
+  private readonly downloadSessions = new Map<
+    string,
+    { stop: Array<() => void>; active: Set<string> }
+  >();
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   /** The size the agent last set. Tabs that open afterwards get it too, as
@@ -673,6 +693,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? resolvePath(options.downloadDirectory)
       : null;
     this.downloadEvents = options.downloadEvents;
+    this.nativeDownloads =
+      options.nativeDownloads === true &&
+      this.targetAutoAttach &&
+      options.browserContextId === undefined &&
+      this.downloadDirectory !== null;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
@@ -1941,11 +1966,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.presentedUserAgent = this.completeClientHints
         ? await this.loadPresentedUserAgent(connection)
         : null;
-      if (this.downloadDirectory) {
+      if (this.downloadDirectory && !this.nativeDownloads) {
         await connection.send("Browser.setDownloadBehavior", {
           ...this.contextScope(),
           // Chromium names each file as in any downloads folder, so its
-          // Downloads page shows the real name and opens it by type.
+          // Downloads page shows the real name (it cannot open it: a CDP
+          // download behavior bypasses Chromium's own download handling).
           behavior: "allow",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
@@ -1983,79 +2009,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.attachingSessions.delete(targetId);
           this.removeState(targetId, true);
         }),
-        connection.on("Browser.downloadWillBegin", (event) => {
-          const frameId = typeof event.params.frameId === "string" ? event.params.frameId : null;
-          const state = [...this.states.values()].find(
-            (candidate) => candidate.frame.id === frameId,
-          );
-          // Browser download events are process-wide. Unknown frames must not
-          // become downloads belonging to another context.
-          if (this.browserContextId && !state) return;
-          if (this.downloadEvents) {
-            const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-            if (this.browserContextId) this.ownedDownloads.add(guid);
-            const suggestedFilename =
-              typeof event.params.suggestedFilename === "string"
-                ? event.params.suggestedFilename
-                : "download";
-            void this.downloadEvents
-              .begin({
-                guid,
-                targetId: state?.targetId ?? null,
-                suggestedFilename,
-              })
-              .catch(() => undefined);
-          }
-          if (state) {
-            state.diagnostics.downloadCount += 1;
-            this.appendDiagnostic(state, {
-              kind: "download",
-              level: "info",
-              message: "Browser download started",
-              url: boundedUrlField(event.params.url),
-              method: null,
-              status: null,
-              filename: boundedTextField(event.params.suggestedFilename, 4_096),
-            });
-          }
-        }),
-        connection.on("Browser.downloadProgress", (event) => {
-          if (!this.downloadEvents) return;
-          const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
-          const state = event.params.state;
-          if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
-          const receivedBytes = event.params.receivedBytes;
-          const totalBytes = event.params.totalBytes;
-          const filePath =
-            state === "completed" && typeof event.params.filePath === "string"
-              ? event.params.filePath
-              : null;
-          if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
-          if (
-            totalBytes !== undefined &&
-            (typeof totalBytes !== "number" || !Number.isSafeInteger(totalBytes))
-          ) {
-            return;
-          }
-          void this.downloadEvents
-            .progress({
-              guid,
-              state,
-              receivedBytes,
-              totalBytes: typeof totalBytes === "number" ? totalBytes : null,
-              filePath,
-            })
-            .then(async ({ cancelReason }) => {
-              if (state !== "inProgress") this.ownedDownloads.delete(guid);
-              if (!cancelReason) return;
-              await connection
-                .send("Browser.cancelDownload", { guid, ...this.contextScope() })
-                .catch(() => undefined);
-              await this.downloadEvents?.reject(guid, cancelReason);
-            })
-            .catch(() => undefined);
-        }),
+        connection.on("Browser.downloadWillBegin", (event) =>
+          this.onDownloadWillBegin(event.params, null),
+        ),
+        connection.on("Browser.downloadProgress", (event) =>
+          this.onDownloadProgress(connection, event.params),
+        ),
       );
       if (this.targetAutoAttach) await this.enableTargetAutoAttach(connection);
       this.connection = connection;
@@ -2090,6 +2049,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         for (const [targetId, autoSession] of this.autoSessions) {
           if (autoSession === sessionId) this.autoSessions.delete(targetId);
         }
+        this.releaseDownloadSession(connection, sessionId);
         this.forgetPresentationSession(sessionId);
         this.passkeys?.detachSession(sessionId);
       }),
@@ -2113,6 +2073,141 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (error instanceof CdpTransportError) throw error;
       // Engines without browser-level auto-attach keep lazy per-target attachment.
       for (const stop of unsubscribe) stop();
+    }
+  }
+
+  /** A download a page started. `sourceTargetId` is the page whose own
+   * session reported it; browser-level events identify it by frame. */
+  private onDownloadWillBegin(
+    params: Record<string, unknown>,
+    sourceTargetId: string | null,
+  ): void {
+    const frameId = typeof params.frameId === "string" ? params.frameId : null;
+    const state =
+      (sourceTargetId === null ? undefined : this.states.get(sourceTargetId)) ??
+      [...this.states.values()].find((candidate) => candidate.frame.id === frameId);
+    // Browser download events are process-wide. Unknown frames must not
+    // become downloads belonging to another context.
+    if (this.browserContextId && !state) return;
+    if (this.downloadEvents) {
+      const guid = typeof params.guid === "string" ? params.guid : "";
+      if (this.browserContextId) this.ownedDownloads.add(guid);
+      const suggestedFilename =
+        typeof params.suggestedFilename === "string" ? params.suggestedFilename : "download";
+      void this.downloadEvents
+        .begin({
+          guid,
+          targetId: state?.targetId ?? sourceTargetId,
+          suggestedFilename,
+        })
+        .catch(() => undefined);
+    }
+    if (state) {
+      state.diagnostics.downloadCount += 1;
+      this.appendDiagnostic(state, {
+        kind: "download",
+        level: "info",
+        message: "Browser download started",
+        url: boundedUrlField(params.url),
+        method: null,
+        status: null,
+        filename: boundedTextField(params.suggestedFilename, 4_096),
+      });
+    }
+  }
+
+  /** Progress of a download. Page-level events name no file; the store finds
+   * the file Chromium named. */
+  private onDownloadProgress(
+    connection: BrowserCdpConnection,
+    params: Record<string, unknown>,
+  ): void {
+    if (!this.downloadEvents) return;
+    const guid = typeof params.guid === "string" ? params.guid : "";
+    if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
+    const state = params.state;
+    if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
+    const receivedBytes = params.receivedBytes;
+    const totalBytes = params.totalBytes;
+    const filePath =
+      state === "completed" && typeof params.filePath === "string" ? params.filePath : null;
+    if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
+    if (
+      totalBytes !== undefined &&
+      (typeof totalBytes !== "number" || !Number.isSafeInteger(totalBytes))
+    ) {
+      return;
+    }
+    if (state !== "inProgress") {
+      for (const session of this.downloadSessions.values()) session.active.delete(guid);
+    }
+    void this.downloadEvents
+      .progress({
+        guid,
+        state,
+        receivedBytes,
+        totalBytes: typeof totalBytes === "number" ? totalBytes : null,
+        filePath,
+      })
+      .then(async ({ cancelReason }) => {
+        if (state !== "inProgress") this.ownedDownloads.delete(guid);
+        if (!cancelReason) return;
+        await this.cancelDownload(connection, guid, cancelReason);
+      })
+      .catch(() => undefined);
+  }
+
+  private async cancelDownload(
+    connection: BrowserCdpConnection,
+    guid: string,
+    reason: "download_quota_exceeded",
+  ): Promise<void> {
+    for (const session of this.downloadSessions.values()) session.active.delete(guid);
+    await connection
+      .send("Browser.cancelDownload", { guid, ...this.contextScope() })
+      .catch(() => undefined);
+    await this.downloadEvents?.reject(guid, reason);
+  }
+
+  /** Observe the downloads a page starts through its auto-attached session. */
+  private observeDownloads(
+    connection: BrowserCdpConnection,
+    targetId: string,
+    sessionId: string,
+  ): void {
+    const active = new Set<string>();
+    this.downloadSessions.set(sessionId, {
+      active,
+      stop: [
+        connection.on(
+          "Page.downloadWillBegin",
+          (event) => {
+            if (typeof event.params.guid === "string") active.add(event.params.guid);
+            this.onDownloadWillBegin(event.params, targetId);
+          },
+          sessionId,
+        ),
+        connection.on(
+          "Page.downloadProgress",
+          (event) => this.onDownloadProgress(connection, event.params),
+          sessionId,
+        ),
+      ],
+    });
+  }
+
+  /** A page session ended. Chromium closes a tab that only started a
+   * download while the download continues, so whatever it had not finished
+   * is followed through its file instead. */
+  private releaseDownloadSession(connection: BrowserCdpConnection, sessionId: string): void {
+    const session = this.downloadSessions.get(sessionId);
+    if (!session) return;
+    this.downloadSessions.delete(sessionId);
+    for (const stop of session.stop) stop();
+    for (const guid of session.active) {
+      this.downloadEvents?.followUnreported?.(guid, async (reason) =>
+        this.cancelDownload(connection, guid, reason),
+      );
     }
   }
 
@@ -2171,12 +2266,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     this.autoSessions.set(info.targetId, sessionId);
+    if (this.nativeDownloads) this.observeDownloads(connection, info.targetId, sessionId);
     // A new tab or popup may have taken the front.
     if (waiting) this.frontTargetId = null;
     try {
       await Promise.all([
         this.presentUserAgent(connection, sessionId, null),
         this.passkeys?.attachTarget(connection, { targetId: info.targetId, sessionId }),
+        // Download events need the Page domain, enabled before the page runs.
+        this.nativeDownloads
+          ? connection
+              .send("Page.enable", {}, { sessionId, timeoutMs: 5_000 })
+              .catch(() => undefined)
+          : undefined,
       ]);
     } finally {
       await resume();
@@ -2274,6 +2376,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.autoSessions.clear();
     for (const sessionId of [...this.presentationSessions.keys()])
       this.forgetPresentationSession(sessionId);
+    if (this.connection) {
+      for (const sessionId of [...this.downloadSessions.keys()])
+        this.releaseDownloadSession(this.connection, sessionId);
+    }
+    this.downloadSessions.clear();
     this.frontTargetId = null;
     if (this.connection) this.passkeys?.detachConnection(this.connection);
   }
