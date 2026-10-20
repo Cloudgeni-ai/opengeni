@@ -39,4 +39,13 @@ describe("sandboxes_list notice", () => {
       "A, B are not online and cannot be used until they reconnect. If the person needs one of them or",
     );
   });
+
+  test("says a listed computer can be tried even before its owner allows this chat", () => {
+    const allow = "just use it, and if it is not allowed yet, the chat shows the owner a card";
+    expect(fleetAgentNotice(fleet([entry("Mac mini", "online")]))).toContain(allow);
+    expect(
+      fleetAgentNotice(fleet([entry("Mac mini", "online"), entry("Work laptop", "offline")])),
+    ).toContain(allow);
+    expect(fleetAgentNotice(fleet([entry("sandbox", "online", true)]))).not.toContain(allow);
+  });
 });

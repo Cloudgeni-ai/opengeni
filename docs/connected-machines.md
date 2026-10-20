@@ -1417,6 +1417,20 @@ own computer, the agent posts the **Connected Machine card**: either
 `sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
 `tool.auth_needed` event with that capability id; the event carries no token.
 
+The card also appears without an agent decision. When `sandbox_swap`,
+`sandbox_attach` or `run_on` is refused with
+`personal_machine_permission_required` (the machine's owner started the turn
+but has not allowed this chat yet), the API posts the same card in the calling
+turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
+reads then says the card is shown and that it should tell the person in one
+sentence, without waiting or retrying: choosing the machine sends the message
+that continues the chat. A repeated refusal in the same turn points at that
+turn's existing machine card, since one card lists every machine; cards for
+other capabilities are never affected. `personal_machine_not_permitted` (not
+the owner, or not the owner's turn) and every other failure stay plain
+refusals, and callers without an exact agent attempt get no card. If the card
+cannot be posted, the original refusal is returned unchanged.
+
 The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
 
 - lists the workspace's enrolled machines with **Use in this chat**, which swaps

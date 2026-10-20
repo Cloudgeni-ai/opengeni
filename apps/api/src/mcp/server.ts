@@ -18,6 +18,11 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
+  connectedMachineCardInTurn,
+  withMachinePermissionCard,
+  type MachinePermissionCardPost,
+} from "./machine-permission-card";
+import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
   workspaceArtifactDownloads,
@@ -111,6 +116,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
+  listSessionEvents,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -4297,6 +4303,35 @@ function registerFleetTools(
     };
   };
 
+  // A refusal that only the owner's permission can resolve shows the Connected
+  // Machine card right away, in the agent's own turn, so the person can allow
+  // the machine without the agent having to find and call the card tool. Only
+  // exact agent attempts post it; one machine card per turn is enough because
+  // it lists every machine. Cards for other capabilities are unaffected.
+  const machinePermissionCard =
+    (toolName: string): MachinePermissionCardPost =>
+    async () => {
+      if (!exactAgentAttemptClaims(grant)) return null;
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const recent = await listSessionEvents(deps.db, grant.workspaceId, sessionId, {
+        direction: "before",
+        includeTypes: ["tool.auth_needed"],
+        limit: 50,
+      });
+      const existing = connectedMachineCardInTurn(recent, claims.callerTurnId);
+      if (existing) return { eventId: existing };
+      const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+        (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+      )!;
+      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        item,
+        action: "connect",
+        rationale: "Allow this chat to use your computer.",
+        toolName,
+      });
+      return { eventId };
+    };
+
   server.registerTool(
     "sandboxes_list",
     {
@@ -4318,7 +4353,13 @@ function registerFleetTools(
         'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_attach"),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -4328,7 +4369,13 @@ function registerFleetTools(
         'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_swap"),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -4368,10 +4415,13 @@ function registerFleetTools(
             )
           : null;
       return json(
-        await runOnSandbox(services, await fleetContext(), target, typedOp, {
-          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-          ...(secretResolver ? { secretResolver } : {}),
-        }),
+        await withMachinePermissionCard(
+          await runOnSandbox(services, await fleetContext(), target, typedOp, {
+            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+            ...(secretResolver ? { secretResolver } : {}),
+          }),
+          machinePermissionCard("run_on"),
+        ),
       );
     },
   );
