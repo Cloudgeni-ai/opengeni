@@ -893,6 +893,7 @@ describe("release image workflow contract", () => {
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
+      "desktop-image",
     ];
     for (const jobName of [
       "worker-image",
@@ -902,7 +903,12 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual([
         "automation-admission",
         "plan",
@@ -920,8 +926,14 @@ describe("release image workflow contract", () => {
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
+      "desktop-image",
     ]);
-    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
     for (const jobName of [
@@ -935,7 +947,7 @@ describe("release image workflow contract", () => {
     expect(parsed.jobs.images?.if).toBe(
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
-    expect(images.match(/packages: write/g)).toHaveLength(7);
+    expect(images.match(/packages: write/g)).toHaveLength(8);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -978,6 +990,7 @@ describe("release image workflow contract", () => {
     );
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
+    expect(images).toContain("DESKTOP_IMAGE_RESULT: ${{ needs.desktop-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
       (step) => step.name === "Require every workload image build",
     );
@@ -990,6 +1003,7 @@ describe("release image workflow contract", () => {
         "${{ needs.artifact-outbox-dispatcher-image.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
+      DESKTOP_IMAGE_RESULT: "${{ needs.desktop-image.result }}",
     });
     const aggregateResult = (...results: string[]) =>
       Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
@@ -1002,14 +1016,13 @@ describe("release image workflow contract", () => {
           ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[4],
           RELAY_IMAGE_RESULT: results[5],
           SANDBOX_IMAGE_RESULT: results[6],
+          DESKTOP_IMAGE_RESULT: results[7],
         },
       }).exitCode;
-    expect(
-      aggregateResult("success", "success", "success", "success", "success", "success", "success"),
-    ).toBe(0);
+    expect(aggregateResult(...(Array(8).fill("success") as string[]))).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 7; index += 1) {
-        const results = Array(7).fill("success") as string[];
+      for (let index = 0; index < 8; index += 1) {
+        const results = Array(8).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
@@ -1018,15 +1031,15 @@ describe("release image workflow contract", () => {
       images.match(
         /push: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/g,
       ),
-    ).toHaveLength(7);
-    expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
+    ).toHaveLength(8);
+    expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(8);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(7);
+    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(8);
     expect(
       images.match(
         /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA canary receipt");
@@ -1041,6 +1054,10 @@ describe("release image workflow contract", () => {
     );
     expect(images).toContain(
       "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}",
+    );
+    expect(images).toContain("DESKTOP_DIGEST: ${{ needs.desktop-image.outputs.desktop_digest }}");
+    expect(images).toContain(
+      'desktop: { repository: "ghcr.io/cloudgeni-ai/opengeni-desktop", digest: $desktopDigest }',
     );
     expect(images).toContain('--arg tag "canary-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');

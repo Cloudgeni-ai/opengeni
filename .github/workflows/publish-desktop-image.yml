@@ -1,29 +1,15 @@
 name: Publish desktop image
 
-# Sibling of the official 7-image release BOM. Computer/Browser on Modal need
-# docker/desktop.Dockerfile (Xvfb/XFCE/Chrome/browserd plus the native Office
-# kernel). The official opengeni-sandbox image is headless and must never be
-# the Modal pin. Helm desktop.imageRef is the digest pin written to
-# OPENGENI_MODAL_IMAGE_REF. ACR Tasks cannot parse this Dockerfile
-# (ADD --checksum, FROM --platform). Publish here, then copy/import the digest
-# into the operator registry. ACR is authoritative; GHCR is a best-effort mirror.
+# Operator-registry publication of docker/desktop.Dockerfile (Xvfb/XFCE/Chrome/
+# browserd plus the native Office kernel) for Computer/Browser on Modal. The
+# official opengeni-sandbox image is headless and must never be the Modal pin.
+# Every main commit already publishes its exact-SHA desktop image to GHCR with
+# the other canary images (ci.yml desktop-image) and records the digest in the
+# canary receipt, so deployments take the controller that matches their server.
+# Dispatch this workflow only to refresh the public ACR digest used as the
+# default pin (Helm desktop.imageRef and the runtime default). ACR Tasks cannot
+# parse this Dockerfile (ADD --checksum, FROM --platform).
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docker/desktop.Dockerfile"
-      - "docker/desktop/**"
-      - "docker/anydoc/**"
-      - "docker/opengeni-git-askpass"
-      - "docker/browserd-THIRD-PARTY-NOTICES"
-      - "packages/browserd/**"
-      - "packages/artifact-tool/**"
-      - "packages/artifact-kernel-wasm-document/**"
-      - "packages/artifact-kernel-wasm-presentation/**"
-      - "packages/artifact-kernel-wasm-spreadsheet/**"
-      - "scripts/*artifact*.ts"
-      - ".github/workflows/publish-desktop-image.yml"
-      - ".github/workflows/artifact-runtime.yml"
   workflow_dispatch:
 
 jobs:
@@ -134,35 +120,3 @@ jobs:
           path: .release/desktop-publication
           if-no-files-found: warn
           retention-days: 30
-
-  # Isolate mirror failures and timeouts from the authoritative publication job.
-  # Existing GHCR consumers keep their tag names. Never rebuild for a mirror.
-  ghcr-mirror:
-    name: Mirror verified desktop image (best effort)
-    needs: desktop-image
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Mirror desktop image to GHCR (best effort)
-        timeout-minutes: 5
-        env:
-          DIGEST: ${{ needs.desktop-image.outputs.digest }}
-          SOURCE_SHA: ${{ github.sha }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          source="opengenipublicneuacr.azurecr.io/opengeni-desktop@$DIGEST"
-          docker pull "$source"
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
-          trap 'docker logout ghcr.io' EXIT
-          for tag in "sha-$SOURCE_SHA" "canary-sha-$SOURCE_SHA"; do
-            target="ghcr.io/cloudgeni-ai/opengeni-desktop:$tag"
-            docker tag "$source" "$target"
-            docker push "$target"
-          done

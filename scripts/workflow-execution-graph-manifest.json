@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "b31ec5820a83d0e82c39e78541e5163683c660a6ac4d34bde07c4ee372f9a345"
+      "sha256": "0acf8359c6f61dfb08abe0e6377773ce8ef4a8303d1a563ecea390fded44b3ca"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -78,7 +78,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "17902076236fd5cccd0d82163ecff8a126e18067e6c1784d5fae5a3e20b48764"
+      "sha256": "d4d7ab1c0aaa8314f2005cc74a287a75684f2f55ea917cb07e26a008bb2ac1e0"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -739,6 +739,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "desktop-image",
+      "step": "Verify anonymous desktop image resolution",
+      "sha256": "ab5bbe2c89fda9f60a36a58dc74323ecf7763c26f2f227afbff4c14b7c1d4854"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "e2e-shards",
       "step": "Install dependencies",
       "sha256": "1d7e772f27cb0541a9370d9b2821a04e9f73a075ba77c2f659b2f52b0026d8fd"
@@ -753,13 +759,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "9a2431314e5cdf5185503a5d6bf04803d26eaeb185e0bd952615ba9c4d6910c2"
+      "sha256": "a3af46be51b64462bbe19dfc3a19f52773b66ef09f962bf3a1b68d9bafa03c00"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Write exact-main-SHA canary receipt",
-      "sha256": "af201a1f4f55151cc8f220d4f0911f1fc0bda4aece1fa5c17ed367a1db8a5962"
+      "sha256": "2409d2f9e94791492054700adab22bf4fa270d42093d2ae2e9476ec47be44b5d"
     },
     {
       "workflow": ".github/workflows/ci.yml",
