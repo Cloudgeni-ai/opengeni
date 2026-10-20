@@ -622,6 +622,21 @@ describe("BrowserInteractionController", () => {
       code: "driver_failed",
     });
   });
+
+  test("an unknown target is named, with where current ones are found", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(targets, async () => observation(targets.get("target-1")!)),
+    });
+
+    await expect(controller.observe("app:guessed")).rejects.toMatchObject({
+      code: "target_not_found",
+      message:
+        'browser target "app:guessed" does not exist; list the current targets and use one of their ids',
+    });
+  });
 });
 
 describe("resolved action targets", () => {
