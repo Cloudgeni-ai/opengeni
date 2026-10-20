@@ -1757,7 +1757,7 @@ export function buildTimeline(
           steerBubblesAwaitingHandover = [];
           // A call still waiting for approval or an answer never ran.
           finalizeOpen(turnId, steerReplacedWait ? "cancelled" : "complete", event.occurredAt);
-          items.push(turnEndItem(event, "complete", null));
+          items.push({ ...turnEndItem(event, "complete", null), handedOver: true });
           break;
         }
         steerBubblesAwaitingHandover = [];
@@ -2279,6 +2279,8 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
     { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
+  // Turns that handed over to a Steer instead of finishing.
+  const handedOverTurns = new Set<string>();
   const messages = new Map<string, AgentMessageItem[]>();
   // Capacity waits per turn: their spans are not work, and a live one is
   // carried by the turn's work row instead of a separate warning.
@@ -2409,6 +2411,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         }
       }
     } else if (item.kind === "turn-end") {
+      if (item.handedOver) handedOverTurns.add(key);
       if (!item.resumedAt) {
         settlements.set(key, {
           endedAt: item.occurredAt,
@@ -2568,6 +2571,25 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
     work.details.push(entry);
     return false;
   });
+  // A turn that handed over to the next Steer before doing anything but start
+  // up did no work of its own: the steered message carries on in the next
+  // turn. Quickly steering several queued messages in a row would otherwise
+  // leave a stack of empty "Worked for" rows between the messages.
+  for (const key of handedOverTurns) {
+    const group = turns.get(key);
+    if (
+      !group ||
+      (messages.get(key)?.length ?? 0) > 0 ||
+      !group.items.every((item) => item.kind === "startup-phase") ||
+      !group.work!.details.every(
+        (detail) =>
+          detail.kind === "activity" && detail.items.every((item) => item.kind === "startup-phase"),
+      )
+    )
+      continue;
+    turns.delete(key);
+    groups = groups.filter((entry) => entry !== group);
+  }
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
   const beforeRows = new Map<TimelineGroup, Work>();

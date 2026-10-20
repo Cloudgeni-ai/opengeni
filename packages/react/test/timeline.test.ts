@@ -1055,6 +1055,87 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("queued prompts steered in quick succession leave no empty work rows", () => {
+    const events: SessionEvent[] = [
+      eventAt(1, "user.message", { text: "Start" }, { turnId: null }),
+      eventAt(2, "turn.queued", { turnId: "t0", triggerEventId: "evt-1" }, { turnId: "t0" }),
+      eventAt(3, "turn.started", { triggerEventId: "evt-1" }, { turnId: "t0" }),
+      eventAt(4, "agent.message.completed", { text: "Working on it." }, { turnId: "t0" }),
+    ];
+    const queuedAt = [20, 40, 60];
+    queuedAt.forEach((second, index) => {
+      events.push(
+        eventAt(second, "user.message", { text: `Later ${index + 1}` }, { turnId: null }),
+      );
+      events.push(
+        eventAt(
+          second + 1,
+          "turn.queued",
+          { turnId: `t${index + 1}`, triggerEventId: `evt-${second}` },
+          { turnId: `t${index + 1}` },
+        ),
+      );
+    });
+    // All three are steered within seconds; each new turn hands over to the
+    // next Steer at its first model step.
+    queuedAt.forEach((_, index) => {
+      events.push(
+        eventAt(
+          150 + index,
+          "session.control.steer_requested",
+          {
+            stopping: false,
+            targetTurnId: `t${index + 1}`,
+            replacedTurnId: index === 0 ? "t0" : "t1",
+            deferredUntilModelStep: true,
+          },
+          { turnId: index === 0 ? "t0" : "t1" },
+        ),
+      );
+    });
+    let second = 200;
+    for (let index = 0; index < 3; index += 1) {
+      events.push(
+        eventAt(
+          second,
+          "turn.superseded",
+          { reason: "steer", atModelStep: true },
+          {
+            turnId: `t${index}`,
+          },
+        ),
+      );
+      events.push(
+        eventAt(
+          second + 1,
+          "turn.started",
+          { triggerEventId: `evt-${queuedAt[index]}` },
+          {
+            turnId: `t${index + 1}`,
+          },
+        ),
+      );
+      second += 2;
+    }
+    events.push(eventAt(second, "agent.message.delta", { text: "On it." }, { turnId: "t3" }));
+
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
+    const workRows = groups.filter(
+      (group): group is Extract<TimelineGroup, { kind: "activity" }> =>
+        group.kind === "activity" && group.work !== undefined,
+    );
+    // The first turn did real work before the Steer; the last is still live.
+    // The two turns that only started up before handing over show nothing.
+    expect(workRows.map((group) => group.id)).toEqual(["work-t0", "work-t3"]);
+    expect(
+      groups
+        .filter((group) => group.kind === "item" && group.item.kind === "user-message")
+        .map((group) => (group.kind === "item" ? (group.item as UserMessageItem).text : "")),
+    ).toEqual(["Start", "Later 1", "Later 2", "Later 3"]);
+  });
+
   test("a recovered turn keeps its prompt anchored at the first attempt start", () => {
     const items = buildTimeline(englishText, [
       eventAt(2, "user.message", { text: "Recover this work" }, { turnId: null }),
