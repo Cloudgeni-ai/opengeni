@@ -2881,6 +2881,7 @@ describe("release schema contract", () => {
       "0868_humanless_personal_workspace_learning.sql",
       "0869_personal_workspace_editable_artifacts.sql",
       "0870_invitation_binding_seat_scope.sql",
+      "0871_explicit_workspace_recovery.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

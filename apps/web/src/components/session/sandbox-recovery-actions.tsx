@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { SandboxRecoverySelection } from "@opengeni/sdk";
+import type { SandboxRecoverySelection, SandboxRecoveryTarget } from "@opengeni/sdk";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   automaticRecoveryRetryNotice,
   createSandboxRecoveryController,
   sameRecoverySelection,
+  sameRecoveryTarget,
   sandboxRecoveryBlocker,
   type SandboxRecoveryClient,
 } from "@/lib/sandbox-recovery";
@@ -27,6 +28,11 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   );
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const [selection, setSelection] = useState<SandboxRecoverySelection | null>(null);
+  const [freshSelection, setFreshSelection] = useState<{
+    target: SandboxRecoveryTarget;
+    count: number;
+  } | null>(null);
+  const freshTrigger = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     void controller.refresh();
@@ -54,6 +60,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
     projection?.reason !== "connected_machine_selected" &&
     !props.structuralFailure &&
     !state.request &&
+    !projection?.target &&
     !projection?.operationId
   ) {
     return props.children;
@@ -83,30 +90,49 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
     props.canControl &&
     (restored ||
       automaticAvailable ||
+      (pending && projection?.reason === "fresh_workspace_selected") ||
       (projection?.status === "unsupported" && projection.reason === "connected_machine_selected"));
   const canConsent =
     eligible && !automaticAvailable && props.canControl && !state.request && !state.submitting;
+  const canChooseWorkspace =
+    props.canControl && !state.request && !state.submitting && !state.uncertain;
+  const freshChanged =
+    !!freshSelection &&
+    (!projection?.freshWorkspaceAvailable ||
+      !sameRecoveryTarget(projection.target, freshSelection.target));
 
   return (
     <div className="mt-3 text-fg">
       <p className="text-xs text-fg-muted" role="status">
         {state.submitting
-          ? "Submitting checkpoint consent… Restoration is not yet confirmed."
+          ? "Submitting recovery request… Restoration is not yet confirmed."
           : state.uncertain
             ? "Recovery outcome unconfirmed. Check its current status below."
             : projection?.status === "consent_accepted"
-              ? "Checkpoint consent accepted. Restoration has not completed."
+              ? projection.reason === "fresh_workspace_selected"
+                ? "Empty workspace selected. Preparing it has not completed; you can retry your message."
+                : projection.reason === "archive_retry_selected"
+                  ? "Archive retry accepted. Restoration has not completed."
+                  : "Checkpoint consent accepted. Restoration has not completed."
               : projection?.status === "restoring"
-                ? "Restoring the selected checkpoint. Restoration has not completed."
+                ? projection.reason === "fresh_workspace_selected"
+                  ? "Preparing the empty workspace. Previous files will not be restored."
+                  : "Restoring the selected checkpoint. Restoration has not completed."
                 : restored
-                  ? "Checkpoint restored. No commands were retried or replayed."
-                  : automaticAvailable && projection
-                    ? automaticRecoveryRetryNotice(projection)
-                    : eligible
-                      ? "An older checkpoint is available for this session. Review what will be restored before continuing."
-                      : projection
-                        ? "Checkpoint recovery is unavailable for this session."
-                        : "Checking checkpoint recovery availability…"}
+                  ? projection?.reason === "fresh_workspace_selected"
+                    ? "The empty workspace is ready. Previous files were not restored."
+                    : "Checkpoint restored. No commands were retried or replayed."
+                  : projection?.target
+                    ? projection.retryAvailable
+                      ? "The previous workspace could not be restored. Try restoring its retained archive again."
+                      : "The previous workspace could not be restored. An empty workspace can be selected only when every affected chat is idle and authorized."
+                    : automaticAvailable && projection
+                      ? automaticRecoveryRetryNotice(projection)
+                      : eligible
+                        ? "An older checkpoint is available for this session. Review what will be restored before continuing."
+                        : projection
+                          ? "Checkpoint recovery is unavailable for this session."
+                          : "Checking checkpoint recovery availability…"}
       </p>
       {projection?.reason ? (
         <p className="mt-1 text-xs text-fg-muted">
@@ -117,6 +143,37 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
         <p className="mt-1 text-xs text-fg-muted">
           You do not have permission to recover this sandbox.
         </p>
+      ) : null}
+      {projection?.target && canChooseWorkspace ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {projection.retryAvailable ? (
+            <Button
+              type="button"
+              size="sm"
+              disabled={state.reading}
+              onClick={() => void controller.recoverWorkspace("retry", projection.target!)}
+            >
+              Retry restoring files
+            </Button>
+          ) : null}
+          {projection.freshWorkspaceAvailable ? (
+            <Button
+              ref={freshTrigger}
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={state.reading}
+              onClick={() =>
+                setFreshSelection({
+                  target: Object.freeze({ ...projection.target! }),
+                  count: projection.groupSessionCount ?? 1,
+                })
+              }
+            >
+              Continue with empty workspace
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {canConsent ? (
         <Button
@@ -146,6 +203,43 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
         </p>
       ) : null}
       {retryAvailable ? props.retryActions : null}
+      <ConfirmDialog
+        open={freshSelection !== null}
+        onOpenChange={(open) => {
+          if (!open) setFreshSelection(null);
+        }}
+        title="Continue without the previous files?"
+        description={
+          freshSelection && freshSelection.count > 1
+            ? `This starts an empty workspace for all ${freshSelection.count} chats sharing it.`
+            : "This starts an empty workspace for this chat."
+        }
+        confirmLabel="Continue with empty workspace"
+        pendingLabel="Preparing recovery…"
+        cancelAutoFocus
+        restoreFocusRef={freshTrigger}
+        confirmDisabled={!canChooseWorkspace || freshChanged || state.reading}
+        onConfirm={async () => {
+          if (!freshSelection || freshChanged) return false;
+          const accepted = await controller.recoverWorkspace(
+            "continue_fresh",
+            freshSelection.target,
+          );
+          if (controller.getSnapshot().request) setFreshSelection(null);
+          return accepted;
+        }}
+      >
+        <p className="text-sm text-fg-muted">
+          Previous files, installed packages and running processes will not be restored. The old
+          archive is retained for an operator to recover. Conversations and changes made outside the
+          workspace remain unchanged. No commands will be replayed.
+        </p>
+        {freshChanged ? (
+          <p role="alert" className="text-sm text-fg-muted">
+            Recovery changed. Close this dialog and review the current state.
+          </p>
+        ) : null}
+      </ConfirmDialog>
       <ConfirmDialog
         open={selection !== null}
         onOpenChange={(open) => {
