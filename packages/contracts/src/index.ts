@@ -8380,6 +8380,12 @@ export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =
     expectedVersion: z.number().int().positive(),
     expectedConnectionEpoch: z.number().int().positive(),
     rotate: z.boolean(),
+    /**
+     * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+     * Providers that need a fixed conversation language use it; the others
+     * detect the spoken language themselves.
+     */
+    language: z.string().min(1).max(64).optional(),
   }).strict(),
 );
 export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
@@ -8610,6 +8616,11 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      */
     unavailableCode: z.string().min(1).max(64).nullable().optional(),
     recommended: z.boolean(),
+    /**
+     * Languages a conversation with this model can be set to, as the provider's
+     * language codes. Absent when the model detects the spoken language itself.
+     */
+    languages: z.array(z.string().min(1).max(64)).optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;

@@ -2785,3 +2785,55 @@ test("Azure rotation persists final speech before the replacement reads startup 
     controller.close();
   }
 });
+
+test("each provider connection carries the host's current conversation language", async () => {
+  const browser = browserFixture();
+  const timers = timerFixture();
+  let language = "nb-NO";
+  const languages: Array<string | undefined> = [];
+  let current = mode({ model: "workspace-elevenlabs/eleven_realtime_v1_max" });
+  const controller = createCodexRealtimeController({
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    model: "workspace-elevenlabs/eleven_realtime_v1_max",
+    storage: storageFixture(),
+    getUserMedia: async () => browser.media,
+    getLanguage: () => language,
+    startTransport: async (input) => {
+      languages.push(input.language);
+      throw new Error("transport unavailable in this test");
+    },
+    reconnectBackoffMs: [10],
+    ...timers,
+    client: {
+      beginSessionRealtime: async (_w, _s, request) => {
+        current = mode({
+          ...current,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        });
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async () => {
+        throw new Error("WebSocket models do not negotiate WebRTC");
+      },
+      activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+      endSessionRealtime: async () => ({
+        mode: mode({ ...current, state: "ended" }),
+        replay: false,
+      }),
+    },
+  });
+  try {
+    await controller.start().catch(() => undefined);
+    await eventually(() => languages.length === 1, "transport not started");
+    language = "sv";
+    timers.runTimeout(10);
+    await eventually(() => languages.length === 2, "transport not retried");
+    expect(languages).toEqual(["nb-NO", "sv"]);
+  } finally {
+    controller.close();
+  }
+});

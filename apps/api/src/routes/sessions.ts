@@ -1980,6 +1980,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       expectedVersion,
       expectedConnectionEpoch,
       rotate,
+      language,
     } = parsed.data;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
@@ -2029,6 +2030,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         sessionId,
         model: claim.mode.model,
+        language,
         fetchImpls: {
           "ai-gateway": deps.codexFetch,
           supergrok: deps.xaiFetch,

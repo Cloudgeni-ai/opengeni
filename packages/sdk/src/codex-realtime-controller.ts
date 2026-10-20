@@ -281,6 +281,13 @@ export type CreateCodexRealtimeControllerOptions = {
   startTransport?: RealtimeControllerTransportStarter | undefined;
   /** Model-visible application context captured with each durable realtime message. */
   getModelContext?: (() => string | undefined) | undefined;
+  /**
+   * BCP 47 tag of the language the person speaks (for example `nb-NO`), read
+   * whenever a provider connection opens. Models that hold a conversation in
+   * one fixed language (catalog entries with `languages`) listen and reply in
+   * it; the others detect the spoken language themselves.
+   */
+  getLanguage?: (() => string | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
@@ -294,6 +301,8 @@ export type RealtimeControllerTransportStarter = (input: {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /** BCP 47 tag of the language the person speaks, when the host supplied one. */
+  language?: string | undefined;
   signal: AbortSignal;
   media: MediaStream;
   onEventsCreated(events: RTCDataChannel): void;
@@ -998,6 +1007,7 @@ export function createCodexRealtimeController(
         expectedVersion: currentMode.version,
         expectedConnectionEpoch: currentMode.connectionEpoch,
         rotate,
+        language: options.getLanguage?.(),
         signal: abort.signal,
         media,
         onEventsCreated: earlyEvents.attach,

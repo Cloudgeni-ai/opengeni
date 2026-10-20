@@ -3999,6 +3999,127 @@ export function resolveElevenLabsRealtimeModel(modelId: string): string | null {
   return null;
 }
 
+/**
+ * Conversation languages Eleven Realtime accepts (both models). ElevenLabs does
+ * not detect the spoken language: the session's language sets what it hears and
+ * the language it replies in, and an unlisted code fails the session.
+ */
+export const ELEVENLABS_REALTIME_LANGUAGES = [
+  "af",
+  "am",
+  "ar",
+  "as",
+  "ast",
+  "az",
+  "be",
+  "bg",
+  "bn",
+  "bs",
+  "ca",
+  "cs",
+  "cy",
+  "da",
+  "de",
+  "el",
+  "en",
+  "es",
+  "et",
+  "fa",
+  "fi",
+  "fil",
+  "fr",
+  "ga",
+  "gl",
+  "gu",
+  "ha",
+  "he",
+  "hi",
+  "hr",
+  "hu",
+  "hy",
+  "id",
+  "is",
+  "it",
+  "ja",
+  "jv",
+  "ka",
+  "kk",
+  "kn",
+  "ko",
+  "ky",
+  "lb",
+  "lg",
+  "lo",
+  "lt",
+  "lv",
+  "mi",
+  "mk",
+  "ml",
+  "mn",
+  "mr",
+  "ms",
+  "mt",
+  "my",
+  "ne",
+  "nl",
+  "no",
+  "oc",
+  "or",
+  "pa",
+  "pl",
+  "ps",
+  "pt",
+  "pt-br",
+  "ro",
+  "ru",
+  "sd",
+  "sk",
+  "sl",
+  "sn",
+  "so",
+  "sr",
+  "sv",
+  "sw",
+  "ta",
+  "te",
+  "tg",
+  "th",
+  "tl",
+  "tr",
+  "uk",
+  "ur",
+  "uz",
+  "vi",
+  "wo",
+  "yo",
+  "yue",
+  "zh",
+  "zu",
+] as const;
+
+// Tags whose language ElevenLabs lists under another code: Norwegian Bokmål and
+// Nynorsk are Norwegian, and the legacy Hebrew, Indonesian and Javanese codes.
+const ELEVENLABS_REALTIME_LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+  nb: "no",
+  nn: "no",
+  iw: "he",
+  in: "id",
+  jw: "jv",
+};
+
+/**
+ * The Eleven Realtime language for a BCP 47 tag such as `nb-NO` or `pt-BR`, or
+ * null when ElevenLabs does not support it.
+ */
+export function resolveElevenLabsRealtimeLanguage(tag: string): string | null {
+  const normalized = tag.trim().toLowerCase().replaceAll("_", "-");
+  const supported: readonly string[] = ELEVENLABS_REALTIME_LANGUAGES;
+  if (supported.includes(normalized)) return normalized;
+  const base = normalized.split("-")[0] ?? "";
+  const language = ELEVENLABS_REALTIME_LANGUAGE_ALIASES[base] ?? base;
+  return supported.includes(language) ? language : null;
+}
+
 export type AiGatewayRealtimeModel =
   (typeof AI_GATEWAY_REALTIME_MODELS)[keyof typeof AI_GATEWAY_REALTIME_MODELS];
 

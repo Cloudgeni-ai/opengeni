@@ -96,6 +96,7 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
           expectedVersion: input.expectedVersion,
           expectedConnectionEpoch: input.expectedConnectionEpoch,
           rotate: input.rotate,
+          ...(input.language ? { language: input.language } : {}),
         },
         { signal: input.signal },
       );
