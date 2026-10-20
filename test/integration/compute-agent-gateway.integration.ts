@@ -152,6 +152,11 @@ let linkUrl: string;
 let keyReads = 0;
 let gatewaySettings: ReturnType<typeof testSettings>;
 
+/** Single-use delivery tokens, as a replay v2 agent issues them in a ping answer. */
+function replayTokens(): string[] {
+  return Array.from({ length: 64 }, () => crypto.randomUUID());
+}
+
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const admin = shared!.admin;
   const [account] = await admin<{ id: string }[]>`
@@ -620,15 +625,22 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       };
       const pong = (frame: Extract<GatewayFrame, { t: "msg" }>, replay: boolean) => {
         const request = ControlRequest.decode(frame.payload);
+        const op = request.op?.$case === "ping" ? request.op.ping : undefined;
         return {
           payload: ControlResponse.encode(
             ControlResponse.fromPartial({
               requestId: request.requestId,
-              result: { $case: "ping", ping: {} },
+              // A replay v2 agent answers a batch ping with single-use delivery tokens.
+              result: {
+                $case: "ping",
+                ping: {
+                  controlReplayTokens: op && op.controlReplayWindowMs !== "0" ? replayTokens() : [],
+                },
+              },
             }),
           ).finish(),
           ...(replay
-            ? { headers: [["Opengeni-Control-Replay", "1"]] as Array<[string, string]> }
+            ? { headers: [["Opengeni-Control-Replay", "2"]] as Array<[string, string]> }
             : {}),
         };
       };
@@ -678,6 +690,8 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const deadline = Date.now() + 5_000;
       while (deliveredBeforeHandOff.length === 0 && Date.now() < deadline) await Bun.sleep(10);
       expect(deliveredBeforeHandOff).toHaveLength(1);
+      // A replay v2 delivery, carrying one of the agent's single-use tokens.
+      expect(deliveredBeforeHandOff[0]).toStartWith(`${scope}.rpc.replay.`);
 
       // The sandbox is handed over to host h2 (a hand-off keeps its memory, so
       // its agent keeps its connection): the link to the first replica ends,
@@ -823,16 +837,22 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
             woke.push(frame.subject);
           }
           const request = ControlRequest.decode(frame.payload);
-          // The transport's replay negotiation.
+          // The transport's replay negotiation: a v2 agent issues delivery tokens.
           if (request.op?.$case === "ping")
             return {
               payload: ControlResponse.encode(
                 ControlResponse.fromPartial({
                   requestId: request.requestId,
-                  result: { $case: "ping", ping: {} },
+                  result: {
+                    $case: "ping",
+                    ping: {
+                      controlReplayTokens:
+                        request.op.ping.controlReplayWindowMs !== "0" ? replayTokens() : [],
+                    },
+                  },
                 }),
               ).finish(),
-              headers: [["Opengeni-Control-Replay", "1"]],
+              headers: [["Opengeni-Control-Replay", "2"]],
             };
           requests.push(request.op?.$case ?? "none");
           // This agent cannot replay output: any other request is refused.
