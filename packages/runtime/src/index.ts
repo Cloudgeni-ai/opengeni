@@ -10528,7 +10528,8 @@ export async function runOwnedSandboxSetup(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       rigCredentialHooksForAgent(agent),
     ),
-    ...sandboxCodemodeTokenHooksForAgent(agent),
+    // Every owned caller registers token renewal after this setup returns.
+    ...sandboxCodemodeTokenHooksForAgent(agent, { seedIndependent: true }),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
@@ -11641,7 +11642,16 @@ function codemodeTokenFileForAgent(
   return codemodeTokenFileFromEnvironment(environment, sessionId);
 }
 
-function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+/**
+ * The token seed is ordered only so that a renewal-registration hook declared
+ * after it (legacy SDK-owned setup) observes a seeded session. Owned setup
+ * attaches renewal after every hook has finished, so there the seed is one
+ * independent round trip that overlaps credential and repository setup.
+ */
+function sandboxCodemodeTokenHooksForAgent(
+  agent: Agent<any, any>,
+  options: { seedIndependent?: boolean } = {},
+): SandboxLifecycleHook[] {
   return codemodeTokenSeedForAgent(agent)
     ? [
         ...(agentActiveSandboxBackend.get(agent) !== "selfhosted"
@@ -11657,6 +11667,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
+          ...(options.seedIndependent ? { independent: true } : {}),
           run: runCodemodeTokenSeedHook,
         },
       ]
