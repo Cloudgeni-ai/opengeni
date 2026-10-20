@@ -104,7 +104,13 @@ beforeAll(async () => {
         elevenLabsMints.push({ headers: request.headers, body });
         if (body.session?.audio?.output?.voice === "unknown-voice-id") {
           return Response.json(
-            { detail: { type: "validation_error", code: "invalid_voice_id", message: "Unknown voice" } },
+            {
+              detail: {
+                type: "validation_error",
+                code: "invalid_voice_id",
+                message: "Unknown voice",
+              },
+            },
             { status: 400 },
           );
         }
