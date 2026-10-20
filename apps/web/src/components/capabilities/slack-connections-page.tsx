@@ -84,6 +84,12 @@ export function SlackConnectionsPage(props: {
   const bindings = [...props.bindings, ...discovery.bindings];
   const selected = bots.find((row) => row.id === selectedId);
   const canWrite = hasWorkspacePermission(accessContext, props.workspaceId, "connections:write");
+  // Members connect their own Slack accounts; adding the workspace bot is integration administration.
+  const canInstallBot = hasWorkspacePermission(
+    accessContext,
+    props.workspaceId,
+    "capabilities:manage",
+  );
   const personal = hostedSlackConnections(props.connections ?? []).filter(
     (row) => row.subjectId === accessContext.subjectId && row.status !== "revoked",
   );
@@ -222,7 +228,7 @@ export function SlackConnectionsPage(props: {
             title="Opengeni bot"
             description="Posts as Opengeni and responds to you in Slack."
             action={
-              canWrite ? (
+              canInstallBot ? (
                 <Button size="sm" variant="outline" onClick={() => connect("slack-bot")}>
                   Add Slack workspace
                 </Button>

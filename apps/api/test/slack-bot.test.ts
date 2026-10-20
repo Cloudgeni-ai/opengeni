@@ -1658,6 +1658,35 @@ describe("Opengeni Slack bot connection", () => {
     expect(slack.calls).toEqual([]);
   });
 
+  test("a Member cannot install the workspace bot through the shared Connect flow either", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const denied = await app(slack.fetch, { ...settings, integrationsEnabled: true }).request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "workspace:read",
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerId: "slack-bot",
+          ownership: "workspace",
+          returnUrl: "https://host.example/finish",
+          idempotencyKey: randomUUID(),
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("capabilities:manage");
+    expect(slack.calls).toEqual([]);
+  });
+
   test("requires connections:write before starting Slack OAuth", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

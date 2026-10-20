@@ -526,7 +526,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               ...callbackOperation,
               expectedRevision: stored.attempt.revision,
               authorize: (tx, _attempt, origin) =>
-                requireConnectOwnerAuthority(tx, callbackState, "connections:write", origin),
+                requireConnectOwnerAuthority(
+                  tx,
+                  callbackState,
+                  SLACK_BOT_INSTALL_PERMISSION,
+                  origin,
+                ),
               authorizeAcquisition: async () => {
                 // Provider denial/cancellation acquires nothing; completed exact
                 // receipts replay before this callback is invoked.
@@ -559,7 +564,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         await finishConnectOperation(db, state, {
           ...operation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, SLACK_BOT_INSTALL_PERMISSION, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -630,7 +635,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           finishConnectOperation(policyTx, acceptedState, {
             ...acceptedOperation,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, acceptedState, SLACK_BOT_INSTALL_PERMISSION, origin),
             commit: async (tx, current) => {
               assertOrganizationIntegrationAllowed(policy, "slack-bot");
               const connection = await persist(tx);
@@ -1852,11 +1857,15 @@ function slackInstallErrorReason(error: unknown): string {
   return "installation_failed";
 }
 
+/** Installing the workspace Slack bot is integration administration (see
+ * requireWorkspaceIntegrationAdministration); the callback re-checks the same authority. */
+const SLACK_BOT_INSTALL_PERMISSION = "capabilities:manage";
+
 async function requireSlackInstallCallbackGrant(
   db: ApiRouteDeps["db"],
   state: OpenGeniSlackInstallState,
 ): Promise<void> {
-  await requireConnectOwnerAuthority(db, state, "connections:write");
+  await requireConnectOwnerAuthority(db, state, SLACK_BOT_INSTALL_PERMISSION);
 }
 
 function assertNotDirectPersonalSlackOAuth(providerDomain: string, kind: string): void {
