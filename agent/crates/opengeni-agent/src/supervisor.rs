@@ -410,10 +410,11 @@ impl EpochCell {
 /// while the loop is between `.notified()` registrations — mid-connect, mid-hello,
 /// or in the sync gap before a select re-arms — is lost, and the agent never stops
 /// (or, worse, the loser of a race exits WITHOUT announcing going-offline). This
-/// pairs the notify with a latched flag: callers `await` [`notified`](Self::notified)
-/// to wake promptly AND check [`is_requested`](Self::is_requested) at each decision
-/// point, so a request is never missed and the clean-shutdown path (which publishes
-/// [`GoingOffline`]) is always reached while a client is live (§23.0).
+/// pairs the notify with a latched flag: every wait registers before checking the
+/// flag, so a request is never missed. Callers can also check
+/// [`is_requested`](Self::is_requested) at decision points to prioritize the
+/// clean-shutdown path, which publishes [`GoingOffline`] while a client is live
+/// (§23.0).
 #[derive(Clone, Default)]
 pub struct ShutdownSignal {
     requested: Arc<AtomicBool>,
@@ -451,18 +452,14 @@ impl ShutdownSignal {
         self.requested.load(Ordering::Acquire)
     }
 
-    /// Resolves when a shutdown is requested via a waiter wake. Because
-    /// `notify_waiters` does not latch a permit, ALWAYS pair this with an
-    /// [`is_requested`](Self::is_requested) check at the enclosing loop top so a
-    /// request that fired before this future registered is still observed.
+    /// Resolves once shutdown is requested, including before the first poll.
     pub async fn notified(&self) {
-        self.notify.notified().await;
+        self.requested().await;
     }
 
-    /// Resolves once a shutdown is requested, at once if one already was:
-    /// level-triggered, unlike [`notified`](Self::notified). The waiter is
-    /// registered before the flag is read, so a request racing this call
-    /// is never missed.
+    /// Resolves once a shutdown is requested, at once if one already was.
+    /// The waiter is registered before the flag is read, so a request racing
+    /// this call is never missed. [`notified`](Self::notified) shares this path.
     pub async fn requested(&self) {
         let mut notified = std::pin::pin!(self.notify.notified());
         notified.as_mut().enable();
@@ -577,7 +574,12 @@ impl TransportLossSignal {
     }
 
     async fn notified(&self) {
-        self.notify.notified().await;
+        let mut notified = std::pin::pin!(self.notify.notified());
+        notified.as_mut().enable();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -1518,11 +1520,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         let mut rpc_tasks = JoinSet::new();
 
         let outcome = loop {
-            // Level-triggered catch: a shutdown latched between selects — during the
-            // hello/subscribe just completed, or while a heartbeat/admission awaited
-            // — would be missed by the edge-triggered `notified()` branch below (its
-            // wake fired with no waiter registered). Checking the flag at the loop
-            // top guarantees this live generation still reaches the announce path.
+            // Prioritize already-latched shutdown and transport loss before
+            // accepting more work. The waits below also check their latch after
+            // registration, covering a request between these checks and select.
             if self.link_stop_requested(link) {
                 break ConnectionOutcome::CleanShutdown;
             }
@@ -4964,25 +4964,45 @@ mod tests {
     async fn shutdown_signal_latches_and_wakes_registered_waiters() {
         let signal = ShutdownSignal::default();
         assert!(!signal.is_requested(), "not requested initially");
-
-        // A waiter already awaiting when the request lands is woken.
-        let waiter = {
-            let s = signal.clone();
-            tokio::spawn(async move { s.notified().await })
-        };
-        // Let the spawned waiter register before we request.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut first = std::pin::pin!(signal.notified());
+        let mut second = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
         signal.request();
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .expect("a registered waiter wakes on request")
-            .expect("waiter task did not panic");
-
-        // And the flag stays latched for any LATER checker even though
-        // `notify_waiters` stored no permit — this level-triggering is exactly what
-        // the run loop's `is_requested` checks rely on to never miss a stop that
-        // raced a select (the missed-signal half the fix closes).
+        assert!(futures::poll!(first.as_mut()).is_ready());
+        assert!(futures::poll!(second.as_mut()).is_ready());
         assert!(signal.is_requested(), "request latches permanently");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_observes_request_before_first_poll_and_after_cancellation() {
+        for update in [false, true] {
+            let signal = ShutdownSignal::default();
+            // A select branch can be constructed after a false loop-top check,
+            // then first polled only after another thread requests shutdown.
+            assert!(!signal.is_requested());
+            let waiter = signal.notified();
+            if update {
+                signal.request_update();
+            } else {
+                signal.request();
+            }
+            let mut waiter = std::pin::pin!(waiter);
+            assert!(futures::poll!(waiter.as_mut()).is_ready());
+            assert_eq!(signal.is_update(), update);
+
+            let mut late = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(late.as_mut()).is_ready());
+        }
+
+        let signal = ShutdownSignal::default();
+        {
+            let mut cancelled = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        }
+        signal.request();
+        let mut replacement = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(replacement.as_mut()).is_ready());
     }
 
     #[tokio::test]
@@ -4990,22 +5010,47 @@ mod tests {
         let signal = TransportLossSignal::default();
         assert!(!signal.is_requested(), "transport starts healthy");
 
-        let waiter = {
-            let signal = signal.clone();
-            tokio::spawn(async move { signal.notified().await })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut first = std::pin::pin!(signal.notified());
+        let mut second = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
         signal.request(TransportLossKind::Disconnected);
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("a registered transport waiter wakes")
-            .expect("waiter task did not panic");
+        assert!(futures::poll!(first.as_mut()).is_ready());
+        assert!(futures::poll!(second.as_mut()).is_ready());
 
         assert!(
             signal.is_requested(),
             "transport loss remains visible to later loop-top checks"
         );
         assert_eq!(signal.kind(), Some(TransportLossKind::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn transport_loss_signal_observes_request_before_first_poll_and_after_cancellation() {
+        for kind in [
+            TransportLossKind::Disconnected,
+            TransportLossKind::CredentialRotation,
+        ] {
+            let signal = TransportLossSignal::default();
+            assert!(!signal.is_requested());
+            let waiter = signal.notified();
+            signal.request(kind);
+            let mut waiter = std::pin::pin!(waiter);
+            assert!(futures::poll!(waiter.as_mut()).is_ready());
+            assert_eq!(signal.kind(), Some(kind));
+
+            let mut late = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(late.as_mut()).is_ready());
+        }
+
+        let signal = TransportLossSignal::default();
+        {
+            let mut cancelled = std::pin::pin!(signal.notified());
+            assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        }
+        signal.request(TransportLossKind::Disconnected);
+        let mut replacement = std::pin::pin!(signal.notified());
+        assert!(futures::poll!(replacement.as_mut()).is_ready());
     }
 
     #[test]
