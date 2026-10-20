@@ -100,4 +100,19 @@ describe("request_human_input secret questions (AC-1)", () => {
     expect(seen).toEqual([{ vault: "Team 1Password", saveTo: "workspace" }]);
     expect(reason).toContain("1Password");
   });
+
+  test("a vault check that cannot complete is a rejection, not a thrown error", async () => {
+    const reason = await secretQuestionRejection(
+      request({ item: "GitHub", saveTo: "workspace", vault: "Team" }),
+      {
+        enabled: true,
+        hasActingHuman: true,
+        validateQuestionVault: async () => {
+          throw new Error("vault store is unavailable");
+        },
+      },
+    );
+    expect(reason).toContain("could not be checked");
+    expect(reason).toContain("vault store is unavailable");
+  });
 });
