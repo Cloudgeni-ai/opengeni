@@ -134,6 +134,11 @@ pages or guarantee graceful completion for a permanently stuck controller.
   preserves the installer's command `PATH`; agent commands retain that normal
   machine environment, while the lifecycle CLI resolves the operating system's
   real systemd tools ahead of unrelated user shims. `service install --print` is the dry run.
+  `stop` pauses automatic login startup as well as the current process;
+  `service start` resumes the installed definition without replacing it.
+  `service status --json` reports versioned installed/enabled/running state for
+  desktop service-backed management. Desktop launch never uninstalls a working
+  agent or resets its privacy grants.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`

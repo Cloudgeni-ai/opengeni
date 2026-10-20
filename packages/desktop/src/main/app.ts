@@ -246,19 +246,30 @@ export class DesktopShell {
         if (!client) throw new Error("Sign in again to turn this computer off here.");
         await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
+      readMachine: async (accountId, _baseUrl, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) return null;
+        const machines = await client.listMachines(workspaceId);
+        const machine = machines.machines.find((entry) => entry.enrollmentId === enrollmentId);
+        return machine
+          ? {
+              online: ["online", "consent_required", "display_unavailable"].includes(machine.state),
+              screenControl: machine.allowScreenControl,
+              permissions: machine.runtime?.macPermissions ?? null,
+            }
+          : null;
+      },
+      enableScreenControl: async (accountId, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) throw new Error("Sign in again to connect this computer.");
+        await client.enableMachineScreenControl(workspaceId, enrollmentId);
+      },
       openSystemSettings: (url) => void shell.openExternal(url),
       onGuidePermission: (id, granted) => {
         if (id) this.permissionGuide.show(id);
         else if (granted) this.permissionGuide.granted();
         else this.permissionGuide.hide();
       },
-      trash: (path) => shell.trashItem(path),
-      onScreenControlHandedOver: () =>
-        showSimpleNotification(
-          `Allow ${config.productName} to use your screen`,
-          `Agents used your screen through the separate agent app, which ${config.productName} replaces. Allow Screen Recording and Accessibility to keep that working.`,
-          () => void this.allowNextPermission(),
-        ),
       onChange: () => {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
@@ -405,7 +416,7 @@ export class DesktopShell {
     this.confirmingQuit = true;
     try {
       const summary = this.config.thisComputer ? await this.computer.summary() : null;
-      if (summary?.running && !summary.needsPermissions) {
+      if (summary?.running && summary.management !== "service" && !summary.needsPermissions) {
         const parent = this.window?.window;
         const options: Electron.MessageBoxOptions = {
           type: "question",
@@ -998,15 +1009,23 @@ export class DesktopShell {
       }
     });
     handle(DESKTOP_IPC.computerStatus, (account, workspaceId) =>
-      this.computer.status(account.baseUrl, String(workspaceId)),
+      this.computer.status(account.baseUrl, String(workspaceId), account.id),
     );
     handle(DESKTOP_IPC.computerConnect, (account, workspaceId, options) =>
       this.computer.connect(account.id, account.baseUrl, String(workspaceId), {
         screenControl: Boolean((options as ThisComputerConnectOptions | undefined)?.screenControl),
       }),
     );
-    handle(DESKTOP_IPC.computerPause, () => this.computer.pause());
-    handle(DESKTOP_IPC.computerResume, () => this.computer.resume());
+    handle(DESKTOP_IPC.computerPause, (account) => {
+      if (account.signedOut || !this.store.token(account.id))
+        throw new Error("Sign in again to manage this computer.");
+      return this.computer.pause();
+    });
+    handle(DESKTOP_IPC.computerResume, (account) => {
+      if (account.signedOut || !this.store.token(account.id))
+        throw new Error("Sign in again to manage this computer.");
+      return this.computer.resume();
+    });
     handle(DESKTOP_IPC.computerRequestPermission, (_account, id) =>
       this.computer.requestPermission(id as ThisComputerPermissionId),
     );
