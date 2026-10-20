@@ -643,6 +643,13 @@ async function cleanup({ container, root }: { container: HTMLElement; root: Root
   container.remove();
 }
 
+/** Start an explicitly cold mock scenario without relying on teardown timers. */
+async function renderColdModelsFixture(): ReturnType<typeof render> {
+  const { clearSharedQueries } = await import("@/lib/shared-query");
+  clearSharedQueries(client);
+  return render();
+}
+
 /** The description under the section titled `title`, or undefined. */
 function sectionDescription(container: HTMLElement, title: string): string | undefined {
   const section = [...container.querySelectorAll<HTMLElement>("[data-slot=section]")].find(
@@ -2680,6 +2687,58 @@ describe("One Models page for the organization and the workspace", () => {
       }
     });
 
+    test("retains successful access across navigation but reads a deliberately cold error fixture", async () => {
+      const { retainSharedQueries } = await import("@/lib/shared-query");
+      const release = retainSharedQueries(client);
+      organizationAdmin = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      let view: Awaited<ReturnType<typeof render>> | undefined;
+      try {
+        view = await render();
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(view.container.textContent).toContain("Selected people");
+        const reads = client.getModelConnectionAccess.mock.calls.length;
+        expect(reads).toBeGreaterThan(0);
+        await cleanup(view);
+        view = undefined;
+
+        client.getModelConnectionAccess.mockImplementation(async () => {
+          throw new Error("Connection request failed");
+        });
+        // Replacing a loader is not an invalidation: a fresh retained read
+        // still serves ordinary navigation without making another request.
+        view = await render();
+        await flush();
+        expect(view.container.textContent).toContain("Selected people");
+        expect(view.container.textContent).not.toContain("Couldn't check who can use it");
+        expect(client.getModelConnectionAccess.mock.calls.length).toBe(reads);
+        await cleanup(view);
+        view = undefined;
+
+        // Holding retention makes this boundary deterministic: without the
+        // explicit clear the failing loader is never called, even on remount.
+        view = await renderColdModelsFixture();
+        await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(reads);
+        expect(view.container.textContent).toContain("Couldn't check who can use it");
+        expect(view.container.textContent).not.toContain("Selected people");
+      } finally {
+        if (view) await cleanup(view);
+        release();
+      }
+    });
+
     test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's, in use for those people where placement serves them", async () => {
       organizationAdmin = true;
       accounts = {
@@ -2729,7 +2788,7 @@ describe("One Models page for the organization and the workspace", () => {
         source: { ...source, mode: "workspace" as const, effectiveSource: "workspace" as const },
       };
       accounts = workspaceSource;
-      const workspaceOnly = await render();
+      const workspaceOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
@@ -2745,7 +2804,7 @@ describe("One Models page for the organization and the workspace", () => {
       // With no other account of its own, new work starts only for those people,
       // not "can't start … none are connected".
       accounts = { ...workspaceSource, accounts: [], activeAccountId: null };
-      const keptOnly = await render();
+      const keptOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
@@ -2767,9 +2826,6 @@ describe("One Models page for the organization and the workspace", () => {
       }
       // While the rows still read their access, no "can't start" that a kept
       // copy might contradict.
-      // This is a cold-load scenario, unlike a normal retained revisit.
-      const { clearSharedQueries } = await import("@/lib/shared-query");
-      clearSharedQueries(client);
       const held: (() => void)[] = [];
       const keptAccess = client.getModelConnectionAccess.getMockImplementation()!;
       client.getModelConnectionAccess.mockImplementation(
@@ -2778,7 +2834,7 @@ describe("One Models page for the organization and the workspace", () => {
             held.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const pendingView = await render();
+      const pendingView = await renderColdModelsFixture();
       try {
         expect(pendingView.container.textContent).not.toContain("New Codex work");
         // Nor a guessed tag or "Not in use" on the row still reading.
@@ -2798,9 +2854,13 @@ describe("One Models page for the organization and the workspace", () => {
       client.getModelConnectionAccess.mockImplementation(async () => {
         throw new Error("Connection request failed");
       });
-      const failedView = await render();
+      const accessReadsBeforeFailure = client.getModelConnectionAccess.mock.calls.length;
+      const failedView = await renderColdModelsFixture();
       try {
         await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(
+          accessReadsBeforeFailure,
+        );
         expect(failedView.container.textContent).not.toContain("New Codex work");
         // Its row says so, with the way to read it again.
         const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
@@ -2840,7 +2900,7 @@ describe("One Models page for the organization and the workspace", () => {
             ? new Promise((resolve) => heldLists.push(() => resolve(callList(...args))))
             : callList(...args),
       );
-      const listPending = await render();
+      const listPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(heldLists.length).toBeGreaterThan(0);
@@ -2862,7 +2922,7 @@ describe("One Models page for the organization and the workspace", () => {
         return callList(...args);
       });
       // Its error row (with Try again) keeps the list from reading "No model providers connected".
-      const listFailed = await render();
+      const listFailed = await renderColdModelsFixture();
       try {
         await flush();
         expect(listFailed.container.textContent).toContain(
@@ -2905,7 +2965,7 @@ describe("One Models page for the organization and the workspace", () => {
             );
           }),
       );
-      const twoKept = await render();
+      const twoKept = await renderColdModelsFixture();
       try {
         await flush();
         expect(rowsNamed(twoKept.container, "Zeta plan")).toHaveLength(1);
@@ -2940,7 +3000,7 @@ describe("One Models page for the organization and the workspace", () => {
             heldOrg.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const organizationPending = await render();
+      const organizationPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(organizationPending.container.textContent).toContain(
@@ -2956,7 +3016,7 @@ describe("One Models page for the organization and the workspace", () => {
         ...workspaceSource,
         source: { ...source, mode: "automatic" as const, effectiveSource: "workspace" as const },
       };
-      const automatic = await render();
+      const automatic = await renderColdModelsFixture();
       try {
         await flush();
         expect(automatic.container.textContent).toContain(
@@ -2977,7 +3037,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const noOne = await render();
+      const noOne = await renderColdModelsFixture();
       try {
         await flush();
         expect(noOne.container.textContent).toContain(
@@ -3000,7 +3060,7 @@ describe("One Models page for the organization and the workspace", () => {
           effectiveSource: "organization" as const,
         },
       };
-      const organizationOnly = await render();
+      const organizationOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(organizationOnly.container, "Team plan")[0]!;
@@ -3023,7 +3083,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const notKept = await render();
+      const notKept = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(notKept.container, "Team plan")[0]!;
