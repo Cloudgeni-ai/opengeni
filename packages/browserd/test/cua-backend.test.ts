@@ -1213,6 +1213,229 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a launch observes the app's own window before a window lying within it", async () => {
+    // A document app launching to its Open panel reports the panel's
+    // accessory view first; it lies within the panel and cannot be read.
+    const accessory = { pid: 77, window_id: 8, title: "Accessory View", app_name: "Editor" };
+    const panel = { pid: 77, window_id: 9, title: "Open", app_name: "Editor" };
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let launched = false;
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json) as Record<string, unknown>;
+      if (name === "launch_app") {
+        launched = true;
+        return result({ pid: 77, windows: [accessory, panel] });
+      }
+      const response = await original(name, json);
+      if (name === "list_windows" && launched) {
+        const data = JSON.parse(response.structuredJson!);
+        data.windows.push(
+          { ...accessory, bounds: { x: 120, y: 300, width: 300, height: 40 } },
+          { ...panel, bounds: { x: 100, y: 100, width: 500, height: 400 } },
+        );
+        response.structuredJson = JSON.stringify(data);
+      }
+      if (name === "get_window_state" && args.pid === 77) {
+        const data = JSON.parse(response.structuredJson!);
+        Object.assign(data, { pid: 77, window_id: args.window_id });
+        response.structuredJson = JSON.stringify(data);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const after = await backend.dispatch({
+        ...command(observation),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(after?.target.id).toBe("cua:window:77:9");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an action that opens one window of its app observes that window", async () => {
+    // After the action, list_windows adds the windows in `opens`, and the
+    // action's result carries CUA's `report` of the windows it opened. With
+    // `closes`, the acted window closes and the new one is listed only from
+    // the second listing after the action.
+    type Opened = { pid: number; window_id: number; title: string; bounds: Record<string, number> };
+    class OpeningFixture extends Fixture {
+      acted = false;
+      closes = false;
+      unreadable = false;
+      listingsAfter = 0;
+      report = "";
+      opens: Opened[] = [];
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (
+          name === "get_window_state" &&
+          args.window_id === 1 &&
+          (!this.live || (this.unreadable && this.acted))
+        )
+          return { ...result({}, true), structuredJson: null, text: "window 1 is gone" } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "click") {
+          this.acted = true;
+          if (this.closes) this.live = false;
+          return { ...response, text: `Clicked.${this.report}` };
+        }
+        if (name === "list_windows" && this.acted && (!this.closes || ++this.listingsAfter > 1)) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens) data.windows.push({ ...window, app_name: "Fixture" });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const opened = (title: string) => `\n\n🪟 Action opened new window(s): Fixture ("${title}").`;
+    const beside = { x: 300, y: 50, width: 200, height: 100 };
+    const within = { x: 60, y: 60, width: 100, height: 50 };
+    const document = { pid: 42, window_id: 2, title: "Untitled", bounds: beside };
+    for (const { opens, report, observed } of [
+      // A new document window of the app, named by CUA's report.
+      { opens: [document], report: opened("Untitled"), observed: 2 },
+      // An untitled window is named by its app.
+      {
+        opens: [{ ...document, title: "" }],
+        report: "\n\n🪟 Action opened new window(s): Fixture.",
+        observed: 2,
+      },
+      // A window that appeared without CUA reporting it is not the action's.
+      { opens: [document], report: "", observed: 1 },
+      // Nor is one CUA's report does not name.
+      { opens: [{ ...document, title: "Unrelated" }], report: opened("Untitled"), observed: 1 },
+      // A window the previous action opened late is not this action's.
+      {
+        opens: [document],
+        report:
+          '\n\n🪟 After the previous action returned, it opened new window(s): Fixture ("Untitled").',
+        observed: 1,
+      },
+      // A sheet is read through the window it is attached to, and a window
+      // appearing beside it is not the action's.
+      {
+        opens: [
+          { pid: 42, window_id: 2, title: "Save", bounds: within },
+          { ...document, window_id: 3, title: "Unrelated" },
+        ],
+        report: opened("Save"),
+        observed: 1,
+      },
+      // Two candidates are never guessed between.
+      {
+        opens: [document, { ...document, window_id: 3 }],
+        report: opened("Untitled"),
+        observed: 1,
+      },
+      // Another app's window is not this target's.
+      { opens: [{ ...document, pid: 43 }], report: opened("Untitled"), observed: 1 },
+    ]) {
+      const fixture = new OpeningFixture();
+      fixture.opens = opens;
+      fixture.report = report;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const listings = fixture.calls.filter((call) => call.name === "list_windows").length;
+        const after = await backend.dispatch(command(observation));
+        expect(after?.target.id).toBe(`cua:window:42:${observed}`);
+        // Windows are listed again only for a reported new window.
+        expect(fixture.calls.filter((call) => call.name === "list_windows").length).toBe(
+          listings + (report.includes("Action opened") ? 1 : 0),
+        );
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The acted window closes and a window of its app appears unreported:
+    // closing proves nothing about where that window came from, so nothing
+    // is observed in its place.
+    {
+      const fixture = new OpeningFixture();
+      fixture.opens = [document];
+      fixture.closes = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        expect(await backend.dispatch(command(observation))).toBeNull();
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The acted window cannot be read after the action but is still listed,
+    // and an unrelated window of its app appears unreported: that window is
+    // not the action's, so nothing is observed in its place.
+    {
+      const fixture = new OpeningFixture();
+      fixture.opens = [{ ...document, title: "Unrelated" }];
+      fixture.unreadable = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        expect(await backend.dispatch(command(observation))).toBeNull();
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The controller records the opened window's observation in the receipt.
+    const fixture = new OpeningFixture();
+    fixture.opens = [document];
+    fixture.report = opened("Untitled");
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const computerSessionId = crypto.randomUUID();
+      const controllerGeneration = "controller-fixture";
+      const controller = new ComputerInteractionController({
+        computerSessionId,
+        controllerGeneration,
+        driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+      });
+      const target = (await backend.targets())[0]!;
+      const observation = await controller.observe(target.id);
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        operationId: crypto.randomUUID(),
+        computerSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        action: {
+          type: "semantic",
+          locator: {
+            kind: "ref",
+            ref:
+              observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "",
+          },
+          action: "invoke",
+        },
+      });
+      expect(receipt.state).toBe("completed");
+      expect(receipt.targetId).toBe(target.id);
+      expect(receipt.observation?.target.id).toBe("cua:window:42:2");
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("apps launch in the background by each platform's own app name", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

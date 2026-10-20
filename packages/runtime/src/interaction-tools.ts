@@ -2718,6 +2718,9 @@ async function actInComputerBatch(
       observedAfterLastAction = receipt.observation !== null;
       break;
     }
+    // The action opened a window: the actions after it were meant for this
+    // target, or for a window not yet seen, so the batch stops at the window.
+    if (receipt.observation && receipt.observation.target.id !== value.targetId) break;
     generation = receipt.observation?.target.targetGeneration;
     observationId = receipt.observation?.observationId ?? null;
   }

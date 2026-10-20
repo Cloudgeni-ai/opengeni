@@ -506,8 +506,25 @@ function computerBatchText(receipt: {
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
+  const opened =
+    last?.state === "completed" &&
+    receipt.observation &&
+    receipt.observation.target.id !== receipt.targetId
+      ? receipt.observation.target.id
+      : null;
   if (last && last.state === "completed" && receipt.steps.length === receipt.actionCount) {
     lines.push(`Batch completed on ${receipt.targetId}: ${plural(receipt.actionCount, "action")}.`);
+  } else if (opened) {
+    const at = receipt.steps.length;
+    lines.push(
+      `Batch stopped on ${receipt.targetId} at action ${at} of ${receipt.actionCount}: action ${at} completed (operation ${last!.operationId}) and opened another window.`,
+    );
+    if (at > 1) lines.push(`${actionRange(1, at - 1)} completed.`);
+    lines.push(
+      `${actionRange(at + 1, receipt.actionCount)} ${
+        at + 1 === receipt.actionCount ? "was" : "were"
+      } not run.`,
+    );
   } else {
     const at = receipt.steps.length;
     lines.push(
@@ -538,6 +555,10 @@ function computerBatchText(receipt: {
       );
     }
   }
+  if (opened)
+    lines.push(
+      `Action ${receipt.steps.length} opened ${opened}; act on that target with the observation below.`,
+    );
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }
