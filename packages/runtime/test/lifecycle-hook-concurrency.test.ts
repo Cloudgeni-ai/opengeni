@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { runBeforeAgentStartHooks, type SandboxLifecycleHook } from "../src/index";
+import {
+  runBeforeAgentStartHooks,
+  withSandboxLifecycleHooks,
+  type SandboxLifecycleHook,
+} from "../src/index";
 
 function deferred() {
   let resolve!: () => void;
@@ -28,6 +32,78 @@ function hook(
 }
 
 describe("beforeAgentStart hook scheduling", () => {
+  for (const operation of ["create", "resume"] as const) {
+    test(`${operation} waits for independent client installation and ordered seed, renewal and clone`, async () => {
+      const log: string[] = [];
+      const clientReady = deferred();
+      const seedReady = deferred();
+      const seedStarted = deferred();
+      const cloneFinished = deferred();
+      const session = {};
+      const client = withSandboxLifecycleHooks(
+        {
+          backendId: "test",
+          create: async () => session,
+          resume: async () => session,
+        } as never,
+        [
+          hook("codemode-client", log, { independent: true, gate: clientReady.promise }),
+          {
+            id: "codemode-token",
+            phase: "beforeAgentStart",
+            run: async () => {
+              log.push("start:seed");
+              seedStarted.resolve();
+              await seedReady.promise;
+              log.push("end:seed");
+            },
+          },
+          hook("codemode-token-renewal-registration", log),
+          {
+            id: "repository-clone",
+            phase: "beforeAgentStart",
+            run: async () => {
+              log.push("end:clone");
+              cloneFinished.resolve();
+            },
+          },
+        ],
+        { environment: {} },
+      );
+      let sdkUsedSession = false;
+      const ready = (
+        operation === "create" ? client.create!({} as never) : client.resume!({} as never)
+      ).then((result) => {
+        sdkUsedSession = true;
+        return result;
+      });
+      try {
+        await seedStarted.promise;
+        expect(log).not.toContain("start:codemode-token-renewal-registration");
+        expect(log).not.toContain("end:clone");
+        expect(sdkUsedSession).toBe(false);
+        seedReady.resolve();
+        await cloneFinished.promise;
+        expect(log.indexOf("end:seed")).toBeLessThan(
+          log.indexOf("start:codemode-token-renewal-registration"),
+        );
+        expect(log.indexOf("end:codemode-token-renewal-registration")).toBeLessThan(
+          log.indexOf("end:clone"),
+        );
+        expect(log).not.toContain("end:codemode-client");
+        expect(sdkUsedSession).toBe(false);
+        clientReady.resolve();
+        await expect(ready).resolves.toBe(session);
+        expect(log).toContain("end:codemode-client");
+        expect(sdkUsedSession).toBe(true);
+      } finally {
+        seedReady.resolve();
+        clientReady.resolve();
+        await ready;
+      }
+    });
+  }
+
   test("independent hooks overlap the ordered chain, which keeps its order", async () => {
     const log: string[] = [];
     const slow = deferred();
