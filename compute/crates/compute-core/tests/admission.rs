@@ -753,6 +753,7 @@ impl Sim {
 
     fn send(&mut self, inputs: Vec<Input>) {
         let cpu_before = self.host.cpu_capacity().map(|cpu| cpu.reserved);
+        let booked_before = self.booked();
         let mut out = Vec::new();
         self.host.handle_all(self.now, inputs, &mut out);
         for action in out {
@@ -784,15 +785,25 @@ impl Sim {
             capacity.reserved <= self.budget,
             "requests of awake sandboxes exceed the budget: {capacity:?}"
         );
-        self.check_cpu(cpu_before);
+        self.check_cpu(cpu_before, &booked_before);
         self.check_waits_only_for_instant_relief();
+    }
+
+    /// The sandboxes holding their requests.
+    fn booked(&self) -> BTreeSet<SandboxId> {
+        self.sizes
+            .keys()
+            .copied()
+            .filter(|id| self.host.reserves(*id))
+            .collect()
     }
 
     /// The processor time of sandboxes awake or waking, counted from what
     /// they do, never exceeds what the host counts, and that never grows
     /// beyond the budget: once the budget falls below it, which leaves
-    /// sandboxes awake as they are, no wake is admitted until it fits.
-    fn check_cpu(&self, before: Option<u64>) {
+    /// sandboxes awake as they are, no wake is admitted until it fits,
+    /// however much others give back meanwhile.
+    fn check_cpu(&self, before: Option<u64>, booked_before: &BTreeSet<SandboxId>) {
         let Some(budget) = self.cpu_budget else {
             assert_eq!(self.host.cpu_capacity(), None);
             return;
@@ -802,6 +813,11 @@ impl Sim {
         assert!(
             cpu.reserved <= budget || cpu.reserved <= before.unwrap_or(0),
             "admitted beyond the budget: {cpu:?}, {before:?} before"
+        );
+        let admitted: Vec<_> = self.booked().difference(booked_before).copied().collect();
+        assert!(
+            admitted.is_empty() || cpu.reserved <= budget,
+            "{admitted:?} admitted beyond the budget: {cpu:?}"
         );
         let awake: u64 = self
             .sizes

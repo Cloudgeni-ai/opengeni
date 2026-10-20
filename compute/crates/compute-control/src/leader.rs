@@ -487,7 +487,10 @@ fn bring(seen: &mut GroupView, host: &GroupHost, policy: &ScalePolicy) {
         if let (Some(cpu), Some(free)) = (host.cpu_millis, host.free_cpu_millis) {
             seen.cpu_millis += cpu;
             seen.free_cpu_millis += free;
-            seen.host_cpu_millis = seen.host_cpu_millis.max(cpu);
+            seen.most_cpu_millis = seen.most_cpu_millis.max(cpu);
+            seen.host_cpu_millis = seen
+                .host_cpu_millis
+                .max(host.registered_cpu_millis.unwrap_or(cpu));
             seen.rooms = seen
                 .rooms
                 .saturating_add(policy.rooms(host.free_memory_mib, Some(free)));
@@ -682,6 +685,7 @@ mod tests {
             free_memory_mib: free_gib * GIB,
             cpu_millis: None,
             free_cpu_millis: None,
+            registered_cpu_millis: None,
         }
     }
 
@@ -801,6 +805,7 @@ mod tests {
         let sliver = GroupHost {
             cpu_millis: Some(7500),
             free_cpu_millis: Some(1500),
+            registered_cpu_millis: Some(7500),
             ..live(64)
         };
         let members = [
@@ -824,5 +829,49 @@ mod tests {
         // 6000 free is all the share asks, but no host can take a sandbox
         // of 2 processors: one more host, which brings three rooms.
         assert_eq!(POLICY.decide(&seen), ScaleDecision::Grow { to: 5 });
+    }
+
+    /// Hosts that registered with 7.5 processors but guarantee none now,
+    /// say while something beside their sandboxes takes all of them, have
+    /// no processor time to spare: the group grows by what a new host
+    /// brings and never shrinks, however much memory is free.
+    #[tokio::test]
+    async fn hosts_guaranteeing_no_processor_time_now_grow_the_group() {
+        let none = GroupHost {
+            cpu_millis: Some(0),
+            free_cpu_millis: Some(0),
+            registered_cpu_millis: Some(7500),
+            ..live(64)
+        };
+        let members = [
+            member("hosts-a"),
+            member("hosts-b"),
+            member("hosts-c"),
+            member("hosts-d"),
+        ];
+        let registered = hosts(&[
+            ("hosts-a", none),
+            ("hosts-b", none),
+            ("hosts-c", none),
+            ("hosts-d", none),
+        ]);
+        let seen = Boots::default().count(4, &members, &registered, BOOTING, &POLICY);
+        assert_eq!(
+            (
+                seen.cpu_unreported,
+                seen.cpu_millis,
+                seen.host_cpu_millis,
+                seen.most_cpu_millis,
+                seen.rooms
+            ),
+            (0, 0, 7500, 0, 0),
+            "{seen:?}"
+        );
+        assert_eq!(POLICY.decide(&seen), ScaleDecision::Grow { to: 5 });
+        let full = ScalePolicy {
+            max_hosts: 4,
+            ..POLICY
+        };
+        assert_eq!(full.decide(&seen), ScaleDecision::Hold);
     }
 }

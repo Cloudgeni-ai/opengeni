@@ -679,6 +679,13 @@ impl Host {
         })
     }
 
+    /// Whether sandbox `id` holds its request of the host's memory and
+    /// processor budgets: it is awake, waking, or its wake was let in.
+    #[must_use]
+    pub fn reserves(&self, id: SandboxId) -> bool {
+        self.sandboxes.get(&id).is_some_and(Sandbox::reserves)
+    }
+
     /// Bytes of host memory that ending VM processes could free at once,
     /// without losing anything or keeping anyone waiting: idle, paused
     /// sandboxes whose current state is already saved, and ready spare

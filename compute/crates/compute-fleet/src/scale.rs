@@ -10,8 +10,13 @@
 //!
 //! Hosts that guarantee processor time keep spare processor time the same
 //! way, to the same share: the group grows for whichever runs short first
-//! and shrinks only with plenty of both. What a new host brings of it is
-//! what the live hosts report, since they are all of one kind.
+//! and shrinks only with plenty of both. What a host guarantees falls
+//! while something beside its sandboxes takes more of its processors than
+//! it keeps back, down to none, so the group counts what hosts guarantee
+//! now, and a host guaranteeing none still counts as reporting: it has no
+//! processor time to spare, which is no reason to shrink. What a new host
+//! brings is what the live hosts guaranteed when they registered, since
+//! they are all of one kind and a new one starts as they did.
 //!
 //! A sandbox lands whole on one host, its memory and processor time both,
 //! so spare scattered in slivers across hosts holds none of the largest.
@@ -58,13 +63,17 @@ pub struct GroupView {
     pub memory_mib: u64,
     /// Memory in MiB the live hosts can still promise.
     pub free_memory_mib: u64,
-    /// Processor time in millicores the live hosts guarantee sandboxes.
+    /// Processor time in millicores the live hosts guarantee sandboxes
+    /// now.
     pub cpu_millis: u64,
     /// Processor time in millicores the live hosts can still promise.
     pub free_cpu_millis: u64,
-    /// The most processor time in millicores one live host guarantees:
-    /// what a new host of the group brings.
+    /// The most processor time in millicores one live host guaranteed
+    /// when it registered: what a new host of the group brings.
     pub host_cpu_millis: u64,
+    /// The most processor time in millicores one live host guarantees
+    /// now: the most removing one takes away.
+    pub most_cpu_millis: u64,
     /// Live hosts that do not say what processor time they guarantee:
     /// while one does, processor time does not decide the group's size.
     pub cpu_unreported: u32,
@@ -105,10 +114,12 @@ impl ScalePolicy {
     }
 
     /// The spare processor time in millicores `view` should keep, when
-    /// processor time decides the group's size: likewise.
+    /// processor time decides the group's size, which it does once there
+    /// are live hosts and every one says what it guarantees, even none:
+    /// likewise.
     #[must_use]
     pub fn target_cpu_millis(&self, view: &GroupView) -> Option<u64> {
-        if view.cpu_unreported > 0 || view.host_cpu_millis == 0 {
+        if view.cpu_unreported > 0 || view.hosts == 0 {
             return None;
         }
         let share = view.cpu_millis * u64::from(self.spare_per_mille) / 1_000;
@@ -145,14 +156,20 @@ impl ScalePolicy {
         if let Some(cpu_target) = cpu_target {
             short_of(view.free_cpu_millis, cpu_target, view.host_cpu_millis);
         }
-        // What a new host brings of rooms, and those the live hosts have,
-        // by processor time too while it decides.
-        let (rooms, host_rooms) = match cpu_target {
-            Some(_) => (
+        // What a new host brings of rooms, those removing one may take
+        // away, and those the live hosts have, by processor time too while
+        // it decides. A group whose hosts guaranteed no processor time
+        // when they registered cannot tell what a new one would bring,
+        // and does not grow for it.
+        let (rooms, host_rooms, removed_rooms) = if cpu_target.is_some() {
+            (
                 view.rooms,
                 self.rooms(self.host_memory_mib, Some(view.host_cpu_millis)),
-            ),
-            None => (view.memory_rooms, self.rooms(self.host_memory_mib, None)),
+                self.rooms(self.host_memory_mib, Some(view.most_cpu_millis)),
+            )
+        } else {
+            let rooms = self.rooms(self.host_memory_mib, None);
+            (view.memory_rooms, rooms, rooms)
         };
         let rooms_target = u64::from(self.spare_largest);
         short_of(rooms, rooms_target, host_rooms);
@@ -161,13 +178,14 @@ impl ScalePolicy {
             return ScaleDecision::Grow { to: wanted };
         }
         let settled = view.booting == 0 && view.draining == 0 && view.stalled == 0;
+        // With one host gone, still a new host's worth beyond the target.
         let plenty = view.free_memory_mib >= target + 2 * self.host_memory_mib
             && cpu_target.is_none_or(|cpu_target| {
-                view.free_cpu_millis >= cpu_target + 2 * view.host_cpu_millis
+                view.free_cpu_millis >= cpu_target + view.most_cpu_millis + view.host_cpu_millis
             })
             // A host too small for the largest sandbox has no rooms to lose.
-            && (host_rooms == 0
-                || rooms >= rooms_target.saturating_add(host_rooms.saturating_mul(2)));
+            && (host_rooms.max(removed_rooms) == 0
+                || rooms >= rooms_target.saturating_add(host_rooms).saturating_add(removed_rooms));
         if settled && plenty && view.hosts > self.min_hosts {
             return ScaleDecision::Shrink;
         }
@@ -189,6 +207,7 @@ mod tests {
         max_hosts: 50,
     };
 
+    /// Hosts that do not guarantee processor time.
     fn view(hosts: u32, free_gib: u64) -> GroupView {
         let free_memory_mib = free_gib * 1024;
         let rooms = POLICY.rooms(free_memory_mib, None);
@@ -199,6 +218,7 @@ mod tests {
             stalled: 0,
             memory_mib: u64::from(hosts) * 100 * 1024,
             free_memory_mib,
+            cpu_unreported: hosts,
             memory_rooms: rooms,
             rooms,
             ..GroupView::default()
@@ -211,8 +231,62 @@ mod tests {
         view.cpu_millis = u64::from(view.hosts) * 30_000;
         view.free_cpu_millis = free * 1000;
         view.host_cpu_millis = 30_000;
+        view.most_cpu_millis = 30_000;
+        view.cpu_unreported = 0;
         view.rooms = POLICY.rooms(view.free_memory_mib, Some(view.free_cpu_millis));
         view
+    }
+
+    /// Hosts that guarantee no processor time now, though they did when
+    /// they registered, still decide by it: nothing is spare, so the
+    /// group grows by what a new host brings and never shrinks.
+    #[test]
+    fn hosts_guaranteeing_none_now_grow_the_group_and_never_shrink_it() {
+        let mut none = with_cpu(view(4, 400), 0);
+        none.cpu_millis = 0;
+        none.most_cpu_millis = 0;
+        none.rooms = 0;
+        // Four of the largest, 16 processors, at 30 a new host: one more.
+        assert_eq!(POLICY.decide(&none), ScaleDecision::Grow { to: 5 });
+        // At the most hosts it may have, it holds.
+        let most = ScalePolicy {
+            max_hosts: 4,
+            min_hosts: 1,
+            ..POLICY
+        };
+        assert_eq!(most.decide(&none), ScaleDecision::Hold);
+        // Hosts that guaranteed none when they registered either: no new
+        // host's worth is known, so it neither grows nor shrinks.
+        none.host_cpu_millis = 0;
+        assert_eq!(most.decide(&none), ScaleDecision::Hold);
+        assert_eq!(POLICY.decide(&none), ScaleDecision::Hold);
+    }
+
+    /// What hosts guarantee now sets the share to keep, and what removing
+    /// the largest of them takes away, beside a new host's worth.
+    #[test]
+    fn it_shrinks_by_what_hosts_guarantee_now() {
+        // Four hosts that registered with 7.5 processors and guarantee 4
+        // now, all of them free: 16 is the 4 to keep, 4 that removing one
+        // takes away and 7.5 a new host brings.
+        let policy = ScalePolicy {
+            largest_cpu_millis: 1000,
+            spare_largest: 4,
+            min_hosts: 1,
+            ..POLICY
+        };
+        let mut lowered = view(4, 400);
+        lowered.cpu_unreported = 0;
+        lowered.cpu_millis = 16_000;
+        lowered.free_cpu_millis = 16_000;
+        lowered.host_cpu_millis = 7500;
+        lowered.most_cpu_millis = 4000;
+        lowered.rooms = 16;
+        assert_eq!(policy.decide(&lowered), ScaleDecision::Shrink);
+        // Counted at what they registered with, it would not.
+        lowered.cpu_millis = 30_000;
+        lowered.most_cpu_millis = 7500;
+        assert_eq!(policy.decide(&lowered), ScaleDecision::Hold);
     }
 
     #[test]

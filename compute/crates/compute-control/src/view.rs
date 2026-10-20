@@ -261,6 +261,7 @@ impl View {
                     free_memory_mib: known.capacity.memory_free_mib,
                     cpu_millis: cpu_millis(&known.info, &known.capacity),
                     free_cpu_millis: known.capacity.cpu_free_millis,
+                    registered_cpu_millis: known.info.cpu_millis,
                 };
                 (known.target.name.clone(), host)
             })
@@ -282,6 +283,10 @@ pub struct GroupHost {
     pub cpu_millis: Option<u64>,
     /// Processor time in millicores it can still promise.
     pub free_cpu_millis: Option<u64>,
+    /// Processor time in millicores it guaranteed sandboxes when it
+    /// registered, which a new host like it starts with; `None` when it
+    /// did not say.
+    pub registered_cpu_millis: Option<u64>,
 }
 
 /// Keeps `view` following the store's host rows, for as long as it runs.
