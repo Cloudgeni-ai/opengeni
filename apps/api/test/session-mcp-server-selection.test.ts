@@ -99,6 +99,37 @@ describe("withSameRequestSessionMcpServerTools", () => {
     const explicit = [{ kind: "mcp" as const, id: "umami", optional: true, eager: true }];
     expect(withSameRequestSessionMcpServerTools(explicit, [{ id: "umami" }])).toBe(explicit);
   });
+
+  test("an attachment's eager tool list seeds the ref without other markers", () => {
+    expect(
+      withSameRequestSessionMcpServerTools(
+        [],
+        [
+          { id: "app", eager: ["search", "get"] },
+          { id: "other", eager: false },
+        ],
+      ),
+    ).toEqual([
+      { kind: "mcp", id: "app", eager: ["search", "get"] },
+      { kind: "mcp", id: "other" },
+    ]);
+  });
+
+  test("an attachment's eager list joins an explicit ref and keeps its other markers", () => {
+    const explicit = [
+      { kind: "mcp" as const, id: "app", optional: true, allowedTools: ["search", "get"] },
+      { kind: "mcp" as const, id: "crm", eager: ["find"] },
+    ];
+    expect(
+      withSameRequestSessionMcpServerTools(explicit, [
+        { id: "app", eager: ["get"] },
+        { id: "crm", eager: ["list"] },
+      ]),
+    ).toEqual([
+      { kind: "mcp", id: "app", optional: true, allowedTools: ["search", "get"], eager: ["get"] },
+      { kind: "mcp", id: "crm", eager: ["find", "list"] },
+    ]);
+  });
 });
 
 describe("createSessionForRequest selects same-request mcpServers", () => {
@@ -143,6 +174,21 @@ describe("createSessionForRequest selects same-request mcpServers", () => {
     );
     expect(session.tools.filter((tool) => tool.id === "umami")).toEqual([
       { kind: "mcp", id: "umami", eager: true },
+    ]);
+  }, 60_000);
+
+  test("an attachment's eager tool list keeps workspace defaults and persists on the ref", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "hi", mcpServers: [{ ...umami, eager: ["search", "get"] }] },
+    );
+    expect(session.toolPolicy.mode).toBe("workspace_default");
+    expect(session.tools.filter((tool) => tool.id === "umami")).toEqual([
+      { kind: "mcp", id: "umami", eager: ["search", "get"] },
     ]);
   }, 60_000);
 });

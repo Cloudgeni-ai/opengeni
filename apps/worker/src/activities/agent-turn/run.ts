@@ -91,7 +91,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
+import { codexWorkspaceMetricKey, promptCacheCohortKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -115,7 +115,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
+import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -857,11 +857,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
                     sessionId: input.sessionId,
-                    cacheAffinityKey: codexCacheAffinityKey(
-                      input.workspaceId,
-                      preferenceSnapshotHumanSubjectId(turn),
-                      input.sessionId,
-                    ),
+                    cacheAffinityKey: promptCacheCohortKey(input.accountId),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
