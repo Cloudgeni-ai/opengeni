@@ -1,13 +1,20 @@
 //! Agent restarts and removal: VMs taken back, ids blocked, generations
 //! fenced, teardowns ordered.
 
-use std::sync::atomic::Ordering;
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use compute_core::HostPolicy;
+use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
     SleepConfig,
+};
+use compute_host::{
+    Archive, Claimed, Directory, FetchInto, FetchedMemory, Owned, OwnerEpoch, Receipt, SavedFiles,
+    Stamp, Store,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
@@ -563,6 +570,151 @@ async fn a_vm_not_taken_back_books_all_its_processors() {
     })
     .await;
     lab.assert_clean();
+}
+
+/// A removal that ends a VM and then stops part way, here because the
+/// store cannot delete its copy, gives that VM's processors back at once:
+/// only its id stays blocked until removing it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_that_stops_after_its_vm_ended_gives_its_processors_back() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let root = Lab::root();
+    let shelf = root.join("shelf");
+    let refusing = Arc::new(AtomicBool::new(false));
+    let store = || Undeletable {
+        inner: Directory::new(&shelf),
+        refusing: Arc::clone(&refusing),
+    };
+    let lab = Lab::start_stored_configured(root, Arc::default(), store(), |config| {
+        config.policy = policy;
+    })
+    .await;
+    let sandbox = id(48);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let (root, world) = lab.stop().await;
+    // Not taken back, it books all its processors.
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+    let lab = Lab::start_stored_configured(root, world, store(), |config| {
+        config.policy = policy;
+    })
+    .await;
+    let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
+    assert_eq!(reserved(&lab.status().await), 1000);
+
+    refusing.store(true, Ordering::SeqCst);
+    let remove = Request::Remove {
+        id: sandbox,
+        generation: None,
+    };
+    let reply = lab.client.call(&remove).await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    assert!(
+        !lab.world.live.lock().unwrap().contains(&vm_name(sandbox)),
+        "its VM ended"
+    );
+    lab.wait_until("its VM's processors to come back", |status| {
+        reserved(status) == 0
+    })
+    .await;
+    assert_eq!(lab.status().await.blocked.len(), 1, "its id stays blocked");
+    // They are free for a sandbox that asks for most of the host.
+    let config = SandboxConfig {
+        image: None,
+        vcpus: 1,
+        memory_mib: 256,
+        memory_request_mib: None,
+        cpu_request_millis: Some(1000),
+        sleep: NEVER,
+        link: None,
+    };
+    let other = id(49);
+    let reply = lab
+        .client
+        .call(&Request::Create { id: other, config })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    assert_eq!(lab.run(other, &["set awake", "get"]).await, ["ok", "awake"]);
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
+
+    refusing.store(false, Ordering::SeqCst);
+    assert_eq!(lab.client.call(&remove).await.unwrap(), Reply::Done);
+    assert_eq!(lab.status().await.blocked.len(), 0);
+    lab.assert_clean();
+}
+
+/// A store whose deletes fail while `refusing` is set, as one out of
+/// reach does.
+struct Undeletable {
+    inner: Directory,
+    refusing: Arc<AtomicBool>,
+}
+
+impl Store for Undeletable {
+    fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
+        self.inner.archive(id, save, files, cancel)
+    }
+
+    fn verify(
+        &self,
+        id: Id,
+        receipt: &Receipt,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send {
+        self.inner.verify(id, receipt)
+    }
+
+    fn fetch(
+        &self,
+        id: Id,
+        into: &FetchInto,
+    ) -> impl Future<Output = Result<FetchedMemory, EngineError>> + Send {
+        self.inner.fetch(id, into)
+    }
+
+    fn delete(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
+        let refused = self.refusing.load(Ordering::SeqCst);
+        let deleted = self.inner.delete(id, own);
+        async move {
+            if refused {
+                return Err(EngineError::new(
+                    ErrorKind::Transient,
+                    "delete",
+                    "the store is out of reach",
+                ));
+            }
+            deleted.await
+        }
+    }
+
+    fn claim(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
+        self.inner.claim(id, own)
+    }
+
+    fn forget_memory(
+        &self,
+        id: Id,
+        change: Stamp,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
+        self.inner.forget_memory(id, change)
+    }
 }
 
 /// A VM that died is torn down before its replacement starts, however long

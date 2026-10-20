@@ -429,6 +429,9 @@ enum Event<V> {
         host: Id,
         /// The ordinal it held, when known.
         ordinal: Option<u32>,
+        /// Whether its VM is known to have ended, even when the removal
+        /// stopped after that.
+        vm_ended: bool,
         result: Result<(), HostError>,
     },
     /// Everything a VM process of `id` left behind is released.
