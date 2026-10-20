@@ -123,14 +123,16 @@ fi
 install -d -m 700 /etc/compute
 attr compute-host-authority >/etc/compute/authority.pem.new
 
-# --- The host's configuration.
+# --- The host's configuration. The memory profile is always named: the
+# agent would otherwise pick nested on any host that is itself a VM.
 huge_pages=0
+profile=$(attr compute-memory-profile)
 args=$(optional_attr compute-host-args)
-if [ "$(attr compute-nested)" = true ]; then
+if [ "$profile" = nested ]; then
   percent=$(attr compute-huge-pages-pct)
   huge_pages=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo) * percent / 100 / 2048))
-  args="--memory-profile nested $args"
 fi
+args="--memory-profile $profile $args"
 umask 077
 cat >/etc/compute/host.env.new <<ENV
 COMPUTE_CONTROL=$(attr compute-control)

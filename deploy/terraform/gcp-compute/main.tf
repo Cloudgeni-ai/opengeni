@@ -15,11 +15,15 @@ locals {
   hosts_tag = "${var.name_prefix}-host"
   store     = "gs://${google_storage_bucket.archive.name}/${var.archive_prefix}"
   group     = "projects/${var.project_id}/zones/${var.zone}/instanceGroupManagers/${var.name_prefix}-hosts"
+  # The hosts' memory profile (ADR 5): nested on nested hosts and
+  # bare-metal otherwise, unless chosen.
+  memory_profile = var.memory_profile != "" ? var.memory_profile : (var.nested ? "nested" : "bare-metal")
   # The memory a new host offers sandboxes, which the control service grows
-  # the group by: on a nested host its huge pages, a share of the kernel's
-  # MemTotal (host-startup.sh), here estimated as 95 % of the machine
-  # type's memory so the estimate errs low; on bare metal 85 % of it.
-  host_memory_mib = floor(one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100 * (var.nested ? var.huge_pages_percent : 85) / 100 / 2) * 2
+  # the group by: on the nested profile its huge pages, a share of the
+  # kernel's MemTotal (host-startup.sh), here estimated as 95 % of the
+  # machine type's memory so the estimate errs low; on the bare-metal
+  # profile 85 % of it.
+  host_memory_mib = floor(one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100 * (local.memory_profile == "nested" ? var.huge_pages_percent : 85) / 100 / 2) * 2
 }
 
 data "google_compute_machine_types" "host" {
@@ -282,7 +286,7 @@ resource "google_compute_instance_template" "host" {
     compute-store          = local.store
     compute-base-image     = var.base_image_ref
     compute-host-authority = "${tls_self_signed_cert.authority.cert_pem}${var.previous_host_authority_pem}"
-    compute-nested         = var.nested ? "true" : "false"
+    compute-memory-profile = local.memory_profile
     compute-huge-pages-pct = tostring(var.huge_pages_percent)
     compute-host-args      = var.host_args
     compute-prelude        = var.host_startup_prelude
