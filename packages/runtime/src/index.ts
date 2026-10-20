@@ -7454,6 +7454,7 @@ type McpTransportErrorOptions = {
 // the authoritative caller receives the original Error object. Keep retry
 // classification out-of-band so exact Error identity and content are unchanged.
 const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
+const firstPartyMcpSetupFailures = new WeakSet<object>();
 
 function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
   try {
@@ -7690,6 +7691,11 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
   );
 }
 
+/** Only the verified required first-party connect/list boundary may grant this wait. */
+export function isFirstPartyMcpSetupUnavailableError(error: unknown): boolean {
+  return !!error && typeof error === "object" && firstPartyMcpSetupFailures.has(error);
+}
+
 /**
  * An MCP connectivity failure whose server answered HTTP 503 Service
  * Unavailable: it is reachable but refusing work for now, as a server does
@@ -7711,6 +7717,22 @@ export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<obje
   return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
+function markFirstPartyMcpSetupFailure(error: object, options: McpTransportErrorOptions): void {
+  if (options.recoverySafeSetup !== true) return;
+  const inspection = inspectMcpTransportError(error);
+  if (!inspection.complete || inspection.statuses.some((status) => status >= 400 && status < 500))
+    return;
+  // Generic statusless Errors and route 404s retain bounded recovery. They may
+  // be configuration/programming faults, not evidence that our API is down.
+  if (
+    inspection.hasConnectivityCode ||
+    inspection.hasSetupSocketCode ||
+    inspection.statuses.some((status) => status === 502 || status === 503 || status === 504)
+  ) {
+    firstPartyMcpSetupFailures.add(error);
+  }
+}
+
 export function mcpTransportErrorWithRetryMetadata(
   error: unknown,
   options: McpTransportErrorOptions = {},
@@ -7725,6 +7747,7 @@ export function mcpTransportErrorWithRetryMetadata(
     mcpTransportFailureKinds.set(classified, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
     mcpTransportFailureKinds.set(classified, "connectivity_unavailable");
+    markFirstPartyMcpSetupFailure(classified, options);
   }
   return classified;
 }
@@ -7747,6 +7770,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
     mcpTransportFailureKinds.set(exactError, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
     mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
+    markFirstPartyMcpSetupFailure(exactError, options);
   }
   return exactError;
 }

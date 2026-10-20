@@ -404,6 +404,12 @@ activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 
+Required first-party MCP setup outages use paced same-turn recovery without a
+retry cutoff; only runtime-verified connect/list transport failures qualify.
+Inspect `provider-recovery-policy.ts`, the DB provider-recovery clock, and
+`docs/run-lifecycle.md` before changing that boundary. External tools, protocol
+rejections, and uncertain tool mutations must not inherit setup-wait policy.
+
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.

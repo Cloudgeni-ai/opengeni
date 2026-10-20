@@ -254,6 +254,11 @@ their explicit authority. Each update keeps its own lineage. [Details](run-lifec
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.
 
+Required first-party MCP connect/tools-list outages preserve the accepted turn
+through paced durable recovery without a retry-count cutoff. The runtime's
+verified setup boundary grants this policy; external servers, tool invocations,
+and authorization or protocol errors do not. See [`run-lifecycle.md`](run-lifecycle.md).
+
 `runAgentTurn` is non-retryable and attempt-fenced: retry settlement, never
 unknown effects ([fences and recovery](run-lifecycle.md)).
 Structured PostgreSQL outages escape executing activities into the existing

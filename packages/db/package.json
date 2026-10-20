@@ -98,6 +98,10 @@
     "./session-background-commands": {
       "types": "./src/session-background-commands.ts",
       "default": "./src/session-background-commands.ts"
+    },
+    "./provider-recovery-clock": {
+      "types": "./src/provider-recovery-clock.ts",
+      "default": "./src/provider-recovery-clock.ts"
     }
   },
   "publishConfig": {
