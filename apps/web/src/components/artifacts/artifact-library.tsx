@@ -1,6 +1,7 @@
 import { defaultStringifySearch, useNavigate } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
+  CopyIcon,
   ImageIcon,
   LayoutGridIcon,
   LinkIcon,
@@ -55,6 +56,7 @@ import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
+import { useDuplicateSite } from "@/lib/use-duplicate-site";
 import { FILE_AUDIENCE_COPY, useArtifactAudience } from "./site-audience";
 import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { ARTIFACT_ACCESS_REQUIRED } from "@/lib/artifact-access";
@@ -267,6 +269,12 @@ function useArtifactOpen(
 ) {
   const navigate = useNavigate();
   const audience = useLibraryFileAudience(workspaceId, item);
+  const { accessContext } = useAppContext();
+  const copies = useDuplicateSite(workspaceId);
+  const canDuplicate =
+    item.kind === "site" &&
+    Boolean(item.versionId) &&
+    hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const [pinning, setPinning] = useState(false);
   const pinInFlight = useRef(false);
   const togglePin = async () => {
@@ -307,6 +315,16 @@ function useArtifactOpen(
         </DropdownMenuItem>
       ) : null}
       {audience.menuItem}
+      {canDuplicate ? (
+        <DropdownMenuItem
+          disabled={copies.busy}
+          // In the session workbench the copy is offered, not opened.
+          onSelect={() => void copies.duplicate(item, { open: !onSelect })}
+        >
+          <CopyIcon />
+          {copies.busy ? "Duplicating…" : "Duplicate"}
+        </DropdownMenuItem>
+      ) : null}
       {item.sourceSessionId && item.sourceSessionId !== sessionId ? (
         <DropdownMenuItem
           onSelect={() =>

@@ -129,6 +129,12 @@ export type RollbackWorkspaceArtifactRequest = {
   reason: string;
   idempotencyKey: string;
 };
+/** A new Site from another Site's current version. Its publication and data stay behind. */
+export type DuplicateWorkspaceArtifactRequest = {
+  /** Omitted: the original's title followed by "(copy)". */
+  title?: string;
+  idempotencyKey: string;
+};
 export type SetWorkspaceArtifactStatusRequest = {
   status: "active" | "archived";
   expectedCurrentVersionId: string;
