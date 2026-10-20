@@ -1,5 +1,6 @@
 -- deployment-mode: rolling
 -- Private telemetry only: no new data-schema grants or admission behavior.
+-- Appended after the current main migration ledger.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '30s';
 

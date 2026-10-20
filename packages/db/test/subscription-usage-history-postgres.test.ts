@@ -262,7 +262,7 @@ test.skipIf(!real)(
           'codex','responses','fixture','external',25,'configured_list_price',now()-interval '8 days')`;
       });
       const seed = await Bun.file(
-        new URL("../drizzle/0866_subscription_usage_call_history_seed.sql", import.meta.url),
+        new URL("../drizzle/0872_subscription_usage_call_history_seed.sql", import.meta.url),
       ).text();
       await owner.db.transaction(async (tx) => {
         await tx.execute(sql.raw(seed));

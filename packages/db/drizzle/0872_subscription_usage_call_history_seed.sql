@@ -1,6 +1,7 @@
 -- deployment-mode: rolling
 -- Separate from trigger installation: no writer-conflicting DDL locks during
 -- this bounded historical scan. Later writes already maintain the projection.
+-- The preceding history expansion installs the write-through triggers.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '10min';
 DO $seed$
