@@ -459,9 +459,15 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
         where namespace.nspname in ('opengeni_private', 'opengeni_subscription_internal')
           and proc.proname like '%subscription_core%'`;
+      // The neutral lists also carry routines whose names do not say
+      // subscription_core (the usage-history readers and capture triggers);
+      // only the ones this query selects are counted.
+      const namedSubscriptionCore = [
+        ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+        ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ].filter((signature) => signature.split("(")[0]!.includes("subscription_core"));
       expect(rows.length).toBe(
-        SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
-          SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
+        namedSubscriptionCore.length +
           // Registered kind lookup and B1's narrow kind/receipt reader.
           2,
       );

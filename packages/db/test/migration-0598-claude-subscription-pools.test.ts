@@ -108,6 +108,10 @@ const subscriptionCoreMigrations = [
   "0838_reclaim_exited_backend_runtime_capabilities.sql",
   // Replaces the admin helper created by withheld 0642; replay after its original.
   "0847_read_only_runtime_probes.sql",
+  // Usage history routines live in the subscription schema from withheld core
+  // migrations; the seed reads them. Replay both after them.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
 ] as const;
