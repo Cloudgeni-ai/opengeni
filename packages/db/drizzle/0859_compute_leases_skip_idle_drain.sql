@@ -26,7 +26,7 @@ BEGIN
     RETURN;
   END IF;
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 2 THEN
-    RAISE EXCEPTION '0858 compute idle drain prerequisite drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0859 compute idle drain prerequisite drift' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor, replacement);
 END;

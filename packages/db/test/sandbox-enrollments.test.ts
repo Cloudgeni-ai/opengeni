@@ -20,7 +20,7 @@ import {
   type DbClient,
 } from "../src/index";
 
-// 0857: Opengeni creates the enrollment of the agent inside each compute
+// 0858: Opengeni creates the enrollment of the agent inside each compute
 // sandbox itself. It is kind 'sandbox', bound to the sandbox's group, has no
 // key or bearer, is never a machine (no sandboxes row, not listed, not
 // counted), is fenced by the control service's owner epoch at the agent gateway and is
