@@ -6,6 +6,7 @@ import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } f
 import {
   projectSessionRealtimeLifecycle,
   type SessionRealtimeControllerSnapshot,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
 } from "@opengeni/sdk/realtime";
 import {
@@ -165,6 +166,13 @@ export function SessionRealtimeControl(props: {
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Explicitly expose low-level controller diagnostics; disabled by default. */
   showDiagnostics?: boolean | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * over the workspace's saved settings for the selected model. A language the
+   * person picks in the voice menu takes precedence. Settings the selected
+   * model does not offer are ignored.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -183,6 +191,7 @@ export function SessionRealtimeControl(props: {
     modelAvailable: selectedModel.available,
     modelUnavailableReason: selectedModel.unavailableReason,
     language: selection.languageFor(selectedModel.id),
+    voiceSettings: selection.voiceSettingsFor(selectedModel.id, props.voiceSettings),
   });
   const autostartModelRef = useRef(props.realtimeAutostartModel ?? null);
   const autostartStartedRef = useRef(false);
@@ -879,6 +888,17 @@ export function RealtimeModelPickerMenu(props: {
   const appLanguageName = appLanguage
     ? languageDisplayName(baseLanguage(appLanguage), t.locale)
     : null;
+  // Without a pick of their own, the person talks in the workspace's language
+  // for this provider's voice, else their app language.
+  const workspaceLanguage = props.provider
+    ? props.models.find(
+        (model) => model.provider === props.provider && model.workspaceVoiceSettings?.language,
+      )?.workspaceVoiceSettings?.language
+    : undefined;
+  const workspaceLanguageName = workspaceLanguage
+    ? languageDisplayName(baseLanguage(workspaceLanguage), t.locale)
+    : null;
+  const automaticLanguageName = workspaceLanguageName ?? appLanguageName;
   const body =
     languagePageOpen && props.provider ? (
       <div data-testid="realtime-language-picker">
@@ -894,11 +914,15 @@ export function RealtimeModelPickerMenu(props: {
           <PickerNavRow
             label={t("realtime.realtimeControl.voiceLanguageAutomatic")}
             hint={
-              appLanguageName
-                ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
-                    language: appLanguageName,
+              workspaceLanguageName
+                ? t("realtime.realtimeControl.voiceLanguageWorkspaceLanguage", {
+                    language: workspaceLanguageName,
                   })
-                : undefined
+                : appLanguageName
+                  ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
+                      language: appLanguageName,
+                    })
+                  : undefined
             }
             disabled={props.disabled}
             active={languagePreference === null}
@@ -980,9 +1004,9 @@ export function RealtimeModelPickerMenu(props: {
               hint={
                 languagePreference !== null
                   ? languageDisplayName(languagePreference, t.locale)
-                  : appLanguageName
+                  : automaticLanguageName
                     ? t("realtime.realtimeControl.voiceLanguageAutomaticValue", {
-                        language: appLanguageName,
+                        language: automaticLanguageName,
                       })
                     : t("realtime.realtimeControl.voiceLanguageAutomatic")
               }

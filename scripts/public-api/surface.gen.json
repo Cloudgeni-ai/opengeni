@@ -16240,7 +16240,8 @@
         "$.operationId": "string!",
         "$.ownerKey": "string!",
         "$.realtimeId": "string!",
-        "$.rotate": "boolean!"
+        "$.rotate": "boolean!",
+        "$.voiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "GatewayRealtimeConnectResponse": {
@@ -22615,6 +22616,27 @@
         "$.secret": "string?"
       }
     },
+    "RealtimeTurnEagerness": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"high\\\"\",\"\\\"low\\\"\",\"\\\"medium\\\"\"]"
+      }
+    },
+    "RealtimeVoiceSettings": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.language": "string?",
+        "$.turnEagerness": "ref(RealtimeTurnEagerness)?",
+        "$.voice": "string?"
+      }
+    },
     "RealtimeWebsocketProtocol": {
       "io": [
         "output"
@@ -25053,7 +25075,8 @@
         "$.operationId": "string!",
         "$.ownerKey": "string!",
         "$.realtimeId": "string!",
-        "$.rotate": "boolean!"
+        "$.rotate": "boolean!",
+        "$.voiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "SessionRealtimeWebsocketResponse": {
@@ -28413,6 +28436,8 @@
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
         "$.modelCompactionThresholds": "unknown?",
+        "$.realtimeVoice": "object?",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
@@ -30281,6 +30306,7 @@
       "shape": {
         "$": "object",
         "$.available": "boolean!",
+        "$.customVoice": "boolean?",
         "$.description": "string!",
         "$.id": "ref(SessionRealtimeModel)!",
         "$.label": "string!",
@@ -30288,8 +30314,16 @@
         "$.languages[]": "string",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
+        "$.turnEagerness": "array?",
+        "$.turnEagerness[]": "ref(RealtimeTurnEagerness)",
         "$.unavailableCode": "string? null",
-        "$.unavailableReason": "string! null"
+        "$.unavailableReason": "string! null",
+        "$.voiceDefaults": "ref(RealtimeVoiceSettings)?",
+        "$.voices": "array?",
+        "$.voices[]": "object",
+        "$.voices[].id": "string!",
+        "$.voices[].label": "string!",
+        "$.workspaceVoiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "WorkspaceRealtimeModelCatalogResponse": {
@@ -31837,6 +31871,8 @@
       "ReadEditableArtifactMaterializationOptions": "type",
       "ReadEditableArtifactResourceOptions": "type",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeTurnEagerness": "type",
+      "RealtimeVoiceSettings": "type",
       "RealtimeWebsocketProtocol": "type",
       "ReasoningEffort": "type",
       "RecordingAvailablePayload": "type",
@@ -33428,6 +33464,8 @@
       "parseCodexRealtimeV3Event": "value",
       "projectSessionRealtimeLifecycle": "value",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeTurnEagerness": "type",
+      "RealtimeVoiceSettings": "type",
       "RealtimeWebsocketProtocol": "type",
       "RenewSessionRealtimeRequest": "type",
       "SESSION_REALTIME_MODELS": "value",

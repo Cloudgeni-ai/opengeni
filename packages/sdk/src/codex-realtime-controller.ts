@@ -41,6 +41,7 @@ import type {
   SessionRealtimeMutationResponse,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
+  RealtimeVoiceSettings,
 } from "./types";
 
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
@@ -288,6 +289,13 @@ export type CreateCodexRealtimeControllerOptions = {
    * it; the others detect the spoken language themselves.
    */
   getLanguage?: (() => string | undefined) | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * read whenever a provider connection opens. Each set field overrides the
+   * workspace's saved settings for the model; settings the model does not
+   * offer (see its catalog entry) are ignored.
+   */
+  getVoiceSettings?: (() => RealtimeVoiceSettings | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
@@ -303,6 +311,8 @@ export type RealtimeControllerTransportStarter = (input: {
   rotate: boolean;
   /** BCP 47 tag of the language the person speaks, when the host supplied one. */
   language?: string | undefined;
+  /** Voice settings for this connection, when the host supplied them. */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   signal: AbortSignal;
   media: MediaStream;
   onEventsCreated(events: RTCDataChannel): void;
@@ -1008,6 +1018,7 @@ export function createCodexRealtimeController(
         expectedConnectionEpoch: currentMode.connectionEpoch,
         rotate,
         language: options.getLanguage?.(),
+        voiceSettings: options.getVoiceSettings?.(),
         signal: abort.signal,
         media,
         onEventsCreated: earlyEvents.attach,

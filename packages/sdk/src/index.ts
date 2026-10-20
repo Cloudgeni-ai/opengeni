@@ -938,6 +938,8 @@ export type {
   GrantSessionAdminAccessRequest,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
+  RealtimeTurnEagerness,
+  RealtimeVoiceSettings,
   CodexAccount,
   CodexPlanExcludedModel,
   CodexAccountOverview,

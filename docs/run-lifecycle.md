@@ -467,6 +467,28 @@ codes. Models that detect the spoken language are sent none. Its transcripts
 carry expressive audio tags such as `[calm]`, so the answer sets
 `transcriptAudioTags` and the browser strips them before ledger sync.
 
+Voice settings are generic across WebSocket providers. Each registry entry
+declares what it offers (`voiceOptions`): Eleven Realtime takes its built-in
+voices (default `brian`) or the id of any voice in the ElevenLabs account's My
+Voices (`customVoice`; a voice-library voice must be added there first, or
+ElevenLabs rejects it and the connect fails with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`), a conversation language and turn
+eagerness (`low`, `medium`, `high`; default `high`); AI Gateway models
+take their upstream family's built-in voices (OpenAI or xAI); SuperGrok takes
+the xAI voices (default `eve`). Speed is not offered: no provider accepts it on
+this path. The realtime model catalog lists these as `voices`, `customVoice`,
+`languages`, `turnEagerness` and `voiceDefaults`, plus the workspace's saved
+values as `workspaceVoiceSettings`. Workspaces save settings per model in the
+workspace setting `realtimeVoice` (merged per model id; `null` removes one),
+from Settings > Models > Voice or `updateWorkspaceSettings`. A connect request
+can carry its own `voiceSettings` (an embedding app's settings, with the
+language the person picked in the voice menu on top). The broker resolves each
+field from the request's `voiceSettings`, else the workspace's setting for the
+model, else the provider default; the language falls back further to the
+request's `language` (the person's app language). A value the provider does not
+offer is dropped, never sent. The workspace read runs alongside the provider's
+credential load, so it adds no time to connecting.
+
 Voice startup overlaps its waits. Starting voice from the new-chat page calls
 `prestartSessionRealtime` right after the session is created, so begin,
 negotiation and the socket open while the session page loads; that page's

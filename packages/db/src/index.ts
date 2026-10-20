@@ -105,6 +105,7 @@ import {
   type SecretReference,
   ToolReviewContext,
   WorkspaceModelCompactionThresholdsPatch,
+  WorkspaceRealtimeVoicePatch,
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
   readTurnServingPolicyV1,
@@ -3725,24 +3726,39 @@ export async function updateWorkspaceSettings(
     controlLockTimeoutMs?: number;
   } = {},
 ): Promise<Workspace> {
-  const { modelCompactionThresholds, ...ordinaryPatch } = patch;
+  const { modelCompactionThresholds, realtimeVoice, ...ordinaryPatch } = patch;
   const thresholds =
     modelCompactionThresholds === undefined
       ? undefined
       : WorkspaceModelCompactionThresholdsPatch.parse(modelCompactionThresholds);
+  const voiceByModel =
+    realtimeVoice === undefined ? undefined : WorkspaceRealtimeVoicePatch.parse(realtimeVoice);
   // Merge each exact-model key inside the SQL update, not a read/modify/write
-  // in the API: simultaneous edits to different models must both survive.
+  // in the API: simultaneous edits to different models must both survive. A
+  // null model value removes that model's key.
+  const mergeByModel = (
+    settings: ReturnType<typeof sql>,
+    key: "modelCompactionThresholds" | "realtimeVoice",
+    values: Record<string, unknown> | undefined,
+  ) =>
+    values === undefined
+      ? settings
+      : sql`jsonb_set((${settings}), ${`{${key}}`}::text[],
+      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->${key}::text) = 'object'
+        then ${schema.workspaces.settings}->${key}::text else '{}'::jsonb end) || ${JSON.stringify(values)}::jsonb))`;
   const settingsPatch = (
     base: typeof schema.workspaces.settings | ReturnType<typeof sql>,
     values: Record<string, unknown>,
-  ) => {
-    const merged = sql`${base} || ${JSON.stringify(values)}::jsonb`;
-    return thresholds === undefined
-      ? merged
-      : sql`jsonb_set((${merged}), '{modelCompactionThresholds}',
-      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->'modelCompactionThresholds') = 'object'
-        then ${schema.workspaces.settings}->'modelCompactionThresholds' else '{}'::jsonb end) || ${JSON.stringify(thresholds)}::jsonb))`;
-  };
+  ) =>
+    mergeByModel(
+      mergeByModel(
+        sql`${base} || ${JSON.stringify(values)}::jsonb`,
+        "modelCompactionThresholds",
+        thresholds,
+      ),
+      "realtimeVoice",
+      voiceByModel,
+    );
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
     if (

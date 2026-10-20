@@ -2532,6 +2532,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
   "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",
   "realtime.realtimeControl.voiceLanguageAutomaticValue": "Automatic · {language}",
+  "realtime.realtimeControl.voiceLanguageWorkspaceLanguage": "Set for this workspace, {language}",
   "realtime.realtimeControl.voiceLanguageDescription":
     "The voice listens and replies in this language.",
   "realtime.realtimeControl.voiceModel": "Voice model",

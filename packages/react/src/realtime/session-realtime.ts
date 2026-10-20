@@ -13,6 +13,7 @@ import {
   type SessionRealtimeController,
   type SessionRealtimeControllerSnapshot,
   type SessionRealtimeLifecycleProjection,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
   type WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/sdk/realtime";
@@ -44,6 +45,16 @@ export type RealtimeModelOption = {
    * model detects the spoken language itself.
    */
   languages?: readonly string[] | undefined;
+  /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+  voices?: WorkspaceRealtimeModelCatalogItem["voices"];
+  /** Whether any provider voice id is accepted beyond the listed `voices`. */
+  customVoice?: boolean | undefined;
+  /** Turn eagerness values this model accepts. */
+  turnEagerness?: WorkspaceRealtimeModelCatalogItem["turnEagerness"];
+  /** The provider's defaults for the settings it offers, other than language. */
+  voiceDefaults?: RealtimeVoiceSettings | undefined;
+  /** The workspace's saved voice settings for this model. */
+  workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
 };
 
 export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
@@ -283,6 +294,8 @@ type PrestartedSessionRealtime = {
   modelContext: { current: (() => string | undefined) | undefined };
   /** The conversation language; the adopting view takes it over. */
   language: { current: () => string | undefined };
+  /** The voice settings; the adopting view takes them over. */
+  voiceSettings: { current: () => RealtimeVoiceSettings | undefined };
 };
 
 const prestartedSessionRealtime = new Map<string, PrestartedSessionRealtime>();
@@ -313,6 +326,11 @@ export function prestartSessionRealtime(input: {
    * (see `realtimeConversationLanguage`).
    */
   language?: string | undefined;
+  /**
+   * Voice settings for this call (voice, language, turn eagerness), over the
+   * workspace's saved settings for the model.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }): () => void {
   const key = prestartKey(input.workspaceId, input.sessionId);
@@ -322,6 +340,9 @@ export function prestartSessionRealtime(input: {
   if (existing) abandonPrestarted(key, existing)();
   const modelContext: PrestartedSessionRealtime["modelContext"] = { current: undefined };
   const language: PrestartedSessionRealtime["language"] = { current: () => input.language };
+  const voiceSettings: PrestartedSessionRealtime["voiceSettings"] = {
+    current: () => input.voiceSettings,
+  };
   // An abandoned call for this session ends before the next one begins.
   const controller = (abandonedSessionRealtime.get(key) ?? Promise.resolve())
     .then(() => import("@opengeni/sdk/realtime"))
@@ -336,6 +357,7 @@ export function prestartSessionRealtime(input: {
         model: input.model,
         getModelContext: () => modelContext.current?.(),
         getLanguage: () => language.current(),
+        getVoiceSettings: () => voiceSettings.current(),
       });
       // The call's state (including a failed start) is read from the
       // controller by the view that adopts it.
@@ -347,6 +369,7 @@ export function prestartSessionRealtime(input: {
     controller,
     modelContext,
     language,
+    voiceSettings,
   };
   prestartedSessionRealtime.set(key, entry);
   controller.catch(() => {
@@ -419,6 +442,11 @@ export function useSessionRealtime(options: {
    * (see `realtimeConversationLanguage`). Applies from the next connection.
    */
   language?: string | undefined;
+  /**
+   * Voice settings (voice, language, turn eagerness) over the workspace's saved
+   * settings for the model. Applies from the next connection.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -435,6 +463,8 @@ export function useSessionRealtime(options: {
   modelContextProviderRef.current = options.getModelContext;
   const languageRef = useRef(options.language);
   languageRef.current = options.language;
+  const voiceSettingsRef = useRef(options.voiceSettings);
+  voiceSettingsRef.current = options.voiceSettings;
   const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
     status: hasStoredSessionRealtimeOwnerProof({
       workspaceId,
@@ -480,6 +510,7 @@ export function useSessionRealtime(options: {
       prestartedSessionRealtime.delete(key);
       adopted.modelContext.current = () => modelContextProviderRef.current?.();
       adopted.language.current = () => languageRef.current;
+      adopted.voiceSettings.current = () => voiceSettingsRef.current;
     }
     const pending: Promise<SessionRealtimeController | null> = adopted
       ? adopted.controller
@@ -494,6 +525,7 @@ export function useSessionRealtime(options: {
             model,
             getModelContext: () => modelContextProviderRef.current?.(),
             getLanguage: () => languageRef.current,
+            getVoiceSettings: () => voiceSettingsRef.current,
           });
         });
     void pending
@@ -768,15 +800,38 @@ export function useRealtimeModelSelection(options: {
     [activeModel, catalog, workspaceId],
   );
   const { language: languagePreference } = useRealtimeLanguagePreference();
-  /** The conversation language to send when starting voice with `modelId`. */
+  /**
+   * The person's own language to send when starting voice with `modelId`: the
+   * fallback when neither they nor the workspace chose a conversation language.
+   */
   const languageFor = useCallback(
     (modelId: SessionRealtimeModel) =>
       realtimeConversationLanguage(
         catalog.find((model) => model.id === modelId),
-        languagePreference,
+        null,
         t.locale,
       ),
-    [catalog, languagePreference, t.locale],
+    [catalog, t.locale],
+  );
+  /**
+   * The voice settings to send when starting voice with `modelId`: the host's
+   * `base` settings, with the language the person picked in the voice menu on
+   * top. The workspace's saved settings apply on the server under these.
+   */
+  const voiceSettingsFor = useCallback(
+    (
+      modelId: SessionRealtimeModel,
+      base?: RealtimeVoiceSettings | undefined,
+    ): RealtimeVoiceSettings | undefined => {
+      const picked =
+        languagePreference !== null &&
+        catalog.find((model) => model.id === modelId)?.languages?.length
+          ? languagePreference
+          : null;
+      if (picked === null) return base;
+      return { ...base, language: picked };
+    },
+    [catalog, languagePreference],
   );
 
   // The fallback catalog is a placeholder: a caller that starts voice on its own
@@ -786,7 +841,14 @@ export function useRealtimeModelSelection(options: {
   const catalogReady =
     (scope.source === "cache" && scope.client === client && scope.workspaceId === workspaceId) ||
     (fallbackFinal?.client === client && fallbackFinal.workspaceId === workspaceId);
-  return { models: catalog, selectedModel, selectModel, catalogReady, languageFor };
+  return {
+    models: catalog,
+    selectedModel,
+    selectModel,
+    catalogReady,
+    languageFor,
+    voiceSettingsFor,
+  };
 }
 
 function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {

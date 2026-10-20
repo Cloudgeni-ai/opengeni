@@ -202,4 +202,6 @@ export type {
   SyncSessionRealtimeLedgerResponse,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
+  RealtimeTurnEagerness,
+  RealtimeVoiceSettings,
 } from "./types";

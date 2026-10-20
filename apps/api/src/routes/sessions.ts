@@ -1981,6 +1981,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       expectedConnectionEpoch,
       rotate,
       language,
+      voiceSettings,
     } = parsed.data;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
@@ -2031,6 +2032,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         model: claim.mode.model,
         language,
+        voiceSettings,
         fetchImpls: {
           "ai-gateway": deps.codexFetch,
           supergrok: deps.xaiFetch,
@@ -2097,7 +2099,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
       if (!(error instanceof RealtimeWebsocketBrokerError)) throw error;
-      const status = error.code === "credential_unavailable" ? 409 : 502;
+      const status =
+        error.code === "credential_unavailable" || error.code === "voice_unavailable" ? 409 : 502;
       return c.json(
         {
           error: {
