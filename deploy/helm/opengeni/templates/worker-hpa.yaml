@@ -71,21 +71,12 @@ spec:
           type: AverageValue
           averageValue: {{ if eq $metric "opengeni_turn_worker_busy" }}"1"{{ else }}{{ $config.autoscaling.queueDemand.targetAverageValue | quote }}{{ end }}
     {{- end }}
+    {{- $queueBehavior := dict
+      "scaleUp" (dict "stabilizationWindowSeconds" 0 "selectPolicy" "Max" "policies" (list (dict "type" "Pods" "value" 4 "periodSeconds" 30)))
+      "scaleDown" (dict "stabilizationWindowSeconds" 600 "selectPolicy" "Disabled" "policies" (list (dict "type" "Pods" "value" 1 "periodSeconds" 300)))
+    }}
   behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      selectPolicy: Max
-      policies:
-        - type: Pods
-          value: 4
-          periodSeconds: 30
-    scaleDown:
-      stabilizationWindowSeconds: 600
-      selectPolicy: Disabled
-      policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 300
+    {{- mergeOverwrite $queueBehavior (deepCopy $config.autoscaling.behavior) | toYaml | nindent 4 }}
     {{- else }}
     {{- with $config.autoscaling.customMetrics }}
     {{- toYaml . | nindent 4 }}
