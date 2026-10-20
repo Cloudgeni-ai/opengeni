@@ -156,6 +156,11 @@ export type SessionRealtimeWebsocketResponse = {
   modeVersion: number;
   initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
+  /**
+   * Assistant transcripts carry inline delivery tags such as `[calm]`, which
+   * are spoken as tone, not words; clients drop them from transcripts.
+   */
+  transcriptAudioTags?: boolean | undefined;
   replay: false;
 };
 /** @deprecated Use SessionRealtimeWebsocketResponse. */
@@ -368,12 +373,19 @@ export type SessionRealtimeModel =
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
   | "workspace-gateway/openai/gpt-realtime-2.1"
   | "workspace-gateway/openai/gpt-realtime-mini"
-  | "workspace-gateway/xai/grok-voice-think-fast-2.0";
+  | "workspace-gateway/xai/grok-voice-think-fast-2.0"
+  | "workspace-elevenlabs/eleven_realtime_v1_max"
+  | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
+  provider:
+    | "OpenGeni"
+    | "Connected Codex"
+    | "Connected SuperGrok"
+    | "Your Gateway"
+    | "Your ElevenLabs";
   description: string;
   available: boolean;
   unavailableReason: string | null;

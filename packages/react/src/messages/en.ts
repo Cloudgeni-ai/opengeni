@@ -2459,6 +2459,7 @@ export const englishMessages = {
   "realtime.realtimeControl.audioMuted": "audio muted",
   "realtime.realtimeControl.audioOutputBlocked": "Audio output blocked",
   "realtime.realtimeControl.billedToYourAiGateway": "Billed to your AI Gateway",
+  "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
   "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
@@ -2528,6 +2529,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceModelUnavailable": "Voice model unavailable",
   "realtime.realtimeControl.voiceUnavailable": "Voice unavailable",
   "realtime.realtimeControl.yourGateway": "Your Gateway",
+  "realtime.realtimeControl.yourElevenlabs": "Your ElevenLabs",
   "realtime.sessionRealtime.codexLive": "Codex Live",
   "realtime.sessionRealtime.codexRealtimeControllerFailedTo":
     "Codex realtime controller failed to load",

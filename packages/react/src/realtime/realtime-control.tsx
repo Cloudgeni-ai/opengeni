@@ -96,6 +96,7 @@ const REALTIME_MODEL_PROVIDERS = [
   "Connected Codex",
   "Connected SuperGrok",
   "Your Gateway",
+  "Your ElevenLabs",
 ] as const;
 type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
@@ -122,6 +123,11 @@ const REALTIME_PROVIDER_META = (
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourGateway"),
     hint: t("realtime.realtimeControl.billedToYourAiGateway"),
+  },
+  "Your ElevenLabs": {
+    billingClass: "byok",
+    label: t("realtime.realtimeControl.yourElevenlabs"),
+    hint: t("realtime.realtimeControl.billedToYourElevenlabs"),
   },
 });
 /** Display name; the catalog's `provider` value stays the wire identifier. */

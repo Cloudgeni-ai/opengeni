@@ -125,6 +125,7 @@ export {
   projectSessionRealtimeLifecycle,
 } from "./codex-realtime-controller";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
+export { isSessionRealtimeModel, SESSION_REALTIME_MODELS } from "./codex-realtime-lifecycle";
 
 export {
   CodexRealtimeMicrophoneError,

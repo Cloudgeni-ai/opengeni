@@ -6,6 +6,7 @@
 import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
   hasStoredSessionRealtimeOwnerProof,
+  isSessionRealtimeModel,
   projectSessionRealtimeLifecycle,
   type CreateSessionRealtimeControllerOptions,
   type SessionRealtimeClientLike,
@@ -31,7 +32,7 @@ function abortError(message: string): Error {
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
+  provider: WorkspaceRealtimeModelCatalogItem["provider"];
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -552,7 +553,7 @@ function readRealtimeModelPreference(workspaceId: string): SessionRealtimeModel 
   if (typeof localStorage === "undefined") return null;
   try {
     const value = localStorage.getItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`);
-    return isRealtimeModel(value) ? value : null;
+    return isSessionRealtimeModel(value) ? value : null;
   } catch {
     return null;
   }
@@ -565,18 +566,4 @@ function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtim
   } catch {
     // Voice selection still works when browser storage is unavailable.
   }
-}
-
-function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
-  return (
-    value === "opengeni-azure/gpt-live-1" ||
-    value === "gpt-live-1-boulder-alpha" ||
-    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
-    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
-    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
-    value === "supergrok/grok-voice-think-fast-2.0" ||
-    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
-    value === "workspace-gateway/openai/gpt-realtime-mini" ||
-    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
-  );
 }

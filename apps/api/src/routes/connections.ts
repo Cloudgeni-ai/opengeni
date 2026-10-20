@@ -29,6 +29,8 @@ import {
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN,
+  WORKSPACE_ELEVENLABS_CONNECTION_ROLE,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_ROLE,
   opperCredentialProblem,
@@ -1173,12 +1175,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             });
             if (!workspaceProviderApiKeyConnectionKind(existing) && targetWorkspaceProviderKind) {
               throw new HTTPException(422, {
-                message:
-                  targetWorkspaceProviderKind === "vercel_gateway"
-                    ? "use the Vercel AI Gateway connect flow to create this connection"
-                    : targetWorkspaceProviderKind === "opper"
-                      ? "use the Opper connect flow to create this connection"
-                      : "use the OpenRouter connect flow to create this connection",
+                message: `use the ${workspaceProviderApiKeyConnectionSpec(targetWorkspaceProviderKind).label} connect flow to create this connection`,
               });
             }
             assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -1959,6 +1956,12 @@ function workspaceProviderApiKeyConnectionKind(input: {
     return "openrouter";
   }
   if (
+    providerDomain === WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_ELEVENLABS_CONNECTION_ROLE
+  ) {
+    return "elevenlabs";
+  }
+  if (
     providerDomain === WORKSPACE_OPPER_CONNECTION_DOMAIN &&
     input.metadata?.credentialRole === WORKSPACE_OPPER_CONNECTION_ROLE
   ) {
@@ -2096,7 +2099,7 @@ function workspaceProviderCredentialMetadata(
     [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
-  for (const role of ["anthropic", "claude_subscription"]) {
+  for (const role of ["anthropic", "claude_subscription", "elevenlabs"]) {
     delete effectiveMetadata[`${role}CredentialOperationId`];
     delete effectiveMetadata[`${role}CredentialOperationDigest`];
   }

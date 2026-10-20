@@ -99,6 +99,7 @@ import {
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceVercelAiGatewayConnectionActive,
+  getWorkspaceProviderApiKeyConnectionMetadata,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -154,6 +155,7 @@ import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
+  ELEVENLABS_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
@@ -1215,15 +1217,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
-      workspaceCodexRealtimeReady(deps, grant, workspaceId),
-      workspaceXaiOperationAvailable(deps.db, deps.settings, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-      }),
-      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
-    ]);
+    const [codexConnected, supergrokConnected, workspaceGatewayConnected, elevenLabsConnected] =
+      await Promise.all([
+        workspaceCodexRealtimeReady(deps, grant, workspaceId),
+        workspaceXaiOperationAvailable(deps.db, deps.settings, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+        }),
+        workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+        getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, "elevenlabs").then(
+          (connection) => connection !== null,
+        ),
+      ]);
     const availability = (
       credentialReady: boolean,
       credentialReason: string,
@@ -1307,6 +1313,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
         recommended: false,
       },
+      ...Object.values(ELEVENLABS_REALTIME_MODELS).map((model) => ({
+        id: model.modelId,
+        label: model.label,
+        provider: "Your ElevenLabs" as const,
+        description: model.description,
+        ...availability(elevenLabsConnected, "Connect a workspace ElevenLabs key"),
+        recommended: false,
+      })),
       ...gatewayModels.map((model) => ({
         id: model.workspaceModelId,
         label: model.label,

@@ -3921,6 +3921,8 @@ export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
 export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 export const WORKSPACE_OPPER_CONNECTION_DOMAIN = "api.opper.ai" as const;
 export const WORKSPACE_OPPER_CONNECTION_ROLE = "opper" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN = "api.elevenlabs.io" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_ROLE = "elevenlabs" as const;
 
 /**
  * Opper issues separate management keys (`op-mak-…`) that its inference routes
@@ -3966,6 +3968,36 @@ export const AI_GATEWAY_REALTIME_MODELS = {
     description: "Fast, natural xAI voice",
   },
 } as const;
+
+export const ELEVENLABS_REALTIME_MODEL_ID_PREFIX = "workspace-elevenlabs/" as const;
+
+/**
+ * Eleven Realtime speech-to-speech models, reached with the workspace's own
+ * ElevenLabs key. v1 max comes first: it is far more reliable at handing work
+ * to the session agent.
+ */
+export const ELEVENLABS_REALTIME_MODELS = {
+  v1Max: {
+    upstreamModelId: "eleven_realtime_v1_max",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_max`,
+    label: "Eleven Realtime v1 max",
+    description: "Reasons before replying; best at handing off work",
+  },
+  v1Mini: {
+    upstreamModelId: "eleven_realtime_v1_mini",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_mini`,
+    label: "Eleven Realtime v1 mini",
+    description: "Lowest latency and cost",
+  },
+} as const;
+
+/** The ElevenLabs upstream model of a realtime model id, or null for other providers. */
+export function resolveElevenLabsRealtimeModel(modelId: string): string | null {
+  for (const model of Object.values(ELEVENLABS_REALTIME_MODELS)) {
+    if (model.modelId === modelId) return model.upstreamModelId;
+  }
+  return null;
+}
 
 export type AiGatewayRealtimeModel =
   (typeof AI_GATEWAY_REALTIME_MODELS)[keyof typeof AI_GATEWAY_REALTIME_MODELS];

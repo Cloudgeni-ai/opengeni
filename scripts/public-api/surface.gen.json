@@ -16225,6 +16225,7 @@
         "$.sessionUpdate{}": "unknown",
         "$.startupFenceSequence": "integer!",
         "$.token": "string!",
+        "$.transcriptAudioTags": "boolean?",
         "$.upstreamModelId": "string!",
         "$.url": "string!"
       }
@@ -24964,7 +24965,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
+        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-elevenlabs/eleven_realtime_v1_max\\\"\",\"\\\"workspace-elevenlabs/eleven_realtime_v1_mini\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
       }
     },
     "SessionRealtimeMutationResponse": {
@@ -25032,6 +25033,7 @@
         "$.sessionUpdate{}": "unknown",
         "$.startupFenceSequence": "integer!",
         "$.token": "string!",
+        "$.transcriptAudioTags": "boolean?",
         "$.upstreamModelId": "string!",
         "$.url": "string!"
       }
@@ -30235,7 +30237,7 @@
         "$.description": "string!",
         "$.id": "ref(SessionRealtimeModel)!",
         "$.label": "string!",
-        "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your Gateway\\\"\"]",
+        "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
         "$.unavailableCode": "string? null",
         "$.unavailableReason": "string! null"
@@ -31378,6 +31380,7 @@
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
+      "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
       "KnowledgeEntryContent": "type",
@@ -31899,6 +31902,7 @@
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
       "SESSION_EVENT_TYPES": "value",
+      "SESSION_REALTIME_MODELS": "value",
       "SESSION_SCOPE_HEADER": "value",
       "SESSION_SEQUENCE_HEADER": "value",
       "SessionAdminAccess": "type",
@@ -33370,11 +33374,13 @@
       "GatewayRealtimeConnectResponse": "type",
       "GatewayRealtimeInitialItem": "type",
       "hasStoredSessionRealtimeOwnerProof": "value",
+      "isSessionRealtimeModel": "value",
       "parseCodexRealtimeV3Event": "value",
       "projectSessionRealtimeLifecycle": "value",
       "RealtimeControllerTransportStarter": "type",
       "RealtimeWebsocketProtocol": "type",
       "RenewSessionRealtimeRequest": "type",
+      "SESSION_REALTIME_MODELS": "value",
       "SessionRealtimeClientLike": "type",
       "SessionRealtimeController": "type",
       "SessionRealtimeControllerSnapshot": "type",
