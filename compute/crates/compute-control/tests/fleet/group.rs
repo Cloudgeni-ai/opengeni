@@ -209,6 +209,7 @@ async fn fleet_with(
             spare_per_mille: 200,
             spare_largest: 2,
             largest_mib: 4096,
+            largest_cpu_millis: 2000,
             host_memory_mib: 65_536,
             min_hosts: 1,
             max_hosts: 10,

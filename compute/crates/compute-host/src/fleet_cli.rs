@@ -83,6 +83,7 @@ pub struct Described<'a> {
     pub memory_profile: String,
     pub cpu_template: String,
     pub memory_bytes: u64,
+    pub cpu_millis: Option<u64>,
 }
 
 impl FleetArgs {
@@ -113,6 +114,7 @@ impl FleetArgs {
                 profile: host.memory_profile.clone(),
                 cpu_template: host.cpu_template.clone(),
                 memory_mib: host.memory_bytes >> 20,
+                cpu_millis: host.cpu_millis,
                 disk_mib: stat.f_blocks.saturating_mul(stat.f_frsize) >> 20,
             },
             image: self.image.clone(),

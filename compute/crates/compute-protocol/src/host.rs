@@ -283,10 +283,12 @@ pub struct SandboxConfig {
     /// guest, so they reserve `memory_mib` whatever this says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<u32>,
-    /// Processor time the sandbox is guaranteed when processors are
-    /// contended, in thousandths of a processor; shares of contended time
-    /// follow it. `vcpus` stays the ceiling. Omitted, it is `vcpus` whole
-    /// processors.
+    /// Processor time the sandbox is guaranteed while it is awake, in
+    /// thousandths of a processor: the host reserves it when the sandbox
+    /// wakes and refuses a wake it has no processor time left for, and
+    /// shares of contended time follow it. Above it the sandbox may use
+    /// idle processor time up to `vcpus`, best effort. Omitted, it is
+    /// `vcpus` whole processors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_request_millis: Option<u32>,
     /// How it sleeps; omitted, it never sleeps.
@@ -355,13 +357,21 @@ impl SandboxConfig {
         self.memory_request_mib.unwrap_or(self.memory_mib)
     }
 
+    /// Millicores of processor time it is guaranteed awake, rounded up to
+    /// the 10 a `cpu.weight` step stands for, so its weight never gives
+    /// it less than the host reserved for it.
+    #[must_use]
+    pub fn cpu_request(&self) -> u32 {
+        self.cpu_request_millis
+            .unwrap_or(u32::from(self.vcpus) * 1000)
+            .div_ceil(10)
+            * 10
+    }
+
     /// Its `cpu.weight`: 100 per processor requested.
     #[must_use]
     pub fn cpu_weight(&self) -> u16 {
-        let millis = self
-            .cpu_request_millis
-            .unwrap_or(u32::from(self.vcpus) * 1000);
-        u16::try_from((millis / 10).clamp(1, 10_000)).unwrap_or(10_000)
+        u16::try_from((self.cpu_request() / 10).clamp(1, 10_000)).unwrap_or(10_000)
     }
 
     /// The sleep settings as a validated core policy.
@@ -815,6 +825,10 @@ pub struct HostStatus {
     /// does not limit what it takes on.
     #[serde(default)]
     pub capacity: Option<CapacityStatus>,
+    /// How much processor time is promised to sandboxes; `None` on a host
+    /// that does not guarantee it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuStatus>,
     /// How much of the local disk saves have booked; `None` on a host that
     /// does not book disk.
     #[serde(default)]
@@ -854,6 +868,19 @@ pub struct CapacityStatus {
     pub free: u64,
     /// Sandboxes awake or waking.
     pub awake: u32,
+}
+
+/// How much of a host's processor time its sandboxes are guaranteed, in
+/// millicores: a thousand per processor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuStatus {
+    /// Millicores the host guarantees its sandboxes at once.
+    pub total: u64,
+    /// Millicores guaranteed to sandboxes awake or waking, and to VMs the
+    /// host does not manage that may run: their CPU requests.
+    pub reserved: u64,
+    /// Millicores a wake can still reserve.
+    pub free: u64,
 }
 
 /// How much of a host's local disk the next saves of VMs not saved yet may

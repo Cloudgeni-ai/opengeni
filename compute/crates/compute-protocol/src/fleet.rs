@@ -59,9 +59,9 @@ pub struct Terms {
     pub rate_error_ppm: u32,
 }
 
-/// What a host is, fixed while it runs.
+/// What a host is, fixed while it runs. Fields it does not know are
+/// ignored, so hosts can describe more than an older service reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostInfo {
     /// Its name, unique in the fleet, such as its instance name: the
     /// service finds a host that comes back by it.
@@ -78,6 +78,10 @@ pub struct HostInfo {
     pub cpu_template: String,
     /// Memory it gives sandboxes, in MiB.
     pub memory_mib: u64,
+    /// Processor time it guarantees sandboxes at once, in millicores;
+    /// `None` from a host that does not guarantee it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u64>,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
 }
@@ -95,12 +99,16 @@ pub struct ReadyClones {
     pub count: u32,
 }
 
-/// What a host can take on now.
+/// What a host can take on now. Fields it does not know are ignored, so
+/// hosts can report more than an older service reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Capacity {
     /// Memory free for sandboxes above the host's buffer, in MiB.
     pub memory_free_mib: u64,
+    /// Processor time a wake can still reserve, in millicores; `None`
+    /// from a host that does not guarantee it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_free_millis: Option<u64>,
     /// Disk free for sandboxes, in MiB.
     pub disk_free_mib: u64,
     /// Its ready clones, per shape.

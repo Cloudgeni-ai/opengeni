@@ -303,15 +303,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Counts the VM of sandbox `id`, of `size`, which may still run,
-    /// against the admission budget at its full size while this agent does
-    /// not manage it, and books what it may still write to local disk: a
-    /// save an earlier agent may have started, and its guest disk's growth.
-    /// Both last until a removal ends it.
+    /// against the admission budget at its full size, and against the
+    /// processor budget at its request, while this agent does not manage
+    /// it, and books what it may still write to local disk: a save an
+    /// earlier agent may have started, and its guest disk's growth. Both
+    /// last until a removal ends it.
     fn unmanaged(&mut self, id: Id, size: Size) {
         self.inputs([
             Input::Unmanaged {
                 sandbox: id.0,
                 bytes: size.limit,
+                cpu: size.cpu,
             },
             Input::Writes {
                 key: id.0,

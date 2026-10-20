@@ -35,6 +35,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 mod admission;
+mod cpu;
 mod disk;
 mod memory;
 mod ready;

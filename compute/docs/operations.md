@@ -715,6 +715,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   rollout, or after a rollback, never restore a stale copy; beside the
   new schema they can only make a copy count as not whole. A host whose
   guest image predates the `sync` request warns and saves without it.
+  One exception: hosts that report their processor capacity (`cpu_millis`
+  when they register, `cpu_free_millis` in their capacity) need a control
+  service that reads it first. The first releases refuse report fields
+  they do not know, so upgrade the service from before that release
+  first, then the hosts; from that release on, report fields a service
+  does not know are ignored, and the usual order holds again. A service
+  meeting hosts that do not report it places and scales by memory alone.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):
@@ -831,15 +838,20 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   disk live only in object storage. The final measurements report agent
   memory and open files per archived sandbox; placement must count records,
   not only running VMs.
-- **The agent's processors come out of the sandboxes'.** The agent runs a
+- **The agent's processors come out of the headroom.** The agent runs a
   quarter of the host's processors, from 2 to 8, as async workers, and
   compresses as many chunks at once for object storage; blocking threads,
   which mostly wait on local disk, are 64 more than that. Archiving is the
-  agent's only long processor-bound work, so `--compress-threads` sets how
-  fast idle sandboxes reach object storage against how much processor
-  time their neighbours lose (see the agent threads measurement in
-  [measurements](measurements.md)). Raise it where saved sandboxes wait
-  long for their archive and local disk runs short; `--worker-threads` and
+  agent's only long processor-bound work. Sandboxes' requests are
+  guaranteed first: when every processor is busy, the agent and the rest
+  of the host share `--cpu-headroom-millis` (a sixteenth of the
+  processors, at least 500), and archiving then takes longer; a waking
+  sandbox's pager runs in its own VM's group, on its request. Otherwise
+  `--compress-threads` sets how fast idle sandboxes reach object storage
+  against how much idle processor time their neighbours could have used
+  (see the agent threads measurement in [measurements](measurements.md)).
+  Raise it, or the headroom, where saved sandboxes wait long for their
+  archive and local disk runs short; `--worker-threads` and
   `--blocking-threads` rarely need changing.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage

@@ -105,6 +105,7 @@ impl Sim {
             let size = Size {
                 request: limit,
                 limit,
+                cpu: 0,
                 save: limit + 64 * MIB,
                 disk,
                 fetch: limit + disk + 64 * MIB,

@@ -201,6 +201,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.inputs([id, host].map(|name| Input::Unmanaged {
                     sandbox: name.0,
                     bytes: 0,
+                    cpu: 0,
                 }));
                 self.inputs([id, host].map(|name| Input::Writes {
                     key: name.0,

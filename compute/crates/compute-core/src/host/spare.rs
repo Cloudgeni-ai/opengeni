@@ -84,9 +84,10 @@ fn endable(spare: &Spare) -> bool {
 
 impl Host {
     /// Takes in [`crate::Input::Unmanaged`].
-    pub(super) fn unmanaged(&mut self, sandbox: SandboxId, bytes: u64) {
+    pub(super) fn unmanaged(&mut self, sandbox: SandboxId, bytes: u64, cpu: u64) {
         if bytes == 0 {
             self.unmanaged.remove(&sandbox);
+            self.unmanaged_cpu.remove(&sandbox);
             self.removed_claims.remove(&sandbox);
             self.removal_ended(sandbox);
         } else {
@@ -101,6 +102,11 @@ impl Host {
                 self.book_removed(sandbox, spare.disk);
             }
             self.unmanaged.insert(sandbox, bytes);
+            if cpu > 0 {
+                self.unmanaged_cpu.insert(sandbox, cpu);
+            } else {
+                self.unmanaged_cpu.remove(&sandbox);
+            }
         }
     }
 

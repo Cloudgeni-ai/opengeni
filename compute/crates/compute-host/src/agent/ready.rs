@@ -436,6 +436,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Input::Unmanaged {
                     sandbox: host.0,
                     bytes,
+                    cpu: 0,
                 },
                 gone,
             ]);
@@ -745,6 +746,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Input::Unmanaged {
                 sandbox: host.0,
                 bytes,
+                cpu: 0,
             },
         ]);
         let template = Arc::clone(&idle.template);
@@ -893,6 +895,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Input::Unmanaged {
                 sandbox: host.0,
                 bytes: 0,
+                cpu: 0,
             },
         ]);
         if died {

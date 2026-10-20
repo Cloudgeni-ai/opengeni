@@ -582,6 +582,7 @@ fn a_fetch_that_fails_keeps_its_booking_for_its_retry_and_gives_it_up_with_its_w
     rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 0);
@@ -654,6 +655,7 @@ fn a_removed_vm_keeps_its_booking_until_it_has_ended() {
     rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 5 * GIB);
     let actions = rig.disk(8 * GIB, 10_000);
@@ -683,12 +685,14 @@ fn a_spare_vm_that_could_not_be_ended_keeps_its_booking() {
     rig.send(Input::Unmanaged {
         sandbox: spare,
         bytes: GIB,
+        cpu: 0,
     });
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 2 * GIB, "it may still write");
     rig.send(Input::Unmanaged {
         sandbox: spare,
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 2 * GIB, "what it wrote shows in a reading");
     rig.disk(8 * GIB, 10_000);

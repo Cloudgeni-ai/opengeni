@@ -104,6 +104,9 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
     Capacity {
         memory_mib: info.memory_mib,
         free_memory_mib: reported.memory_free_mib,
+        // Only a host that guarantees processor time says what it has
+        // left, and only then is it checked.
+        free_cpu_millis: info.cpu_millis.and(reported.cpu_free_millis),
         free_disk_mib: reported.disk_free_mib,
         ready: reported
             .ready
@@ -246,6 +249,8 @@ impl View {
                     draining: known.state == HostState::Draining,
                     memory_mib: known.info.memory_mib,
                     free_memory_mib: known.capacity.memory_free_mib,
+                    cpu_millis: known.info.cpu_millis,
+                    free_cpu_millis: known.capacity.cpu_free_millis,
                 };
                 (known.target.name.clone(), host)
             })
@@ -262,6 +267,11 @@ pub struct GroupHost {
     pub memory_mib: u64,
     /// Memory in MiB it can still promise.
     pub free_memory_mib: u64,
+    /// Processor time in millicores it guarantees sandboxes; `None` when
+    /// it does not say.
+    pub cpu_millis: Option<u64>,
+    /// Processor time in millicores it can still promise.
+    pub free_cpu_millis: Option<u64>,
 }
 
 /// Keeps `view` following the store's host rows, for as long as it runs.

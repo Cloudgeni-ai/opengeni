@@ -247,6 +247,7 @@ fn shortage(resource: Resource) -> &'static str {
         Resource::Memory => "bytes of memory reserved",
         Resource::Disk => "bytes of local disk booked",
         Resource::Inodes => "local disk inodes booked",
+        Resource::Cpu => "millicores of processor time reserved",
     }
 }
 
@@ -1124,6 +1125,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Size {
             request,
             limit,
+            cpu: u64::from(config.cpu_request()),
             save: limit * self.save_copies + SAVE_EXTRA,
             disk,
             fetch: disk

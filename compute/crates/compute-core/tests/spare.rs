@@ -256,6 +256,7 @@ fn a_spare_that_could_not_be_ended_is_no_relief() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
         Input::Spare {
             sandbox: SPARE,
@@ -303,6 +304,7 @@ fn a_claimed_ready_sandbox_is_counted_once() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
     ]);
     assert_eq!(occupied(&rig), 2 * GIB);
@@ -317,6 +319,7 @@ fn a_claimed_ready_sandbox_is_counted_once() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 0,
+            cpu: 0,
         },
     ]);
     assert_eq!(occupied(&rig), 2 * GIB);
@@ -334,6 +337,7 @@ fn a_filling_spare_that_could_not_be_ended_keeps_its_claim_until_it_is_gone() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
         Input::Spare {
             sandbox: SPARE,
@@ -348,6 +352,7 @@ fn a_filling_spare_that_could_not_be_ended_keeps_its_claim_until_it_is_gone() {
     rig.send(Input::Unmanaged {
         sandbox: SPARE,
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.host.spare_room(), Some(4 * GIB));
 }

@@ -175,6 +175,25 @@ ones still hold and any use above a request, stay within the host's
 capacity (`--memory-capacity-mib`; by default the huge-page pool, or the
 host's memory less `--memory-headroom-mib`).
 
+Processor time is booked the same way. Each sandbox has a CPU request,
+what it is guaranteed while awake (`cpu_request_millis`, in thousandths of
+a processor, all of `vcpus` unless set lower), and may use idle processors
+up to `vcpus` above it, best effort. The requests of awake and waking
+sandboxes, and of VMs the agent does not manage that may run, stay within
+the host's processor capacity (`--cpu-capacity-millis`; by default the
+processors the agent may use less `--cpu-headroom-millis`, a sixteenth of
+them and at least 500). A sleeping sandbox books none. Nothing frees
+processor time instantly, so a wake that does not fit gets `host_full`
+naming processor time at once; one that is held wakes by itself once
+another sandbox sleeps. Each VM's `cpu.weight` is one per 10 millicores
+requested, and the VMs' parent group gets a weight that outweighs every
+group beside it at start by the capacity against the headroom, so when
+every processor is busy each awake sandbox still gets at least its
+request. A capacity above the processors overcommits them: requests then
+hold only in proportion. The status shows `cpu` (total, reserved, free),
+and a host in a fleet reports its capacity, which placement and scaling
+count beside memory.
+
 Admission is arithmetic on numbers the agent already holds, decided in
 microseconds. Inside a request the only relief is instant: ending idle VMs
 whose state is already saved, which frees their memory in milliseconds
@@ -242,8 +261,9 @@ it runs (zero while paused, so the kernel takes from idle VMs first; not
 `memory.min`, which would have the kernel kill processes rather than slow a
 VM down if the host ever runs short beyond everything unprotected), and
 `cpu.weight` from `cpu_request_millis` (all its processors unless set
-lower), so contended processors are shared by request while `vcpus` stays
-the ceiling. A running VM is never compressed or swapped, not even by the
+lower, rounded up to 10 millicores), so contended processors are shared by
+request and never below it, while `vcpus` stays the ceiling. A running VM is
+never compressed or swapped, not even by the
 kernel under memory pressure: `memory.zswap.max` is 0 from launch, on
 adoption and before every resume, and opens only while the agent compresses
 the paused VM; with `memory.zswap.writeback` at 0 a page zswap refuses is
@@ -411,7 +431,9 @@ VMs live in their own cgroups under `--cgroup`, outside the unit's, so its
 agent refuses to start if `--cgroup` lies inside its own cgroup. Make
 `--cgroup` a top-level group: processors are shared between siblings, so
 all VMs together then compete with `system.slice` as one group however
-busy they are, and a VM's memory protection reaches only as far as its
+busy they are (the agent weighs that group, at start, against the groups
+beside it, so the VMs together get the processor capacity they were
+promised), and a VM's memory protection reaches only as far as its
 ancestors' (the agent keeps the parent's `memory.low` at the sum of its
 VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
 VMs' -900, so the host's out-of-memory killer takes VMs before the agent

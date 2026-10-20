@@ -204,6 +204,9 @@ struct Serve {
     /// The largest sandbox's guaranteed memory, in MiB.
     #[arg(long, default_value_t = 4096)]
     scale_largest_mib: u64,
+    /// The largest sandbox's guaranteed processor time, in millicores.
+    #[arg(long, default_value_t = 2000)]
+    scale_largest_cpu_millis: u64,
     /// Memory in MiB a new host brings for sandboxes.
     #[arg(long, default_value_t = 0)]
     scale_host_memory_mib: u64,
@@ -392,6 +395,7 @@ impl Serve {
                 spare_per_mille: self.scale_spare_per_mille,
                 spare_largest: self.scale_spare_largest,
                 largest_mib: self.scale_largest_mib,
+                largest_cpu_millis: self.scale_largest_cpu_millis,
                 host_memory_mib: self.scale_host_memory_mib,
                 min_hosts: self.scale_min,
                 max_hosts: self.scale_max,

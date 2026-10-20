@@ -1,6 +1,7 @@
 # 14. Requests, limits and admission
 
-Status: Accepted, 2026-10-16. Built.
+Status: Accepted, 2026-10-16. Built. Amended 2026-10-20: processor time is
+booked and guaranteed like memory.
 
 ## Context
 
@@ -43,6 +44,40 @@ pick a VM.
   `memory.min`: when the host runs short beyond everything unprotected, the
   kernel then kills processes rather than reclaim from a protected group,
   and slowing a VM down is the better failure.
+- Processor time is a request too: `cpu_request_millis`, in thousandths
+  of a processor, all of `vcpus` unless set lower. It is what a sandbox is
+  guaranteed while awake; above it, it may use idle processors up to
+  `vcpus`, best effort. The requests of awake and waking sandboxes, and of
+  VMs the agent does not manage that may run (a removed sandbox's until
+  its VM has ended, one found running at its request), stay within the
+  host's processor capacity: its processors less a headroom for the agent
+  and the rest of the host (a sixteenth, at least half a processor), or
+  what the operator sets. A sleeping sandbox books none: paused, its vCPUs
+  do not run. Nothing frees processor time instantly, so a wake that does
+  not fit is refused at once with `host_full` naming processor time,
+  before memory is looked at, and ends no idle VM; a held one wakes by
+  itself once another sandbox sleeps (pausing after its idle time is the
+  relief), and the host does not count its memory toward the buffer while
+  its processor time cannot fit. On an overdrawn capacity nothing wakes,
+  as with memory.
+- The kernel enforces it with weights, not limits. A VM's `cpu.weight` is
+  one per 10 millicores requested, the request rounded up to that, so the
+  weights of awake VMs add up to at most the capacity. The VMs' parent
+  group, at the top of the hierarchy, gets the weight that gives it the
+  capacity against every group beside it at start busy at once: the sum
+  of their weights times the capacity over the headroom, at most 10000.
+  Contended time goes to busy groups by weight, so when every processor is
+  busy each awake VM still gets at least its request, VMM threads and its
+  pager included, which run in its group. The agent's own work beyond the
+  headroom (archiving, mostly) waits for idle processors. A capacity above
+  the processors overcommits them on purpose: requests then hold only in
+  proportion, and the agent warns that its share cannot cover them. Hosts
+  report their capacity and what is free; placement skips a host without
+  room for a sandbox's request, and a host group grows for whichever of
+  memory and processor time runs short first and shrinks only with plenty
+  of both. Not `cpu.max`: a ceiling would waste idle processors and slow a
+  burst that harms nobody, and the request is a floor, as in Kubernetes
+  and Modal.
 - A running VM is never compressed or swapped: `memory.swap.max` and
   `memory.zswap.max` are 0 from launch, after adoption and before every
   resume, and open only while the agent compresses a paused VM, with
@@ -239,6 +274,14 @@ pick a VM.
 - A sandbox that stays within its request is never squeezed, paused or
   killed for memory. Above it, it may be squeezed or paused for a few
   seconds, never lose data.
+- An awake sandbox always gets its processor request when it wants it,
+  and more when processors are idle. A host fills by requests, so a small
+  request packs many awake sandboxes and a whole-vCPU default packs few: a
+  host of 8 processors keeps at most 7.5 awake sandboxes of 1000
+  millicores, or 107 of 64 (each booked at 70). A burst above the request
+  is never promised: next to busy neighbours a sandbox may get only its
+  request. Groups made beside the VMs' after the agent starts are not
+  counted in its weight until it restarts.
 - Whether a sandbox waits, saved, for room after a pause for memory is kept
   in its holds file, written by the same writer as its holds whenever the
   core says the wait starts or ends. The core says it starts before the

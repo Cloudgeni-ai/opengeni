@@ -479,6 +479,13 @@ fn bring(seen: &mut GroupView, host: &GroupHost) {
         seen.hosts += 1;
         seen.memory_mib += host.memory_mib;
         seen.free_memory_mib += host.free_memory_mib;
+        if let (Some(cpu), Some(free)) = (host.cpu_millis, host.free_cpu_millis) {
+            seen.cpu_millis += cpu;
+            seen.free_cpu_millis += free;
+            seen.host_cpu_millis = seen.host_cpu_millis.max(cpu);
+        } else {
+            seen.cpu_unreported += 1;
+        }
     }
 }
 
@@ -645,6 +652,8 @@ mod tests {
             draining: false,
             memory_mib: 64 * GIB,
             free_memory_mib: free_gib * GIB,
+            cpu_millis: None,
+            free_cpu_millis: None,
         }
     }
 
@@ -725,6 +734,7 @@ mod tests {
             spare_per_mille: 200,
             spare_largest: 2,
             largest_mib: 4 * GIB,
+            largest_cpu_millis: 2000,
             host_memory_mib: 64 * GIB,
             min_hosts: 1,
             max_hosts: 10,

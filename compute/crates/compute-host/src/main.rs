@@ -253,6 +253,19 @@ struct ServeArgs {
     /// deeper in the background. Defaults to a sixteenth of the capacity.
     #[arg(long)]
     memory_buffer_mib: Option<u64>,
+    /// Processor time, in millicores, this host guarantees its sandboxes
+    /// at once: every sandbox awake or waking reserves its CPU request
+    /// from it, and a wake that does not fit is refused at once as host
+    /// full. Above it the host overcommits: requests then hold only in
+    /// proportion. Defaults to the processors this agent may use, a
+    /// thousand per processor, less `--cpu-headroom-millis`.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    cpu_capacity_millis: Option<u64>,
+    /// Processor time, in millicores, kept back from sandboxes for the
+    /// agent, its pagers and the rest of the host when the capacity comes
+    /// from the processors. Defaults to a sixteenth of them, at least 500.
+    #[arg(long)]
+    cpu_headroom_millis: Option<u64>,
     /// Local disk never booked for saves: room for records, logs and
     /// anything else written beside them. Every VM not saved yet books
     /// what its next save may write; a wake that would book more than is
@@ -660,6 +673,18 @@ fn host_policy(
         // samples keeps a sandbox from being pushed deeper to make room.
         busy_grace: args.busy_window + 2 * sample_every,
     });
+    let processors = processors();
+    let cpu = cpu_budget(
+        processors,
+        args.cpu_capacity_millis,
+        args.cpu_headroom_millis,
+    )?;
+    tracing::info!(
+        capacity_millis = cpu,
+        processors,
+        "guaranteed processor capacity"
+    );
+    policy.cpu_budget = Some(cpu);
     policy.memory = memory_policy(
         memory_profile,
         args.memory_low_mib,
@@ -704,6 +729,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
+    guarantee_vm_processors(&args.cgroup, policy.cpu_budget)?;
     check_huge_pages(memory_profile)?;
     check_zswap(memory_profile.compress && !args.no_compress)?;
     raise_open_file_limit();
@@ -718,6 +744,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         memory_profile: memory_profile.to_string(),
         cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
         memory_bytes: budget,
+        cpu_millis: policy.cpu_budget,
     })?;
     let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
     // A host in a fleet keeps agent links for the sandboxes that run
@@ -958,6 +985,122 @@ fn admission_budget(
     total.saturating_sub(headroom)
 }
 
+/// The processors this agent may use.
+fn processors() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Millicores a host of `processors` guarantees its sandboxes at once:
+/// `capacity` when given, otherwise its processors less `headroom`, by
+/// default a sixteenth of them, at least 500 millicores.
+fn cpu_budget(
+    processors: usize,
+    capacity: Option<u64>,
+    headroom: Option<u64>,
+) -> anyhow::Result<u64> {
+    if let Some(capacity) = capacity {
+        return Ok(capacity);
+    }
+    let total = u64::try_from(processors)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1000);
+    let headroom = headroom.unwrap_or((total / 16).max(500));
+    let budget = total.saturating_sub(headroom);
+    anyhow::ensure!(
+        budget > 0,
+        "a processor headroom of {headroom} millicores leaves sandboxes none of this host's \
+         {total}: lower --cpu-headroom-millis or give --cpu-capacity-millis"
+    );
+    Ok(budget)
+}
+
+/// Gives the VMs' parent group `cgroup`, when the host guarantees
+/// processor time, a share of contended processor time (`cpu.weight`)
+/// large enough that, with every group beside it busy, the VMs together
+/// still get the `budget` millicores that admission promises them.
+/// Contended time is shared between busy groups only, so idle ones take
+/// nothing from it; inside, each VM's own weight, 1 per 10 millicores
+/// requested, then gives it at least its request. Groups beside it that
+/// hold no process at start, such as those of finished mounts, and groups
+/// made later are not counted.
+fn guarantee_vm_processors(cgroup: &std::path::Path, budget: Option<u64>) -> anyhow::Result<()> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let processors = processors();
+    let siblings = sibling_weights(cgroup)
+        .with_context(|| format!("reading the processor shares beside {}", cgroup.display()))?;
+    let (weight, exact) = vm_group_weight(siblings, processors, budget);
+    compute_engine::cgroup::Cgroup::at(cgroup)
+        .set_cpu_weight(weight)
+        .with_context(|| format!("setting the processor share of {}", cgroup.display()))?;
+    if exact {
+        tracing::info!(weight, siblings, "processor share of the VMs");
+    } else {
+        tracing::warn!(
+            weight,
+            siblings,
+            budget,
+            "the VMs' processor share cannot cover the guaranteed capacity against every group \
+             beside them at once; raise the headroom"
+        );
+    }
+    Ok(())
+}
+
+/// The sum of the `cpu.weight` of every group beside `cgroup` that holds
+/// processes, itself or below it.
+fn sibling_weights(cgroup: &std::path::Path) -> std::io::Result<u64> {
+    let (Some(parent), Some(own)) = (cgroup.parent(), cgroup.file_name()) else {
+        return Ok(0);
+    };
+    let mut sum = 0;
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if entry.file_name() == own || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let events = match std::fs::read_to_string(entry.path().join("cgroup.events")) {
+            Ok(events) => events,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !events.lines().any(|line| line.trim() == "populated 1") {
+            continue;
+        }
+        match std::fs::read_to_string(entry.path().join("cpu.weight")) {
+            Ok(text) => sum += text.trim().parse::<u64>().unwrap_or(100),
+            // Not a group the processor controller reaches.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(sum)
+}
+
+/// The `cpu.weight` that gives a group at least `budget` millicores of
+/// `processors` against busy groups beside it weighing `siblings`, and
+/// whether it does: a weight is at most 10000.
+fn vm_group_weight(siblings: u64, processors: usize, budget: u64) -> (u16, bool) {
+    let total = u64::try_from(processors)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1000);
+    if siblings == 0 {
+        return (100, true);
+    }
+    let Some(reserve) = total.checked_sub(budget).filter(|reserve| *reserve > 0) else {
+        // Promised every processor or more: no share is enough.
+        return (10_000, false);
+    };
+    // weight / (weight + siblings) >= budget / total
+    let needed = u128::from(siblings) * u128::from(budget);
+    let weight = needed.div_ceil(u128::from(reserve)).max(1);
+    match u16::try_from(weight) {
+        Ok(weight) if weight <= 10_000 => (weight, true),
+        _ => (10_000, false),
+    }
+}
+
 /// The least default low watermark on 4 KiB pages.
 const DEFAULT_LOW_WATERMARK_MIN: u64 = 512 << 20;
 
@@ -1065,6 +1208,41 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// A host keeps a sixteenth of its processors back, at least half of
+    /// one, unless told otherwise.
+    #[test]
+    fn processor_capacity_keeps_headroom_back() {
+        assert_eq!(cpu_budget(16, None, None).unwrap(), 15_000);
+        assert_eq!(cpu_budget(64, None, None).unwrap(), 60_000);
+        assert_eq!(cpu_budget(2, None, None).unwrap(), 1500);
+        assert_eq!(cpu_budget(8, None, Some(2000)).unwrap(), 6000);
+        // Given outright, overcommitted or not.
+        assert_eq!(cpu_budget(8, Some(32_000), None).unwrap(), 32_000);
+        assert!(cpu_budget(1, None, Some(1000)).is_err());
+    }
+
+    /// The VMs' group outweighs every busy group beside it by what they
+    /// were promised against what is kept back.
+    #[test]
+    fn the_vm_group_weighs_enough_to_get_its_capacity() {
+        // 8 processors, 7.5 promised: 0.5 kept back. Beside three groups
+        // of 100: 300 * 7500 / 500.
+        assert_eq!(vm_group_weight(300, 8, 7500), (4500, true));
+        for (siblings, processors, budget) in [(100, 8, 7360), (300, 16, 15_000), (250, 3, 2100)] {
+            let (weight, exact) = vm_group_weight(siblings, processors, budget);
+            assert!(exact);
+            let share = u128::from(weight) * u128::from(processors as u64 * 1000)
+                / (u128::from(weight) + u128::from(siblings));
+            assert!(share >= u128::from(budget) - 1, "{share} < {budget}");
+        }
+        // Nothing beside it: any weight is enough.
+        assert_eq!(vm_group_weight(0, 8, 7500), (100, true));
+        // Promised every processor, or more than a weight can cover.
+        assert_eq!(vm_group_weight(100, 8, 8000), (10_000, false));
+        assert_eq!(vm_group_weight(100, 8, 12_000), (10_000, false));
+        assert_eq!(vm_group_weight(300, 64, 63_000), (10_000, false));
+    }
 
     /// A host on 4 KiB pages relieves memory pressure without being told
     /// to: its sandboxes may use more than they are guaranteed.

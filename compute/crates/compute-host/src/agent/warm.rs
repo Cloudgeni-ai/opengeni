@@ -269,6 +269,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.input(Input::Unmanaged {
                 sandbox: earlier.0,
                 bytes: 0,
+                cpu: 0,
             });
         }
     }
@@ -309,6 +310,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Input::Unmanaged {
                     sandbox: name.0,
                     bytes: build.bytes,
+                    cpu: 0,
                 },
             ]);
             self.build_left(build.name, Some(name));

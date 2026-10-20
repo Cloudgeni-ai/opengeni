@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use compute_core::{
     Action, Admission, At, Capacity, Durability, Failure, HoldId, Host, HostPolicy, Input, Level,
-    MemoryPolicy, Notice, OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State,
-    Step, StepLimits,
+    MemoryPolicy, Notice, OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy,
+    SleepRules, State, Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -491,6 +491,7 @@ fn a_removed_vm_counts_until_its_process_has_ended() {
     let actions = rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     assert!(matches!(started(&actions)[..], [(2, Step::Restore, _)]));
 }
@@ -502,6 +503,7 @@ fn a_vm_found_but_not_managed_counts_against_the_budget() {
     rig.send(Input::Unmanaged {
         sandbox: SandboxId(9),
         bytes: 1536 * MIB,
+        cpu: 0,
     });
     let actions = rig.touch(1);
     assert_eq!(host_full(&actions, 1), Some((GIB, 512 * MIB)));
@@ -704,9 +706,12 @@ struct Sim {
     now: At,
     rng: Rng,
     budget: u64,
+    /// Millicores guaranteed at once, in half the runs.
+    cpu_budget: Option<u64>,
     sizes: BTreeMap<SandboxId, Size>,
     running: BTreeMap<OpId, (SandboxId, Step)>,
     refusals: u64,
+    cpu_refusals: u64,
     starts: u64,
     limit: u32,
     /// Removed sandboxes whose VM the host agent has not ended yet.
@@ -722,8 +727,10 @@ impl Sim {
         let buffer = rng.below(3) * GIB;
         let limit = 1 + u32::try_from(rng.below(8)).unwrap();
         let limits = StepLimits::uniform(limit);
+        let cpu_budget = seed.is_multiple_of(2).then(|| (1 + rng.below(6)) * 1000);
         let host = Host::new(HostPolicy {
             limits,
+            cpu_budget,
             ..policy(budget, buffer)
         })
         .unwrap();
@@ -732,11 +739,13 @@ impl Sim {
             now: At::ZERO,
             rng,
             budget,
+            cpu_budget,
             sizes: BTreeMap::new(),
             running: BTreeMap::new(),
             ending: Vec::new(),
             failed: BTreeSet::new(),
             refusals: 0,
+            cpu_refusals: 0,
             starts: 0,
             limit,
         }
@@ -753,9 +762,17 @@ impl Sim {
                 }
                 Action::Notify {
                     sandbox,
-                    notice: Notice::HostFull { needed, free, .. },
+                    notice:
+                        Notice::HostFull {
+                            resource,
+                            needed,
+                            free,
+                        },
                 } => {
                     self.refusals += 1;
+                    if resource == Resource::Cpu {
+                        self.cpu_refusals += 1;
+                    }
                     assert!(needed > free, "{sandbox:?} refused though it fits");
                 }
                 _ => {}
@@ -766,7 +783,33 @@ impl Sim {
             capacity.reserved <= self.budget,
             "requests of awake sandboxes exceed the budget: {capacity:?}"
         );
+        self.check_cpu();
         self.check_waits_only_for_instant_relief();
+    }
+
+    /// The processor time of sandboxes awake or waking, counted from what
+    /// they do, never exceeds the budget, nor does what the host counts.
+    fn check_cpu(&self) {
+        let Some(budget) = self.cpu_budget else {
+            assert_eq!(self.host.cpu_capacity(), None);
+            return;
+        };
+        let cpu = self.host.cpu_capacity().unwrap();
+        assert!(cpu.reserved <= budget, "{cpu:?}");
+        let awake: u64 = self
+            .sizes
+            .iter()
+            .filter_map(|(id, size)| Some((self.host.sandbox(*id)?, size)))
+            .filter(|(view, _)| {
+                view.state.level == Level::Running
+                    || matches!(
+                        view.step,
+                        Some(Step::Resume | Step::Restore | Step::Boot | Step::Fetch)
+                    )
+            })
+            .map(|(_, size)| size.cpu)
+            .sum();
+        assert!(awake <= cpu.reserved, "{awake} awake beyond {cpu:?}");
     }
 
     /// A wake that neither started nor was refused waits for a free slot
@@ -818,6 +861,7 @@ impl Sim {
                     request,
                     limit,
                     save: limit,
+                    cpu: 10 * (1 + self.rng.below(200)),
                     ..Size::default()
                 };
                 self.sizes.insert(id, size);
@@ -871,7 +915,11 @@ impl Sim {
             78..81 if !self.ending.is_empty() => {
                 let index = self.rng.below(self.ending.len() as u64);
                 let sandbox = self.ending.swap_remove(usize::try_from(index).unwrap());
-                Input::Unmanaged { sandbox, bytes: 0 }
+                Input::Unmanaged {
+                    sandbox,
+                    bytes: 0,
+                    cpu: 0,
+                }
             }
             _ => {
                 let ops: Vec<OpId> = self.running.keys().copied().collect();
@@ -905,7 +953,7 @@ impl Sim {
 
 #[test]
 fn awake_requests_never_exceed_the_budget() {
-    let (mut starts, mut refusals) = (0, 0);
+    let (mut starts, mut refusals, mut cpu_refusals) = (0, 0, 0);
     for seed in 0..200 {
         let mut sim = Sim::new(seed);
         for _ in 0..2_000 {
@@ -913,9 +961,10 @@ fn awake_requests_never_exceed_the_budget() {
         }
         starts += sim.starts;
         refusals += sim.refusals;
+        cpu_refusals += sim.cpu_refusals;
     }
     assert!(
-        starts > 10_000 && refusals > 100,
-        "{starts} starts, {refusals} refusals"
+        starts > 10_000 && refusals > 100 && cpu_refusals > 50,
+        "{starts} starts, {refusals} refusals, {cpu_refusals} for processor time"
     );
 }
