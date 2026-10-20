@@ -120,7 +120,10 @@ function busWithAgent(opts: {
         op?.$case === "ping"
           ? {
               requestId: req.requestId,
-              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+              result: {
+                $case: "ping",
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
+              },
             }
           : op?.$case === "agentUpdateApply"
             ? {
