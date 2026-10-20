@@ -6,6 +6,7 @@ import {
   ClaudeSettingRows,
   claudePlan,
   claudeUsageCell,
+  ClaudeAccountUsageReadout,
 } from "./claude-subscription-models";
 import type {
   CodexAccount,
@@ -16,7 +17,8 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
+import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -77,6 +79,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { billingClassForModel } from "@/lib/model-policy";
 import { accountKey, type GatewayId } from "@/lib/models-route";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models, the list: every account that pays for
@@ -233,34 +236,31 @@ function useWorkspaceSnapshots(
   /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
   defaultsRevision: string,
 ): Record<string, WorkspaceModelsSnapshot | "loading" | "error"> {
-  const [snapshots, setSnapshots] = useState<
-    Record<string, WorkspaceModelsSnapshot | "loading" | "error">
-  >({});
   const readable = useMemo(
     () => workspaces.filter((workspace) => workspace.canManage),
     [workspaces],
   );
   const key = readable.map((workspace) => `${workspace.id}:${workspace.savedDefaultModel}`).join();
-  useEffect(() => {
-    let live = true;
-    setSnapshots(
-      Object.fromEntries(readable.map((workspace) => [workspace.id, "loading" as const])),
-    );
-    for (const workspace of readable) {
-      readWorkspaceModels(client, workspace, claudeEnabled)
-        .then((snapshot) => {
-          if (live) setSnapshots((current) => ({ ...current, [workspace.id]: snapshot }));
-        })
-        .catch(() => {
-          if (live) setSnapshots((current) => ({ ...current, [workspace.id]: "error" }));
-        });
-    }
-    return () => {
-      live = false;
-    };
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read when the set of workspaces changes
-  }, [client, key, claudeEnabled, defaultsRevision]);
-  return snapshots;
+  const query = useSharedQuery(
+    client,
+    ["model-settings", "workspace-snapshots", key, claudeEnabled, defaultsRevision],
+    async () =>
+      Object.fromEntries(
+        await Promise.all(
+          readable.map(
+            async (workspace) =>
+              [workspace.id, await readWorkspaceModels(client, workspace, claudeEnabled)] as const,
+          ),
+        ),
+      ),
+    { enabled: readable.length > 0, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  return (
+    query.data ??
+    Object.fromEntries(
+      readable.map((workspace) => [workspace.id, query.error ? "error" : "loading"]),
+    )
+  );
 }
 
 export function OrganizationModelsList({
@@ -407,7 +407,17 @@ export function OrganizationModelsList({
           email={account.email}
           primary={account.active}
           meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
-          cells={{ usage: claudeUsageCell(account) }}
+          cells={{
+            usage: (
+              <ClaudeAccountUsageReadout
+                client={client}
+                scope="workspace"
+                scopeId={workspace.id}
+                account={account}
+                canManage={workspace.canManage}
+              />
+            ),
+          }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
@@ -931,6 +941,8 @@ function OrganizationCodexRow({
   usage: ReactNode;
   onOpen: () => void;
 }) {
+  const live = useOrganizationCodexUsage(codex.client, codex.organizationId, account);
+  const readings = codexUsageReadings(live.data?.usage, Date.now());
   const access = useConnectionAccess({
     client: codex.client,
     organizationId: codex.organizationId,
@@ -952,6 +964,16 @@ function OrganizationCodexRow({
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
           <StatusBadge status="disabled" variant="dot" />
+        ) : live.loading ? (
+          <UsageReadout percent={null} window="this week" loading />
+        ) : live.error || live.data?.status === "error" ? (
+          <span className="text-xs text-fg-muted">Usage unavailable</span>
+        ) : live.data ? (
+          <UsageReadout
+            percent={readings[0]!.percent}
+            window="this week"
+            resets={usageResets(readings, readings[0]!.label)}
+          />
         ) : (
           usage
         ),

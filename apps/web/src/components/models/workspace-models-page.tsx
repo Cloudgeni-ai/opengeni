@@ -1,4 +1,6 @@
 import { t } from "@/lib/console-text";
+import { ModelsRefreshControl } from "./models-refresh-control";
+import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -1337,6 +1339,17 @@ export function WorkspaceModelsPageBody({
   return (
     <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
+        {!key && !view ? <ModelsRefreshControl client={client} /> : null}
+        {organizationAdmin
+          ? orgCodex.accounts.map((candidate) => (
+              <OrganizationCodexDetailPrefetch
+                key={candidate.id}
+                client={client}
+                organizationId={orgId}
+                account={candidate}
+              />
+            ))
+          : null}
         {page}
       </div>
     </ModelsListLabelProvider>

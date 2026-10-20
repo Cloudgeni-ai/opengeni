@@ -30,6 +30,7 @@ import {
   sharedQueryWriter,
   useSharedQuery,
   useSharedQueryValue,
+  useSharedQueryActivity,
   type SharedQueryOptions,
 } from "../src/hooks/shared-query";
 import { OpenGeniProvider } from "../src/provider";
@@ -37,6 +38,31 @@ import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
 registerDom();
+
+test("read activity follows matching mounted reads, refresh failures and client changes", async () => {
+  const scope = {};
+  let fail = false;
+  const view = await renderHook(() => {
+    const query = useSharedQuery(scope, ["settings", "one"], async () => {
+      if (fail) throw new Error("offline");
+      return "value";
+    });
+    const activity = useSharedQueryActivity(scope, ["settings"]);
+    const other = useSharedQueryActivity({}, ["settings"]);
+    return { query, activity, other };
+  }, undefined);
+  try {
+    expect(view.result.current.activity.updatedAt).toBe(view.result.current.query.updatedAt);
+    expect(view.result.current.activity.fetching).toBe(false);
+    expect(view.result.current.other.updatedAt).toBeNull();
+    fail = true;
+    await actRun(() => view.result.current.query.refresh());
+    expect(view.result.current.activity.failed).toBe(true);
+    expect(view.result.current.activity.fetching).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

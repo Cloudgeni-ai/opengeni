@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-import { actRun, registerDom, renderHook } from "../../../../packages/react/test/render-hook";
+import {
+  actRun,
+  flush,
+  registerDom,
+  renderHook,
+} from "../../../../packages/react/test/render-hook";
 import { notifyCreditBalanceChanged } from "./credit-balance-events";
+import { invalidateSharedQueries, retainSharedQueries } from "./shared-query";
 
 const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
 
@@ -14,6 +20,24 @@ registerDom();
 afterEach(() => document.body.replaceChildren());
 
 describe("useWorkspaceModelCatalog", () => {
+  test("revisits reuse the catalog and global Models refresh invalidates it", async () => {
+    const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
+    context.client = { getWorkspaceModelCatalog } as unknown as OpenGeniBrowserClient;
+    const release = retainSharedQueries(context.client);
+    const first = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), {});
+    await first.unmount();
+    const second = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), {});
+    try {
+      expect(second.result.current.loading).toBe(false);
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(1);
+      await actRun(() => invalidateSharedQueries(context.client, ["model-settings"]));
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(2);
+    } finally {
+      await second.unmount();
+      release();
+    }
+  });
+
   test("settled usage and returning to the app refresh funding without reopening the picker", async () => {
     const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
     context.client = { getWorkspaceModelCatalog } as unknown as OpenGeniBrowserClient;
@@ -103,6 +127,8 @@ describe("useWorkspaceModelCatalog", () => {
     expect(signals[1]?.aborted).toBe(false);
 
     await hook.unmount();
+    // Unretained shared reads release after the StrictMode grace task.
+    await flush();
     expect(signals[1]?.aborted).toBe(true);
   });
 });
