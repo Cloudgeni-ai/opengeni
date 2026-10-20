@@ -1,5 +1,5 @@
 import { claudeProviderId } from "@opengeni/config";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceGatewayCustomModelRequest,

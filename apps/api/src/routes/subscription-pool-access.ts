@@ -8,7 +8,8 @@ import {
 } from "@opengeni/core";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { agentActingAsPersonBeforeGrantCheck, isAgentActingAsPerson } from "../http/acting-person";
+import { agentActingAsPersonBeforeGrantCheck } from "../http/acting-person";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 type ManagedCookieHuman = { subjectId: string };
 
 /**
@@ -62,32 +63,6 @@ export async function managedCookieHuman(
     sessionSetMode: deps.settings.managedAuthSessionSetMode,
   });
   return session?.user?.id ? { subjectId: `user:${session.user.id}` } : null;
-}
-
-export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
-  // Built in process for an agent acting as a person: no browser credentials
-  // ride along, so there is no cross-site request to guard against.
-  if (isAgentActingAsPerson(c)) return;
-  const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") {
-    throw new HTTPException(403, { message: "JSON browser request required" });
-  }
-  if (!deps.settings.publicBaseUrl) {
-    throw new HTTPException(503, {
-      message: "managed browser origin is not configured",
-    });
-  }
-  const expectedOrigin = new URL(deps.settings.publicBaseUrl).origin;
-  if (c.req.header("origin") !== expectedOrigin) {
-    throw new HTTPException(403, {
-      message: "same-origin browser request required",
-    });
-  }
-  if (c.req.header("sec-fetch-site")?.toLowerCase() !== "same-origin") {
-    throw new HTTPException(403, {
-      message: "same-origin fetch metadata required",
-    });
-  }
 }
 
 export async function requirePrivateSubscriptionHuman(
