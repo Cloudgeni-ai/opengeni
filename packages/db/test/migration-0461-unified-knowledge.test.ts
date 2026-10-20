@@ -97,6 +97,8 @@ const forwardMigrations = [
   "0855_session_fork_agent_parity.sql",
   // Patches 0855's fork routines and backfills over 0560's import column.
   "0856_session_fork_workflow_identity.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501.
+  "0873_mcp_binding_delegation_revocation.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
