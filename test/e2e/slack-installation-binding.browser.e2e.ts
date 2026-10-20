@@ -93,7 +93,9 @@ describe("Slack installation binding browser acceptance", () => {
       expect((await settings.textContent()) ?? "").not.toContain(workspaceId);
       // Healthy: Reconnect is a secondary action in the page's ⋯ menu, and it is available.
       expect(await settings.getByRole("button", { name: "Reconnect" }).count()).toBe(0);
-      await settings.getByRole("button", { name: "More actions for Slack", exact: true }).click();
+      await settings
+        .getByRole("button", { name: "More actions for Slack Binding Team", exact: true })
+        .click();
       const reconnectItem = page.getByRole("menuitem", { name: "Reconnect", exact: true });
       await reconnectItem.waitFor();
       expect(await reconnectItem.getAttribute("aria-disabled")).toBeNull();
@@ -135,6 +137,11 @@ async function openSlackSettings(page: Page, chip: string) {
   await settings.waitFor({ state: "visible", timeout: 15_000 });
   expect(await settings.locator("h1").textContent()).toBe("Slack");
   expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
+  // Slack opens the workspace inventory first. The named installation owns
+  // its exact tenant/principal binding, health, and repair controls.
+  await settings.getByRole("button", { name: /Slack Binding Team/ }).click();
+  await settings.getByRole("heading", { name: "Slack Binding Team", exact: true }).waitFor();
+  expect(new URL(page.url()).pathname).toContain(`/workspaces/${workspaceId}/`);
   // A healthy connection carries no badge in the header; attention does.
   const headerBadge = settings.locator(
     '[data-slot="detail-page-header"] [data-slot="status-badge"]',
@@ -230,6 +237,15 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: [slackConnection(state.connectionStatus)] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/available`) {
+      return json({
+        connections: [slackConnection(state.connectionStatus)],
+        organizationSharedConnectionIds: [],
+      });
+    }
+    if (url.pathname.endsWith("/slack-bot/organization-access")) {
+      return json({ connectionId, enabled: false, generation: 0, workspaceIds: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
       return json({

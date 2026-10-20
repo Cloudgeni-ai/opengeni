@@ -183,14 +183,13 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
-    const posting = new Set<string>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
-    // Ordinary-chat discovery is not an unattended posting grant. Preserve
-    // every other default, but no bot posting without a person-chosen channel.
-    expect(session.firstPartyMcpTools).toEqual(defaults.filter((tool) => !posting.has(tool)));
+    // Scheduled work gets the ordinary tool defaults. Delivery still requires
+    // the exact bot connection and channel authority at execution.
+    expect(session.firstPartyMcpTools).toEqual(defaults);
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
-    for (const tool of posting) {
+    for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
       expect(defaults).toContain(tool);
-      expect(session.firstPartyMcpTools).not.toContain(tool);
+      expect(session.firstPartyMcpTools).toContain(tool);
     }
   }, 60_000);
 
@@ -198,7 +197,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     ["posting allowed", ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS]],
     ["posting disallowed", ["goal_set"]],
   ] as const)(
-    "explicit defaults stay destination-bound and under the ceiling: %s",
+    "explicit defaults stay under the deployment tool ceiling: %s",
     async (_label, allowed) => {
       if (!available) return;
       const grant = await workspaceGrant();
@@ -208,7 +207,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         allowedFirstPartyMcpTools: [...allowed],
       });
       expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
-      expect(session.firstPartyMcpTools).toEqual(["goal_set"]);
+      expect(session.firstPartyMcpTools).toEqual([...allowed]);
       expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
       expect(accepted?.resolvedAgentConfig).toEqual(session.agent);
     },
@@ -222,7 +221,10 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     const { accepted } = await dispatchGeneratedSession(grant, task.id, {
       defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
     });
-    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(["goal_set"]);
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual([
+      "goal_set",
+      ...SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+    ]);
     const { producerKey } = await queuedAgentRun(grant, accepted!);
     const { activities: scheduled } = activities({
       defaultFirstPartyMcpTools: [
@@ -241,6 +243,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     if (recovered.action !== "start") throw new Error("queued recovery did not start");
     const stored = await getSession(client.db, grant.workspaceId, recovered.sessionId);
     expect(stored?.firstPartyMcpTools).toEqual(accepted!.resolvedFirstPartyMcpTools);
+    expect(stored?.firstPartyMcpTools).not.toContain("knowledge_search");
     expect(stored?.agent).toEqual(accepted!.resolvedAgentConfig);
   }, 60_000);
 

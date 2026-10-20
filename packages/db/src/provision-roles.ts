@@ -2700,12 +2700,21 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.organization_slack_bot_access FROM PUBLIC;
       REVOKE ALL ON FUNCTION
         opengeni_private.set_organization_slack_bot_access(uuid,uuid,uuid,text,boolean),
-        opengeni_private.set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[]),
-        opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid),
         opengeni_private.read_organization_slack_bot_access(uuid,uuid,uuid),
         opengeni_private.list_organization_slack_bots(uuid,uuid),
         opengeni_private.prepare_organization_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,uuid,bigint,text,text,text),
         opengeni_private.read_organization_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
+      -- Selected-workspace access arrived after the base organization bot
+      -- table. Historical schema provisioning must use the installed routine
+      -- inventory, not migration receipts (upgrade fixtures withhold bodies).
+      FOREACH routine_signature IN ARRAY ARRAY[
+        'set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[])',
+        'read_slack_bot_workspace_access(uuid,uuid,uuid)'
+      ] LOOP
+        IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+          EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        END IF;
+      END LOOP;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'sync_usage_maintenance_due()',
