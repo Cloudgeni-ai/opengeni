@@ -227,7 +227,10 @@ pick a VM.
   booked a paused sandbox whose 8 GiB image had just been saved at
   8 GiB while its VM held 336 MiB, and would have had relief balloon,
   pause and save a sandbox for writing to its disk. Shared memory, mapped
-  files and cache still to be written stay held.
+  files and cache still to be written stay held: what a guest writes to
+  its disk is held until the host writes it back, within its writeback delay
+  (`vm.dirty_expire_centisecs`, 30 s by default): the drives pass guests
+  no flush, so a guest's own sync does not hasten it.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents
