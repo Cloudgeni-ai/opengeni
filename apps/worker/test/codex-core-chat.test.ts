@@ -47,6 +47,7 @@ import {
   finalizeCoreCodexUsage,
   observeCodexResponseCompletion,
   recordCoreCodexRefusal,
+  recordCoreCodexUsageReading,
 } from "../src/activities/agent-turn/codex-core-settlement";
 import {
   CodexCredentialLeaseLostError,
@@ -855,6 +856,49 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     personal: false,
   };
   const lease = { holderId: "codex-turn:holder", generation: 3 };
+
+  test("each response appends under the serving lease without waiting for finalization", async () => {
+    const append = spy(db, "recordSubscriptionCoreCodexTurnUsageReading").mockResolvedValue(true);
+    const quota = spy(db, "applySubscriptionCoreCodexQuotaObservation");
+    for (let index = 0; index < 3; index++) {
+      const checkedAt = new Date(1_790_000_000_000 + index * 60_000);
+      await recordCoreCodexUsageReading({
+        db: {} as db.Database,
+        core,
+        lease,
+        credentialVersion: null,
+        usage: {
+          primaryUsedPercent: index * 10,
+          primaryResetAt: null,
+          secondaryUsedPercent: null,
+          secondaryResetAt: null,
+          checkedAt,
+        },
+      });
+      expect(append).toHaveBeenLastCalledWith(
+        {},
+        identity,
+        { connectionId: core.connectionId, ...lease },
+        expect.objectContaining({ observedAt: checkedAt.getTime(), observedRefreshGeneration: 5 }),
+      );
+    }
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(quota).not.toHaveBeenCalled();
+    await recordCoreCodexUsageReading({
+      db: {} as db.Database,
+      core,
+      lease: { holderId: null, generation: null },
+      credentialVersion: 5,
+      usage: {
+        primaryUsedPercent: 40,
+        primaryResetAt: null,
+        secondaryUsedPercent: null,
+        secondaryResetAt: null,
+        checkedAt: new Date(),
+      },
+    });
+    expect(append).toHaveBeenCalledTimes(3);
+  });
 
   test("usage headers become a fenced shared quota observation", () => {
     const checkedAt = new Date("2026-10-08T12:00:00Z");

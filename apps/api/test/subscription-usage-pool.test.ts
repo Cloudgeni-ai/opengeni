@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as realDb from "@opengeni/db";
 import * as realCore from "@opengeni/core";
+import { SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+import { buildSubscriptionUsagePool } from "@opengeni/subscriptions";
 
 let authorized = true;
 let personal = false;
@@ -90,4 +92,52 @@ test("personal telemetry keeps the owning-human account-list fence", async () =>
   personal = true;
   expect((await app.request("/v1/workspaces/workspace/subscription-usage-pools")).status).toBe(401);
   expect(calls).toEqual([]);
+});
+
+test("a full pool with fractional capacity weights passes the bounded response schema", () => {
+  const now = Date.now();
+  const pool = buildSubscriptionUsagePool({
+    provider: "codex",
+    now,
+    historyStart: null,
+    readings: [],
+    calls: [],
+    accounts: [9 / 31, 1, 69 / 31].map((planWeight, index) => ({
+      id: `00000000-0000-4000-8000-00000000000${index}`,
+      label: `Account ${index}`,
+      plan: null,
+      planWeight,
+      windows: [
+        { id: "weekly" as const, usedPercent: 0, observedAt: now, resetsAt: now + 86_400_000 },
+      ],
+    })),
+  });
+  const iso = (at: number | null) => (at === null ? null : new Date(at).toISOString());
+  const response = {
+    checkedAt: iso(now),
+    pools: [
+      {
+        ...pool,
+        observedAt: iso(pool.observedAt),
+        windows: pool.windows.map((window) => ({
+          ...window,
+          accounts: window.accounts.map((account) => ({
+            ...account,
+            observedAt: iso(account.observedAt),
+            resetsAt: iso(account.resetsAt),
+          })),
+          forecast: {
+            ...window.forecast,
+            runsOutAt: iso(window.forecast.runsOutAt),
+            nextResetAt: iso(window.forecast.nextResetAt),
+          },
+        })),
+      },
+    ],
+  };
+  expect(
+    SubscriptionUsagePoolsResponse.parse(response).pools[0]!.windows.find(
+      (window) => window.id === "weekly",
+    )!.remainingPercent,
+  ).toBe(100);
 });

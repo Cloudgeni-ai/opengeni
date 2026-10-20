@@ -73,7 +73,9 @@ BEGIN
       END IF;
       SELECT c.provider INTO provider_id FROM subscription_connections c
         WHERE c.id = p_connection AND c.account_id = p_account AND c.provider = p_provider
-          AND c.ownership = 'shared' AND c.disconnected_at IS NULL;
+          AND c.disconnected_at IS NULL;
+      -- Personal turn writes arrive with the exact accepted-turn capability;
+      -- ordinary personal-owner reads still use the owner-only seam below.
       IF provider_id IS NULL THEN
         workspace_id := nullif(current_setting('opengeni.workspace_id', true), '')::uuid;
         subject_id := nullif(current_setting('opengeni.subject_id', true), '');

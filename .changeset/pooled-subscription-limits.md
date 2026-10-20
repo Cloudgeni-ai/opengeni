@@ -1,4 +1,5 @@
 ---
+"@opengeni/codex": minor
 "@opengeni/subscriptions": minor
 "@opengeni/contracts": minor
 "@opengeni/sdk": minor

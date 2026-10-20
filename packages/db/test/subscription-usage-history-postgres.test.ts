@@ -307,8 +307,9 @@ test.skipIf(!real)(
           label: "Personal",
         }),
       );
-      expect(personal).not.toBeNull();
-      const personalConnection = personal!.id;
+      expect(personal.kind).toBe("connected");
+      if (personal.kind !== "connected") throw new Error("Personal fixture connection refused");
+      const personalConnection = personal.id;
       const observation = {
         observedAt: Date.now(),
         windows: [
