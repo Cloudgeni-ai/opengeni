@@ -428,6 +428,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
