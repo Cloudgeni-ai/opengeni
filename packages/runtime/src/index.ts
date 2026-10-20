@@ -11325,6 +11325,9 @@ export type SandboxLifecycleHook = {
   id: string;
   phase: SandboxLifecycleHookPhase;
   shouldRun?: (context: SandboxLifecycleHookContext) => boolean;
+  /** The hook neither depends on nor affects any other hook, so it may run
+   * concurrently with them. Hooks without this flag keep their relative order. */
+  independent?: boolean;
   run: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>;
 };
 
@@ -11378,10 +11381,54 @@ export async function runBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
-    await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+  await runApplicableBeforeAgentStartHooks(
+    session,
+    applicableBeforeAgentStartHooks(hooks, context),
+    context,
+  );
+}
+
+/**
+ * Each hook costs at least one provider round trip, so independent hooks start
+ * at once and overlap the ordered ones; ordered hooks still run one after
+ * another and stop at the first failure. Setup waits for every started hook,
+ * then reports the failure of the earliest hook in declaration order, so the
+ * error does not depend on which round trip happened to finish first.
+ */
+async function runApplicableBeforeAgentStartHooks(
+  session: SandboxSessionLike,
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
+    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
       hook.run(session, context),
     );
+  if (!hooks.some((hook) => hook.independent)) {
+    for (const hook of hooks) await runHook(hook);
+    return;
+  }
+  const failures = new Map<SandboxLifecycleHook, unknown>();
+  const record = (hook: SandboxLifecycleHook) => (error: unknown) => {
+    failures.set(hook, error);
+  };
+  const independent = hooks
+    .filter((hook) => hook.independent)
+    .map((hook) => runHook(hook).catch(record(hook)));
+  const ordered = (async () => {
+    for (const hook of hooks) {
+      if (hook.independent) continue;
+      try {
+        await runHook(hook);
+      } catch (error) {
+        record(hook)(error);
+        return;
+      }
+    }
+  })();
+  await Promise.all([...independent, ordered]);
+  for (const hook of hooks) {
+    if (failures.has(hook)) throw failures.get(hook);
   }
 }
 
@@ -11397,11 +11444,7 @@ export function withSandboxLifecycleHooks(
   const seen = new WeakSet<object>();
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
-      for (const hook of beforeAgentStartHooks) {
-        await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
-          hook.run(session, context),
-        );
-      }
+      await runApplicableBeforeAgentStartHooks(session, beforeAgentStartHooks, context);
       seen.add(session);
     }
     return session;
@@ -11474,6 +11517,7 @@ export function sandboxArtifactRuntimeDoctorHooks(
     {
       id: "artifact-runtime-doctor",
       phase: "beforeAgentStart",
+      independent: true,
       run: async (session, context) => {
         const result = await runSandboxLifecycleCommand(
           session,
@@ -11533,6 +11577,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
               {
                 id: "codemode-client",
                 phase: "beforeAgentStart" as const,
+                independent: true,
                 run: runManagedCodemodeClientHook,
               },
             ]
