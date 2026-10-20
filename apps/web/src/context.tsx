@@ -15,6 +15,7 @@ import { useConsoleSharedQueries } from "@/lib/shared-query";
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import {
+  DESKTOP_APP_RETURN_PATH,
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
@@ -805,6 +806,7 @@ export function RootRouteComponent() {
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
+    pathname === DESKTOP_APP_RETURN_PATH ||
     isPublicDevHarness;
   useEffect(() => {
     if (!browserAccountsConfigured) configureManagedActorEpoch(null);

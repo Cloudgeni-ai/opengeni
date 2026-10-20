@@ -33,6 +33,7 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
+//   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
@@ -47,6 +48,7 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
+import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
@@ -132,6 +134,10 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazyDesktopReturnRoute = lazyRouteComponent(
+  () => import("@/routes/desktop-return"),
+  "DesktopReturnRoute",
 );
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
@@ -307,6 +313,13 @@ const resetPasswordRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
+});
+// Where a sign-in started in the desktop app lands in the person's browser:
+// hand them back to the app. PUBLIC, like `/reset-password`.
+const desktopReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: DESKTOP_APP_RETURN_PATH.slice(1),
+  component: LazyDesktopReturnRoute,
 });
 const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -818,6 +831,7 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   connectAgentRoute,
   resetPasswordRoute,
+  desktopReturnRoute,
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
