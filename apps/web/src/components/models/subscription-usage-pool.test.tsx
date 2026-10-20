@@ -54,13 +54,13 @@ test("shows weekly utilization and weighted details, with only currently blockin
 });
 
 test("run-out headline names the time and gap to the next reset", async () => {
+  const pool = pooledLimitsFixture("organization", false, true);
+  const weekly = pool.windows.find((window) => window.id === "weekly")!;
+  expect(Date.parse(weekly.forecast.nextResetAt!)).toBe(
+    Math.min(...weekly.accounts.map((account) => Date.parse(account.resetsAt!))),
+  );
   await act(async () =>
-    root.render(
-      <SubscriptionUsagePoolView
-        pool={pooledLimitsFixture("organization", false, true)}
-        now={POOL_PREVIEW_NOW}
-      />,
-    ),
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
   );
   expect(container.textContent).toContain("At this pace you'll run out");
   expect(container.textContent).toContain("1 day before the next reset.");

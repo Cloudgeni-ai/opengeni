@@ -52,8 +52,8 @@ export function pooledLimitsFixture(
         forecast: {
           kind: sparse ? "insufficient_history" : runsOut ? "runs_out" : "unused",
           basis: sparse ? "collecting usage readings" : "last 7 days, adjusted to this week's pace",
-          runsOutAt: !sparse && runsOut ? at(55) : null,
-          nextResetAt: at(79),
+          runsOutAt: !sparse && runsOut ? at(52) : null,
+          nextResetAt: at(76),
           unusedPercent: sparse || runsOut ? null : 50,
           utilizationPercent: sparse ? null : runsOut ? 100 : 50,
           lowestPercent: sparse ? null : runsOut ? 0 : 30,
