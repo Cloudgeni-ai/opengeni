@@ -108,6 +108,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.claimed(id, config, reply, *claimed);
                 self.refill();
             }
+            Event::VmEnded { id, host } => self.vm_ended(id, host),
             Event::Destroyed {
                 id,
                 host,
@@ -177,6 +178,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let _ = reply.send(Ok(()));
     }
 
+    /// The VM of `id`, under removal, ended: its memory and processors are
+    /// free for others at once, under whichever name it was counted,
+    /// however long the rest of the removal takes and however it ends.
+    fn vm_ended(&mut self, id: Id, host: Id) {
+        self.release_vm(id, host);
+        self.spare_gone(host, true);
+    }
+
+    /// Tells the core that the VM counted as `id` or `host` has ended.
+    /// Telling it again changes nothing.
+    fn release_vm(&mut self, id: Id, host: Id) {
+        self.inputs([id, host].map(|name| Input::Unmanaged {
+            sandbox: name.0,
+            bytes: 0,
+            cpu: 0,
+        }));
+    }
+
     /// A removal ended, finished or stopped part way.
     fn destroyed(
         &mut self,
@@ -195,13 +214,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 self.leftovers.remove(&id.0);
                 self.hosts.remove(&host.0);
-                // Its VM has ended: its memory is free for others, under
-                // whichever name it was counted, and what a restart booked
-                // for it on disk shows in the next reading.
-                self.inputs([id, host].map(|name| Input::Unmanaged {
-                    sandbox: name.0,
-                    bytes: 0,
-                }));
+                // Its VM has ended, as already reported unless what was
+                // left was only its files. What a restart booked for it
+                // on disk shows in the next reading.
+                self.release_vm(id, host);
                 self.inputs([id, host].map(|name| Input::Writes {
                     key: name.0,
                     disk: DiskSpace::default(),
@@ -219,6 +235,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         self.handing_away.remove(&id.0);
         self.dropped(id, result);
+        // A spare whose VM ended is already gone.
         self.spare_gone(host, result.is_ok());
     }
 
@@ -840,7 +857,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 host,
                 hand_off,
             };
-            let result = removal.run(fence, vm, &spec, &paths.dir).await;
+            let ended = || {
+                let _ = events.send(Event::VmEnded { id, host });
+            };
+            let result = removal.run(fence, vm, &spec, &paths.dir, ended).await;
             if let Err(error) = &result {
                 tracing::error!(%id, %error, "removal stopped; the next start of the agent finishes it");
             }
@@ -1006,13 +1026,15 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
     /// Records that removal began, ends the VM, deletes the store's copy,
     /// then the record, then the files. Until the record is gone a restart
     /// resumes the removal; after, the directory is an unrecorded stray
-    /// that recovery deletes.
+    /// that recovery deletes. Calls `ended` as soon as the VM is known to
+    /// have ended, before the rest.
     async fn run(
         &self,
         fence: Fence,
         vm: Option<(E::Vm, LiveMemory)>,
         spec: &VmSpec,
         dir: &Path,
+        ended: impl FnOnce(),
     ) -> Result<(), HostError> {
         let id = self.id;
         let begun = if self.hand_off {
@@ -1040,6 +1062,7 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             None => self.engine.clean_up(spec).await,
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
+        ended();
         if let Some(net) = self.net.clone() {
             // The record holds its ordinal until it is removed below.
             let ordinal = record.allocation.link.map(|_| record.ordinal);

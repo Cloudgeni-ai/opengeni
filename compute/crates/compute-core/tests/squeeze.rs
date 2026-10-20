@@ -512,6 +512,7 @@ fn a_removed_sandbox_keeps_its_claim_until_its_vm_is_gone() {
     let actions = rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(started(&actions, 2)[0].0, Step::Restore, "{actions:?}");
 }

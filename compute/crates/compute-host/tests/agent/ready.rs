@@ -279,6 +279,40 @@ async fn a_create_that_asks_for_less_still_claims_a_ready_sandbox_given_its_guar
     lab.assert_clean();
 }
 
+/// A ready sandbox's guest runs whole while it fills, so it starts at its
+/// shape's whole weight, as it is booked, and a create that asks for no
+/// request takes it at the default: a tenth of its processor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_runs_at_its_whole_weight_and_a_default_claim_lowers_it() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 1).await;
+    wait_filled(&lab, 1).await;
+    let filled = ready_dirs(&lab);
+    let weight = lab
+        .world
+        .started_weights
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(name, _)| filled.contains(name))
+        .map(|(_, weight)| *weight)
+        .expect("the fill's VM started");
+    assert_eq!(weight, SHAPE.cpu_weight(), "a whole processor's weight");
+    assert_eq!(create(&lab, id(1)).await, Reply::Done);
+    let (dir, record) = record_of(&lab, id(1));
+    assert!(filled.contains(&dir), "it took the ready sandbox");
+    assert!(
+        record["config"].get("cpu_request_millis").is_none(),
+        "{record}"
+    );
+    assert_eq!(
+        *lab.world.guarantees.lock().unwrap(),
+        [(dir, SHAPE.memory_mib, 10)],
+        "its VM was given the default request's weight"
+    );
+    wait_filled(&lab, 1).await;
+    lab.assert_clean();
+}
+
 /// Ready sandboxes share the host's one memory book: they count against
 /// admission, a wake that needs their room ends one first, and a fill
 /// waits until there is room no wake wants.

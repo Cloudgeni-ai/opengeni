@@ -26,6 +26,8 @@ fn random() -> u64 {
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
+        cpu_millis: None,
+        cpu_free_millis: None,
         disk_free_mib: 1024,
         ready: Vec::new(),
         awake: 0,
@@ -45,6 +47,7 @@ fn register(name: &str, attempt: u64, held: Vec<Held>) -> Register {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 4096,
+            cpu_millis: None,
             disk_mib: 4096,
         },
         capacity: capacity(),

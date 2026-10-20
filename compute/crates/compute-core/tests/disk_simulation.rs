@@ -105,6 +105,7 @@ impl Sim {
             let size = Size {
                 request: limit,
                 limit,
+                cpu: 0,
                 save: limit + 64 * MIB,
                 disk,
                 fetch: limit + disk + 64 * MIB,
@@ -406,6 +407,7 @@ fn booking(key: SandboxId, spare: bool, disk: DiskSpace) -> Input {
             bytes: MIB,
             disk,
             filling: disk != DiskSpace::default(),
+            cpu: 0,
         }
     } else {
         Input::Writes { key, disk }

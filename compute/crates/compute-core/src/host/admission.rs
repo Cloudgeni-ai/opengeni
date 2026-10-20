@@ -2,7 +2,9 @@
 //! decided by arithmetic with instant relief only; the buffer of free room
 //! kept ahead of wakes in the background, and the memory pressure relief
 //! that shares its mechanism; see [`crate::Admission`]. A wake must also
-//! fit the local disk its saves may need; see [`super::disk`].
+//! fit the processor time the host guarantees (see
+//! [`crate::HostPolicy::cpu_budget`]) and the local disk its saves may need
+//! (see [`super::disk`]).
 
 use std::time::Duration;
 
@@ -14,7 +16,7 @@ use crate::sandbox::{QueueKey, Sandbox};
 use crate::time::At;
 
 /// What one sandbox may take of host memory, like a request and a limit,
-/// and of local disk for a save.
+/// of processor time, and of local disk for a save.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Size {
     /// Bytes reserved for it while it runs: what it is guaranteed. Admission
@@ -23,6 +25,11 @@ pub struct Size {
     /// Bytes its VM can use at most: its memory size. Counted for a paused
     /// VM whose resident size has not been reported yet.
     pub limit: u64,
+    /// Millicores of processor time reserved for it while it is awake or
+    /// waking: what it is guaranteed when processors are contended,
+    /// counted against [`crate::HostPolicy::cpu_budget`]. A sleeping
+    /// sandbox reserves none.
+    pub cpu: u64,
     /// Bytes of local disk one save of its VM may write at most, booked
     /// while its VM holds state not saved yet; see [`crate::DiskPolicy`].
     pub save: u64,
@@ -39,16 +46,25 @@ pub struct Size {
 
 impl Size {
     /// A sandbox that reserves and may use `bytes`, whose saves write at
-    /// most as much, and that books no disk growth or fetch.
+    /// most as much, and that reserves no processor time and books no disk
+    /// growth or fetch.
     #[must_use]
     pub const fn whole(bytes: u64) -> Self {
         Self {
             request: bytes,
             limit: bytes,
+            cpu: 0,
             save: bytes,
             disk: 0,
             fetch: 0,
         }
+    }
+
+    /// The same, reserving `millis` of processor time while awake.
+    #[must_use]
+    pub const fn with_cpu(mut self, millis: u64) -> Self {
+        self.cpu = millis;
+        self
     }
 }
 
@@ -80,6 +96,31 @@ impl Capacity {
     /// nothing more fits until room is made.
     pub(super) fn headroom(&self) -> i128 {
         i128::from(self.budget) - i128::from(self.occupied)
+    }
+}
+
+/// How much of the processor budget is taken; see [`Host::cpu_capacity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuCapacity {
+    /// Millicores the host guarantees its sandboxes at once.
+    pub budget: u64,
+    /// Millicores reserved by sandboxes awake or waking, and by VMs not
+    /// managed here that may run.
+    pub reserved: u64,
+}
+
+impl CpuCapacity {
+    /// Millicores a wake can still reserve; 0 when the budget is
+    /// overdrawn.
+    #[must_use]
+    pub const fn free(&self) -> u64 {
+        self.budget.saturating_sub(self.reserved)
+    }
+
+    /// Millicores left of the budget, negative when it is overdrawn, as
+    /// after a restart with a smaller budget.
+    pub(super) fn headroom(&self) -> i128 {
+        i128::from(self.budget) - i128::from(self.reserved)
     }
 }
 
@@ -173,6 +214,12 @@ impl Sandbox {
         self.awake_bytes()
             .saturating_sub(self.occupies(compressed_percent))
     }
+
+    /// Millicores more it reserves once a wake of it has started: none
+    /// when it reserves already.
+    pub(super) fn cpu_need(&self) -> u64 {
+        if self.reserves() { 0 } else { self.size.cpu }
+    }
 }
 
 /// What relief is measured in.
@@ -206,6 +253,29 @@ impl Host {
         }
         capacity.occupied += self.unmanaged.values().sum::<u64>() + self.spares.held();
         Some(capacity)
+    }
+
+    /// How much of the processor budget is taken, or `None` without one.
+    #[must_use]
+    pub fn cpu_capacity(&self) -> Option<CpuCapacity> {
+        let budget = self.policy.cpu_budget?;
+        let awake: u64 = self
+            .sandboxes
+            .values()
+            .filter(|slot| slot.reserves())
+            .map(|slot| slot.size.cpu)
+            .sum();
+        Some(CpuCapacity {
+            budget,
+            reserved: awake + self.unmanaged_cpu.values().sum::<u64>() + self.spares.filling_cpu(),
+        })
+    }
+
+    /// Takes in [`crate::Input::CpuBudget`].
+    pub(super) fn set_cpu_budget(&mut self, millis: u64) {
+        if self.policy.cpu_budget.is_some() {
+            self.policy.cpu_budget = Some(millis);
+        }
     }
 
     /// Whether `id`'s wake was refused for want of memory and it waits,
@@ -245,16 +315,19 @@ impl Host {
     pub(super) fn left(&self) -> Option<Left> {
         let left = Left {
             memory: self.capacity().map(|capacity| capacity.headroom()),
+            cpu: self.cpu_capacity().map(|capacity| capacity.headroom()),
             waiting: 0,
             disk: self.disk_room(),
         };
-        (left.memory.is_some() || left.disk.is_some()).then_some(left)
+        (left.memory.is_some() || left.cpu.is_some() || left.disk.is_some()).then_some(left)
     }
 
     /// Starts the queued wakes of kind `step`, which needs memory, while
-    /// its limit allows and they fit into what is `left`. A wake the disk
-    /// cannot book is refused at once, unless it is short by no more than
-    /// what bookings that ended since the last disk reading stood for (see
+    /// its limit allows and they fit into what is `left`. A wake whose
+    /// processor time does not fit is refused at once: nothing frees
+    /// processor time instantly. A wake the disk cannot book is refused at
+    /// once, unless it is short by no more than what bookings that ended
+    /// since the last disk reading stood for (see
     /// [`Host::disk_awaits_reading`]): it waits, queued, for the next
     /// reading to decide it. One whose memory does not fit waits only if
     /// ending idle VM processes that are already saved frees enough for it
@@ -288,17 +361,30 @@ impl Host {
                 continue;
             }
             let need = slot.wake_need(percent);
+            let cpu = slot.cpu_need();
             let save = slot.disk_need();
+            if let Some(headroom) = left.cpu.as_mut() {
+                if i128::from(cpu) > *headroom {
+                    let free = u64::try_from(*headroom).unwrap_or(0);
+                    let overdraft = u64::try_from(-*headroom).unwrap_or(0);
+                    self.refuse(key, step, Resource::Cpu, cpu + overdraft, free, out);
+                    changed = true;
+                    continue;
+                }
+                *headroom -= i128::from(cpu);
+            }
             if let Some(disk) = left.disk.as_mut()
                 && let Err(short) = disk.take(save)
             {
                 if disk.may_take(save, unread) {
                     // Perhaps there is room: the next reading shows. What
-                    // it needs is charged meanwhile, so a later wake does
-                    // not take room it may get.
+                    // it needs is charged meanwhile, its processor time
+                    // among it, so a later wake does not take room it may
+                    // get.
                     disk.charge(save);
                     continue;
                 }
+                left.give_back_cpu(cpu);
                 self.refuse(key, step, short.resource, short.needed, short.free, out);
                 changed = true;
                 continue;
@@ -321,13 +407,14 @@ impl Host {
                 Room::Made => changed = true,
                 Room::None => {
                     left.waiting -= need;
-                    if let Some(disk) = left.disk.as_mut() {
-                        disk.give_back(save);
-                    }
                     // On an overdrawn budget a wake needs the overdraft
                     // freed too.
                     let free = u64::try_from(*headroom).unwrap_or(0);
                     let overdraft = u64::try_from(-*headroom).unwrap_or(0);
+                    left.give_back_cpu(cpu);
+                    if let Some(disk) = left.disk.as_mut() {
+                        disk.give_back(save);
+                    }
                     self.refuse(key, step, Resource::Memory, need + overdraft, free, out);
                     changed = true;
                 }
@@ -367,16 +454,17 @@ impl Host {
     }
 
     /// Lets sandboxes refused earlier but still held try again once their
-    /// wake fits, memory counting instant relief and disk, next to every
-    /// wake already queued for memory: a retried wake queues behind those,
-    /// and [`Self::admit_measured`] charges it their need too, so a sandbox
-    /// let through here is not refused again for the same shortfall. One
-    /// paused for host memory waits, besides, until the memory it held is
-    /// free above the high watermark, next to what others let through
-    /// before it claim; see [`Host::room_returned`]. Returns whether any
-    /// did.
+    /// wake fits, memory counting instant relief, processor time and disk,
+    /// next to every wake already queued for memory: a retried wake queues
+    /// behind those, and [`Self::admit_measured`] charges it their need
+    /// too, so a sandbox let through here is not refused again for the same
+    /// shortfall. One paused for host memory waits, besides, until the
+    /// memory it held is free above the high watermark, next to what others
+    /// let through before it claim; see [`Host::room_returned`]. Returns
+    /// whether any did.
     pub(super) fn retry_refused(&mut self, now: At) -> bool {
         let capacity = self.capacity();
+        let mut cpu = self.cpu_capacity().map(|cpu| cpu.headroom());
         let percent = self.compressed_percent();
         let queued: Vec<&Sandbox> = Step::ALL
             .into_iter()
@@ -385,6 +473,12 @@ impl Host {
             .filter_map(|key| self.sandboxes.get(&key.sandbox))
             .collect();
         let mut wanted: u64 = queued.iter().map(|slot| slot.wake_need(percent)).sum();
+        if let Some(headroom) = cpu.as_mut() {
+            *headroom -= queued
+                .iter()
+                .map(|slot| i128::from(slot.cpu_need()))
+                .sum::<i128>();
+        }
         let mut disk = self.disk_room();
         if let Some(room) = disk.as_mut() {
             for slot in &queued {
@@ -405,16 +499,22 @@ impl Host {
                 Squeeze::Waiting { bytes } => bytes,
                 _ => 0,
             };
-            let fits = capacity.is_none_or(|capacity| {
-                let (dropping, droppable) = self.instant_room(now, *id);
-                i128::from(wanted + need)
-                    <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
-            }) && disk
-                .as_mut()
-                .is_none_or(|room| room.take(slot.disk_need()).is_ok());
+            let cpu_need = i128::from(slot.cpu_need());
+            let fits = cpu.is_none_or(|headroom| cpu_need <= headroom)
+                && capacity.is_none_or(|capacity| {
+                    let (dropping, droppable) = self.instant_room(now, *id);
+                    i128::from(wanted + need)
+                        <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
+                })
+                && disk
+                    .as_mut()
+                    .is_none_or(|room| room.take(slot.disk_need()).is_ok());
             if fits {
                 wanted += need;
                 claimed += returning;
+                if let Some(headroom) = cpu.as_mut() {
+                    *headroom -= cpu_need;
+                }
                 ready.push(*id);
             }
         }
@@ -544,13 +644,16 @@ impl Host {
     /// Keeps [`crate::Admission::buffer`] bytes of the budget free ahead of
     /// wakes, plus what the wakes refused and still held need, by pushing
     /// idle sandboxes deeper, least recently used first, after ending ready
-    /// spare VMs, oldest first. Counts what floors already set and spare
-    /// VMs already ending will free. Returns whether any floor changed.
+    /// spare VMs, oldest first. A held wake that waits for processor time
+    /// counts no memory until that is free: freeing memory would not let
+    /// it through. Counts what floors already set and spare VMs already
+    /// ending will free. Returns whether any floor changed.
     pub(super) fn keep_buffer(&mut self, now: At) -> bool {
         let (Some(admission), Some(capacity)) = (self.policy.admission, self.capacity()) else {
             return false;
         };
         let percent = self.compressed_percent();
+        let cpu = self.cpu_capacity().map(|cpu| cpu.headroom());
         let planned: u64 = self
             .sandboxes
             .values()
@@ -564,6 +667,7 @@ impl Host {
             .refused
             .iter()
             .filter_map(|id| self.sandboxes.get(id))
+            .filter(|slot| cpu.is_none_or(|headroom| i128::from(slot.cpu_need()) <= headroom))
             .map(|slot| slot.wake_need(percent))
             .sum();
         let needed = (admission.buffer + held)
@@ -677,10 +781,23 @@ pub(super) struct Left {
     /// Bytes left of the memory budget, negative when it is overdrawn;
     /// `None` without admission.
     memory: Option<i128>,
+    /// Millicores left of the processor budget, negative when it is
+    /// overdrawn; `None` without one.
+    cpu: Option<i128>,
     /// Bytes the wakes waiting for instant relief need.
     waiting: u64,
     /// Disk saves may still book; `None` without a disk policy.
     disk: Option<DiskRoom>,
+}
+
+impl Left {
+    /// Gives back processor time charged to a wake that was refused after
+    /// all.
+    fn give_back_cpu(&mut self, millis: u64) {
+        if let Some(headroom) = self.cpu.as_mut() {
+            *headroom += i128::from(millis);
+        }
+    }
 }
 
 /// Whether ending `slot`'s VM process now frees memory instantly, without
