@@ -282,6 +282,7 @@ import {
   assertToolRefsSubset,
   availableToolRefs,
   mergeToolRefs,
+  mergeToolRefEager,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
@@ -3201,7 +3202,10 @@ async function createSessionForRequestInFileScope(
   if (!parentSession) {
     selectedTools = withSameRequestSessionMcpServerTools(
       selectedTools,
-      sessionMcpServers.runtimeServers,
+      sessionMcpServers.runtimeServers.map((server) => ({
+        id: server.id,
+        eager: payload.mcpServers.find((input) => input.id === server.id)?.eager,
+      })),
     );
   }
   if (payload.excludedMcpServerIds !== undefined) {
@@ -5830,13 +5834,31 @@ export async function readSessionLineage(
  */
 export function withSameRequestSessionMcpServerTools(
   tools: ToolRef[],
-  attachedServers: ReadonlyArray<{ id: string }>,
+  attachedServers: ReadonlyArray<{ id: string; eager?: ToolRef["eager"] }>,
 ): ToolRef[] {
-  const selectedIds = new Set(tools.map((tool) => tool.id));
+  const attachedEager = new Map(
+    attachedServers.flatMap((server) => {
+      const eager = mergeToolRefEager(server.eager, undefined);
+      return eager === undefined ? [] : [[server.id, eager] as const];
+    }),
+  );
+  // An attachment's eager marker joins an explicit ref's own marker; every
+  // other explicit marker (optional, allowedTools) is kept exactly.
+  const selected = attachedEager.size
+    ? tools.map((tool) => {
+        const eager = attachedEager.get(tool.id);
+        if (eager === undefined) return tool;
+        return { ...tool, eager: mergeToolRefEager(tool.eager, eager)! };
+      })
+    : tools;
+  const selectedIds = new Set(selected.map((tool) => tool.id));
   const missing = attachedServers
     .filter((server) => !selectedIds.has(server.id))
-    .map((server) => ({ kind: "mcp" as const, id: server.id }));
-  return missing.length === 0 ? tools : mergeToolRefs(tools, missing);
+    .map((server) => {
+      const eager = attachedEager.get(server.id);
+      return { kind: "mcp" as const, id: server.id, ...(eager !== undefined ? { eager } : {}) };
+    });
+  return missing.length === 0 ? selected : mergeToolRefs(selected, missing);
 }
 
 function withFirstPartyTools(

@@ -592,7 +592,7 @@ export async function computeScheduledTaskAccessPlan(input: {
       })
     : { missing: [], policy: null };
   const toolKey = (tool: ToolRef) =>
-    `${tool.kind}:${tool.id}:${tool.optional === true}:${tool.eager === true}`;
+    `${tool.kind}:${tool.id}:${tool.optional === true}:${JSON.stringify(tool.eager === true || (Array.isArray(tool.eager) && tool.eager.length > 0 ? tool.eager : false))}`;
   const toolsChanged = !sameMembers(
     connectors.tools.map(toolKey),
     task.agentConfig.tools.map(toolKey),

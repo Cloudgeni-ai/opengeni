@@ -171,6 +171,13 @@ export type SessionProxyToolServer = {
    * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
    */
   approvals?: { ask: string[] | true } | undefined;
+  /**
+   * Tools the agent has from the first model request, so everyday reads (for
+   * example search and get-by-id) need no `tool_search` round trip: unprefixed
+   * MCP tool names, or `true` for every tool. Other tools stay searchable. Keep
+   * the list short and stable: every listed schema is part of each request.
+   */
+  eager?: string[] | true | undefined;
   /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
   secret?: string | undefined;
   /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
@@ -231,9 +238,9 @@ export type SessionProxyHandlerOptions = {
   /**
    * Attach your product's MCP tool server to every session the `createSession`
    * hook creates, authenticated as the resolved user. The proxy mints the
-   * token, adds the `mcpServers` entry (plus an eager ref when the hook lists
-   * explicit `tools`), and rotates the token on every send, steer, submit,
-   * approval decision, and human-input answer.
+   * token, adds the `mcpServers` entry (with its `eager` tools, or every tool
+   * when the hook lists explicit `tools`), and rotates the token on every send,
+   * steer, submit, approval decision, and human-input answer.
    */
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
@@ -1381,6 +1388,10 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
   if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
     throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
   }
+  const eager = toolServer.eager;
+  if (eager !== undefined && eager !== true && !(Array.isArray(eager) && eager.every(isToolName))) {
+    throw new TypeError("toolServer.eager must be true or a list of tool names.");
+  }
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
     ...toolServer,
@@ -1407,6 +1418,12 @@ function withToolServer(
     );
   }
   const ask = toolServer.approvals?.ask;
+  const eager =
+    toolServer.eager === true
+      ? true
+      : toolServer.eager?.length
+        ? [...new Set(toolServer.eager)]
+        : undefined;
   const tools = created.tools;
   return {
     ...created,
@@ -1418,13 +1435,16 @@ function withToolServer(
         url: toolServer.url,
         headers: { Authorization: `Bearer ${token}` },
         ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
+        ...(eager !== undefined ? { eager } : {}),
       },
     ],
     // Omitted tools keep workspace defaults; the attachment alone selects the
-    // server. An explicit allow-list gets the server's tools on the first request.
+    // server, and its `eager` marker names the first-request tools. An explicit
+    // allow-list without an `eager` choice gets every server tool on the first
+    // request, as before.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
-          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: eager ?? true }],
         }
       : {}),
   };

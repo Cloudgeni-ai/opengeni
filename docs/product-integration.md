@@ -975,7 +975,12 @@ const { user, tenant } = await verifyToolRequest(request); // throws ToolRequest
 On every session the `createSession` hook creates, the proxy attaches the
 server as a per-session `mcpServers` entry with an HS256 bearer token for the
 user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
-explicit list). It rotates that token through `mcpCredentialUpdates` on every
+explicit list). Name the everyday tools the agent should have from its first
+model request with `toolServer.eager` (for example
+`eager: ["search_posts", "get_post"]`): the agent can call them without a
+`tool_search` round trip, while the rest of the server's tools stay searchable.
+Keep that list short and stable, since every listed schema is part of each
+request; `eager: true` puts every tool on it. It rotates that token through `mcpCredentialUpdates` on every
 send, steer, composer submit, approval decision, and human-input answer, only
 for sessions that carry this exact server, and only when the chat's creator acts
 (tools act as the creator, also in shared chats). Tokens last 24 hours by default.
