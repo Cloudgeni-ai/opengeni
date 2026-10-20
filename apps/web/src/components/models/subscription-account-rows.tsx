@@ -67,7 +67,7 @@ export function SubscriptionAccountPoolRows<T extends Account>({
   kind: "supergrok" | "claude_subscription";
   providerName: string;
   plan: (account: T) => string;
-  renderRow: (account: T, onOpen: () => void, scopeLabel?: string) => ReactNode;
+  renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
   pendingRow?: ReactNode;
 }) {
   if (pool.unavailable) return null;
@@ -154,7 +154,7 @@ function SharedRow<T extends Account>({
   provider: "supergrok" | "claude_subscription";
   kind: "supergrok" | "claude_subscription";
   plan: (account: T) => string;
-  renderRow: (account: T, onOpen: () => void, scopeLabel?: string) => ReactNode;
+  renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
 }) {
   const access = useConnectionAccess({
     client: organization.pool.client,
