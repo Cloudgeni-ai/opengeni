@@ -1,12 +1,13 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db`: upstream `cua-driver-rs-v0.36.0`
-(`6d6c734c`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
+`39d06ca98e45c3fbf106458f7d8de782f60526c8`: upstream `cua-driver-rs-v0.37.0`
+(`2d2f9922`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
 fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`), including its non-invalidating
 preview capture and cursor support. `@trycua/cua-driver` 0.36.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. Windows uses
-the published SDK's native runtime in process. CUA is the default on macOS, on
+the published SDK's native runtime in process, so it stays on 0.36 until the
+0.37 SDK is published. CUA is the default on macOS, on
 Windows and for explicitly selected isolated Linux desktops. Linux host desktops
 retain the native default.
 
@@ -108,13 +109,13 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/39d06ca98e45c3fbf106458f7d8de782f60526c8/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
-[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.36: only
+[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
-decorations rebuild element bounds from Window coordinates. Plain 0.36 still
-misplaces GTK4 controls after a window move, which the isolated Linux end-to-end
-tests catch.
+decorations rebuild element bounds from Window coordinates. Upstream 0.37 does
+not include them; without them GTK4 controls are misplaced after a window move,
+which the isolated Linux end-to-end tests catch.
 
 ## Native agent interface
 
