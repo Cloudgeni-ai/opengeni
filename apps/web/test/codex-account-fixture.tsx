@@ -29,31 +29,53 @@ const client = new OpenGeniBrowserClient({
     const request = new Request(input, init);
     const pathname = new URL(request.url).pathname;
     let result: unknown;
-    if (pathname.endsWith("/usage")) {
+    if (pathname.endsWith("/overview")) {
+      // The account page reads usage and resets from one overview read.
+      const fetchedAt = new Date().toISOString();
       result = {
-        status: "ok",
+        accountId,
         usage: {
-          status: "ok",
-          planType: "pro",
-          limitReached: false,
-          fetchedAt: new Date().toISOString(),
-          fiveHour: null,
-          weekly: {
-            used: 25,
-            limit: 100,
-            remaining: 75,
-            percent: 25,
-            resetAt: new Date(Date.now() + 86_400_000).toISOString(),
-            resetAfterSeconds: 86400,
-            limitWindowSeconds: 604800,
-          },
-          credits: {
-            hasCredits: true,
-            unlimited: false,
-            overageLimitReached: false,
-            balance: "120.50",
+          source: "provider",
+          fetchedAt,
+          stale: false,
+          error: null,
+          value: {
+            status: "ok",
+            planType: "pro",
+            limitReached: false,
+            fetchedAt,
+            fiveHour: null,
+            weekly: {
+              used: 25,
+              limit: 100,
+              remaining: 75,
+              percent: 25,
+              resetAt: new Date(Date.now() + 86_400_000).toISOString(),
+              resetAfterSeconds: 86400,
+              limitWindowSeconds: 604800,
+            },
+            credits: {
+              hasCredits: true,
+              unlimited: false,
+              overageLimitReached: false,
+              balance: "120.50",
+            },
           },
         },
+        resetCredits: {
+          source: "provider",
+          fetchedAt,
+          stale: false,
+          error: null,
+          detailState: "detailed",
+          detailsComplete: true,
+          availableCount: 0,
+          credits: [],
+        },
+        canRedeem: true,
+        redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
+        canResumeRedemption: false,
+        redemptions: [],
       };
     } else if (pathname.endsWith("/access")) {
       result = {
