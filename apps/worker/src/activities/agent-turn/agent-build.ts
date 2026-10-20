@@ -43,7 +43,6 @@ import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
-import { promptCacheCohortKey } from "./codex";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
 import {
   executeCodexImageGeneration,
@@ -832,7 +831,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             // is not in the registry, served by the built-in OpenAI/Azure Responses
             // client).
             {
-              promptCacheKey: promptCacheCohortKey(input.accountId),
+              promptCacheKey: input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,

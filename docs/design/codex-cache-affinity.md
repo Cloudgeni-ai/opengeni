@@ -1,13 +1,5 @@
 # Codex: reuse a familiar prefix on the first request
 
-> **Update, October 20, 2026: one cohort per account.** The workspace and
-> person cohort below still left an embedding product's first sessions cold:
-> each tenant workspace and each signed-in end user is new, so each started a
-> new cohort. The cohort is now one key per Opengeni account, and it is used as
-> both the Codex `session_id` header and the OpenAI/Azure `prompt_cache_key`.
-> See [Account cohort](#update-account-cohort) at the end; the original
-> design is kept below for its evidence.
-
 Status: proposed; requires review before merge. Serial measurements October 18,
 2026 between 10:39 and 10:51 UTC; concurrent follow-up measurements below.
 These are synthetic request sequences, not Opengeni
@@ -301,69 +293,15 @@ claim end-to-end task latency or quality improvements.
 The provider's affinity header now labels a cohort rather than an individual
 session; this deliberately changes provider routing metadata, not model input.
 
-<a id="update-account-cohort"></a>
+## Not adopted: one cohort per account (October 20, 2026)
 
-## Update: account cohort (October 20, 2026)
-
-### What still missed
-
-An embedding product creates a workspace per tenant and acts as each end user.
-Both are new to Opengeni on the first session, so the workspace and person
-cohort was new too, and the first request routed to a cache that had never
-seen the shared prefix. Sessions with no human identity fell back to the
-session id, which is always new.
-
-The first-request bodies of fresh sessions were compared byte for byte on a
-local stack. Apart from the user's own message and the per-session cache key,
-they were identical: the same instructions, Skill catalog and tool block. No
-session-specific text sits early in the prompt.
-
-A direct probe then replayed one real 16,760-token first request, four new
-sessions per arm, after one warm-up request:
-
-| Arm | Cached on the first request |
-| --- | ---: |
-| Same cohort header for every session | 15,616 / 16,760 (93%) |
-| New cohort header per session | 3,712 / 16,760 (22%), every time |
-| Same cohort, per-session text appended to the instructions | 93% |
-| Same cohort, per-session text in the Skill-catalog message | 93% |
-
-So the route, not the bytes, decided the miss. The backend also matched the
-shared prefix in 128-token steps up to the first differing byte.
-
-For OpenAI and Azure API keys, the body `prompt_cache_key` was the session id.
-The [OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
-says that on GPT-5.6 and later, distinct keys keep separate cache accounting
-even for an identical prefix, so every new session there started cold too.
-
-### Change
-
-`promptCacheCohortKey(accountId)` is a SHA-256 of a versioned tuple holding
-only the Opengeni account id. It replaces the workspace and person cohort as the
-Codex affinity header, and it is the `prompt_cache_key` on every OpenAI-wire
-transport that accepts one (built-in OpenAI/Azure, the legacy fallback and
-standalone compaction). Native Claude keeps the session id, because that value
-supplies Claude session identity, not an OpenAI cache key. No instruction, tool
-schema, history item or cache marker changes.
-
-### Measurement
-
-Local stack, Codex subscription, low reasoning, a new tenant workspace for every
-session, one product MCP server with 14 tools, all of them behind tool search:
-
-| | First request below half cached | Mean first-request cache ratio |
-| --- | ---: | ---: |
-| Before (workspace and person cohort), 10 sessions | 6 / 10 | 50.7% |
-| After (account cohort), 8 sessions | 0 / 8 | 96.5% |
-
-### Risks
-
-- One account's traffic now shares one routing key. Under heavy load a busy
-  cohort can overflow its cache machine, which could lower follow-up hits.
-  Deterministic shards per account are the lever if that is observed; none are
-  added without evidence.
-- Sessions in flight at deploy pay one cold request when their key changes.
-- People in the same account share a route, so a cache hit could in theory
-  reveal that a colleague recently sent an identical prefix. Caches match exact
-  bytes and the shared prefix is the account's own instructions and tools.
-  Accounts never share a cohort.
+A broader cohort was tried and reverted: one key per Opengeni account, used as
+both this header and the OpenAI/Azure `prompt_cache_key`. It made new tenant
+sessions of an embedding product start warm, but it routes every session of an
+account through one prefix-and-key combination. OpenAI documents roughly 15
+requests per minute per prefix-and-key combination before overflow goes to
+additional machines, each starting cold. A busy account runs far above that, so
+long sessions could lose their own cached history on later turns, which is
+most of the cached volume. The cohort stays workspace and person, and the body
+`prompt_cache_key` stays the session id. A finer design, such as a few stable
+buckets per shared prefix, needs measurement under real concurrent load first.

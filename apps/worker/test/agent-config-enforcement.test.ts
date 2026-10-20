@@ -53,7 +53,6 @@ import {
   type PrepareTurnToolRuntimeDeps,
 } from "../src/activities/agent-turn/tool-environment";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
-import { promptCacheCohortKey } from "../src/activities/agent-turn/codex";
 import { lazyToolRuntimeForAgent } from "../../../packages/runtime/src/lazy-tool-transport";
 
 const SCOPE = {
@@ -656,8 +655,7 @@ function assertLegacyRequestContract(request: ModelRequest) {
     reasoning: { effort: "low", summary: "detailed" },
     providerData: {
       include: ["reasoning.encrypted_content"],
-      // One cache cohort per account (see promptCacheCohortKey).
-      prompt_cache_key: promptCacheCohortKey(SCOPE.accountId),
+      prompt_cache_key: SCOPE.sessionId,
     },
   });
   expect(request.toolsExplicitlyProvided).toBe(true);
