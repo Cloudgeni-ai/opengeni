@@ -1,5 +1,35 @@
 # @opengeni/react-native
 
+## 4.3.1
+
+### Minor Changes
+
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- Updated dependencies [579239a]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [ee83178]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [eeab39f]
+- Updated dependencies [7ed4d2b]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [6b08cbe]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [5f5fe8d]
+- Updated dependencies [67262de]
+  - @opengeni/react@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/contracts@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

@@ -1,5 +1,47 @@
 # @opengeni/react
 
+## 4.3.1
+
+### Minor Changes
+
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- 579239a: The desktop workspace dock drops its separate header row: the machine status and the maximize and hide controls sit under the panel tabs. Site previews can hide their frame toolbar and take reload and full-screen control from the host.
+- bf39d5e: Show ambiguous Connected Machine command outcomes as uncertain instead of successful, including when command details are hidden. Preserve the existing warning to inspect effects before retrying; command execution and retry behavior are unchanged.
+- ee83178: Editable documents and presentations now have a Download action, exporting DOCX and PPTX like spreadsheets export XLSX. `EditableArtifactView` accepts `downloadArtifact` for all modalities; `downloadSpreadsheet` remains supported.
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- eeab39f: Keep accepted turns recovering while required first-party MCP setup cannot reach the internal API, instead of failing after five attempts during a deployment outage.
+- 7ed4d2b: Keep Models settings reads across navigation, expose their freshness with an explicit refresh action, and reserve account-detail space while data loads. The client-scoped cache now supports internal mounted-read activity observation without changing the public React API.
+- 427f2a5: Leave existing standalone agents untouched when the desktop app opens. Explicit
+  signed-in setup reuses their service and signed installation, preserving macOS
+  privacy grants. Service-backed pause/resume persists across logins; quitting the
+  desktop does not stop the service. Permission guidance uses the running agent's
+  reported grants rather than probing the desktop app. Existing agents require
+  the matching native release with structured service inspection before management.
+- 6b08cbe: A message that waited in the queue behind running work no longer shows that waiting time as "Worked for". When several queued messages were steered in quickly one after another, each turn showed minutes of work even though it ran for about a second. A turn's queue phase now starts when the work ahead of it ended, not when the message was queued.
+- 9508318: Live voice models reached over a WebSocket (AI Gateway voices and SuperGrok) now share one path. `POST …/realtime/websocket` and `client.negotiateRealtimeWebsocket` return the provider socket URL, its subprotocols, the wire dialect and the complete provider session configuration, and `createRealtimeWebsocketTransportStarter` opens any of them; the browser no longer carries per-provider configuration. `negotiateGatewayRealtime`, `negotiateXaiSubscriptionRealtime` and the two older transport starters keep working and are deprecated. Voice connections also start slightly faster because billing settlement no longer blocks the connection response.
+- 5f5fe8d: Steering several queued messages one after another no longer leaves a stack of empty "Worked for" rows after the messages. A turn that handed over to the next Steer before doing anything but start up did no work of its own, so it now shows no work row; the turn that does the work still shows its own.
+- Updated dependencies [bf39d5e]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/connect@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

@@ -1,5 +1,76 @@
 # @opengeni/worker-bundle
 
+## 4.3.1
+
+### Patch Changes
+
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+- Updated dependencies [3d83bfd]
+- Updated dependencies [d142e5b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [18030c8]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [fa5347a]
+- Updated dependencies [16781e5]
+- Updated dependencies [18030c8]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [9508318]
+- Updated dependencies [017121f]
+- Updated dependencies [72e00f6]
+- Updated dependencies [72e032c]
+- Updated dependencies [b95784c]
+- Updated dependencies [22e3585]
+- Updated dependencies [67262de]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/core@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/subscriptions@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/github@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/vaults-keeper@4.3.0
+  - @opengeni/vaults-onepassword@4.3.0
+  - @opengeni/vaults-protonpass@4.3.0
+  - @opengeni/jev@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

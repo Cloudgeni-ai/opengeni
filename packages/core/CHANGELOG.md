@@ -1,5 +1,69 @@
 # @opengeni/core
 
+## 4.3.1
+
+### Patch Changes
+
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- 1d62cf3: When an agent tries to use someone's personal (Only me) computer that they have not yet allowed in the chat, the chat now shows them the card to allow it right away. The agent is told the card is posted in the chat and gets the chat link, so it tells the person in one sentence (or gives the link when they are reading in Slack or a worker chat) instead of waiting or retrying the same command. Cards for other connections, such as Slack and GitHub together, are not limited; only a repeated computer refusal in the same turn reuses that turn's computer card, even when several are refused at once.
+- 6794bf2: Removing a workspace member or offboarding an organization member now works when that person's sessions selected their own connected account. Previously two session fences rejected the revocation and the removal failed with a generic "not available". External membership errors now also name the database check that refused them.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- Updated dependencies [3d83bfd]
+- Updated dependencies [d142e5b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [18030c8]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [fa5347a]
+- Updated dependencies [16781e5]
+- Updated dependencies [18030c8]
+- Updated dependencies [9976132]
+- Updated dependencies [9508318]
+- Updated dependencies [017121f]
+- Updated dependencies [72e00f6]
+- Updated dependencies [72e032c]
+- Updated dependencies [b95784c]
+- Updated dependencies [22e3585]
+- Updated dependencies [67262de]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/vaults@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

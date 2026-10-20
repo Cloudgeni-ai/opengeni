@@ -1,5 +1,28 @@
 # @opengeni/codex
 
+## 4.3.1
+
+### Minor Changes
+
+- 9976132: Add pooled weekly subscription utilization, estimated plan-size weighting and reset-aware forecasts with one total remaining bar. Retain observed limit history; organization pools cover organization accounts and workspace pools cover all visible accounts available to that workspace, using each account's total usage. Show five-hour limits only when blocking an account; keep individual account details in the account list.
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- Updated dependencies [d1de8b4]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/network@4.3.0
+  - @opengeni/contracts@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

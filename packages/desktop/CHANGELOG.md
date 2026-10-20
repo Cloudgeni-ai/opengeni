@@ -1,5 +1,29 @@
 # @opengeni/desktop
 
+## 0.2.4
+
+### Patch Changes
+
+- bc9a7f9: Connecting an account from the desktop app works again. Connect, GitHub and model sign-in buttons that open a sign-in window failed with "Allow popups to connect your account", because the app refused every new window. The app now accepts the blank window such a flow reserves, opens the provider's sign-in page in your browser, and the app picks up the finished connection by itself. Pages from the account's own server that a flow opens show as an app window.
+- 427f2a5: Leave existing standalone agents untouched when the desktop app opens. Explicit
+  signed-in setup reuses their service and signed installation, preserving macOS
+  privacy grants. Service-backed pause/resume persists across logins; quitting the
+  desktop does not stop the service. Permission guidance uses the running agent's
+  reported grants rather than probing the desktop app. Existing agents require
+  the matching native release with structured service inspection before management.
+- Updated dependencies [bf39d5e]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/agent-host@4.3.0
+
 ## 0.2.3
 
 ### Patch Changes

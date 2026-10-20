@@ -1,5 +1,22 @@
 # @opengeni/vaults-keeper
 
+## 4.3.1
+
+### Patch Changes
+
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/contracts@4.3.0
+  - @opengeni/vaults@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

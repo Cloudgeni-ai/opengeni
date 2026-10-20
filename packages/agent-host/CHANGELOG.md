@@ -1,5 +1,27 @@
 # @opengeni/agent-host
 
+## 4.3.1
+
+### Patch Changes
+
+- 427f2a5: Leave existing standalone agents untouched when the desktop app opens. Explicit
+  signed-in setup reuses their service and signed installation, preserving macOS
+  privacy grants. Service-backed pause/resume persists across logins; quitting the
+  desktop does not stop the service. Permission guidance uses the running agent's
+  reported grants rather than probing the desktop app. Existing agents require
+  the matching native release with structured service inspection before management.
+- Updated dependencies [bf39d5e]
+- Updated dependencies [579239a]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes
