@@ -307,11 +307,11 @@ if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
 fi
 
 if [ -f base.ext4 ] && {
-  ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
-    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
-    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("owner"'
+  ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep Before=lab-agent >/dev/null ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep "opengeni-identity" >/dev/null ||
+    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep Inode >/dev/null ||
+    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep OOMScoreAdjust >/dev/null ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep 'fields.get("owner"' >/dev/null
 }; then
   log "guest services"
   sudo mkdir -p /mnt/lab-base
@@ -337,7 +337,7 @@ if [ ! -f base.ext4 ]; then
     apt-get install -y -qq --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold git python3 socat ca-certificates curl xz-utils >/dev/null
     apt-get clean
   '
-  node_tar=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" | grep -oE "node-v[0-9.]+-linux-x64\.tar\.xz" | head -1)
+  node_tar=$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" | grep -oE "node-v[0-9.]+-linux-x64\.tar\.xz" | sed -n 1p)
   curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${node_tar}" | sudo tar -xJ -C rootfs/usr/local --strip-components=1
   # Synthetic workloads built only from public code.
   sudo chroot rootfs /bin/bash -euo pipefail -c '
@@ -364,7 +364,7 @@ if [ ! -f base.ext4 ]; then
 fi
 
 log "swap and zswap"
-if ! swapon --show=NAME --noheadings | grep -q "$LAB_DIR/swapfile"; then
+if ! swapon --show=NAME --noheadings | grep "$LAB_DIR/swapfile" >/dev/null; then
   if [ ! -f swapfile ]; then
     if [ -z "$SWAP_SIZE" ]; then
       memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"

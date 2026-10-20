@@ -27,7 +27,7 @@ systemctl enable --now docker
 sysctl -qw fs.inotify.max_user_watches=1048576 fs.inotify.max_user_instances=8192
 
 log "Caddy $CADDY_VERSION"
-if ! caddy version 2>/dev/null | grep -q "^v$CADDY_VERSION "; then
+if ! caddy version 2>/dev/null | grep "^v$CADDY_VERSION " >/dev/null; then
   work=$(mktemp -d)
   curl -fsSL -o "$work/caddy.tgz" \
     "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
@@ -41,7 +41,7 @@ if ! caddy version 2>/dev/null | grep -q "^v$CADDY_VERSION "; then
 fi
 
 log "Helm $HELM_VERSION"
-if ! helm version --short 2>/dev/null | grep -q "^$HELM_VERSION"; then
+if ! helm version --short 2>/dev/null | grep "^$HELM_VERSION" >/dev/null; then
   work=$(mktemp -d)
   curl -fsSL -o "$work/helm.tgz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
   echo "$HELM_SHA256  $work/helm.tgz" | sha256sum -c --quiet -

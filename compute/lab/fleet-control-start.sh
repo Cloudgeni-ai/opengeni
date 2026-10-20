@@ -19,7 +19,7 @@ if ! command -v psql >/dev/null; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
 fi
 systemctl start postgresql
-if ! sudo -u postgres psql -tAc "select 1 from pg_roles where rolname = 'fleet'" | grep -q 1; then
+if ! sudo -u postgres psql -tAc "select 1 from pg_roles where rolname = 'fleet'" | grep 1 >/dev/null; then
   sudo -u postgres psql -qc "create role fleet login password 'fleet'"
   sudo -u postgres psql -qc "create database fleet owner fleet"
 fi

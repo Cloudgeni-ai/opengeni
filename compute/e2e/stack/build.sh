@@ -22,7 +22,7 @@ cm=/srv/e2e/compute
 out=$HOME/e2e/out
 mkdir -p "$out"
 log() { printf '[build %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
-imported() { sudo k3s ctr -n k8s.io images ls -q | grep -qx "docker.io/library/$1"; }
+imported() { sudo k3s ctr -n k8s.io images ls -q | grep -x "docker.io/library/$1" >/dev/null; }
 to_k3s() {
   imported "$1" && return
   docker save "$1" | sudo k3s ctr -n k8s.io images import - >/dev/null

@@ -25,7 +25,7 @@ export SOURCE_DATE_EPOCH
 log() { printf '[host-bundle %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 if command -v rustup >/dev/null &&
-  ! rustup target list --installed | grep -qx x86_64-unknown-linux-musl; then
+  ! rustup target list --installed | grep -x x86_64-unknown-linux-musl >/dev/null; then
   rustup target add x86_64-unknown-linux-musl
 fi
 # musl-gcc compiles the crates' C; Rust links against its own bundled musl.

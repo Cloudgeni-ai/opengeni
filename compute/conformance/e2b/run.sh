@@ -221,7 +221,7 @@ pids+=($!)
 say "waiting for the host to join and its warm sandbox to be ready"
 for i in $(seq 1 300); do
   if curl -fsS -H "X-API-Key: $OPERATOR_KEY" "http://$API/v1/hosts" 2>/dev/null \
-    | grep -q '"h1"'; then
+    | grep '"h1"' >/dev/null; then
     break
   fi
   [[ $i == 300 ]] && { echo "the host never joined"; tail -20 "$WORK/host.log"; exit 1; }
