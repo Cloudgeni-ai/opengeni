@@ -60,6 +60,7 @@ export function authorizeConnectAttempt(
     ...options,
     signal: observation.signal,
     minimumRevision: attempt.revision,
+    expiresAt: attempt.expiresAt,
   })
     .catch(async (failure: unknown) => {
       if (failure !== closed) throw failure;
