@@ -4077,7 +4077,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
 
-    const sourceFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+    // A cross-origin frame renders in its own process: its frame tree, file
+    // chooser interception and chooser events belong to that frame's session.
+    const frameSessionId = this.oopifForFrame(state, frameId)?.sessionId ?? state.sessionId;
+    const sourceFrame = flattenFrameTree(await this.frameTree(frameSessionId)).find(
       (frame) => frame.id === frameId,
     );
     if (!sourceFrame) {
@@ -4094,7 +4097,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.setInterceptFileChooserDialog",
         { enabled: true },
         {
-          sessionId: state.sessionId,
+          sessionId: frameSessionId,
         },
       );
     } catch (error) {
@@ -4109,7 +4112,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const abort = new AbortController();
     const chooser = connection
       .waitForEvent("Page.fileChooserOpened", {
-        sessionId: state.sessionId,
+        sessionId: frameSessionId,
         timeoutMs: DEFAULT_ACTION_TIMEOUT_MS,
         signal: abort.signal,
         predicate: (params) => params.frameId === frameId,
@@ -4129,7 +4132,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "upload control was clicked but no file chooser was confirmed; inspect the page before continuing",
         );
       }
-      const currentFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+      const currentFrame = flattenFrameTree(await this.frameTree(frameSessionId)).find(
         (frame) => frame.id === frameId,
       );
       if (currentFrame?.loaderId !== sourceFrame.loaderId) {
@@ -4166,7 +4169,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.setInterceptFileChooserDialog",
         { enabled: false },
         {
-          sessionId: state.sessionId,
+          sessionId: frameSessionId,
         },
       );
     }
