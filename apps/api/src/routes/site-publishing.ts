@@ -13,9 +13,9 @@ import {
 } from "@opengeni/contracts";
 import {
   getManagedSession,
-  hasLiteralPermission,
   requireAccessContext,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -37,6 +37,7 @@ import {
   type SiteAbuseReportRecord,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
@@ -451,19 +452,20 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.put("/v1/workspaces/:workspaceId/site-limit-profile", async (context) => {
     requireSitesDomain(deps.settings);
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      context.req.param("workspaceId")!,
-      "workspace:admin",
-    );
-    if (!hasLiteralPermission(grant.permissions, "workspace:admin"))
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_admin_required",
-        "Only a workspace admin can change Site limits",
-      );
+    // A workspace setting: a workspace admin, or the owner of a Personal workspace.
+    let grant;
+    try {
+      grant = await requireWorkspaceSettingsGrant(context, deps, context.req.param("workspaceId")!);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 403)
+        throw sitePublishingError(
+          403,
+          "forbidden",
+          "site_admin_required",
+          "Only a workspace admin can change Site limits",
+        );
+      throw error;
+    }
     await requireSitePublicationWriter(deps, grant);
     const request = await body(context, SiteLimitProfile);
     const stored = await putWorkspaceSiteLimitProfile(
