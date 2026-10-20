@@ -229,9 +229,10 @@ pick a VM.
   would have had relief balloon, pause and save a sandbox for writing to
   its disk. Shared memory, mapped files and cache still to be written
   stay held: what a guest writes to its disk is held until the host
-  writes it back, within its writeback delay (`vm.dirty_expire_centisecs`,
-  30 s by default): the drives pass guests no flush, so a guest's own sync
-  does not hasten it. The two counters are separate reads, so cache added
+  writes it back, which it starts only once the data has been dirty for
+  its writeback delay (`vm.dirty_expire_centisecs`, 30 s by default) or
+  dirty memory runs high: the drives pass guests no flush, so a guest's
+  own sync does not hasten it. The two counters are separate reads, so cache added
   between them could make the subtraction leave out memory still held; a
   reading is therefore never less than what `memory.stat` alone names as
   held (anonymous, kernel, socket and huge-page memory and the cache that
