@@ -234,7 +234,12 @@ export function claudeUsageReportedAt(
 
 export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
   const now = useMinuteNow();
-  const readings = claudeUsageReadings(state.value, now);
+  const unavailable =
+    state.error ||
+    state.value?.refreshStatus === "unavailable" ||
+    state.value?.refreshStatus === "reconnect";
+  // A failed live check is not evidence of no usage (or a fresh old reading).
+  const readings = claudeUsageReadings(unavailable ? null : state.value, now);
   const planReadings = readings.filter(
     (item) => item.label !== labels.overage && item.label !== labels.seven_day_overage_included,
   );
@@ -257,6 +262,11 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
       limitReached={reading.limitReached}
       resets={usageResets(resetWindows, reading.label)}
       loading={state.loading}
+      fallback={
+        unavailable || state.value?.refreshStatus === "scope_required"
+          ? "Usage unavailable"
+          : "No usage yet"
+      }
     />
   );
 }

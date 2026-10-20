@@ -762,3 +762,48 @@ test("read-only usage never attempts the live mutation, including global Refresh
   expect(storedReads).toBe(2);
   expect(liveChecks).toBe(0);
 });
+
+for (const cold of [true, false]) {
+  test(`Claude row reports unavailable after a failed ${cold ? "initial check" : "global refresh"}`, async () => {
+    let fail = cold;
+    const client = {
+      refreshClaudeSubscriptionAccountUsage: async () => {
+        if (fail) throw new Error("Provider unavailable");
+        return {
+          ...usage(),
+          refreshStatus: "ok",
+          windows: [{ ...usage().windows[1]!, usedPercent: 25 }],
+        };
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const account = {
+      id: "account",
+      version: 1,
+      status: "active",
+      allocatorEnabled: true,
+    } as ClaudeSubscriptionAccount;
+    function Harness() {
+      return (
+        <>
+          <ModelsRefreshControl client={client} />
+          <ClaudeAccountUsageReadout
+            client={client}
+            scope="workspace"
+            scopeId="workspace"
+            account={account}
+            canManage
+          />
+        </>
+      );
+    }
+    await act(async () => root.render(<Harness />));
+    if (!cold) {
+      expect(container.textContent).toContain("75% left");
+      fail = true;
+      await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    }
+    expect(container.textContent).toContain("Usage unavailable");
+    expect(container.textContent).not.toContain("No usage yet");
+    expect(container.textContent).not.toContain("75% left");
+  });
+}
