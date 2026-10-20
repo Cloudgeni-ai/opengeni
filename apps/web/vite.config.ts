@@ -295,6 +295,27 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // The workspace rail and the appearance menu read these icons while
+              // their modules load. Once the session route shared them too
+              // (app-shots), entry-aware grouping put them in the large shared
+              // session chunk, which sits in an import cycle with those routes.
+              // A leaf chunk keeps them initialized first.
+              name: "workspace-load-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:brain-circuit|monitor|server-cog)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
+              // The session page shows these icons, and so does the default-machine
+              // settings row. Left to entry-aware grouping they share a chunk with
+              // that row, which pulls the settings and model pages into every
+              // direct session load.
+              name: "visibility-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:eye|eye-off)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // A few tiny primitives are shared by the initial composer and
               // the active-session route. Pin that boundary so entry-aware
               // merging cannot use an icon or label helper to pull the full
