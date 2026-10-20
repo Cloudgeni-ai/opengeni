@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { CUA_DESKTOP_TOOLS, parseSecretReference, referenceKey } from "@opengeni/contracts";
+import {
+  CUA_DESKTOP_TOOLS,
+  CUA_WINDOWS_DESKTOP_TOOLS,
+  parseSecretReference,
+  referenceKey,
+} from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { CuaComputerBackend } from "../src/cua/backend";
@@ -1771,6 +1776,7 @@ describe("CUA desktop boundary", () => {
 
   describe("a batch runs as one run_steps call", () => {
     class BatchFixture extends Fixture {
+      override listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
       /** What run_steps answers; null runs every step. */
       reply: Record<string, unknown> | null = null;
       /** Window-change lines of the last step. */
@@ -1868,6 +1874,23 @@ describe("CUA desktop boundary", () => {
         expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
       } finally {
         await backend.close();
+      }
+    });
+
+    test("a CUA whose run_steps cannot stop at a stale token runs batches one action at a time", async () => {
+      for (const listToolsJson of [
+        async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+        undefined,
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.listToolsJson = listToolsJson as BatchFixture["listToolsJson"];
+        const backend = await CuaComputerBackend.open(fixture);
+        try {
+          expect(backend.initialCapabilities.actionBatches).toBe(false);
+          expect((await backend.capabilities()).actionBatches).toBe(false);
+        } finally {
+          await backend.close();
+        }
       }
     });
 
