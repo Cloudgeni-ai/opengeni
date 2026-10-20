@@ -35,6 +35,7 @@ import {
   wakeComputeSandboxOnNoResponders,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
+import { RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY } from "../src/sandbox/selfhosted/control-rpc";
 import { applyDiff } from "@openai/agents";
 import { Manifest } from "@openai/agents/sandbox";
 import { setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
@@ -1735,6 +1736,40 @@ describe("an operation whose agent restarts", () => {
     expect(await transportHandler(liveSubject)).toBe(true);
     expect(control.wakes).toBe(1);
   }, 20_000);
+
+  test("a no-responder whose recovery window was spent is neither woken for nor sent again", async () => {
+    let sends = 0;
+    let wakes = 0;
+    const waking = new ComputeWakingControlRpc(
+      {
+        request: async (_subject, req) => {
+          sends += 1;
+          const answer = offlineControlResponse(req.requestId, true);
+          answer.error!.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] = "1";
+          return answer;
+        },
+      },
+      new ComputeWakeGate({
+        control: {
+          wake: async () => {
+            wakes += 1;
+            return {} as never;
+          },
+        },
+        sandboxId: "box",
+        enrollmentId: "agent",
+        resolveConnection: async () => null,
+        probe: async () => true,
+        readyTimeoutMs: 2_000,
+      }),
+      "agent",
+    );
+    const subject = `agent.${WORKSPACE}.agent.connection.c1.rpc`;
+    const answer = await waking.request(subject, pingRequestFor(), { timeoutMs: 100 });
+    expect(answer.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBe("1");
+    expect(sends).toBe(1);
+    expect(wakes).toBe(0);
+  });
 
   test("an exec whose agent never answers ends at its own timeout, start included", async () => {
     const { plane, client } = setup({ controlTimeoutMs: 500, execTimeoutMs: 1_000 });

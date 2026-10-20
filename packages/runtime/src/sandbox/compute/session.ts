@@ -50,6 +50,7 @@ import { archiveRestoreScript } from "../providers/opensandbox-adapter";
 import {
   CONNECTION_REPLACED_DETAIL_KEY,
   NEVER_SENT_DETAIL_KEY,
+  RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY,
   SelfhostedControlError,
   subjectFor,
   type ControlRpc,
@@ -137,7 +138,10 @@ function isNoResponder(response: ControlResponse): boolean {
     response.error?.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE &&
     response.error.detail?.[NEVER_SENT_DETAIL_KEY] === "1" &&
     // A request whose agent connection was replaced is answered, not resent.
-    response.error.detail?.[CONNECTION_REPLACED_DETAIL_KEY] !== "1"
+    response.error.detail?.[CONNECTION_REPLACED_DETAIL_KEY] !== "1" &&
+    // The transport already woke and waited its whole window for this exact
+    // process; another round would only wait it again.
+    response.error.detail?.[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] !== "1"
   );
 }
 

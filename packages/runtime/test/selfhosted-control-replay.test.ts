@@ -49,6 +49,58 @@ describe("control reply recovery", () => {
     ).toEqual({ action: "fail" });
   });
 
+  test("a wake hook that outlasts the recovery window still spends it", async () => {
+    let hooks = 0;
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      {
+        // Room for one wake before the 250 ms retry delay, but the wake
+        // itself spends the rest.
+        recoveryMs: 300,
+        onNoResponders: async () => {
+          hooks += 1;
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return false;
+        },
+      },
+    );
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1 });
+    expect(hooks).toBe(1);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBe("1");
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error: agentErrorToControlError(response.error!, mutation.requestId),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }),
+    ).toEqual({ action: "fail" });
+  });
+
+  test("an early refusal by the wake hook leaves the request to be sent again", async () => {
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      { recoveryMs: 10_000, onNoResponders: async () => false },
+    );
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1_000 });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBeUndefined();
+    expect(agentErrorToControlError(response.error!, mutation.requestId).neverSent).toBe(true);
+  });
+
   test("a responder without reply recovery that vanishes is still retried", async () => {
     // The probe answers without the replay header, so the operation is sent once
     // directly; its no-responder did not wait out any recovery window.

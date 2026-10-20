@@ -199,11 +199,16 @@ export class ControlReplyRecovery {
         if (connectionCurrent && !(await connectionCurrent().catch(() => true))) {
           throw new ControlConnectionReplacedError(uncertain === undefined);
         }
+        // The window is spent, so callers do not wait it again.
+        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? windowExhausted(error);
         if ((error as { code?: string }).code === "503" && this.onNoResponders) {
           const keepTrying = await this.onNoResponders(target).catch(() => false);
-          if (!keepTrying) throw uncertain ?? error;
+          // A refusal that came only once the hook had spent the window
+          // still spent it.
+          const spent = Date.now() + this.retryDelayMs >= deadline;
+          if (!keepTrying) throw uncertain ?? (spent ? windowExhausted(error) : error);
+          if (spent) throw uncertain ?? windowExhausted(error);
         }
-        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? windowExhausted(error);
         await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
       }
     }
