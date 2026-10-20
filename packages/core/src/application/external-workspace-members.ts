@@ -19,6 +19,7 @@ import {
   cancelExternalWorkspaceMemberGrant,
   updateExternalWorkspaceMemberOperation,
   lookupExternalIdentity,
+  nestedPostgresMessage,
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import { organizationMembershipHttpStatus } from "../domain/organization-membership-lifecycle";
@@ -124,13 +125,19 @@ export async function addExternalWorkspaceMemberForRequest(
 
 function rethrowExternalWorkspaceOperation(error: unknown): never {
   const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
-  if (status)
+  if (status) {
+    const summary =
+      status === 409
+        ? "External membership operation changed or was cancelled"
+        : "External membership operation is not available";
+    // Database fences raise fixed reasons without row data. Name the one that
+    // refused so an integrator (and our logs) can act on it.
+    const reason = nestedPostgresMessage(error);
     throw new HTTPException(status, {
-      message:
-        status === 409
-          ? "External membership operation changed or was cancelled"
-          : "External membership operation is not available",
+      message: reason ? `${summary}: ${reason}` : summary,
+      cause: error,
     });
+  }
   throw error;
 }
 

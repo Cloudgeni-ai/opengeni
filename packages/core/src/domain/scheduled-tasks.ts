@@ -76,6 +76,7 @@ import {
   getSessionAuthorityProjection,
   getWorkspaceDefaultRigId,
   withSessionRlsActorContext,
+  nestedPostgresMessage,
   nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
@@ -825,26 +826,6 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
       memoryScope: memoryScope.success ? memoryScope.data : null,
     },
   };
-}
-
-function nestedPostgresMessage(error: unknown): string | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    const record = current as Record<string, unknown>;
-    if (typeof record.code === "string" && typeof record.message === "string") {
-      return record.message;
-    }
-    for (const key of ["cause", "errors", "error", "originalError"]) {
-      const nested = record[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
-  }
-  return null;
 }
 
 /**
