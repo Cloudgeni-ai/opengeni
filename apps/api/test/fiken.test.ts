@@ -1250,6 +1250,7 @@ async function startOAuth(
   workspace: { accountId: string; workspaceId: string },
   fikenFetch: typeof globalThis.fetch,
   payload: Record<string, unknown> = {},
+  headers: Record<string, string> = {},
 ): Promise<{ status: number; authorizationUrl: URL | null; state: string | null }> {
   const response = await oauthApp(fikenFetch).request(
     `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
@@ -1261,6 +1262,7 @@ async function startOAuth(
           "connections:write",
         ]),
         "content-type": "application/json",
+        ...headers,
       },
       body: JSON.stringify(payload),
     },
@@ -1490,6 +1492,39 @@ describe("fiken OAuth", () => {
       entry.url.pathname.endsWith("/contacts"),
     )!;
     expect(contactsCall.headers.get("authorization")).toBe("Bearer fixture-oauth-access-token");
+  });
+
+  test("a sign-in started in the desktop app returns through the hand-back page", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken({ companies: [fixtureCompanies()[0]!] });
+    const returnPath = `/workspaces/${workspace.workspaceId}/capabilities?connect_item=fiken`;
+    const started = await startOAuth(
+      workspace,
+      provider.fetch,
+      { returnPath },
+      { "x-opengeni-desktop-app": "windows" },
+    );
+    expect(started.status).toBe(200);
+    const redirected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    // The browser lands on the hand-back page, which reopens the app on the
+    // original page and carries the outcome there.
+    expect(redirected.origin).toBe("https://app.example.test");
+    expect(redirected.pathname).toBe("/desktop-return");
+    expect(redirected.searchParams.get("url")).toBe(returnPath);
+    expect(redirected.searchParams.get("fiken")).toBe("connected");
+    expect(redirected.searchParams.get("connectionId")).toBeTruthy();
+
+    // Without the desktop header nothing changes.
+    const plain = await startOAuth(workspace, provider.fetch, { returnPath });
+    const plainRedirect = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: plain.state!,
+    });
+    expect(`${plainRedirect.pathname}${plainRedirect.search}`).toStartWith(`${returnPath}&fiken=`);
   });
 
   test("callback rejects a replayed state", async () => {

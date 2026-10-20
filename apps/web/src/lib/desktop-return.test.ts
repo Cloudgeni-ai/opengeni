@@ -20,8 +20,18 @@ describe("desktop hand-back page", () => {
     expect(desktopReturnTarget(`?url=${encodeURIComponent("https://evil.test/")}`, origin)).toBe(
       null,
     );
+    expect(desktopReturnTarget(`?url=${encodeURIComponent("//evil.test/x")}`, origin)).toBe(null);
     expect(desktopReturnTarget("?url=javascript%3Aalert(1)", origin)).toBe(null);
     expect(desktopReturnTarget("", origin)).toBe(null);
+  });
+
+  test("returns to a console path with the outcome a flow added", () => {
+    expect(
+      desktopReturnTarget(
+        `?url=${encodeURIComponent("/workspaces/w1/capabilities?connect_item=x")}&integration_oauth=success`,
+        origin,
+      ),
+    ).toBe(`${origin}/workspaces/w1/capabilities?connect_item=x&integration_oauth=success`);
   });
 
   test("opens the page in the app through its link", () => {

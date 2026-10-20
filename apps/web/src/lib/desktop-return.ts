@@ -7,8 +7,9 @@ import { openInAppUrl } from "@/lib/open-in-app";
 
 /**
  * The console page the flow meant to return to, or null when the link is
- * missing it or names another site. A provider may add its own outcome
- * parameters to the hand-back link; they are carried onto that page.
+ * missing it or names another site. The destination is a full console URL or
+ * a console path. A provider may add its own outcome parameters to the
+ * hand-back link; they are carried onto that page.
  */
 export function desktopReturnTarget(search: string, origin: string): string | null {
   const params = new URLSearchParams(search);
@@ -16,7 +17,7 @@ export function desktopReturnTarget(search: string, origin: string): string | nu
   if (!raw) return null;
   let target: URL;
   try {
-    target = new URL(raw);
+    target = new URL(raw, origin);
   } catch {
     return null;
   }
