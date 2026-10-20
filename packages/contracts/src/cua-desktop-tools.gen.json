@@ -6035,6 +6035,39 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "capabilities": [
+      "driver.guide"
+    ],
+    "description": "Read Cua Driver guidance on demand, taken from the guide bundled with this driver (no skill install needed). Topics: overview, drag, browser, permissions, batching, menus. Call with no topic to list them. Read-only.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "session": {
+          "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+          "type": "string"
+        },
+        "topic": {
+          "description": "One of: overview, drag, browser, permissions, batching, menus. Omit to list the topics.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_guide",
+    "risk": {
+      "class": "r0",
+      "enforcement": "metadata_only",
+      "operation_sensitive": false,
+      "version": "1"
+    }
+  },
+  {
+    "annotations": {
       "destructiveHint": true,
       "idempotentHint": false,
       "openWorldHint": true,
