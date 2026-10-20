@@ -1104,7 +1104,7 @@ export function createAppComposition(deps: AppDependencies): {
       return c.json(
         {
           code: "API_CONTRACT_CHANGED",
-          message: "Opengeni updated. Reload this client before changing state.",
+          message: "The service was updated. Reload this client before changing state.",
           apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         },
         409,

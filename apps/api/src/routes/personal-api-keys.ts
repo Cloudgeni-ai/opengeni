@@ -119,13 +119,13 @@ async function requireOrganizationPerson(
   mutation: boolean,
 ): Promise<{ context: AccessContext; organizationId: string; admin: boolean }> {
   if (deps.settings.productAccessMode !== "managed") {
-    throw new HTTPException(404, { message: "Personal API keys need Opengeni sign-in." });
+    throw new HTTPException(404, { message: "Personal API keys need a signed-in person." });
   }
   if (isAgentActingAsPerson(c)) {
     if (mutation) requireFullAccessIfAgent(c, "Managing personal API keys");
   } else if (!c.req.header("cookie") || c.req.header("authorization")) {
     throw new HTTPException(403, {
-      message: "Manage personal API keys in the Opengeni app in your browser.",
+      message: "Manage personal API keys in the app in your browser.",
     });
   }
   const context = await requireAccessContext(c, deps);

@@ -1173,7 +1173,7 @@ describe("OpenGeniClient files", () => {
         reason: "insecure_context",
         retryable: false,
       });
-      expect((error as Error).message).toContain("Opengeni is open over HTTP");
+      expect((error as Error).message).toContain("this page is open over HTTP");
       expect(requests).toHaveLength(0);
     } finally {
       if (windowDescriptor) {

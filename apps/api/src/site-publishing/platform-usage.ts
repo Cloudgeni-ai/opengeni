@@ -341,11 +341,10 @@ export type SitePlatformBrakedAction = "sql_write" | "publish" | "guest_agent";
 
 const BRAKE_MESSAGES: Record<SitePlatformBrakedAction, string> = {
   sql_write:
-    "Opengeni has paused new Site database writes for the rest of the month. Published pages keep working.",
-  publish:
-    "Opengeni has paused publishing for the rest of the month. Published pages keep working.",
+    "New Site database writes are paused for the rest of the month. Published pages keep working.",
+  publish: "Publishing is paused for the rest of the month. Published pages keep working.",
   guest_agent:
-    "Opengeni has paused Site assistants for visitors for the rest of the month. Published pages keep working.",
+    "Site assistants for visitors are paused for the rest of the month. Published pages keep working.",
 };
 
 /** The 503 a braked action gets. */

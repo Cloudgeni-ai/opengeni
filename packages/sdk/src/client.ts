@@ -872,7 +872,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected Opengeni API does not support ${feature}`);
+  return new Error(`The connected API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -1142,8 +1142,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
             for (const segment of path) {
               target = (target as Record<string, unknown>)[segment];
             }
-            if (typeof target !== "function")
-              throw new TypeError("Opengeni tool path is not callable");
+            if (typeof target !== "function") throw new TypeError("Tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {

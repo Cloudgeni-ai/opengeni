@@ -1964,8 +1964,32 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("");
     expect((error as OpenGeniApiError).code).toBeUndefined();
     expect((error as OpenGeniApiError).message).toMatch(
-      /^Opengeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+      /^API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
     );
+  });
+
+  test("API error text an agent may relay names no platform and keeps the reference", async () => {
+    const requestId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    const { client } = makeClient(
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "The workspace could not complete the request.",
+            requestId,
+          }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as Error).message).toBe(
+      `API 500: The workspace could not complete the request. Reference: ${requestId}.`,
+    );
+    expect((error as Error).message).not.toMatch(/opengeni/i);
   });
 
   test("decodes structured API error code/message while retaining the raw body", async () => {
@@ -1988,7 +2012,7 @@ describe("OpenGeniClient", () => {
       body,
     });
     expect((error as Error).message).toMatch(
-      /^Opengeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+      /^API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
     );
   });
 

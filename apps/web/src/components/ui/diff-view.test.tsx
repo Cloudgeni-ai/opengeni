@@ -123,6 +123,19 @@ describe("DiffView", () => {
     expect(html).toContain("Technical details");
     expect(html).toContain("req_diff_1");
     expect(html).not.toContain("Opengeni API 500");
+    const neutral = renderToStaticMarkup(
+      <DiffView
+        error={{
+          message: "Couldn't load the changes.",
+          cause: Object.assign(new Error("API 500: internal error Reference: req_diff_2."), {
+            status: 500,
+          }),
+        }}
+      />,
+    );
+    expect(neutral).toContain("Technical details");
+    expect(neutral).toContain("req_diff_2");
+    expect(neutral).not.toContain("API 500: internal error");
   });
 });
 

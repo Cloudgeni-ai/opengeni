@@ -398,7 +398,7 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
     });
     expect(widened.status).toBe(403);
     expect(await widened.text()).toContain(
-      "an agent may only narrow its session Opengeni tools: goal_set",
+      "an agent may only narrow its session first-party tools: goal_set",
     );
 
     // Adopting workspace defaults is a widen whenever it adds anything.

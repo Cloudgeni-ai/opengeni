@@ -121,7 +121,7 @@ export function assertAllowedHost(
   if (!host || !allowed.includes(host)) {
     throw new VaultProviderError(
       "provider_auth_invalid",
-      "The Keeper region host is not one Opengeni connects to",
+      "The Keeper region host is not a supported Keeper region",
     );
   }
   return host;

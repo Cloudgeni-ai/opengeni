@@ -23,7 +23,8 @@ function apiError(status: number, message: string, code?: string) {
 describe("api errors in product words", () => {
   test("splits the raw message into status, server message and reference", () => {
     const error = apiError(403, "missing permission: workspace:admin");
-    expect(error.message).toContain("Opengeni API 403");
+    expect(error.message).toContain("API 403");
+    expect(error.message).not.toMatch(/opengeni/i);
     expect(apiErrorFacts(error)).toEqual({
       status: 403,
       code: undefined,
@@ -43,6 +44,9 @@ describe("api errors in product words", () => {
     const facts = apiErrorFacts(new Error(`Opengeni API 404: not found Reference: ${REFERENCE}.`));
     expect(facts.reference).toBe(REFERENCE);
     expect(facts.serverMessage).toBe("not found");
+    const neutral = apiErrorFacts(new Error(`API 404: not found Reference: ${REFERENCE}.`));
+    expect(neutral.reference).toBe(REFERENCE);
+    expect(neutral.serverMessage).toBe("not found");
   });
 
   test("a 403 or a missing permission is a permission refusal, not a failure", () => {

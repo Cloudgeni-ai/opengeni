@@ -156,7 +156,7 @@ function videoGenerationFundingOptions(input: {
       description: "Uses credits through the managed Gateway route.",
       available: input.managedConfigured && !input.creditsDisabled,
       unavailableReason: !input.managedConfigured
-        ? "Opengeni-managed video generation is not configured."
+        ? "Managed video generation is not configured."
         : input.creditsDisabled
           ? "Credits are turned off in this workspace."
           : null,

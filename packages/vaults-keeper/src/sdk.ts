@@ -50,7 +50,7 @@ export class CapturedConsole {
 }
 
 function denied(module: string): never {
-  throw new Error(`The Keeper SDK may not use ${module} inside Opengeni`);
+  throw new Error(`The Keeper SDK may not use ${module} here`);
 }
 
 /**
@@ -98,7 +98,7 @@ export function readInstalledKeeperSdkSource(): string {
   } catch {
     throw new VaultProviderError(
       "provider_unavailable",
-      `${KEEPER_SDK_PACKAGE} ${KEEPER_SDK_VERSION} is not installed on this Opengeni server`,
+      `${KEEPER_SDK_PACKAGE} ${KEEPER_SDK_VERSION} is not installed on this server`,
     );
   }
   return readFileSync(path, "utf8");
@@ -172,7 +172,7 @@ async function readBounded(response: Response, maxBytes: number): Promise<Uint8A
     await response.body?.cancel().catch(() => {});
     throw new VaultProviderError(
       "provider_unavailable",
-      "Keeper returned more data than Opengeni reads",
+      "Keeper returned more data than can be read at once",
     );
   }
   if (!response.body) return new Uint8Array();
@@ -187,7 +187,7 @@ async function readBounded(response: Response, maxBytes: number): Promise<Uint8A
       await reader.cancel().catch(() => {});
       throw new VaultProviderError(
         "provider_unavailable",
-        "Keeper returned more data than Opengeni reads",
+        "Keeper returned more data than can be read at once",
       );
     }
     chunks.push(value);

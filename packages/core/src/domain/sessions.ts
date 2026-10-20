@@ -5181,7 +5181,7 @@ export async function updateSessionToolPolicy(
           );
           if (widenedFirstPartyTool) {
             throw new HTTPException(403, {
-              message: `session Opengeni tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
+              message: `session first-party tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
             });
           }
           nextFirstPartyMcpTools = explicitRequestedFirstPartyTools!;
@@ -5318,7 +5318,7 @@ export async function updateSessionToolPolicy(
         );
         if (widenedFirstPartyTool) {
           throw new HTTPException(403, {
-            message: `an agent may only narrow its session Opengeni tools: ${widenedFirstPartyTool}`,
+            message: `an agent may only narrow its session first-party tools: ${widenedFirstPartyTool}`,
           });
         }
       }

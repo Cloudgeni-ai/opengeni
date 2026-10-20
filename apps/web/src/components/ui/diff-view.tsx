@@ -37,7 +37,7 @@ export interface FailedLoad {
   onRetry?: () => void;
 }
 
-const RAW_API_ERROR = /^(?:OpenGeni|Opengeni) API (\d{3})\b/u;
+const RAW_API_ERROR = /^(?:(?:OpenGeni|Opengeni) )?API (\d{3})\b/u;
 
 /**
  * The line under a failed load's title and its Technical details. An API
