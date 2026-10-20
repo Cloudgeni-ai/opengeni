@@ -797,7 +797,9 @@ test("keyed cancellation removes a member whose sessions selected their own MCP 
       );
   // Without the lifecycle capability the binding fence refuses the clear
   // before the immutability fence sees it, with or without an epoch advance.
-  expect(await directClear(false)).toContain("MCP account binding requires exact sender delegation");
+  expect(await directClear(false)).toContain(
+    "MCP account binding requires exact sender delegation",
+  );
   expect(await directClear(true)).toContain("MCP account binding requires exact sender delegation");
 
   await f.revoke();
