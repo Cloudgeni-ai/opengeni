@@ -97,6 +97,7 @@ import {
   validateHeadlessSessionCookies,
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
+import { BrowserWindowParking } from "./window-parking";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 // Attached Chrome without file access receives upload bytes over its
@@ -493,6 +494,10 @@ export type AgentBrowserDriverOptions = {
   passkeys?: BrowserPasskeyManager;
   /** Test seam for the navigation commit deadline. */
   navigationCommitTimeoutMs?: number;
+  /** Windowed browser on a display without occlusion tracking: minimize its
+   * windows after this long without any use, so idle pages stop rendering,
+   * and present them again before the next use. */
+  parkIdleWindowsAfterMs?: number;
 };
 
 export type BrowserSessionEmulation = {
@@ -625,6 +630,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly autoSessions = new Map<string, string>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
+  private readonly windowParking: BrowserWindowParking | null;
   /** Secret values this controller typed; redacted from everything it returns. */
   private readonly typedSecrets: TypedSecretMemory;
 
@@ -678,6 +684,61 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       : null;
     this.downloadEvents = options.downloadEvents;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
+    this.windowParking =
+      options.parkIdleWindowsAfterMs === undefined
+        ? null
+        : new BrowserWindowParking({
+            idleMs: options.parkIdleWindowsAfterMs,
+            connection: () => this.connection,
+            pageTargetIds: async () => {
+              const connection = this.connection;
+              if (!connection) return [];
+              return visiblePageTargets(await this.targetInfos(connection)).map(
+                (target) => target.targetId,
+              );
+            },
+            // Focus emulation keeps every tab rendering as if it were being
+            // captured; it is only needed while the browser is in use.
+            suspendRendering: async () => await this.setTabFocusEmulation(false),
+            resumeRendering: async () => await this.setTabFocusEmulation(true),
+            onError: (phase, error) =>
+              console.info(
+                JSON.stringify({
+                  event: "browser.window_parking.failed",
+                  browserSessionId: this.browserSessionId,
+                  phase,
+                  error: error instanceof Error ? error.message : String(error),
+                  at: new Date().toISOString(),
+                }),
+              ),
+          });
+  }
+
+  /** Keeps this browser's windows presented (not parked) until the returned
+   * release is called. A no-op for browsers that never park their windows. */
+  async acquirePresence(): Promise<() => void> {
+    return this.windowParking ? await this.windowParking.acquire() : () => undefined;
+  }
+
+  private async setTabFocusEmulation(enabled: boolean): Promise<void> {
+    const connection = this.connection;
+    if (!connection || !this.focusEmulation) return;
+    const results = await Promise.allSettled(
+      [...this.states.values()].map(
+        async (state) =>
+          await connection.send(
+            "Emulation.setFocusEmulationEnabled",
+            { enabled },
+            { sessionId: state.sessionId, timeoutMs: 2_000 },
+          ),
+      ),
+    );
+    // A tab that closed meanwhile refuses the command; nothing is left to do.
+    const failure = results.find(
+      (result): result is PromiseRejectedResult =>
+        result.status === "rejected" && !(result.reason instanceof CdpProtocolError),
+    );
+    if (failure) throw failure.reason;
   }
 
   async start(
@@ -697,6 +758,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let target: TargetInfo;
     if (this.targetLifecycle === "cdp") {
       connection = await this.ensureConnection();
+      await this.windowParking?.presentNow();
       if (deferNavigation) connection.assertNavigable?.(url);
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
@@ -715,6 +777,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.selectedTargetId = target.targetId;
         if (deferNavigation)
           await this.navigate(await this.ensureTargetState(target), url, options);
+        this.windowParking?.arm();
         return await this.observe(target.targetId);
       } catch (error) {
         // The session never started, so nothing can use or close this tab.
@@ -723,6 +786,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     } else {
       connection = await this.ensureConnection();
+      // A browser reattached after a controller restart may still have the
+      // windows its previous controller parked.
+      await this.windowParking?.presentNow();
       if (this.headlessSessionCookies) {
         await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
         this.headlessSessionCookies = null;
@@ -760,6 +826,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (deferNavigation) {
       await this.navigate(await this.ensureTargetState(target), url, options);
     }
+    this.windowParking?.arm();
     return await this.observe(target.targetId);
   }
 
@@ -952,6 +1019,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async close(): Promise<void> {
+    this.windowParking?.close();
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
@@ -1020,6 +1088,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async detach(): Promise<void> {
+    this.windowParking?.close();
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();

@@ -281,6 +281,13 @@ export type CreateCodexRealtimeControllerOptions = {
   startTransport?: RealtimeControllerTransportStarter | undefined;
   /** Model-visible application context captured with each durable realtime message. */
   getModelContext?: (() => string | undefined) | undefined;
+  /**
+   * BCP 47 tag of the language the person speaks (for example `nb-NO`), read
+   * whenever a provider connection opens. Models that hold a conversation in
+   * one fixed language (catalog entries with `languages`) listen and reply in
+   * it; the others detect the spoken language themselves.
+   */
+  getLanguage?: (() => string | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
@@ -294,6 +301,8 @@ export type RealtimeControllerTransportStarter = (input: {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /** BCP 47 tag of the language the person speaks, when the host supplied one. */
+  language?: string | undefined;
   signal: AbortSignal;
   media: MediaStream;
   onEventsCreated(events: RTCDataChannel): void;
@@ -582,8 +591,32 @@ export function createCodexRealtimeController(
     });
   };
 
-  const ensureMicrophone = async (replace: boolean, signal: AbortSignal): Promise<MediaStream> => {
+  let microphoneAcquisition: Promise<MediaStream> | null = null;
+  const ensureMicrophone = async (
+    replace: boolean,
+    signal: AbortSignal,
+    warmup = false,
+  ): Promise<MediaStream> => {
     if (!replace && codexRealtimeMicrophoneHealthy(microphone)) return microphone!;
+    if (!replace && microphoneAcquisition) {
+      // Startup acquires the microphone alongside the begin request; the
+      // connection joins that acquisition instead of prompting twice.
+      try {
+        return await abortable(microphoneAcquisition, signal);
+      } catch (error) {
+        throw publishMicrophoneFailure(error, signal);
+      }
+    }
+    const acquisition = acquireMicrophone(signal, warmup);
+    microphoneAcquisition = acquisition;
+    try {
+      return await acquisition;
+    } finally {
+      if (microphoneAcquisition === acquisition) microphoneAcquisition = null;
+    }
+  };
+
+  const acquireMicrophone = async (signal: AbortSignal, warmup: boolean): Promise<MediaStream> => {
     releaseMicrophone();
     publish({ microphone: "acquiring" });
     try {
@@ -600,27 +633,36 @@ export function createCodexRealtimeController(
       publish({ microphone: "active" });
       return acquired;
     } catch (error) {
-      const microphoneError =
-        error instanceof CodexRealtimeMicrophoneError
-          ? error
-          : signal.aborted && state.microphone === "acquiring"
-            ? new CodexRealtimeMicrophoneError(
-                "acquisition_failed",
-                "Microphone did not become available before voice startup timed out",
-              )
-            : null;
-      if (microphoneError) {
-        const kind =
-          microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
-        publish({
-          microphone: microphoneError.code,
-          status: state.mode?.state === "active" ? "recovering" : "error",
-          diagnostic: diagnostic(kind, microphoneError.message, true),
-          error: microphoneError.message,
-        });
+      // A cancelled warmup is not a microphone failure: startup either failed
+      // for its own reason or ended before it needed the microphone.
+      if (warmup && signal.aborted) {
+        if (state.microphone === "acquiring") publish({ microphone: "inactive" });
+        throw error;
       }
-      throw microphoneError ?? error;
+      throw publishMicrophoneFailure(error, signal);
     }
+  };
+
+  const publishMicrophoneFailure = (error: unknown, signal: AbortSignal): unknown => {
+    const microphoneError =
+      error instanceof CodexRealtimeMicrophoneError
+        ? error
+        : signal.aborted && state.microphone === "acquiring"
+          ? new CodexRealtimeMicrophoneError(
+              "acquisition_failed",
+              "Microphone did not become available before voice startup timed out",
+            )
+          : null;
+    if (!microphoneError) return error;
+    const kind =
+      microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
+    publish({
+      microphone: microphoneError.code,
+      status: state.mode?.state === "active" ? "recovering" : "error",
+      diagnostic: diagnostic(kind, microphoneError.message, true),
+      error: microphoneError.message,
+    });
+    return microphoneError;
   };
 
   const syncForGeneration = async (
@@ -965,6 +1007,7 @@ export function createCodexRealtimeController(
         expectedVersion: currentMode.version,
         expectedConnectionEpoch: currentMode.connectionEpoch,
         rotate,
+        language: options.getLanguage?.(),
         signal: abort.signal,
         media,
         onEventsCreated: earlyEvents.attach,
@@ -1296,15 +1339,20 @@ export function createCodexRealtimeController(
       owner = record;
       storage?.setItem(storageKey, JSON.stringify(record));
       publish({ status: "starting", error: null, diagnostic: null, refusal: null });
+      const microphoneWarmup = new AbortController();
+      void ensureMicrophone(false, microphoneWarmup.signal, true).catch(() => undefined);
       try {
         await begin(record, false);
       } catch (error) {
+        microphoneWarmup.abort(new DOMException("Realtime startup failed", "AbortError"));
         closeBrowserResources(false);
         const refusal = codexRealtimeRefusal(error);
         const failedMode = state.mode as SessionRealtimeMode | null;
         if (failedMode?.state === "active") {
           await handleConnectionFailure(error, "reconnect", false);
         } else {
+          // The microphone was only warmed for this start; do not keep it live.
+          releaseMicrophone();
           clearOwner();
           publish({
             status: "error",
@@ -1318,6 +1366,10 @@ export function createCodexRealtimeController(
         }
         if (refusal) return;
         throw error;
+      } finally {
+        // A start that ended without connecting must not finish acquiring later.
+        if (!active)
+          microphoneWarmup.abort(new DOMException("Realtime startup ended", "AbortError"));
       }
     },
     observeLifecycle: async (lifecycle) => {
@@ -1836,6 +1888,21 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Reject when `signal` aborts without cancelling the shared `promise`. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 function isAbortError(error: unknown): boolean {

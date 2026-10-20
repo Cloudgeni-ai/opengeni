@@ -66,102 +66,129 @@ const REALTIME_WIRE_CODECS: Record<RealtimeWebsocketProtocol, RealtimeWireCodec>
 /** One transport for every realtime voice provider reached over a WebSocket. */
 export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTransportStarter {
   return async (input) => {
-    const client = input.client as CodexRealtimeControllerClient;
-    const negotiate =
-      client.negotiateRealtimeWebsocket?.bind(client) ??
-      client.negotiateGatewayRealtime?.bind(client) ??
-      client.negotiateXaiSubscriptionRealtime?.bind(client);
-    if (!negotiate) {
-      throw new Error("The Opengeni client does not support WebSocket realtime voice");
-    }
-    const answer = await negotiate(
-      input.workspaceId,
-      input.sessionId,
-      {
-        realtimeId: input.realtimeId,
-        operationId: input.operationId,
-        browserInstanceId: input.browserInstanceId,
-        ownerKey: input.ownerKey,
-        expectedVersion: input.expectedVersion,
-        expectedConnectionEpoch: input.expectedConnectionEpoch,
-        rotate: input.rotate,
-      },
-      { signal: input.signal },
-    );
-    throwIfAborted(input.signal);
-
-    const codec = REALTIME_WIRE_CODECS[answer.protocol];
-    const websocket = new WebSocket(answer.url, answer.protocols);
-    const channel = new RealtimeWebsocketDataChannel((payload) =>
-      handleBridgeOutbound(websocket, payload, codec),
-    );
-    input.onEventsCreated(channel.asRtcDataChannel());
-    const audio = new RealtimeWebsocketAudio({
-      onAudio: (encoded) => send(websocket, codec.audioAppend(encoded)),
-      onAudibleOutputState: input.onAudibleOutputState,
-    });
-    let stopped = false;
-    let currentOutputItemId: string | null = null;
-    const finalizedAssistantItems = new Set<string>();
-    const microphoneTracks = input.media.getAudioTracks();
-    const onMicrophoneEnded = (): void => {
-      if (!stopped) input.onMicrophoneEnded();
-    };
-    for (const track of microphoneTracks) track.addEventListener?.("ended", onMicrophoneEnded);
-
-    const onMessage = (event: MessageEvent): void => {
-      if (typeof event.data !== "string") return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (!isRecord(parsed) || typeof parsed.type !== "string") return;
-      handleRealtimeEvent({
-        event: parsed as RealtimeServerEvent,
-        codec,
-        transcriptAudioTags: answer.transcriptAudioTags === true,
-        channel,
-        websocket,
-        audio,
-        finalizedAssistantItems,
-        getCurrentOutputItemId: () => currentOutputItemId,
-        setCurrentOutputItemId: (value) => {
-          currentOutputItemId = value;
-        },
-      });
-    };
-    const onClose = (): void => {
-      if (!stopped) input.onConnectionHealth("closed");
-    };
-    const onError = (): void => {
-      if (!stopped) input.onConnectionHealth("failed");
-    };
-    websocket.addEventListener("message", onMessage);
-    websocket.addEventListener("close", onClose);
-    websocket.addEventListener("error", onError);
-
-    const stop = (): void => {
-      if (stopped) return;
-      stopped = true;
-      input.signal.removeEventListener("abort", stop);
-      websocket.removeEventListener("message", onMessage);
-      websocket.removeEventListener("close", onClose);
-      websocket.removeEventListener("error", onError);
-      for (const track of microphoneTracks) track.removeEventListener?.("ended", onMicrophoneEnded);
-      channel.close();
-      audio.dispose();
-      if (
-        websocket.readyState === WebSocket.OPEN ||
-        websocket.readyState === WebSocket.CONNECTING
-      ) {
-        websocket.close(1000, "Opengeni realtime connection retired");
-      }
-    };
-    input.signal.addEventListener("abort", stop, { once: true });
-
+    // Until a connection is returned, failures own all partially started resources.
+    // Successful connections keep the existing controller-owned media lifetime.
+    let cleanupStartup = (): void => {};
     try {
+      const client = input.client as CodexRealtimeControllerClient;
+      const negotiate =
+        client.negotiateRealtimeWebsocket?.bind(client) ??
+        client.negotiateGatewayRealtime?.bind(client) ??
+        client.negotiateXaiSubscriptionRealtime?.bind(client);
+      if (!negotiate) {
+        throw new Error("The Opengeni client does not support WebSocket realtime voice");
+      }
+      // Microphone capture is prepared while the server mints the provider
+      // session; audio flows once the socket is open and configured.
+      let sendAudio: ((encoded: string) => void) | null = null;
+      const audio = new RealtimeWebsocketAudio({
+        onAudio: (encoded) => sendAudio?.(encoded),
+        onAudibleOutputState: input.onAudibleOutputState,
+      });
+      cleanupStartup = () => audio.dispose();
+      const capture = audio.startCapture(input.media);
+      capture.catch(() => undefined);
+      const answer = await negotiate(
+        input.workspaceId,
+        input.sessionId,
+        {
+          realtimeId: input.realtimeId,
+          operationId: input.operationId,
+          browserInstanceId: input.browserInstanceId,
+          ownerKey: input.ownerKey,
+          expectedVersion: input.expectedVersion,
+          expectedConnectionEpoch: input.expectedConnectionEpoch,
+          rotate: input.rotate,
+          ...(input.language ? { language: input.language } : {}),
+        },
+        { signal: input.signal },
+      );
+      throwIfAborted(input.signal);
+
+      const codec = REALTIME_WIRE_CODECS[answer.protocol];
+      const websocket = new WebSocket(answer.url, answer.protocols);
+      cleanupStartup = () => {
+        try {
+          audio.dispose();
+        } finally {
+          websocket.close(1000, "Opengeni realtime startup failed");
+        }
+      };
+      const channel = new RealtimeWebsocketDataChannel((payload) =>
+        handleBridgeOutbound(websocket, payload, codec),
+      );
+      const closeSocketAndAudio = cleanupStartup;
+      cleanupStartup = () => {
+        try {
+          channel.close();
+        } finally {
+          closeSocketAndAudio();
+        }
+      };
+      input.onEventsCreated(channel.asRtcDataChannel());
+      let stopped = false;
+      let currentOutputItemId: string | null = null;
+      const finalizedAssistantItems = new Set<string>();
+      const microphoneTracks = input.media.getAudioTracks();
+      const onMicrophoneEnded = (): void => {
+        if (!stopped) input.onMicrophoneEnded();
+      };
+      for (const track of microphoneTracks) track.addEventListener?.("ended", onMicrophoneEnded);
+
+      const onMessage = (event: MessageEvent): void => {
+        if (typeof event.data !== "string") return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (!isRecord(parsed) || typeof parsed.type !== "string") return;
+        handleRealtimeEvent({
+          event: parsed as RealtimeServerEvent,
+          codec,
+          transcriptAudioTags: answer.transcriptAudioTags === true,
+          channel,
+          websocket,
+          audio,
+          finalizedAssistantItems,
+          getCurrentOutputItemId: () => currentOutputItemId,
+          setCurrentOutputItemId: (value) => {
+            currentOutputItemId = value;
+          },
+        });
+      };
+      const onClose = (): void => {
+        if (!stopped) input.onConnectionHealth("closed");
+      };
+      const onError = (): void => {
+        if (!stopped) input.onConnectionHealth("failed");
+      };
+      websocket.addEventListener("message", onMessage);
+      websocket.addEventListener("close", onClose);
+      websocket.addEventListener("error", onError);
+
+      const stop = (): void => {
+        if (stopped) return;
+        stopped = true;
+        input.signal.removeEventListener("abort", stop);
+        websocket.removeEventListener("message", onMessage);
+        websocket.removeEventListener("close", onClose);
+        websocket.removeEventListener("error", onError);
+        for (const track of microphoneTracks)
+          track.removeEventListener?.("ended", onMicrophoneEnded);
+        channel.close();
+        audio.dispose();
+        if (
+          websocket.readyState === WebSocket.OPEN ||
+          websocket.readyState === WebSocket.CONNECTING
+        ) {
+          websocket.close(1000, "Opengeni realtime connection retired");
+        }
+      };
+      cleanupStartup = stop;
+      input.signal.addEventListener("abort", stop, { once: true });
+
       await waitForWebSocketOpen(websocket, input.signal);
       channel.open();
       if (answer.sessionUpdate) send(websocket, answer.sessionUpdate as RealtimeClientEvent);
@@ -173,31 +200,45 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
           ),
         );
       }
-      await audio.startCapture(input.media);
+      sendAudio = (encoded) => send(websocket, codec.audioAppend(encoded));
+      await capture;
+      throwIfAborted(input.signal);
       input.onConnectionHealth("connected");
+      throwIfAborted(input.signal);
+
+      return {
+        peerConnection: null as unknown as RTCPeerConnection,
+        events: channel.asRtcDataChannel(),
+        media: input.media,
+        operationId: input.operationId,
+        connectionId: answer.connectionId,
+        connectionEpoch: answer.connectionEpoch,
+        startupFenceSequence: answer.startupFenceSequence,
+        modeVersion: answer.modeVersion,
+        microphoneHealthy: () =>
+          microphoneTracks.length > 0 &&
+          microphoneTracks.every((track) => track.readyState !== "ended"),
+        audibleOutputState: () => audio.audibleOutputState(),
+        setOutputMuted: (muted) => audio.setMuted(muted),
+        activateRemoteAudio: () => void audio.resume(),
+        retryAudibleOutput: () => audio.resume(),
+        stop,
+      } satisfies CodexRealtimeWebrtcSession;
     } catch (error) {
-      stop();
+      try {
+        cleanupStartup();
+      } catch {
+        // Cleanup must not hide the startup error or leave other tracks running.
+      }
+      for (const track of input.media.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // A faulty track must not prevent stopping the rest of this stream.
+        }
+      }
       throw error;
     }
-
-    return {
-      peerConnection: null as unknown as RTCPeerConnection,
-      events: channel.asRtcDataChannel(),
-      media: input.media,
-      operationId: input.operationId,
-      connectionId: answer.connectionId,
-      connectionEpoch: answer.connectionEpoch,
-      startupFenceSequence: answer.startupFenceSequence,
-      modeVersion: answer.modeVersion,
-      microphoneHealthy: () =>
-        microphoneTracks.length > 0 &&
-        microphoneTracks.every((track) => track.readyState !== "ended"),
-      audibleOutputState: () => audio.audibleOutputState(),
-      setOutputMuted: (muted) => audio.setMuted(muted),
-      activateRemoteAudio: () => void audio.resume(),
-      retryAudibleOutput: () => audio.resume(),
-      stop,
-    } satisfies CodexRealtimeWebrtcSession;
   };
 }
 
@@ -433,7 +474,7 @@ function handleBridgeOutbound(
 class RealtimeWebsocketAudio {
   private captureContext: AudioContext | null = null;
   private captureSource: MediaStreamAudioSourceNode | null = null;
-  private captureProcessor: ScriptProcessorNode | null = null;
+  private captureNode: AudioNode | null = null;
   private playbackContext: AudioContext | null = null;
   private playbackGain: GainNode | null = null;
   private playbackTime = 0;
@@ -453,19 +494,20 @@ class RealtimeWebsocketAudio {
     const context = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
     this.captureContext = context;
     const source = context.createMediaStreamSource(media);
-    const processor = context.createScriptProcessor(4096, 1, 1);
     this.captureSource = source;
-    this.captureProcessor = processor;
-    processor.onaudioprocess = (event) => {
-      const samples = resample(
-        new Float32Array(event.inputBuffer.getChannelData(0)),
-        context.sampleRate,
-        AUDIO_SAMPLE_RATE,
-      );
-      this.options.onAudio(encodePcm16(samples));
+    const emit = (samples: Float32Array): void => {
+      this.options.onAudio(encodePcm16(resample(samples, context.sampleRate, AUDIO_SAMPLE_RATE)));
     };
-    source.connect(processor);
-    processor.connect(context.destination);
+    const node =
+      (await createCaptureWorklet(context, emit)) ?? createCaptureScriptProcessor(context, emit);
+    if (this.captureContext !== context) {
+      // Disposed while the capture module loaded.
+      node.disconnect();
+      return;
+    }
+    this.captureNode = node;
+    source.connect(node);
+    node.connect(context.destination);
     await context.resume();
   }
 
@@ -549,10 +591,10 @@ class RealtimeWebsocketAudio {
   }
 
   dispose(): void {
-    this.captureProcessor?.disconnect();
+    this.captureNode?.disconnect();
     this.captureSource?.disconnect();
     void this.captureContext?.close();
-    this.captureProcessor = null;
+    this.captureNode = null;
     this.captureSource = null;
     this.captureContext = null;
     this.stopPlayback();
@@ -581,6 +623,82 @@ class RealtimeWebsocketAudio {
 function send(websocket: WebSocket, event: RealtimeClientEvent): void {
   if (websocket.readyState !== WebSocket.OPEN) return;
   websocket.send(JSON.stringify(event));
+}
+
+/**
+ * Microphone audio leaves the browser in 20 ms frames, so the provider hears the
+ * end of a sentence (and can answer) without waiting for a large capture block.
+ */
+const CAPTURE_FRAME_SECONDS = 0.02;
+const CAPTURE_PROCESSOR_NAME = "opengeni-realtime-capture";
+const CAPTURE_PROCESSOR_SOURCE = `class OpengeniRealtimeCapture extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    this.size = options.processorOptions.frameSamples;
+    this.frame = new Float32Array(this.size);
+    this.filled = 0;
+  }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (!channel) return true;
+    let offset = 0;
+    while (offset < channel.length) {
+      const count = Math.min(channel.length - offset, this.size - this.filled);
+      this.frame.set(channel.subarray(offset, offset + count), this.filled);
+      this.filled += count;
+      offset += count;
+      if (this.filled === this.size) {
+        this.port.postMessage(this.frame, [this.frame.buffer]);
+        this.frame = new Float32Array(this.size);
+        this.filled = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor(${JSON.stringify(CAPTURE_PROCESSOR_NAME)}, OpengeniRealtimeCapture);
+`;
+
+/** The capture worklet, or null where AudioWorklet or blob modules are unavailable. */
+async function createCaptureWorklet(
+  context: AudioContext,
+  emit: (samples: Float32Array) => void,
+): Promise<AudioNode | null> {
+  if (typeof AudioWorkletNode === "undefined" || !context.audioWorklet) return null;
+  const url = URL.createObjectURL(
+    new Blob([CAPTURE_PROCESSOR_SOURCE], { type: "application/javascript" }),
+  );
+  try {
+    await context.audioWorklet.addModule(url);
+    const node = new AudioWorkletNode(context, CAPTURE_PROCESSOR_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 1,
+      processorOptions: {
+        frameSamples: Math.max(128, Math.round(context.sampleRate * CAPTURE_FRAME_SECONDS)),
+      },
+    });
+    node.port.onmessage = (event: MessageEvent) => {
+      if (event.data instanceof Float32Array) emit(event.data);
+    };
+    return node;
+  } catch {
+    // A host content security policy can refuse blob modules.
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function createCaptureScriptProcessor(
+  context: AudioContext,
+  emit: (samples: Float32Array) => void,
+): AudioNode {
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (event) => {
+    emit(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  return processor;
 }
 
 function delegationRequest(argumentsJson: string): string {

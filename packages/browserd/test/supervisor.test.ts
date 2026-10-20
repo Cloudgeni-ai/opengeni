@@ -175,6 +175,146 @@ describe("BrowserSupervisor", () => {
     expect(cleaned).toEqual([46]);
   });
 
+  test("holds the browser's windows presented for each use and while a live view is open", async () => {
+    const directory = await mkdtemp("/tmp/ogb-window-presence-");
+    let holders = 0;
+    const holdersDuring: Record<string, number> = {};
+    let frameStreamClosed = false;
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: join(directory, "sockets"),
+      createDriver: async (context) => {
+        const driver = fakeDriver(context);
+        return {
+          ...driver,
+          async acquirePresence() {
+            holders += 1;
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              holders -= 1;
+            };
+          },
+          async observe(targetId) {
+            holdersDuring.observe = holders;
+            return await driver.observe(targetId);
+          },
+          async dispatch(input) {
+            holdersDuring.dispatch = holders;
+            return await driver.dispatch(input as never);
+          },
+          async subscribeFrames() {
+            return {
+              async close() {
+                frameStreamClosed = true;
+              },
+              async *[Symbol.asyncIterator]() {},
+            };
+          },
+        };
+      },
+    });
+    try {
+      const created = await supervisor.createSession({ ...reference(48), headed: true });
+      await supervisor.observe(reference(48), created.observation.target.id);
+      expect(holdersDuring.observe).toBe(1);
+      expect(holders).toBe(0);
+      await supervisor.action(command(created.observation));
+      expect(holdersDuring.dispatch).toBe(1);
+      expect(holders).toBe(0);
+      const frames = await supervisor.subscribeFrames(reference(48), created.observation.target.id);
+      expect(holders).toBe(1);
+      await frames.close();
+      expect(frameStreamClosed).toBe(true);
+      expect(holders).toBe(0);
+      await frames.close();
+      expect(holders).toBe(0);
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps windows presented through startup and moves every outstanding use to a recovered browser", async () => {
+    const directory = await mkdtemp("/tmp/ogb-window-presence-recovery-");
+    const holders: number[] = [0, 0, 0];
+    const holdersAt: Record<string, number[]> = {};
+    let instances = 0;
+    let firstLost = false;
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: join(directory, "sockets"),
+      createDriver: async (context) => {
+        instances += 1;
+        const instance = instances;
+        const driver = fakeDriver(
+          context,
+          { available: (index) => index > 1 || !firstLost },
+          instance,
+        );
+        return {
+          ...driver,
+          async acquirePresence() {
+            holders[instance]! += 1;
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              holders[instance]! -= 1;
+            };
+          },
+          async start(url) {
+            holdersAt[`start-${instance}`] = [...holders];
+            return await driver.start(url);
+          },
+          async observe(targetId) {
+            holdersAt[`observe-${instance}`] = [...holders];
+            return await driver.observe(targetId);
+          },
+          async subscribeFrames() {
+            return {
+              async close() {},
+              async *[Symbol.asyncIterator]() {},
+            };
+          },
+        };
+      },
+    });
+    try {
+      const session = reference(49);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: { kind: "managed" },
+      });
+      // Startup itself is a use: nothing may park the windows mid-start.
+      expect(holdersAt["start-1"]).toEqual([0, 1, 0]);
+      expect(holders).toEqual([0, 0, 0]);
+
+      const frames = await supervisor.subscribeFrames(session, created.observation.target.id);
+      expect(holders).toEqual([0, 1, 0]);
+
+      firstLost = true;
+      await supervisor.listTargets(session);
+      // The replacement restored its tabs presented, the live view's hold and
+      // the recovering read moved to it, and nothing remains on the old one.
+      expect(instances).toBe(2);
+      expect(holdersAt["start-2"]![2]).toBeGreaterThanOrEqual(1);
+      expect(holders).toEqual([0, 0, 1]);
+
+      await supervisor.observe(session, (await supervisor.listTargets(session))[0]!.id);
+      expect(holdersAt["observe-2"]).toEqual([0, 0, 2]);
+      expect(holders).toEqual([0, 0, 1]);
+
+      await frames.close();
+      expect(holders).toEqual([0, 0, 0]);
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
     async () => {

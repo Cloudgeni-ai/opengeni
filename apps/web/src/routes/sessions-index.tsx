@@ -1,3 +1,4 @@
+import { voiceRealtimeClient } from "@/api";
 import { initialWorkspaceMachineCompute } from "@/lib/workspace-default-machine";
 import { t } from "@/lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
@@ -38,7 +39,11 @@ import {
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults, stableJson } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
-import { NewSessionRealtimeControl, useRealtimeModelSelection } from "@opengeni/react/realtime";
+import {
+  NewSessionRealtimeControl,
+  prestartSessionRealtime,
+  useRealtimeModelSelection,
+} from "@opengeni/react/realtime";
 import {
   OpenGeniApiError,
   type NewSessionSelectionHistory,
@@ -1328,11 +1333,31 @@ function SessionsIndexRouteContent({
             return null;
           },
           navigate: async (sessionId) => {
-            await navigate({
-              to: "/workspaces/$workspaceId/sessions/$sessionId",
-              params: { workspaceId, sessionId },
-              search: realtimeModel ? { realtime: realtimeModel } : {},
-            });
+            // Voice connects while the session page loads; the page adopts
+            // the running call (`?realtime=` still selects its model there).
+            const sessionPath = `/workspaces/${workspaceId}/sessions/${sessionId}`;
+            const abandonVoice = realtimeModel
+              ? prestartSessionRealtime({
+                  client: voiceRealtimeClient(
+                    context.client,
+                    () => new URL(sessionPath, window.location.origin).href,
+                  ),
+                  workspaceId,
+                  sessionId,
+                  model: realtimeModel,
+                  language: voiceSelection.languageFor(realtimeModel),
+                })
+              : null;
+            try {
+              await navigate({
+                to: "/workspaces/$workspaceId/sessions/$sessionId",
+                params: { workspaceId, sessionId },
+                search: realtimeModel ? { realtime: realtimeModel } : {},
+              });
+            } catch (error) {
+              abandonVoice?.();
+              throw error;
+            }
           },
         });
       } finally {

@@ -448,10 +448,33 @@ API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The
 mint is authoritative: ElevenLabs applies the minted instructions, delegation
 tool and audio settings at `session.created`, so the entry returns no session
 update. ElevenLabs accepts only `semantic_vad` turn detection (we use high
-eagerness) and its transcription language defaults to English, which also
-steers the reply language; there is no automatic language detection. Its
-transcripts carry expressive audio tags such as `[calm]`, so the answer sets
+eagerness). Its conversation language (`audio.input.transcription.language`)
+sets both what the model hears and the language it replies in; without one it
+guesses, and for example hears Norwegian as Danish and answers in Danish. The
+catalog therefore lists the 90 languages Eleven Realtime accepts as the
+model's `languages`, and for such models the browser sends the person's
+language with every connect request: their choice from the voice menu's
+Language page, else the app locale, else the browser language. The broker maps
+that BCP 47 tag to ElevenLabs' code (`nb-NO` and `nn` become `no`, `pt-BR`
+becomes `pt-br`) and omits an unsupported one, since ElevenLabs refuses unknown
+codes. Models that detect the spoken language are sent none. Its transcripts
+carry expressive audio tags such as `[calm]`, so the answer sets
 `transcriptAudioTags` and the browser strips them before ledger sync.
+
+Voice startup overlaps its waits. Starting voice from the new-chat page calls
+`prestartSessionRealtime` right after the session is created, so begin,
+negotiation and the socket open while the session page loads; that page's
+`useSessionRealtime` adopts the running controller (same workspace, session and
+model) and consumes its `?realtime=` autostart instead of starting a second
+call. The controller asks for the microphone alongside the begin request, and
+the WebSocket transport prepares capture while the server mints the provider
+session; audio is sent only once the socket is open and configured. Capture
+uses an AudioWorklet that sends 20 ms frames (a 4096-sample ScriptProcessor is
+the fallback where blob worklet modules are refused), so the provider hears the
+end of speech without waiting for a large capture block. A delegated turn's
+result is pulled as soon as the session reports the turn's outcome (agent
+message completed or a terminal turn event); the one-second ledger sync remains
+the fallback.
 
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or

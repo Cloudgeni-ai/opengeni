@@ -16,6 +16,7 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
+import { registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   sessionChatUrl,
@@ -1123,6 +1124,18 @@ export function buildOpenGeniMcpServer(
       },
       attempt: () => exactAgentCommandContext(grant, sessionId),
       json,
+    });
+  }
+  // Office.js code in a workbook the person has open with the Opengeni add-in.
+  if (sessionId !== null) {
+    registerExcelTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
     });
   }
   // PolicyMcpServer applies each tool's own permission contract. Register this
@@ -2986,7 +2999,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -4269,6 +4282,15 @@ function registerFleetTools(
       workspaceId: grant.workspaceId,
       sessionId,
       ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
+      ...(actor && claims
+        ? {
+            commandAttempt: {
+              turnId: claims.turnId,
+              attemptId: claims.attemptId,
+              executionGeneration: claims.executionGeneration,
+            },
+          }
+        : {}),
       ...(actor?.initiatingHumanSubjectId && claims
         ? {
             attemptAuthority: {
@@ -4399,7 +4421,7 @@ function registerFleetTools(
     "run_on",
     {
       description:
-        "Run a ONE-OFF op on a SPECIFIC enrolled selfhosted machine WITHOUT changing this session's active sandbox (a side-channel to another machine). Ops: exec (run a command), read (read a file), write (write a file). Exec returns exact exitCode plus typed timedOut and the effective deadlineMs; a deadline kill or missing exit proof is never ok:true, and an ambiguous transport loss is not replayed. `target` = a selfhosted sandboxes_list `id`. To make a machine the active sandbox instead, use sandbox_swap.",
+        "Run a ONE-OFF op on a SPECIFIC enrolled selfhosted machine WITHOUT changing this session's active sandbox (a side-channel to another machine). Ops: exec (run a command), read (read a file), write (write a file). Exec returns exact exitCode plus typed timedOut and the effective deadlineMs. Long-running agent calls return state:running and a retained commandId: use command_read or command_wait rather than starting the command again. The observation wait does not stop the process. A deadline kill or a result without terminal proof or retained command ownership is never ok:true, and an ambiguous transport loss is not replayed. `target` = a selfhosted sandboxes_list `id`. To make a machine the active sandbox instead, use sandbox_swap.",
       inputSchema: {
         target: z4.string().min(1),
         op: z4.discriminatedUnion("kind", [

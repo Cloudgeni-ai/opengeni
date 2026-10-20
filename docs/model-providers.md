@@ -1743,12 +1743,14 @@ Streaming Codex subscription requests travel over a pooled Responses
 WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
 endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
 The Codex Responses `session_id` header is a cache-affinity hint, not the
-conversation identifier. The worker supplies a deterministic hash of workspace
-and frozen initiating human identity so a new session can reuse a familiar
-prefix. Unknown human identity keeps the session UUID fallback. The body
-`prompt_cache_key` remains the actual session UUID. HTTP requests, WebSocket
-pre-open and authentication retries use the same affinity; session-scoped
-connections and continuation remain separate. Other providers are unchanged.
+conversation identifier. The worker supplies one deterministic hash per
+Opengeni account (the prompt-cache cohort), so a new session, workspace,
+person or service job reaches the cache that already holds the account's
+shared prefix. The same cohort is the body `prompt_cache_key` on Codex and on
+the built-in OpenAI/Azure Responses providers (current OpenAI models keep a
+separate cache per key). Native Claude keeps the session id as its session
+identity. HTTP requests, WebSocket pre-open and authentication retries use the
+same affinity; session-scoped connections and continuation remain separate.
 See [design and live measurements](design/codex-cache-affinity.md).
 Each worker process keeps one socket per conversation and handshake identity;
 concurrent cold callers share one handshake and credential changes retire the

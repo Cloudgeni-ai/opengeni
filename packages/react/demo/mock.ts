@@ -399,6 +399,16 @@ export class MockOpenGeniClient implements SessionClientLike {
           unavailableReason: null,
           recommended: false,
         },
+        {
+          id: "workspace-elevenlabs/eleven_realtime_v1_max",
+          label: "Eleven Realtime v1 max",
+          provider: "Your ElevenLabs",
+          description: "Reasons before replying; best at handing off work",
+          available: true,
+          unavailableReason: null,
+          recommended: false,
+          languages: ["de", "en", "es", "fr", "no", "pt", "pt-br", "sv"],
+        },
       ],
     };
   }

@@ -347,7 +347,9 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
 `ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root and removed when the attempt ends; that cleanup
+`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+end; terminal one-offs clean it on return, while yielded `run_on` commands retain
+it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during
 preparation, and such an exec writes no further file. `cmd.exe`, fish
 and unknown shells return `unsupported_shell`. Commands without references run
@@ -993,8 +995,11 @@ before its existing claim lease expires; this never cancels or time-limits the c
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
-ambient default shell. Calls that omit `shell` intentionally retain the
-machine-owned `$SHELL`/`ComSpec` default.
+ambient default shell. Calls that omit `shell` retain the machine-owned `$SHELL`
+default on Linux and macOS. On Windows they run Windows PowerShell
+(`powershell.exe -NoLogo -NoProfile -NonInteractive -Command`), the dialect agents
+write for Windows and the one secret splicing already uses, instead of the
+machine's `ComSpec` (`cmd.exe`). Internal Channel-A commands keep the machine default.
 On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind. The runner-death lease
@@ -1018,12 +1023,38 @@ personal-machine path requires the same exact accepted-attempt authorization
 and current `connected_machine.use` grant as an active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
 `deadlineMs` (`0` means none). A process killed at an explicitly configured
-deadline, or a response with no terminal
-exit proof, is never reported as `ok: true`; a transport loss after dispatch is
+deadline, or a response with neither terminal exit proof nor durable running
+custody, is never reported as `ok: true`; a transport loss after dispatch is
 ambiguous and is not replayed. `run_on` uses the deployment's separate
 `OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS` and
 `OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and no exec
 deadline by default), while preserving the active sandbox pointer and epoch.
+Attempt-owned calls use the existing ten-second observation yield and the same
+session-command ledger hooks as attached exec (`agent-background-commands.ts`
+in core, shared by the API and worker). A still-running command returns
+`state: "running"`, a `commandId`, and output so far only after the ledger accepts
+custody; use `command_read` or `command_wait` rather than repeating the command.
+The observation wait is not a process deadline. HTTP loss is not cancellation.
+Failed adoption stops the unowned operation through the existing native cleanup
+path; ambiguous machine loss records an exact-connection stop request for the
+reconciler. Direct callers without attempt authority retain terminal semantics.
+An API crash before adoption remains a non-durable observation window; it does
+not make a Unix command block handover. Secret files needed by yielded commands
+are not removed on HTTP return. They remain available on the machine for the
+owning agent; terminal settlement performs best-effort cleanup only while the
+originating session object is still observing it. Later ledger reconciliation
+does not delete those files. There is no expiry or forced-cleanup ledger.
+There is no new duration limit. Unix streamed one-offs already use
+the same update handover as background commands; Windows still waits for live
+commands rather than interrupting them.
+
+Fleet entries report the installed `agentVersion` and the accepted `agentUpdate`
+status, target, waiting reason and timestamps. Machines shows the current hold
+reason and highlights holds after ten minutes; this attention state never kills
+work or overrides update admission. Old agents' `update_busy_work` is ambiguous
+(it also covered interaction sessions), so it must not be presented as proof of
+a stuck command. New agents distinguish interaction-controller holds. Neither
+surface reveals another person's command text or private session identifiers.
 
 Large `write` operations use the existing bounded transactional file transfer
 when the live target advertises `transactional_fs_write` and

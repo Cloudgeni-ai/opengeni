@@ -2226,6 +2226,64 @@ describe("Codex realtime browser controller", () => {
     });
   });
 
+  test("acquires the microphone while begin is in flight and releases it when begin is refused", async () => {
+    const stopped: string[] = [];
+    let resolveBegin: (() => void) | null = null;
+    let getUserMediaCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        getUserMediaCalls += 1;
+        const track = {
+          kind: "audio",
+          enabled: true,
+          readyState: "live",
+          stop: () => stopped.push("track"),
+        } as unknown as MediaStreamTrack;
+        return {
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        } as unknown as MediaStream;
+      },
+      client: {
+        beginSessionRealtime: async () => {
+          await new Promise<void>((resolve) => {
+            resolveBegin = resolve;
+          });
+          throw new Error("Voice is unavailable for this session");
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("negotiation must not start after a refused begin");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start after a refused begin");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: mode(), replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: false }),
+      },
+    });
+
+    const starting = controller.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The permission prompt overlaps the begin request instead of following it.
+    expect(getUserMediaCalls).toBe(1);
+    expect(resolveBegin).not.toBeNull();
+    resolveBegin!();
+    await expect(starting).rejects.toThrow("Voice is unavailable for this session");
+    expect(stopped).toEqual(["track"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      microphone: "inactive",
+      error: "Voice is unavailable for this session",
+    });
+  });
+
   test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {
     const browser = browserFixture({ initialEventsReadyState: "connecting" });
     const timers = timerFixture();
@@ -2723,6 +2781,58 @@ test("Azure rotation persists final speech before the replacement reads startup 
     await stop;
     expect(persisted).toEqual(["Last user request", "Final response"]);
     expect(controller.snapshot().status).toBe("idle");
+  } finally {
+    controller.close();
+  }
+});
+
+test("each provider connection carries the host's current conversation language", async () => {
+  const browser = browserFixture();
+  const timers = timerFixture();
+  let language = "nb-NO";
+  const languages: Array<string | undefined> = [];
+  let current = mode({ model: "workspace-elevenlabs/eleven_realtime_v1_max" });
+  const controller = createCodexRealtimeController({
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    model: "workspace-elevenlabs/eleven_realtime_v1_max",
+    storage: storageFixture(),
+    getUserMedia: async () => browser.media,
+    getLanguage: () => language,
+    startTransport: async (input) => {
+      languages.push(input.language);
+      throw new Error("transport unavailable in this test");
+    },
+    reconnectBackoffMs: [10],
+    ...timers,
+    client: {
+      beginSessionRealtime: async (_w, _s, request) => {
+        current = mode({
+          ...current,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        });
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async () => {
+        throw new Error("WebSocket models do not negotiate WebRTC");
+      },
+      activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+      endSessionRealtime: async () => ({
+        mode: mode({ ...current, state: "ended" }),
+        replay: false,
+      }),
+    },
+  });
+  try {
+    await controller.start().catch(() => undefined);
+    await eventually(() => languages.length === 1, "transport not started");
+    language = "sv";
+    timers.runTimeout(10);
+    await eventually(() => languages.length === 2, "transport not retried");
+    expect(languages).toEqual(["nb-NO", "sv"]);
   } finally {
     controller.close();
   }

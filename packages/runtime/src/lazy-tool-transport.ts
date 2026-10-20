@@ -232,6 +232,11 @@ export class LazyToolRuntime {
     routerInHistory = false,
     private readonly startToolPreparation?: () => void,
     private readonly pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
+    /**
+     * Exact model names a prepared deferred server keeps on the first request
+     * (its harness control tools and the session's ToolRef.eager list).
+     */
+    private readonly firstRequestMcpToolNames: () => ReadonlySet<string> = () => new Set(),
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -360,6 +365,7 @@ export class LazyToolRuntime {
     this.functionTools.clear();
     this.searchableToolNames.clear();
     const modelServerIds = this.modelMcpServerIds();
+    const firstRequestMcpToolNames = this.firstRequestMcpToolNames();
     for (const tool of tools) {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
@@ -369,6 +375,14 @@ export class LazyToolRuntime {
       // polling, wait_for_input) stay visible on every transport when the
       // authorized opengeni server listed them; its other tools stay deferred.
       if (isHarnessControlMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
+      // The session's exact eager tool list (ToolRef.eager as names): those
+      // tools of an authorized prepared server stay in the first request; the
+      // server's other tools stay searchable.
+      if (
+        firstRequestMcpToolNames.has(tool.name) &&
+        isSearchableMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)
+      )
+        continue;
       // Each interaction family's entry tool (browser_open, computer_open)
       // stays visible so a browser or computer task starts without a search
       // round trip; calling it discloses the rest of the family.
@@ -703,6 +717,7 @@ export function installLazyToolRuntime(
   routerInHistory = false,
   startToolPreparation?: () => void,
   pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
+  firstRequestMcpToolNames?: () => ReadonlySet<string>,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -715,6 +730,7 @@ export function installLazyToolRuntime(
     routerInHistory,
     startToolPreparation,
     pendingMcpServerIds,
+    firstRequestMcpToolNames,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

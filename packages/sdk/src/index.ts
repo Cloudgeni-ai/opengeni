@@ -1066,6 +1066,7 @@ export type {
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   CreateDocumentBaseRequest,
+  AppShotCapture,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,

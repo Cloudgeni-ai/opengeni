@@ -796,6 +796,14 @@ wrappers remain the recommended path. Concurrent catalog reads are deduplicated
 per client and workspace, and successful results are reused for a short bounded
 window so embedded controls can remount without refetching.
 
+Voice models that hold a conversation in one fixed language (catalog entries
+with `languages`, such as Eleven Realtime) listen and reply in the person's
+language. By default that is the `OpenGeniProvider` locale, else the browser's
+language; the model menu's Language page stores another choice on the device
+(`useRealtimeLanguagePreference`). Custom layouts pass
+`useRealtimeModelSelection().languageFor(model)` as `useSessionRealtime`'s
+`language` (and to `prestartSessionRealtime`).
+
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
 deterministic selection/start/mute/stop/reconnect/error testing. Use

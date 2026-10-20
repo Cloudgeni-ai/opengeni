@@ -123,6 +123,12 @@ export type SessionRealtimeWebsocketRequest = {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /**
+   * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+   * Providers that need a fixed conversation language use it; the others
+   * detect the spoken language themselves.
+   */
+  language?: string | undefined;
 };
 /** @deprecated Use SessionRealtimeWebsocketRequest. */
 export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
@@ -392,6 +398,11 @@ export type WorkspaceRealtimeModelCatalogItem = {
   /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
   unavailableCode?: string | null | undefined;
   recommended: boolean;
+  /**
+   * Languages a conversation with this model can be set to, as the provider's
+   * language codes. Absent when the model detects the spoken language itself.
+   */
+  languages?: string[] | undefined;
 };
 
 export type WorkspaceRealtimeModelCatalogResponse = {
@@ -739,10 +750,13 @@ export type ToolRef = {
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
-   * Put this server's tool schemas on the first model request instead of behind
-   * `tool_search` progressive discovery. A startup choice only; grants nothing.
+   * Put tool schemas on the first model request instead of behind `tool_search`
+   * progressive discovery: `true` for every tool of this server, or the exact
+   * unprefixed names of its everyday tools (its other tools stay searchable).
+   * A startup choice only; grants nothing, and names the server does not
+   * authorize are ignored.
    */
-  eager?: boolean | undefined;
+  eager?: boolean | string[] | undefined;
 };
 
 export type SessionToolPolicy = {
@@ -808,6 +822,13 @@ export type SessionMcpServerInput = {
   name?: string | undefined;
   url: string;
   allowedTools?: string[] | undefined;
+  /**
+   * Tools the agent has from the first model request: `true` for every tool,
+   * or exact unprefixed tool names (the rest stay searchable). Same as listing
+   * this server in `tools` with `eager`, without turning an omitted `tools`
+   * list into an explicit allow-list.
+   */
+  eager?: boolean | string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
   /** Require human approval for every tool, or only the listed unprefixed tool names. */
@@ -3915,6 +3936,7 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "excel_run"
   | "secret_search"
   | "secret_save"
   | "secret_get"
@@ -6422,10 +6444,14 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
+/** `office`: the Opengeni add-in for Excel, signed in from its task pane. */
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux" | "office";
 
 export type NativeAppAuthorizeInput = {
-  /** Exactly `<registered scheme>://auth/callback`. */
+  /**
+   * Exactly `<registered scheme>://auth/callback`, or for the Office add-in the
+   * deployment's own `<web origin>/office/auth-callback.html`.
+   */
   redirectUri: string;
   /** Base64url SHA-256 of the app's code verifier. */
   codeChallenge: string;
@@ -7687,6 +7713,42 @@ export type FileAccess = {
   whoCanOpen: string;
 };
 
+/**
+ * An app-shot: a screenshot of another app's window, sent from a desktop app,
+ * with the window it shows and the text the window exposed. Stored with the
+ * file once and never changed.
+ */
+export type AppShotCapture = {
+  /** The app's name as the system shows it. */
+  app: string;
+  /** The app's stable identifier, where the system has one (macOS bundle id). */
+  bundleId?: string | undefined;
+  /** The window title; empty when the window has none. */
+  title: string;
+  /** ISO timestamp. */
+  capturedAt: string;
+  platform: "macos" | "windows" | "linux";
+  /** Text read through accessibility, at most 32,000 characters. */
+  text?: string | undefined;
+  /** The window had more text than was kept. */
+  textTruncated?: boolean | undefined;
+  /** The window as the system identifies it. */
+  window?: { processId: number; windowId: number } | undefined;
+  /** The computer the window is on, when connected to this workspace. */
+  computer?: { name: string; sandboxId?: string | undefined } | undefined;
+  /**
+   * A web browser window's page address (http or https) and, when the computer
+   * is connected, the browser profiles connected from it (at most 10) by the
+   * attached browser device id browser tools use.
+   */
+  browser?:
+    | {
+        url: string;
+        profiles?: { deviceId: string; name: string }[] | undefined;
+      }
+    | undefined;
+};
+
 export type FileAsset = {
   /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
@@ -7706,6 +7768,8 @@ export type FileAsset = {
   updatedAt: string;
   /** Present on upload, publish and sharing results: who can open the file. */
   access?: FileAccess | undefined;
+  /** A screenshot sent as an app-shot: the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
@@ -7966,6 +8030,8 @@ export type CreateFileUploadRequest = {
   contentType: string;
   sizeBytes: number;
   sha256?: string | undefined;
+  /** The upload is an app-shot (images only). */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type CreateFileUploadResponse = {
@@ -8001,6 +8067,8 @@ export type UploadFileInput = {
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** The upload is an app-shot (images only): the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------

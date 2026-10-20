@@ -17,6 +17,8 @@ export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./file-access";
 import { FileAccess } from "./file-access";
+export * from "./app-shot";
+import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -1062,6 +1064,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "excel_run",
   "secret_search",
   "secret_save",
   "secret_get",
@@ -6455,6 +6458,8 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     updatedAt: z.string(),
     /** Present on upload, publish and sharing results: who can open the file. */
     access: FileAccess.optional(),
+    /** A screenshot sent as an app-shot: the window it shows and what it said. */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6489,6 +6494,12 @@ export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
     contentType: z.string().min(1),
     sizeBytes: z.number().int().positive(),
     sha256: z.string().min(1).optional(),
+    /**
+     * The upload is an app-shot: an image of another app's window plus what
+     * the window said. Stored with the file once and never changed. Only for
+     * images.
+     */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type CreateFileUploadRequest = z.infer<typeof CreateFileUploadRequest>;
@@ -7169,14 +7180,23 @@ export const WorkspaceMemorySearchResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
+/** Exact unprefixed MCP tool names that stay on the first model request. */
+export const McpEagerToolNames = /* @__PURE__ */ defineSchema(() =>
+  z.array(z.string().min(1).max(200)).max(2000),
+);
+export type McpEagerToolNames = z.infer<typeof McpEagerToolNames>;
+
 export const ToolRef = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.literal("mcp"),
     id: z.string().min(1),
     // Session-scoped startup choice. `true` prepares this server's authorized
     // schemas before the first model request; absent/false keeps it behind
-    // progressive discovery. This never grants a server or tool permission.
-    eager: z.boolean().optional(),
+    // progressive discovery. A list of exact unprefixed tool names prepares the
+    // server before the first request too, but puts only those tools on it; the
+    // server's other tools stay searchable. This never grants a server or tool
+    // permission: a listed name the server does not authorize is ignored.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     // Non-fatal-on-connect marker for MCP server refs that can degrade
     // gracefully. On new input, absent/false is STRICT: the id must be configured
     // and an unavailable registered server fails closed when its preparation is
@@ -7337,6 +7357,10 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     name: z.string().min(1).optional(),
     url: httpsUrl,
     allowedTools: z.array(z.string().min(1)).optional(),
+    // Seeds this server's selection `eager` marker (see ToolRef.eager) without
+    // turning an omitted `tools` list into an explicit allow-list: `true` or the
+    // exact unprefixed tool names the agent has from the first model request.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     timeoutMs: z.number().int().positive().optional(),
     cacheToolsList: z.boolean().optional(),
     // The caller resolves an approval pause with `user.approvalDecision`.
@@ -7500,7 +7524,7 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
 
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
-    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const eager = mergeToolRefEager(prior.eager, tool.eager);
     const allowedTools =
       prior.allowedTools === undefined
         ? tool.allowedTools
@@ -7511,11 +7535,34 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
-      ...(eager ? { eager } : {}),
+      ...(eager !== undefined ? { eager } : {}),
       ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
+}
+
+/**
+ * Combine two eager markers for the same server: `true` wins, otherwise the
+ * named tools are united in first-seen order. Undefined when neither asks for
+ * anything on the first request.
+ */
+export function mergeToolRefEager(
+  left: ToolRef["eager"],
+  right: ToolRef["eager"],
+): true | string[] | undefined {
+  if (left === true || right === true) return true;
+  const names = [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])];
+  return names.length > 0 ? [...new Set(names)] : undefined;
+}
+
+/**
+ * The exact tools a ref puts on the first model request: every tool (`true`),
+ * the named tools (a list), or none (absent/false).
+ */
+export function toolRefEagerToolNames(eager: ToolRef["eager"]): true | readonly string[] {
+  if (eager === true) return true;
+  return Array.isArray(eager) ? eager : [];
 }
 
 export function mergeResourceRefs(
@@ -8333,6 +8380,12 @@ export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =
     expectedVersion: z.number().int().positive(),
     expectedConnectionEpoch: z.number().int().positive(),
     rotate: z.boolean(),
+    /**
+     * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+     * Providers that need a fixed conversation language use it; the others
+     * detect the spoken language themselves.
+     */
+    language: z.string().min(1).max(64).optional(),
   }).strict(),
 );
 export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
@@ -8563,6 +8616,11 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      */
     unavailableCode: z.string().min(1).max(64).nullable().optional(),
     recommended: z.boolean(),
+    /**
+     * Languages a conversation with this model can be set to, as the provider's
+     * language codes. Absent when the model detects the spoken language itself.
+     */
+    languages: z.array(z.string().min(1).max(64)).optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;

@@ -29,6 +29,7 @@ import {
 
 import { apiBaseUrl } from "@/api";
 import { DesktopThisComputerPanel } from "@/components/desktop/this-computer";
+import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
 import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
@@ -236,15 +237,22 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
       <div className="pt-6">
         {!machines.canRead ? (
-          <Notice tone="muted" title="Machines are managed by your workspace admin">
-            You do not have permission to view connected machines in this workspace. Ask a workspace
-            admin for access.
-          </Notice>
+          <>
+            {/* App-shots are this app's own setting, so they never depend on machine access. */}
+            <AppShotsSettings className="mb-6" />
+            <Notice tone="muted" title="Machines are managed by your workspace admin">
+              You do not have permission to view connected machines in this workspace. Ask a
+              workspace admin for access.
+            </Notice>
+          </>
         ) : featureUnavailable ? (
-          <Notice tone="muted">
-            Connected machines aren't enabled on this deployment. Sessions run on the managed
-            sandbox.
-          </Notice>
+          <>
+            <AppShotsSettings className="mb-6" />
+            <Notice tone="muted">
+              Connected machines aren't enabled on this deployment. Sessions run on the managed
+              sandbox.
+            </Notice>
+          </>
         ) : selectedMachine ? (
           <MachineDetail
             machine={selectedMachine}
@@ -299,6 +307,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           <>
             {/* Inside the desktop app: this computer, ahead of the rest. */}
             <DesktopThisComputerPanel className="mb-6" />
+            <AppShotsSettings className="mb-6" />
             <MachinesDashboard
               machines={machines.machines}
               activeSandboxId={machines.activeSandboxId}

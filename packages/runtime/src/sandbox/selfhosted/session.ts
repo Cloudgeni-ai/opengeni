@@ -112,6 +112,9 @@ const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
 // well below the 1 MiB RPC payload ceiling.
 const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
 
+/** Windows PowerShell ships with every supported Windows release; `pwsh` may not. */
+const WINDOWS_EXEC_COMMAND_SHELL = "powershell.exe";
+
 /**
  * Builds the exact argv for an explicitly selected shell.
  *
@@ -402,7 +405,7 @@ export interface SelfhostedSessionDeps {
    * Without it, the instance resolveOperationAdmission reports is used. */
   liveConnectionInstance?: () => Promise<string | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
-   * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
+   * bounded wait. Omitted for direct/Channel-A callers, which remain terminal. */
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
@@ -1262,6 +1265,13 @@ export class SelfhostedSession {
     return await this.execInternal(args, false);
   }
 
+  /** Structured counterpart of execCommand: a bounded observation may yield
+   * only after the existing session ledger accepts custody. Never a process
+   * deadline. Callers without adoption hooks remain terminal. */
+  async execWithYield(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    return await this.execInternal(args, true);
+  }
+
   /** Internal controller transport: stream private request bytes over the
    * existing command channel, never through argv, environment or host files. */
   async execWithInput(
@@ -1756,7 +1766,7 @@ export class SelfhostedSession {
    *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.execInternal(args, true);
+    const result = await this.execWithYield(this.withExecCommandDefaultShell(args));
     if (result.backgroundCommandId && result.backgroundOpId) {
       const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
@@ -1777,6 +1787,21 @@ export class SelfhostedSession {
     return result.backgroundChildrenStopped
       ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
       : formatted;
+  }
+
+  /**
+   * `exec_command` with no `shell` runs PowerShell on a Windows machine.
+   *
+   * The machine's own default there is `cmd.exe` (`ComSpec`), but agents writing
+   * commands for Windows write PowerShell, and the rest of this session already
+   * treats PowerShell as the Windows dialect (secret splicing forces it). Choosing
+   * it here, as direct argv, makes the default the same for every enrolled agent
+   * version. An explicit `shell` is always honoured, and internal Channel-A
+   * callers (`exec`) keep the machine default they were written for.
+   */
+  private withExecCommandDefaultShell(args: SelfhostedExecArgs): SelfhostedExecArgs {
+    if (args.shell?.trim() || this.hostOs() !== "windows") return args;
+    return { ...args, shell: WINDOWS_EXEC_COMMAND_SHELL };
   }
 
   /**

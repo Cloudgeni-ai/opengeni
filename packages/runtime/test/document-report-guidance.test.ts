@@ -14,7 +14,7 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toBe(source);
   const prose = source.replace(/\s+/g, " ");
   expect(prose).toContain(
-    "Create a document when the user asks for a document or file, or when a deliverable is large (multi-page) or clearly meant to be kept or shared; otherwise answer in chat.",
+    "Create a document when the user asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or when a deliverable is too long to read comfortably in chat (several pages); otherwise answer in chat, including briefs, letters, plans and reports written on request.",
   );
   expect(prose).toContain("Do not create a goal only to declare a document.");
   expect(prose).toContain("a short summary and the artifact link, not a restatement");

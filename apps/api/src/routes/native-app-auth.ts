@@ -33,7 +33,14 @@ const CODE_IDENTIFIER_PREFIX = "opengeni-native-app-code:";
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
 const MANAGED_PROVIDERS = ["credential", "google", "github"] as const;
-export const NATIVE_APP_PLATFORMS = ["ios", "android", "macos", "windows", "linux"] as const;
+export const NATIVE_APP_PLATFORMS = [
+  "ios",
+  "android",
+  "macos",
+  "windows",
+  "linux",
+  "office",
+] as const;
 type NativeAppPlatform = (typeof NATIVE_APP_PLATFORMS)[number];
 const PLATFORM_LABELS: Record<NativeAppPlatform, string> = {
   ios: "iOS",
@@ -41,6 +48,7 @@ const PLATFORM_LABELS: Record<NativeAppPlatform, string> = {
   macos: "macOS",
   windows: "Windows",
   linux: "Linux",
+  office: "Office add-in",
 };
 
 /** The device label shown in the person's signed-in sessions. */
@@ -83,9 +91,34 @@ const StoredGrant = z.object({
   deviceName: z.string().nullable(),
 });
 
-/** A registered native callback: exactly `<allowed scheme>://auth/callback`. */
-export function nativeAppRedirectAllowed(redirectUri: string, schemes: readonly string[]): boolean {
-  return schemes.some((scheme) => redirectUri === `${scheme}://auth/callback`);
+/** Where the Office add-in, served by this deployment's web app, receives its code. */
+export const OFFICE_ADDIN_CALLBACK_PATH = "/office/auth-callback.html";
+
+/**
+ * A registered native callback: exactly `<allowed scheme>://auth/callback`, or
+ * the Office add-in's callback page on one of this deployment's own web origins.
+ */
+export function nativeAppRedirectAllowed(
+  redirectUri: string,
+  schemes: readonly string[],
+  webOrigins: readonly string[] = [],
+): boolean {
+  return (
+    schemes.some((scheme) => redirectUri === `${scheme}://auth/callback`) ||
+    webOrigins.some((origin) => redirectUri === `${origin}${OFFICE_ADDIN_CALLBACK_PATH}`)
+  );
+}
+
+function deploymentWebOrigins(settings: ApiRouteDeps["settings"]): string[] {
+  return [settings.webBaseUrl, settings.publicBaseUrl].flatMap((url) => {
+    if (!url) return [];
+    try {
+      const { origin, protocol } = new URL(url);
+      return protocol === "https:" || protocol === "http:" ? [origin] : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function pkceS256Challenge(verifier: string): string {
@@ -133,7 +166,13 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     if (!parsed.success)
       throw new HTTPException(400, { message: "Invalid native sign-in request" });
     const body = parsed.data;
-    if (!nativeAppRedirectAllowed(body.redirectUri, deps.settings.nativeAppSchemes)) {
+    if (
+      !nativeAppRedirectAllowed(
+        body.redirectUri,
+        deps.settings.nativeAppSchemes,
+        deploymentWebOrigins(deps.settings),
+      )
+    ) {
       throw new HTTPException(400, { message: "Unregistered native app redirect" });
     }
     // The device session is bound to the same sign-in method as the approving

@@ -553,6 +553,10 @@ export const englishMessages = {
   "commands.registry.thisSessionHasNoGoal": "This session has no goal to control.",
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
+  "composer.appShotSummary": "{app} · App-shot",
+  "composer.appShotTextIncluded":
+    "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
+  "composer.appShotNoText": "Only the screenshot: this window shared no text.",
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
@@ -2524,6 +2528,12 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
+  "realtime.realtimeControl.voiceLanguage": "Language",
+  "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
+  "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",
+  "realtime.realtimeControl.voiceLanguageAutomaticValue": "Automatic · {language}",
+  "realtime.realtimeControl.voiceLanguageDescription":
+    "The voice listens and replies in this language.",
   "realtime.realtimeControl.voiceModel": "Voice model",
   "realtime.realtimeControl.voiceModelLabel": "Voice model: {label}",
   "realtime.realtimeControl.voiceModelUnavailable": "Voice model unavailable",
@@ -3919,6 +3929,8 @@ export const englishMessages = {
   "timeline.toolStep.withdrawNotification.running": "Withdrawing a notification",
   "timeline.toolStep.workInBrowser.done": "Worked in the browser",
   "timeline.toolStep.workInBrowser.running": "Working in the browser",
+  "timeline.toolStep.workInExcel.done": "Worked in Excel",
+  "timeline.toolStep.workInExcel.running": "Working in Excel",
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",

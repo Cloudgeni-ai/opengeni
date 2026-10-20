@@ -1,4 +1,5 @@
 import {
+  resolveElevenLabsRealtimeLanguage,
   resolveElevenLabsRealtimeModel,
   SUPERGROK_REALTIME_MODEL_ID,
   VERCEL_AI_GATEWAY_AI_SDK_BASE_URL,
@@ -89,6 +90,8 @@ type ProviderInput = {
   sessionId: string;
   model: SessionRealtimeModel;
   instructions: string;
+  /** BCP 47 tag of the language the person speaks, when the client sent one. */
+  language: string | undefined;
   fetchImpl: typeof fetch;
 };
 
@@ -436,6 +439,9 @@ const ELEVENLABS_MAX_SESSION_SECONDS = 3_600;
  * request carries the whole session, so the browser sends no session update.
  * ElevenLabs accepts only semantic turn detection; `high` eagerness answers as
  * soon as the speaker is done.
+ * ElevenLabs does not detect the spoken language, so the conversation language
+ * comes from the person's language; it sets what the model hears and the
+ * language it replies in. An unsupported language keeps the provider default.
  */
 const elevenLabsProvider: RealtimeWebsocketProvider = {
   id: "elevenlabs",
@@ -461,6 +467,8 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
         "Connect an ElevenLabs API key to use this voice model",
       );
     }
+    const language =
+      input.language === undefined ? null : resolveElevenLabsRealtimeLanguage(input.language);
     const [history, secret] = await Promise.all([
       loadHistory(),
       mintElevenLabsClientSecret({
@@ -474,7 +482,7 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
           audio: {
             input: {
               format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-              transcription: {},
+              transcription: language === null ? {} : { language },
               turn_detection: { type: "semantic_vad", eagerness: "high" },
             },
             output: { format: { type: "audio/pcm" } },
@@ -571,6 +579,8 @@ export async function createRealtimeWebsocketConnection(input: {
   workspaceId: string;
   sessionId: string;
   model: SessionRealtimeModel;
+  /** BCP 47 tag of the language the person speaks. */
+  language?: string | undefined;
   /** Test seams for provider requests, by provider. */
   fetchImpls?: Partial<Record<RealtimeWebsocketProviderId, typeof fetch | undefined>>;
 }): Promise<RealtimeWebsocketConnection> {
@@ -591,6 +601,7 @@ export async function createRealtimeWebsocketConnection(input: {
       sessionId: input.sessionId,
       model: input.model,
       instructions,
+      language: input.language,
       fetchImpl: input.fetchImpls?.[provider.id] ?? fetch,
     },
     async () =>

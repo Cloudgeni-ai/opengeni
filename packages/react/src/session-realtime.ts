@@ -7,7 +7,11 @@ export {
   CODEX_LIVE_MODEL,
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
+  prestartSessionRealtime,
+  realtimeAppLanguage,
+  realtimeConversationLanguage,
   sessionRealtimeLifecycleIsActive,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "./realtime/session-realtime";

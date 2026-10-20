@@ -1,5 +1,6 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
+  AppWindowIcon,
   ArrowUpIcon,
   ChevronDownIcon,
   FileIcon,
@@ -1970,36 +1971,53 @@ function AttachmentChips({
           attachment.file &&
           attachment.contentType.startsWith("image/"),
         );
+        const appShot = attachment.appShot;
         const statusText = previewFailed
           ? (messages.previewUnavailable ?? t("composer.previewUnavailable"))
           : attachment.status === "uploading"
             ? messages.uploading
             : failed
               ? attachment.error || messages.uploadFailed
-              : messages.formatBytes(attachment.sizeBytes);
+              : appShot
+                ? t("composer.appShotSummary", { app: appShot.app })
+                : messages.formatBytes(attachment.sizeBytes);
+        // An app-shot reads as the window it shows: its title first, then the
+        // app, with a wider thumbnail so the window is recognizable.
+        const displayName = appShot ? appShot.title.trim() || appShot.app : attachment.name;
+        const thumbSize = appShot ? "h-10 w-16" : "size-8";
         return (
           <div
             key={attachment.id}
+            data-app-shot={appShot ? "" : undefined}
             className={cn(
               "flex min-w-0 items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              // A captured window arrives from outside the page: let it settle in.
+              appShot && "animate-og-enter",
               failed
                 ? cn(
                     "border-og-status-failed/40 bg-og-status-failed/10",
                     secureContextRequired
                       ? "max-w-full items-start sm:max-w-[32rem]"
-                      : "max-w-[240px]",
+                      : appShot
+                        ? "max-w-[320px]"
+                        : "max-w-[240px]",
                   )
-                : "max-w-[240px] border-og-border bg-og-surface-2",
+                : cn(
+                    "border-og-border bg-og-surface-2",
+                    appShot ? "max-w-[320px]" : "max-w-[240px]",
+                  ),
             )}
           >
             {lightbox && (thumb || canLoadPreview) ? (
               <button
                 type="button"
                 className={cn(
-                  "size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  thumbSize,
+                  "shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  appShot && "border border-og-border bg-og-surface-1",
                   !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
-                aria-label={messages.previewAttachment(attachment.name)}
+                aria-label={messages.previewAttachment(displayName)}
                 aria-busy={previewLoading || undefined}
                 disabled={previewLoading}
                 onClick={(event) =>
@@ -2011,7 +2029,10 @@ function AttachmentChips({
                     src={thumb}
                     alt=""
                     onError={onThumbError}
-                    className="h-full w-full object-cover transition-opacity hover:opacity-80"
+                    className={cn(
+                      "h-full w-full object-cover transition-opacity hover:opacity-80",
+                      appShot && "object-top",
+                    )}
                   />
                 ) : previewLoading ? (
                   <LoaderCircleIcon className="size-4 animate-og-spin text-og-fg-muted" />
@@ -2024,7 +2045,7 @@ function AttachmentChips({
                 src={thumb}
                 alt=""
                 onError={onThumbError}
-                className="size-8 shrink-0 rounded object-cover"
+                className={cn(thumbSize, "shrink-0 rounded object-cover", appShot && "object-top")}
               />
             ) : attachment.contentType.startsWith("image/") ? (
               <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
@@ -2032,8 +2053,21 @@ function AttachmentChips({
               <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-og-fg">{attachment.name}</div>
-              {secureContextRequired ? (
+              <div className="truncate font-medium text-og-fg">{displayName}</div>
+              {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
+                <ComposerTip
+                  tip={
+                    appShot.text?.trim()
+                      ? t("composer.appShotTextIncluded")
+                      : t("composer.appShotNoText")
+                  }
+                >
+                  <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
+                    <AppWindowIcon aria-hidden className="size-3 shrink-0" />
+                    <span className="truncate">{statusText}</span>
+                  </div>
+                </ComposerTip>
+              ) : secureContextRequired ? (
                 <div className="break-words text-og-xs leading-4 text-og-status-failed">
                   {statusText}
                 </div>
@@ -2055,7 +2089,7 @@ function AttachmentChips({
                   onClick={() => onRetry(attachment.id)}
                   disabled={disabled}
                   className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
-                  aria-label={messages.retryAttachment(attachment.name)}
+                  aria-label={messages.retryAttachment(displayName)}
                 >
                   <RotateCwIcon className="size-3.5" />
                 </button>
@@ -2066,7 +2100,7 @@ function AttachmentChips({
               onClick={() => onRemove(attachment.id)}
               disabled={disabled}
               className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
-              aria-label={messages.removeAttachment(attachment.name)}
+              aria-label={messages.removeAttachment(displayName)}
             >
               <XIcon className="size-3.5" />
             </button>

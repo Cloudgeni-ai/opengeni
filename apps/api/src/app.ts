@@ -382,6 +382,7 @@ import {
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
@@ -2285,6 +2286,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);
+  registerOfficeWorkbookRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerInsightsUsageRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);

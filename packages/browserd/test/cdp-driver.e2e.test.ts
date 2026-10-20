@@ -223,6 +223,87 @@ e2e(
 );
 
 headedE2e(
+  "parks an idle windowed browser so its animated page stops rendering, and presents it for the next use",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-park-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `park_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+      focusEmulation: true,
+      parkIdleWindowsAfterMs: 500,
+    });
+    // Timers keep running in a hidden page; animation frames do not.
+    const page = dataUrl(`<!doctype html><title>Animated</title>
+      <div style="width:80px;height:80px;background:red;animation:spin 1s linear infinite"></div>
+      <output>pending</output>
+      <style>@keyframes spin { to { transform: rotate(360deg) } }</style>
+      <script>
+        let frames = 0;
+        const tick = () => { frames += 1; requestAnimationFrame(tick); };
+        requestAnimationFrame(tick);
+        setInterval(() => {
+          document.querySelector('output').textContent = 'State ' + document.visibilityState + ' ' + frames;
+        }, 100);
+      </script>`);
+    const state = async (targetId: string) => {
+      const text = names(await driver.observe(targetId)).find((name) => name.startsWith("State "));
+      const [, visibility, frames] = (text ?? "State unknown -1").split(" ");
+      return { visibility, frames: Number(frames) };
+    };
+    try {
+      const started = await driver.start(page);
+      const targetId = started.target.id;
+      await Bun.sleep(400);
+      expect((await state(targetId)).visibility).toBe("visible");
+      // Nothing uses the browser: its window parks and the page stops drawing.
+      await Bun.sleep(1_500);
+      const parked = await state(targetId);
+      expect(parked.visibility).toBe("hidden");
+      await Bun.sleep(600);
+      expect((await state(targetId)).frames).toBe(parked.frames);
+      // A parked page still answers screenshots.
+      const shot = await driver.captureScreenshot(targetId);
+      expect(shot.data.byteLength).toBeGreaterThan(0);
+      // The next use presents the window again before it acts.
+      const release = await driver.acquirePresence();
+      try {
+        await Bun.sleep(400);
+        const presented = await state(targetId);
+        expect(presented.visibility).toBe("visible");
+        expect(presented.frames).toBeGreaterThan(parked.frames);
+        // Held: the window never parks while in use.
+        await Bun.sleep(1_200);
+        expect((await state(targetId)).visibility).toBe("visible");
+      } finally {
+        release();
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  40_000,
+);
+
+headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-slow-tab-");
