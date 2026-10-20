@@ -14,7 +14,7 @@ export function pooledLimitsFixture(
   const accounts = [
     {
       id: "11111111-1111-4111-8111-111111111111",
-      label: "Engineering · Pro",
+      label: "Shared engineering · Pro",
       remainingPercent: 60,
       resetsAt: at(79),
       weight: 10,
@@ -32,7 +32,7 @@ export function pooledLimitsFixture(
     },
     {
       id: "33333333-3333-4333-8333-333333333333",
-      label: "Design · Plus",
+      label: "Design workspace · Plus",
       remainingPercent: 80,
       resetsAt: at(76),
       weight: 1,
@@ -40,6 +40,9 @@ export function pooledLimitsFixture(
       observedAt: at(-0.05),
     },
   ];
+  // The filtered workspace can use the shared engineering account and its own
+  // design account. Operations is available only to a different workspace.
+  // Percentages and pace remain account-wide, including other workspaces' use.
   const selected = scope === "organization" ? accounts : [accounts[0]!, accounts[2]!];
   return {
     provider: "codex",
@@ -103,15 +106,13 @@ export function PooledLimitsPreview() {
           <option value="normal">Organization</option>
           <option value="runout">Runs out</option>
           <option value="sparse">Limited history</option>
-          <option value="workspace">Workspace with accounts</option>
-          <option value="empty">Workspace without accounts</option>
+          <option value="workspace">Workspace · shared and own accounts</option>
+          <option value="empty">Workspace · no available accounts</option>
         </Select>
       </div>
       <SectionStack variant="group">
         <Section
-          title={
-            scope === "organization" ? "Organization · Models" : "Engineering workspace · Models"
-          }
+          title={scope === "organization" ? "Organization · Models" : "Design workspace · Models"}
         >
           <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
         </Section>

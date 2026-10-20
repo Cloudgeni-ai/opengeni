@@ -175,7 +175,7 @@ export function ConnectedSubscriptionUsagePool({
     { staleTimeMs: 60_000 },
   );
   const pool = query.data?.pools.find((item) => item.provider === provider);
-  // No workspace pool is shown until its scoped read establishes owned accounts.
+  // No workspace pool is shown until its scoped read establishes available accounts.
   if (scope === "workspace" && !pool) return null;
   if (query.loading)
     return (

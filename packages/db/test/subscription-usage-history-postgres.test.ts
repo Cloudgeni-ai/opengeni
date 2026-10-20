@@ -60,6 +60,12 @@ test.skipIf(!real)(
       name: "Pool test workspace",
       operationId: crypto.randomUUID(),
     });
+    const otherWorkspace = await createOrganizationSharedWorkspace(client!.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      name: "Other pool workspace",
+      operationId: crypto.randomUUID(),
+    });
     const ids = [crypto.randomUUID(), crypto.randomUUID()];
     for (const [i, id] of ids.entries()) {
       await shared!
@@ -112,17 +118,32 @@ test.skipIf(!real)(
       );
     const organization = await read(null);
     expect(organization.windows[0]!.accounts.map((a) => a.id).sort()).toEqual([...ids].sort());
-    // Assignment is not ownership: a workspace using organization accounts has no pool.
-    expect((await read(workspace.id)).windows.every((window) => window.accounts.length === 0)).toBe(
-      true,
-    );
+    // The assigned organization account reaches this workspace; the other does not.
+    expect((await read(workspace.id)).windows[0]!.accounts.map((a) => a.id)).toEqual([ids[0]!]);
+    expect(
+      (await read(otherWorkspace.id)).windows.every((window) => window.accounts.length === 0),
+    ).toBe(true);
     await shared!.admin.begin(async (tx) => {
       await tx`select set_config('opengeni.account_id', ${accountId}, true), set_config('opengeni.subject_id', ${subjectId}, true)`;
       await tx`update subscription_connections set managed_by_workspace_id=${workspace.id}::uuid where id=${ids[0]!}::uuid`;
       await tx`update subscription_connections set scope_kind='organization' where id=${ids[1]!}::uuid`;
     });
     const scoped = await read(workspace.id);
-    expect(scoped.windows[0]!.accounts.map((a) => a.id)).toEqual([ids[0]!]);
+    // Workspace-owned and organization-wide accounts combine in one pool.
+    expect(scoped.windows[0]!.accounts.map((a) => a.id).sort()).toEqual([...ids].sort());
+    expect((await read(otherWorkspace.id)).windows[0]!.accounts.map((a) => a.id)).toEqual([
+      ids[1]!,
+    ]);
+    // The limits overview includes all available sources even when inference selects one.
+    await shared!.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true), set_config('opengeni.subject_id', ${subjectId}, true)`;
+      await tx`insert into subscription_settings(account_id,workspace_id,providers)
+        values(${accountId},${workspace.id},'{"codex":{"inferenceSource":"workspace"}}'::jsonb)
+        on conflict (account_id,workspace_id) do update set providers=excluded.providers`;
+    });
+    expect((await read(workspace.id)).windows[0]!.accounts.map((a) => a.id).sort()).toEqual(
+      [...ids].sort(),
+    );
     await expect(
       withRlsContext(client!.db, { accountId, workspaceId: workspace.id }, async (tx) => {
         await setSubjectRlsContext(tx, subjectId);
@@ -212,6 +233,31 @@ test.skipIf(!real)(
           .admin`select * from opengeni_private.subscription_usage_calls where fact_id=${factId}`
       ).length,
     ).toBe(0);
+
+    // Shared-account history includes calls from every workspace, not just the filtered one.
+    const sharedFactId = crypto.randomUUID();
+    await shared!
+      .admin`insert into model_call_facts(id,account_id,workspace_id,connection_id,session_id,turn_id,source_key,
+      provider,provider_api,model,billing_path,estimated_provider_cost_micros,pricing_source,occurred_at)
+      values(${sharedFactId},${accountId},${otherWorkspace.id},${ids[1]!},${crypto.randomUUID()},${crypto.randomUUID()},'cross-workspace-pool-test',
+        'codex','responses','fixture','external',456,'configured_list_price',now()-interval '1 hour')`;
+    const accountHistory = (workspaceId: string) =>
+      withSessionRlsActorContext({ subjectId }, () =>
+        withRlsContext(client!.db, { accountId, workspaceId }, async (tx) => {
+          await setSubjectRlsContext(tx, subjectId);
+          const [row] = await rawRows<{
+            history: { calls: { connectionId: string; units: number }[]; readings: unknown[] };
+          }>(
+            tx,
+            sql`select opengeni_private.read_subscription_usage_history(${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, 'codex', ARRAY[${ids[1]}::uuid]) as history`,
+          );
+          return row!.history;
+        }),
+      );
+    const fromTarget = await accountHistory(workspace.id);
+    expect(fromTarget.calls).toHaveLength(1);
+    expect(fromTarget.calls[0]!.units).toBe(456);
+    expect(fromTarget).toEqual(await accountHistory(otherWorkspace.id));
   },
   180_000,
 );
@@ -343,8 +389,8 @@ test.skipIf(!real)(
           provider: "codex",
         }),
       );
-      // A user's personal subscription is not a workspace-owned subscription.
-      expect(personalPool.windows.every((window) => window.accounts.length === 0)).toBe(true);
+      // Personal accounts join only through the existing owner-only Personal-workspace reader.
+      expect(personalPool.windows[0]!.accounts.some((a) => a.id === personalConnection)).toBe(true);
       const orgPool = await withSessionRlsActorContext({ subjectId }, () =>
         readSubscriptionUsagePool(runtime!.db, {
           accountId,

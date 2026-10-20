@@ -5,7 +5,7 @@ import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
   readSubscriptionCoreOrganizationPool,
-  readSubscriptionCoreWorkspaceOwnedConnections,
+  readSubscriptionCoreWorkspaceView,
   type SubscriptionCoreConnectionRow,
 } from "./subscription-core/administration";
 import { projectSubscriptionCoreAccountUsage } from "./subscription-core/account-usage-presentation";
@@ -73,11 +73,20 @@ export async function readSubscriptionUsagePool(
         if (!pool) throw new Error("Organization subscription pool is not visible");
         rows = pool.rows;
       } else {
-        rows = await readSubscriptionCoreWorkspaceOwnedConnections(tx, provider, {
+        const { pool, personal } = await readSubscriptionCoreWorkspaceView(tx, provider, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          viewerSubjectId: input.subjectId,
+          includeAllAvailableConnections: true,
         });
+        rows = [
+          ...new Map(
+            [...pool.connections.map(({ row }) => row), ...personal].map((row) => [row.id, row]),
+          ).values(),
+        ];
       }
+      // Workspace scope selects accounts, never a fraction of their usage: a shared
+      // account's history and forecast include activity from every workspace.
       const ids = rows.map((row) => row.id);
       const [data] =
         ids.length === 0

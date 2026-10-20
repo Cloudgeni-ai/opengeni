@@ -16,10 +16,13 @@ The point-in-time decision record and evidence are in
 ## Pooled subscription limits
 
 Settings → Models shows one limits pool per provider: organization administrators
-see all the organization's shared accounts; a workspace sees only shared accounts
-managed by that workspace, not merely assigned organization accounts or personal
-subscriptions. A workspace with none shows no pool. Limits belong to provider
-accounts. The headline forecasts this week's included utilization, with weekly
+see all the organization's shared accounts; a workspace sees all viewer-visible
+accounts whose availability reaches it, including organization and workspace-owned
+accounts, across available inference sources. The owner's personal accounts join
+only in their own Personal workspace through the existing owner-only reader.
+A workspace with no available accounts shows no pool. Limits belong to provider
+accounts: forecasts use total account usage, including other workspaces, not a
+workspace-attributed fraction. The headline forecasts this week's included utilization, with weekly
 account remaining percentages, reset times and capacity-sized bars beneath it.
 Five-hour limits appear only as a muted line when currently blocking an account;
 there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.

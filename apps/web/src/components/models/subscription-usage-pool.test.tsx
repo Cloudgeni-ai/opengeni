@@ -44,8 +44,8 @@ test("shows weekly utilization and weighted details, with only currently blockin
     "At this pace you'll use about 50% of this week's included usage.",
   );
   expect(container.textContent).toContain("Last 7 days, adjusted to this week's pace.");
-  expect(container.textContent).toContain("Design · Plus is at its 5-hour limit until");
-  expect(container.textContent).not.toContain("Engineering · Pro is at its 5-hour limit");
+  expect(container.textContent).toContain("Design workspace · Plus is at its 5-hour limit until");
+  expect(container.textContent).not.toContain("Shared engineering · Pro is at its 5-hour limit");
   expect(container.innerHTML).toContain("width: 10%");
   expect(container.textContent).not.toMatch(/\$|dollars|cost|tokens/i);
   expect(container.querySelectorAll("button")).toHaveLength(0);
@@ -91,7 +91,24 @@ test("limited history remains visible without a fabricated utilization number", 
   expect(container.textContent).not.toContain("you'll use about");
 });
 
-test("expired five-hour blockers disappear and a workspace with no owned accounts shows nothing", async () => {
+test("workspace preview combines shared and owned accounts in one pool without splitting their usage", async () => {
+  const pool = pooledLimitsFixture("workspace");
+  const organization = pooledLimitsFixture("organization");
+  for (const account of pool.windows[0]!.accounts) {
+    expect(account).toEqual(
+      organization.windows[0]!.accounts.find((entry) => entry.id === account.id)!,
+    );
+  }
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).toContain("Shared engineering · Pro");
+  expect(container.textContent).toContain("Design workspace · Plus");
+  expect(container.textContent).not.toContain("Operations");
+  expect(container.textContent!.match(/this week's included usage/g)).toHaveLength(1);
+});
+
+test("expired five-hour blockers disappear and a workspace with no available accounts shows nothing", async () => {
   const pool = pooledLimitsFixture("workspace");
   for (const account of pool.windows.find((window) => window.id === "five_hour")!.accounts)
     account.resetsAt = new Date(POOL_PREVIEW_NOW - 1).toISOString();
@@ -138,7 +155,7 @@ test("all providers share one client-scoped request and refresh invalidation", a
   release();
 });
 
-test("workspace loading and failure show no pool until owned accounts are established", async () => {
+test("workspace loading and failure show no pool until available accounts are established", async () => {
   let reject!: (reason: Error) => void;
   const pending = new Promise<never>((_resolve, fail) => {
     reject = fail;
