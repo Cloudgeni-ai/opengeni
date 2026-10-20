@@ -87737,6 +87737,11 @@ async function latestStartedSessionTurnRow(
   return row?.turn ?? null;
 }
 
+/** A stored file row as the public file contract reads it. */
+export function fileAssetFromRow(row: typeof schema.files.$inferSelect): FileAsset {
+  return mapFile(row);
+}
+
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
   return {
     scope: row.privateOwnerSubjectIds ? "personal" : "workspace",

@@ -33,6 +33,7 @@ import {
   getGeneratedImageArtifact,
   recordAuditEvent,
   getGeneratedVideoArtifact,
+  fileAssetFromRow,
   getFilesForSubject,
   isFilePrivateToAnother,
   listFilesForSubject,
@@ -937,11 +938,9 @@ export async function fileAuthoritySubjectIdForGrant(
 function generatedVideoFileAsset(
   file: NonNullable<Awaited<ReturnType<typeof getGeneratedVideoArtifact>>>["file"],
 ): RetainedFileArtifact["file"] {
-  return FileAsset.parse({
-    ...file,
-    createdAt: file.createdAt.toISOString(),
-    updatedAt: file.updatedAt.toISOString(),
-  });
+  // The shared row mapper reads stored columns (an empty app-shot is null) the
+  // way every other file response does.
+  return FileAsset.parse(fileAssetFromRow(file));
 }
 
 function retainedGeneratedVideoMetadata(artifact: {
