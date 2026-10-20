@@ -191,6 +191,7 @@ export function SiteSettings({
             canManage
             isAdmin={management.isAdmin}
             onShareWithWorkspace={management.showAudience ? audience.share : undefined}
+            personalWorkspace={!management.showAudience}
             sites={sitesClientConfig(clientConfig)}
           />
         )

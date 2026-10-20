@@ -1,7 +1,12 @@
 import { sql } from "drizzle-orm";
-import { rawRows, withRlsContext, type Database } from "./database";
+import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import type { Permission } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import {
+  rlsSubjectIdOrEmpty,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 import { lockSessionEventWriteRows } from "./session-control";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 
@@ -1245,26 +1250,28 @@ export async function revokeSiteViewerSessions(
   });
 }
 
-/** Whether the subject holds a membership in this workspace (re-checked on every runtime call). */
+/** Whether the subject holds live authority in this workspace (re-checked on every runtime call). */
 export async function isSiteWorkspaceMember(
   db: Database,
   scope: SitePublishingScope,
   subjectId: string,
 ): Promise<boolean> {
-  return await withRlsContext(db, scope, async (tx) => {
-    const rows = await rawRows<{ one: number }>(
-      tx,
-      sql`select 1 as one from workspace_memberships
-        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
-    );
-    return rows.length > 0;
-  });
+  return (await getSiteWorkspaceMemberPermissions(db, scope, subjectId)) !== null;
 }
 
 /**
- * The subject's workspace permissions (normalized), or null when they hold
- * no membership. A Site conversation of a member gets only the Site's tools
- * that member may use themselves.
+ * The subject's workspace permissions (normalized), or null when they hold no
+ * live workspace authority. A Site conversation of a member gets only the
+ * Site's tools that member may use themselves.
+ *
+ * For a managed person (`user:`) live authority is the canonical rule
+ * (`subjectHasLiveWorkspaceAuthorityInScope`): a membership row whose
+ * organization membership is active, or the person's own personal workspace,
+ * which has no membership row and carries the managed personal workspace
+ * permissions. The subject was verified by Site sign-in (a managed cookie at
+ * /v1/site-auth/authorize) and is named here from the Site viewer session,
+ * never taken from the page. Other subjects (configured external actors)
+ * keep the plain membership answer.
  */
 export async function getSiteWorkspaceMemberPermissions(
   db: Database,
@@ -1272,14 +1279,38 @@ export async function getSiteWorkspaceMemberPermissions(
   subjectId: string,
 ): Promise<Permission[] | null> {
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ permissions: unknown }>(
-      tx,
-      sql`select permissions from workspace_memberships
-        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
-    );
-    return row
-      ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
-      : null;
+    const membership = async () => {
+      const [row] = await rawRows<{ permissions: unknown }>(
+        tx,
+        sql`select permissions from workspace_memberships
+          where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+      );
+      return row
+        ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
+        : null;
+    };
+    if (!subjectId.startsWith("user:")) return await membership();
+    const priorSubjectId = await rlsSubjectIdOrEmpty(tx);
+    let completed = false;
+    try {
+      await setSubjectRlsContext(tx, subjectId);
+      const live = await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        subjectId,
+      });
+      const permissions = live ? await membership() : null;
+      completed = true;
+      if (!live) return null;
+      return permissions ?? [...managedPersonalWorkspacePermissions];
+    } finally {
+      // Never leave the probed subject applied to the caller's transaction.
+      const restore = tx.execute(
+        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+      );
+      if (completed) await restore;
+      else await restore.catch(() => undefined);
+    }
   });
 }
 
