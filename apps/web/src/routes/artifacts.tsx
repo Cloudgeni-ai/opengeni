@@ -17,13 +17,12 @@ import {
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { SiteData } from "@/components/artifacts/site-data";
+import { SitePublishButton, sitePublicationHeader } from "@/components/artifacts/site-publishing";
 import {
-  SitePublishButton,
-  SitePublishPage,
-  sitePublicationHeader,
-  useSitePublication,
-} from "@/components/artifacts/site-publishing";
-import { useSiteAudience } from "@/components/artifacts/site-audience";
+  SiteSettings,
+  hasSiteSettings,
+  useSiteManagement,
+} from "@/components/artifacts/site-settings";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
@@ -47,11 +46,9 @@ import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
 import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   LineTabs,
   LineTabsContent,
@@ -61,7 +58,7 @@ import {
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@/components/ui/page-actions";
 import { PageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,7 +66,6 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 import {
   artifactLibraryFilters,
@@ -79,8 +75,7 @@ import {
   useArtifactLibraryPosition,
 } from "@/lib/artifact-library-navigation";
 import type { ArtifactCatalogFilters } from "@/lib/artifact-catalog";
-import type { ArtifactReturnSearch } from "@/lib/routes";
-import { sitesClientConfig } from "@/lib/site-publishing";
+import type { ArtifactReturnSearch, SiteDetailTab } from "@/lib/routes";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
 
@@ -95,20 +90,6 @@ function useConsoleSiteViewer(): SiteViewer {
     [email, name, subjectId],
   );
 }
-// Stands in for the Site while it loads so the audience hook keeps its order.
-const PLACEHOLDER_SITE: WorkspaceArtifactDetailResponse["artifact"] = {
-  id: "00000000-0000-4000-8000-000000000000",
-  accountId: "00000000-0000-4000-8000-000000000000",
-  workspaceId: "00000000-0000-4000-8000-000000000000",
-  slug: "loading",
-  title: "Site",
-  description: null,
-  status: "active",
-  currentVersion: null,
-  createdBySubjectId: "loading",
-  createdAt: new Date(0).toISOString(),
-  updatedAt: new Date(0).toISOString(),
-};
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -321,18 +302,97 @@ function ArtifactListRoute({
   );
 }
 
-type SiteTab = "site" | "versions" | "conversations" | "data";
+type SiteTab = "site" | SiteDetailTab;
 
 export function ArtifactDetailRoute({
   embedded = false,
+  embeddedView = "site",
   ...props
 }: {
   workspaceId: string;
   artifactId: string;
   fromSession?: string | undefined;
   embedded?: boolean;
+  /** In the session workbench: the Site itself, or its Settings. */
+  embeddedView?: "site" | "settings";
 }) {
-  return embedded ? <EmbeddedSiteDetail {...props} /> : <ArtifactDetailPage {...props} />;
+  if (!embedded) return <ArtifactDetailPage {...props} />;
+  return embeddedView === "settings" ? (
+    <EmbeddedSiteSettings {...props} />
+  ) : (
+    <EmbeddedSiteDetail {...props} />
+  );
+}
+
+/**
+ * The session dock's Site Settings: the Site page's Settings tab, so the Site
+ * can be published, shared or archived without leaving the session.
+ */
+function EmbeddedSiteSettings({
+  workspaceId,
+  artifactId,
+}: {
+  workspaceId: string;
+  artifactId: string;
+}) {
+  const context = useAppContext();
+  const [artifact, setArtifact] = useState<WorkspaceArtifactDetailResponse["artifact"] | null>(
+    null,
+  );
+  const [error, setError] = useState<unknown>(null);
+  const readAbort = useRef<AbortController | null>(null);
+  const load = useCallback(async () => {
+    readAbort.current?.abort();
+    const abort = new AbortController();
+    readAbort.current = abort;
+    try {
+      setError(null);
+      const detail = await context.client.getWorkspaceArtifact(workspaceId, artifactId, {
+        signal: abort.signal,
+      });
+      if (!abort.signal.aborted) setArtifact(detail.artifact);
+    } catch (nextError) {
+      if (abort.signal.aborted) return;
+      setArtifact(null);
+      setError(nextError);
+    }
+  }, [artifactId, workspaceId, context.client]);
+  useEffect(() => {
+    setArtifact(null);
+    void load();
+    return () => readAbort.current?.abort();
+  }, [load]);
+  const management = useSiteManagement({
+    workspaceId,
+    siteId: artifactId,
+    artifact,
+    onArtifactChanged: setArtifact,
+    onStatusChanged: load,
+  });
+  return (
+    <div className="h-full min-h-0 overflow-y-auto bg-bg">
+      <div className="mx-auto w-full max-w-[720px] px-4 py-5">
+        {error ? (
+          <SiteLoadError
+            error={error}
+            accessDenied={isArtifactReadDenied(error, context.accessContext, workspaceId)}
+            onRetry={() => void load()}
+          />
+        ) : !artifact ? (
+          <div className="flex flex-col gap-3" aria-busy="true">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-48 w-full rounded-lg" />
+            <span className="sr-only" role="status">
+              Loading Site settings
+            </span>
+          </div>
+        ) : (
+          <SiteSettings workspaceId={workspaceId} artifact={artifact} management={management} />
+        )}
+      </div>
+      {management.showAudience ? management.audience.dialog : null}
+    </div>
+  );
 }
 
 /** The session dock's Site view: the shared SiteView with console tool access. */
@@ -392,7 +452,22 @@ function ArtifactDetailPage({
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   const [fullView, setFullView] = useArtifactFullView();
   const viewer = useConsoleSiteViewer();
-  const [tab, setTab] = useState<SiteTab>("site");
+  // The tab is in the address, so Settings (from the workbench or the old
+  // Publish link) and the other tabs can be linked to and survive a reload.
+  const tab: SiteTab = search.view === "publish" ? "settings" : (search.tab ?? "site");
+  const setTab = (next: SiteTab) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/artifacts/$artifactId",
+      params: { workspaceId, artifactId },
+      search: {
+        ...search,
+        view: undefined,
+        browse: true,
+        tab: next === "site" ? undefined : next,
+      },
+      replace: true,
+      resetScroll: false,
+    });
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
   const [content, setContent] = useState<Pick<
     WorkspaceArtifactContentResponse,
@@ -400,8 +475,6 @@ function ArtifactDetailPage({
   > | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
-  const [statusBusy, setStatusBusy] = useState(false);
-  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const readAbort = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
     readAbort.current?.abort();
@@ -481,73 +554,16 @@ function ArtifactDetailPage({
       setBusyVersion(null);
     }
   };
-  const setSiteStatus = async (status: "active" | "archived") => {
-    if (!canPublish) return false;
-    const artifact = detail?.artifact;
-    const currentVersion = artifact?.currentVersion;
-    if (!artifact || !currentVersion || artifact.status === status) return true;
-    setStatusBusy(true);
-    try {
-      await context.client.setWorkspaceArtifactStatus(workspaceId, artifactId, {
-        status,
-        expectedCurrentVersionId: currentVersion.id,
-        reason: `${status === "archived" ? "Archived" : "Restored"} from Sites by ${context.authSession?.user?.name ?? "a workspace member"}`,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      invalidateArtifactCatalog(context.client, workspaceId);
-      toast.success(status === "archived" ? "Site archived" : "Site restored");
-      await load();
-      return true;
-    } catch (nextError) {
-      toast.error(status === "archived" ? "Couldn't archive Site" : "Couldn't restore Site", {
-        description: nextError instanceof Error ? nextError.message : String(nextError),
-      });
-      return false;
-    } finally {
-      setStatusBusy(false);
-    }
-  };
   const archived = detail?.artifact.status === "archived";
-  // Site Data is for the people who manage the Site: its owner and workspace
-  // admins. The API decides; an ownerless Site shows the tab and its answer.
-  const manageData = Boolean(
-    canPublish &&
-    detail &&
-    (hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") ||
-      !detail.artifact.ownerSubjectId ||
-      detail.artifact.ownerSubjectId === context.accessContext.subjectId),
-  );
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  // Publishing is for the same people as Site Data: the owner and workspace admins.
-  const publication = useSitePublication({
-    client: context.client,
+  const management = useSiteManagement({
     workspaceId,
     siteId: artifactId,
-    enabled: manageData,
+    artifact: detail?.artifact ?? null,
+    onArtifactChanged: (artifact) =>
+      setDetail((current) => (current ? { ...current, artifact } : current)),
+    onStatusChanged: load,
   });
-  const setView = (view: ArtifactReturnSearch["view"]) =>
-    void navigate({
-      to: "/workspaces/$workspaceId/artifacts/$artifactId",
-      params: { workspaceId, artifactId },
-      search: { ...search, view },
-    });
-  // A Personal workspace has nobody to share with, so there is no audience.
-  const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);
-  const audience = useSiteAudience({
-    client: context.client,
-    workspaceId,
-    workspaceName: workspace?.name ?? "this workspace",
-    artifact: detail?.artifact ?? PLACEHOLDER_SITE,
-    ownedByCurrentUser: Boolean(
-      canPublish &&
-      detail?.artifact.ownerSubjectId &&
-      detail.artifact.ownerSubjectId === context.accessContext.subjectId,
-    ),
-    onChanged: (artifact) => {
-      setDetail((current) => (current ? { ...current, artifact } : current));
-      invalidateArtifactCatalog(context.client, workspaceId);
-    },
-  });
+  const { manageData, publication, audience, showAudience, statusBusy, setSiteStatus } = management;
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
@@ -586,30 +602,13 @@ function ArtifactDetailPage({
   const artifact = detail.artifact;
   const toolCount = content?.requestedTools.length ?? 0;
   const publicationHeader = sitePublicationHeader(publication.load);
-  if (search.view === "publish")
-    return (
-      <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
-        <SitePublishPage
-          client={context.client}
-          workspaceId={workspaceId}
-          workspaceName={workspace?.name ?? "this workspace"}
-          site={artifact}
-          load={publication.load}
-          onPublication={publication.setPublication}
-          onReload={() => void publication.reload()}
-          onBack={() => setView(undefined)}
-          canManage={manageData && !archived}
-          isAdmin={hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin")}
-          onShareWithWorkspace={showAudience ? audience.share : undefined}
-          sites={sitesClientConfig(context.clientConfig)}
-        />
-        {showAudience ? audience.dialog : null}
-      </ContentPage>
-    );
+  const showSettings = hasSiteSettings(management);
+  const shownTab: SiteTab =
+    (tab === "settings" && !showSettings) || (tab === "data" && !manageData) ? "site" : tab;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={back}>
-        <LineTabs value={tab} onValueChange={(value) => setTab(value as SiteTab)}>
+        <LineTabs value={shownTab} onValueChange={(value) => setTab(value as SiteTab)}>
           <DetailPageHeader
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
@@ -637,7 +636,7 @@ function ArtifactDetailPage({
                 <>
                   {showAudience ? audience.shareButton : null}
                   {manageData && !archived ? (
-                    <SitePublishButton load={publication.load} onOpen={() => setView("publish")} />
+                    <SitePublishButton load={publication.load} onOpen={() => setTab("settings")} />
                   ) : null}
                   {archived ? (
                     <Button
@@ -662,17 +661,6 @@ function ArtifactDetailPage({
                       Edit with Opengeni
                     </Button>
                   )}
-                  {archived ? null : (
-                    <MoreMenu label={`More actions for ${artifact.title}`}>
-                      <DropdownMenuItem
-                        disabled={statusBusy}
-                        onSelect={() => setArchiveDialogOpen(true)}
-                      >
-                        <ArchiveIcon />
-                        Archive
-                      </DropdownMenuItem>
-                    </MoreMenu>
-                  )}
                 </>
               ) : null
             }
@@ -684,6 +672,7 @@ function ArtifactDetailPage({
                 </LineTabsTrigger>
                 <LineTabsTrigger value="conversations">Conversations</LineTabsTrigger>
                 {manageData ? <LineTabsTrigger value="data">Data</LineTabsTrigger> : null}
+                {showSettings ? <LineTabsTrigger value="settings">Settings</LineTabsTrigger> : null}
               </LineTabsList>
             }
           />
@@ -805,18 +794,14 @@ function ArtifactDetailPage({
               />
             </LineTabsContent>
           ) : null}
+          {showSettings ? (
+            <LineTabsContent value="settings" className="pt-6">
+              <SiteSettings workspaceId={workspaceId} artifact={artifact} management={management} />
+            </LineTabsContent>
+          ) : null}
         </LineTabs>
       </DetailPage>
       {showAudience ? audience.dialog : null}
-      <ConfirmDialog
-        open={archiveDialogOpen}
-        onOpenChange={setArchiveDialogOpen}
-        title={`Archive “${artifact.title}”?`}
-        description="The Site will be unpublished, but its source and complete version history will remain recoverable."
-        confirmLabel="Archive Site"
-        cancelAutoFocus
-        onConfirm={() => setSiteStatus("archived")}
-      />
     </ContentPage>
   );
 }

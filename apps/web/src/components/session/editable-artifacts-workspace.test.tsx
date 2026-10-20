@@ -15,10 +15,23 @@ mock.module("@/routes/editable-artifact", () => ({
   ),
 }));
 mock.module("@/routes/artifacts", () => ({
-  ArtifactDetailRoute: ({ artifactId, embedded }: { artifactId: string; embedded?: boolean }) => (
-    <div data-site-preview={artifactId}>{embedded ? "Embedded Site" : "Full Site"}</div>
-  ),
+  ArtifactDetailRoute: ({
+    artifactId,
+    embedded,
+    embeddedView,
+  }: {
+    artifactId: string;
+    embedded?: boolean;
+    embeddedView?: "site" | "settings";
+  }) =>
+    embeddedView === "settings" ? (
+      <div data-site-settings={artifactId}>Site settings panel</div>
+    ) : (
+      <div data-site-preview={artifactId}>{embedded ? "Embedded Site" : "Full Site"}</div>
+    ),
 }));
+// The viewer's grants; a test that needs Site management swaps them in.
+const appAccess: { accessContext: unknown } = { accessContext: null };
 // Library rows ask the app who the viewer is, to offer a file's owner its share action.
 mock.module("@/context", () => ({
   useAppContext: () => ({
@@ -26,7 +39,7 @@ mock.module("@/context", () => ({
     accessKeyVersion: 0,
     workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
     managedSelfContext: null,
-    accessContext: null,
+    accessContext: appAccess.accessContext,
   }),
 }));
 
@@ -303,6 +316,65 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+  test("opens a session Site's settings in place for people who manage Sites", async () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const id = "22222222-2222-4222-8222-222222222222";
+    const render = async (permissions: string[]) => {
+      appAccess.accessContext = {
+        subjectId: "subject",
+        workspaceGrants: [{ workspaceId, permissions }],
+      };
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <SessionEditableArtifactsWorkspace
+            workspaceId={workspaceId}
+            artifacts={[{ id, title: "Dashboard", modality: "site" }]}
+            status="ready"
+            onRetry={() => undefined}
+          />,
+        );
+      });
+      return {
+        container,
+        cleanup: async () => {
+          await act(async () => root.unmount());
+          container.remove();
+        },
+      };
+    };
+    const reader = await render(["artifacts:read"]);
+    try {
+      expect(reader.container.querySelector('[aria-label="Site settings"]')).toBeNull();
+    } finally {
+      await reader.cleanup();
+    }
+    const manager = await render(["artifacts:read", "artifacts:publish"]);
+    try {
+      const toggle = manager.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Site settings"]',
+      );
+      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+      await act(async () => toggle?.click());
+      expect(manager.container.querySelector("[data-site-settings]")?.textContent).toBe(
+        "Site settings panel",
+      );
+      expect(manager.container.querySelector("[data-site-preview]")).toBeNull();
+      // Still in the session: settings open in place, with no link out.
+      expect(manager.container.querySelector("a")).toBeNull();
+      const back = manager.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Back to Site"]',
+      );
+      expect(back?.getAttribute("aria-pressed")).toBe("true");
+      await act(async () => back?.click());
+      expect(manager.container.querySelector("[data-site-preview]")).not.toBeNull();
+    } finally {
+      await manager.cleanup();
+      appAccess.accessContext = null;
     }
   });
   test("keeps a native document in the session without navigation links", async () => {

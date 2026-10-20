@@ -1,14 +1,17 @@
 import { Link } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import { ArtifactViewerHeader } from "@opengeni/react/artifacts";
-import { Loader2Icon, PanelsTopLeftIcon, RefreshCwIcon } from "lucide-react";
+import { Loader2Icon, PanelsTopLeftIcon, RefreshCwIcon, SettingsIcon } from "lucide-react";
 import { lazy, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
+import { useAppContext } from "@/context";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
 import { ArtifactLibrary, type ArtifactPinAction } from "@/components/artifacts/artifact-library";
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { cn } from "@/lib/utils";
 const RetainedArtifactRoute = lazy(() =>
   import("@/routes/retained-artifact").then((module) => ({
     default: module.RetainedArtifactRoute,
@@ -59,6 +62,10 @@ export function SessionEditableArtifactsWorkspace({
   );
   const [browsing, setBrowsing] = useState(!initialSelectedArtifactId && !openArtifactRequest);
   const [filters, setFilters] = useState(defaultArtifactFilters);
+  // A Site's Settings open in place of the Site, for the Site on screen only.
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const { accessContext } = useAppContext();
+  const canManageSites = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const catalogItems = artifacts.flatMap((item) => (item.catalogItem ? [item.catalogItem] : []));
 
   const handledRequestId = useRef<number | null>(null);
@@ -173,6 +180,8 @@ export function SessionEditableArtifactsWorkspace({
     );
   }
 
+  const settingsOpen = artifact.modality === "site" && settingsFor === artifact.id;
+  const settingsLabel = settingsOpen ? "Back to Site" : "Site settings";
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-fg">
       <ArtifactViewerHeader
@@ -214,19 +223,35 @@ export function SessionEditableArtifactsWorkspace({
           ) : undefined
         }
         actions={
-          status === "error" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0"
-              aria-label="Retry artifact list"
-              title="Retry artifact list"
-              onClick={onRetry}
-            >
-              <RefreshCwIcon className="size-4" />
-            </Button>
-          ) : null
+          <>
+            {status === "error" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                aria-label="Retry artifact list"
+                title="Retry artifact list"
+                onClick={onRetry}
+              >
+                <RefreshCwIcon className="size-4" />
+              </Button>
+            ) : null}
+            {artifact.modality === "site" && canManageSites ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className={cn("shrink-0", settingsOpen && "bg-accent text-accent-foreground")}
+                aria-label={settingsLabel}
+                aria-pressed={settingsOpen}
+                title={settingsLabel}
+                onClick={() => setSettingsFor(settingsOpen ? null : artifact.id)}
+              >
+                <SettingsIcon className="size-4" />
+              </Button>
+            ) : null}
+          </>
         }
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -236,6 +261,7 @@ export function SessionEditableArtifactsWorkspace({
             workspaceId={workspaceId}
             artifactId={artifact.id}
             embedded
+            embeddedView={settingsOpen ? "settings" : "site"}
           />
         ) : artifact.modality === "image" || artifact.modality === "file" ? (
           <RetainedArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} embedded />
