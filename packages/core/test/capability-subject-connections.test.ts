@@ -1378,13 +1378,13 @@ describe("subject-owned capability connection references", () => {
     };
     await expect(
       getConnectorToolPermissions({ ...permissionInput, connectionId: sharedConnection.id }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     await expect(
       updateConnectorToolPermissions({
         ...permissionInput,
         payload: { connectionId: sharedConnection.id, target: "default", permission: "allow" },
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     expect(
       await listConnectorToolPermissionPolicies(db, {
         ...workspace,
@@ -1410,7 +1410,7 @@ describe("subject-owned capability connection references", () => {
         capabilityId,
         personalOwnerVerified: true,
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
   });
 
   test.each([
