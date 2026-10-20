@@ -156,6 +156,8 @@ impl Host {
                 "RUST_LOG",
                 std::env::var("COMPUTE_TEST_LOG").unwrap_or_else(|_| "info".into()),
             )
+            // The log is a file, read by tests: plain text, not colours.
+            .env("NO_COLOR", "1")
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -1166,7 +1168,7 @@ cp -P /etc/resolv.conf /tmp/resolv.conf.kept && rm -f /etc/resolv.conf && \
 echo nameserver {private} > /etc/resolv.conf && echo \"resolver now $(cat /etc/resolv.conf)\"
 python3 -c '{RESOLVE}' {private} {name} {hidden} example.com
 rm -f /etc/resolv.conf && cp -P /tmp/resolv.conf.kept /etc/resolv.conf && \
-echo \"resolver back to $(cat /etc/resolv.conf)\"
+cmp -s /tmp/resolv.conf.kept /etc/resolv.conf && echo resolver back as it was
 python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
     );
     let (output, _) = exec(client, id(0), &script).await;
@@ -1178,7 +1180,7 @@ python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
     );
     for changed in [
         format!("resolver now nameserver {private}"),
-        "resolver back to nameserver 169.254.0.22".to_owned(),
+        "resolver back as it was".to_owned(),
     ] {
         assert!(
             output.lines().any(|line| line.trim() == changed),
