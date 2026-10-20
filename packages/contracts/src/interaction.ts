@@ -1807,6 +1807,68 @@ export const BrowserDownloadExportReceipt = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;
 
+/** One browser recording as its controller reports it. */
+export const BrowserRecordingSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      state: z.enum(["recording", "stopped"]),
+      startedAt: z.string().datetime({ offset: true }),
+      stoppedAt: z.string().datetime({ offset: true }).nullable(),
+      stopReason: z
+        .enum(["requested", "duration_limit", "size_limit", "session_ended"])
+        .nullable(),
+      durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      frameCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      frameBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      actionCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      bundle: z
+        .object({
+          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          sha256: sha256Hex,
+        })
+        .strict()
+        .nullable(),
+      streamError: z.string().max(2_048).nullable(),
+    })
+    .strict(),
+);
+export type BrowserRecordingSummary = z.infer<typeof BrowserRecordingSummary>;
+
+export const BrowserRecordingStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ targetId: boundedOpaqueId }).strict(),
+);
+export type BrowserRecordingStartRequest = z.infer<typeof BrowserRecordingStartRequest>;
+
+/** Controller-private, narrow object authority for uploading one stopped
+ * recording's frame bundle. */
+export const BrowserRecordingExportRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      upload: z
+        .object({
+          url: boundedHttpUrl,
+          requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
+          expiresAt: z.string().datetime({ offset: true }),
+        })
+        .strict(),
+    })
+    .strict(),
+);
+export type BrowserRecordingExportRequest = z.infer<typeof BrowserRecordingExportRequest>;
+
+export const BrowserRecordingExportReceipt = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sha256: sha256Hex,
+    })
+    .strict(),
+);
+export type BrowserRecordingExportReceipt = z.infer<typeof BrowserRecordingExportReceipt>;
+
 export const InteractionRect = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
