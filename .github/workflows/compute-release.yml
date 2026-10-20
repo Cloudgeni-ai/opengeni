@@ -256,7 +256,11 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
           for tag in "${tags[@]}"; do
             [ "$tag" = --tag ] && continue
-            named="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')"
+            # Read the whole answer before parsing it: an awk that stops at the
+            # first match would end docker with SIGPIPE, and pipefail would
+            # fail the step after the tag had already moved.
+            inspected="$(docker buildx imagetools inspect "$tag")"
+            named="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspected")"
             if [ "$named" != "$DIGEST" ]; then
               echo "::error::$tag is $named, not the checked $DIGEST" >&2
               exit 1
