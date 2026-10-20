@@ -2980,6 +2980,7 @@ describe("runtime event normalization", () => {
       lazyToolTransport?: "codex_native" | "generic_dispatch";
       legacyApproval?: boolean;
       withoutConnection?: boolean;
+      prepare?: ConnectorActionPolicyHooks["prepare"];
       begin?: ConnectorActionPolicyHooks["begin"];
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
@@ -3002,14 +3003,16 @@ describe("runtime event normalization", () => {
         ...(input.previewReview
           ? { preview: async () => ({ managed: true as const, decision: input.connectorDecision }) }
           : {}),
-        prepare: async (call) => {
-          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
-          return {
-            managed: true,
-            decision: input.connectorDecision,
-            ...(input.alreadyApproved ? { approvalStatus: "approved" as const } : {}),
-          };
-        },
+        prepare:
+          input.prepare ??
+          (async (call) => {
+            calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
+            return {
+              managed: true,
+              decision: input.connectorDecision,
+              ...(input.alreadyApproved ? { approvalStatus: "approved" as const } : {}),
+            };
+          }),
         begin:
           input.begin ??
           (async (call) => {
@@ -3313,6 +3316,120 @@ describe("runtime event normalization", () => {
           await fixture.prepared.close();
           fixture.mcp.close();
         }
+      }
+    });
+
+    test("approval preflight failures become not-run tool errors instead of failing the turn", async () => {
+      const cases = [
+        {
+          name: "review preview",
+          options: { previewReview: true },
+          breakReview: true,
+        },
+        {
+          name: "policy prepare",
+          options: {
+            prepare: async () => {
+              throw new Error("connector policy store is unavailable");
+            },
+          },
+          breakReview: false,
+        },
+      ];
+      for (const testCase of cases) {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          ...testCase.options,
+        });
+        if (testCase.breakReview) {
+          for (const server of fixture.prepared.mcpServers) {
+            (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+              async () => {
+                throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
+              };
+          }
+        }
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          expect(
+            await tool.needsApproval(new RunContext(), { query: "..." }, "preflight-call"),
+          ).toBe(false);
+          const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "..." }), {
+            toolCall: { callId: "preflight-call" },
+          } as any);
+          expect(output).toMatchObject({ isError: true });
+          expect(JSON.stringify(output)).toContain("The tool was not run");
+          // Nothing executed and no approval or begin record was created.
+          expect(fixture.mcp.calls).toHaveLength(0);
+          expect(fixture.calls.filter((call) => !call.startsWith("prepare:"))).toEqual([]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("a failing approval preflight returns to the model and the run continues", async () => {
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "ask",
+        previewReview: true,
+      });
+      for (const server of fixture.prepared.mcpServers) {
+        (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+          async () => {
+            throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
+          };
+      }
+      try {
+        const model = new ScriptedModel([
+          {
+            output: [
+              scriptedFunctionCall("docs__search_documents", { query: "..." }, "preflight-run"),
+            ],
+          },
+          { outputText: "Recovered." },
+        ]);
+        const result = await runAgentStream(
+          fixture.agent.clone({ model }),
+          "Search documents",
+          fixture.settings,
+        );
+        for await (const _event of result.toStream()) {
+          // Drain the run.
+        }
+        await result.completed;
+        expect(model.calls).toBe(2);
+        expect(result.interruptions).toHaveLength(0);
+        expect(result.finalOutput).toBe("Recovered.");
+        const secondInput = JSON.stringify(model.requests[1]?.input);
+        expect(secondInput).toContain("preflight-run");
+        expect(secondInput).toContain("The tool was not run");
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("an approval preflight without a call id keeps failing closed", async () => {
+      const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
+      try {
+        const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("Tool missing");
+        await expect(
+          tool.needsApproval(new RunContext(), { query: "x" }, undefined as never),
+        ).rejects.toThrow("durable approval identity");
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
       }
     });
 
@@ -3909,91 +4026,98 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("attempt-local connector binding rejection becomes a tool error", async () => {
-      const executions: Record<string, unknown>[] = [];
-      const policyCalls: string[] = [];
-      const hooks: ConnectorActionPolicyHooks = {
-        prepare: async () => {
-          policyCalls.push("prepare");
-          return { managed: false, decision: "unmanaged" };
-        },
-        begin: async () => {
-          policyCalls.push("begin");
-          return { allowed: true, managed: false };
-        },
-        complete: async () => {
-          policyCalls.push("complete");
-        },
-      };
-      const bindings = [
-        {
-          modelName: "github_app__repository_get",
-          call: () => {
-            throw new ConnectorActionBindingRejectedError(
-              "repository is outside accepted resources",
-            );
+    test.each(["rejected", "malformed"] as const)(
+      "attempt-local connector binding %s arguments become a tool error",
+      async (failure) => {
+        const executions: Record<string, unknown>[] = [];
+        const policyCalls: string[] = [];
+        const hooks: ConnectorActionPolicyHooks = {
+          prepare: async () => {
+            policyCalls.push("prepare");
+            return { managed: false, decision: "unmanaged" };
           },
-        },
-      ];
-      const prepared = await prepareAgentTools(testSettings(), [], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        connectorActionPolicy: hooks,
-        attemptConnectorActionBindings: bindings,
-        attemptToolDefinitions: [
+          begin: async () => {
+            policyCalls.push("begin");
+            return { allowed: true, managed: false };
+          },
+          complete: async () => {
+            policyCalls.push("complete");
+          },
+        };
+        const bindings = [
           {
-            identity: { serverId: "github_app", toolName: "repository_get" },
             modelName: "github_app__repository_get",
-            inputSchema: {
-              type: "object",
-              properties: { repository: { type: "string" } },
-              required: ["repository"],
-              additionalProperties: false,
-            },
-            source: "mcp",
-            approval: "policy",
-            execute: async (args) => {
-              executions.push(args);
-              return { content: [{ type: "text", text: "repository" }] };
+            call: () => {
+              // A schema parse error in a binding (for example Google Drive's)
+              // is not a typed rejection, and must not fail the turn either.
+              throw failure === "rejected"
+                ? new ConnectorActionBindingRejectedError(
+                    "repository is outside accepted resources",
+                  )
+                : new Error("Invalid input: expected object, received undefined");
             },
           },
-        ],
-      });
-      const agent = buildOpenGeniAgent(testSettings(), [], {
-        mcpServers: prepared.mcpServers,
-        connectorActionPolicy: hooks,
-        attemptConnectorActionBindings: bindings,
-      });
-      try {
-        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
-          (candidate) =>
-            candidate.type === "function" && candidate.name === "github_app__repository_get",
-        );
-        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
-        expect(
-          await tool.needsApproval(
-            new RunContext(),
-            { repository: "Cloudgeni-ai/not-accepted" },
-            "call-rejected",
-          ),
-        ).toBe(false);
-        expect(
-          await tool.invoke(
-            new RunContext(),
-            JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
-            { toolCall: { callId: "call-rejected" } } as any,
-          ),
-        ).toMatchObject({ isError: true });
-        expect(executions).toEqual([]);
-        expect(policyCalls).toEqual([]);
-      } finally {
-        await prepared.close();
-      }
-    });
+        ];
+        const prepared = await prepareAgentTools(testSettings(), [], {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          connectorActionPolicy: hooks,
+          attemptConnectorActionBindings: bindings,
+          attemptToolDefinitions: [
+            {
+              identity: { serverId: "github_app", toolName: "repository_get" },
+              modelName: "github_app__repository_get",
+              inputSchema: {
+                type: "object",
+                properties: { repository: { type: "string" } },
+                required: ["repository"],
+                additionalProperties: false,
+              },
+              source: "mcp",
+              approval: "policy",
+              execute: async (args) => {
+                executions.push(args);
+                return { content: [{ type: "text", text: "repository" }] };
+              },
+            },
+          ],
+        });
+        const agent = buildOpenGeniAgent(testSettings(), [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          attemptConnectorActionBindings: bindings,
+        });
+        try {
+          const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "github_app__repository_get",
+          );
+          if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { repository: "Cloudgeni-ai/not-accepted" },
+              "call-rejected",
+            ),
+          ).toBe(false);
+          expect(
+            await tool.invoke(
+              new RunContext(),
+              JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
+              { toolCall: { callId: "call-rejected" } } as any,
+            ),
+          ).toMatchObject({ isError: true });
+          expect(executions).toEqual([]);
+          expect(policyCalls).toEqual([]);
+        } finally {
+          await prepared.close();
+        }
+      },
+    );
 
     test("attempt-local connector bindings preserve unmanaged read execution", async () => {
       const executions: Record<string, unknown>[] = [];

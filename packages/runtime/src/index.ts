@@ -3294,6 +3294,7 @@ export function buildOpenGeniAgent(
       options.approvedToolCallId,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+    installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -3424,6 +3425,7 @@ export function buildOpenGeniAgent(
     options.approvedToolCallId,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+  installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -3573,6 +3575,101 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
 function modelMcpSourceCallId(modelName: string): string | undefined {
   const identity = modelMcpCallIdentity.getStore();
   return identity?.modelName === modelName ? identity.callId : undefined;
+}
+
+const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
+const TOOL_PREFLIGHT_FAILURE_RETENTION_MAX = 256;
+
+/** Model-facing result for a call whose approval preflight failed. Nothing ran. */
+export function toolPreflightFailureOutput(error: unknown): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  const message = exactErrorMessage(error);
+  const bounded =
+    message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
+      ? `${message.slice(0, TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS)}…`
+      : message;
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text:
+          "The tool was not run: it failed while being prepared, before anything was executed, so no change was made. " +
+          `Error: ${bounded}`,
+      },
+    ],
+  };
+}
+
+/**
+ * Contain every error thrown while the model SDK asks a tool whether it needs
+ * approval. The SDK treats a throwing `needsApproval` as a fatal
+ * `ToolCallError` that ends the whole turn, and the per-tool MCP errorFunction
+ * only covers the invocation itself. Approval preflight runs policy lookups,
+ * connector bindings, review-context parsing and provider preview reads, any
+ * of which can fail because of model arguments or a transient dependency.
+ *
+ * Instead, the failure is remembered for that exact call id and the SDK is told
+ * no approval is needed; the matching `invoke` then returns the failure as an
+ * ordinary tool error without calling any inner wrapper, so the action never
+ * executes and the model can correct itself. A call without an id cannot be
+ * correlated and keeps the original behavior.
+ *
+ * This must be installed last so it wraps every other approval wrapper, and is
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
+  const failures = new Map<string, unknown>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function") return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof needsApproval>[0],
+          parsedInput: Parameters<typeof needsApproval>[1],
+          callId: Parameters<typeof needsApproval>[2],
+        ) => {
+          try {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (callId) failures.delete(callId);
+            return required;
+          } catch (error) {
+            if (!callId) throw error;
+            failures.delete(callId);
+            failures.set(callId, error);
+            while (failures.size > TOOL_PREFLIGHT_FAILURE_RETENTION_MAX) {
+              const oldest = failures.keys().next().value;
+              if (oldest === undefined) break;
+              failures.delete(oldest);
+            }
+            return false;
+          }
+        },
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && failures.has(callId)) {
+            const error = failures.get(callId);
+            failures.delete(callId);
+            return toolPreflightFailureOutput(error) as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installToolPreflightContainment(cloned);
+      return cloned;
+    };
+  }
 }
 
 /**

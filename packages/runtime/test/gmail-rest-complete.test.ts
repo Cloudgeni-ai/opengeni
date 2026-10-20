@@ -832,6 +832,15 @@ describe("Gmail review snapshots", () => {
     expect(await missing.reviewContext("trash_message", { messageId: "gone" })).toEqual({
       samples: [],
     });
+    // A malformed id, rate limit or outage only drops the optional sample.
+    for (const status of [400, 429, 503]) {
+      const unreadable = make(async () =>
+        Response.json({ error: { message: "Unavailable" } }, { status }),
+      );
+      expect(await unreadable.reviewContext("modify_message", { messageId: "..." })).toEqual({
+        samples: [],
+      });
+    }
     const wrong = make(async () => Response.json({ id: "different" }));
     await expect(wrong.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow(
       "did not match",
