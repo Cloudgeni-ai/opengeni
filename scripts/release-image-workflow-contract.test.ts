@@ -486,7 +486,9 @@ describe("release image workflow contract", () => {
       expect(patchCopy).toBeGreaterThan(-1);
       expect(patchCopy).toBeLessThan(frozenInstall);
       expect(treeCopy).toBeGreaterThan(frozenInstall);
-      expect(stage.slice(frozenInstall - 120, frozenInstall)).toContain("--mount=type=cache,");
+      const installRun = stage.lastIndexOf("\nRUN ", frozenInstall);
+      expect(installRun).toBeGreaterThan(-1);
+      expect(stage.slice(installRun, frozenInstall)).toContain("--mount=type=cache,");
 
       const staged = (source: string, end: number) =>
         Array.from(
