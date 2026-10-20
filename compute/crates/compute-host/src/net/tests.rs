@@ -252,6 +252,237 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
     }
 }
 
+/// A host whose sandboxes may reach port 443 and ports 9443 to 9445 of one
+/// local address, and never one public range.
+fn reaching() -> NetworkConfig {
+    NetworkConfig {
+        reach: vec!["10.20.0.7:443,9443-9445".parse().unwrap()],
+        blocked: vec!["93.184.216.0/24".parse().unwrap()],
+        ..NetworkConfig::default()
+    }
+}
+
+const TCP: u8 = 6;
+const UDP: u8 = 17;
+const ICMP: u8 = 1;
+/// A sandbox namespace's end of its link, which its traffic leaves from.
+const UPLINK_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+
+fn ip(text: &str) -> Ipv4Addr {
+    text.parse().unwrap()
+}
+
+/// A connection a guest may have made, (protocol, destination, port, who
+/// answers), and whether the rules installed now refuse it.
+type Made = ((u8, &'static str, Option<u16>, &'static str), bool);
+
+/// The connections a guest may have made.
+fn guest_connections() -> Vec<Made> {
+    vec![
+        // Queries to a private name server, as an older host named: still
+        // going there, refused; redirected, answered by the gateway, kept.
+        ((UDP, "100.100.100.100", Some(53), "100.100.100.100"), true),
+        ((UDP, "100.100.100.100", Some(53), "169.254.0.22"), false),
+        ((TCP, "10.0.0.2", Some(53), "169.254.0.22"), false),
+        // The guest's own name server.
+        ((UDP, "169.254.0.22", Some(53), "169.254.0.22"), false),
+        // The internet, but for a range the host blocks.
+        ((TCP, "1.1.1.1", Some(443), "1.1.1.1"), false),
+        ((UDP, "8.8.8.8", Some(53), "8.8.8.8"), false),
+        ((TCP, "93.184.216.34", Some(443), "93.184.216.34"), true),
+        // What `--reach` opens: TCP to the listed ports only.
+        ((TCP, "10.20.0.7", Some(443), "10.20.0.7"), false),
+        ((TCP, "10.20.0.7", Some(9444), "10.20.0.7"), false),
+        ((TCP, "10.20.0.7", Some(22), "10.20.0.7"), true),
+        ((UDP, "10.20.0.7", Some(443), "10.20.0.7"), true),
+        // The rest of the local network, an overlay's, metadata, the pool.
+        ((TCP, "10.20.0.8", Some(443), "10.20.0.8"), true),
+        ((ICMP, "100.84.1.1", None, "100.84.1.1"), true),
+        ((TCP, "169.254.169.254", Some(80), "169.254.169.254"), true),
+        ((TCP, "198.18.0.9", Some(22), "198.18.0.9"), true),
+    ]
+}
+
+#[test]
+fn the_connections_forgotten_are_those_the_rules_refuse() {
+    let config = reaching();
+    assert_eq!(
+        config.blocked_nets().len(),
+        config.blocked().len(),
+        "every blocked range is a range"
+    );
+    let refusals = config.refusals(&config.allowed().unwrap());
+    let direction = |protocol, source, destination, port| conntrack::Direction {
+        protocol,
+        source,
+        destination,
+        port,
+    };
+    for ((protocol, destination, port, answerer), refused) in guest_connections() {
+        let destination = ip(destination);
+        let original = direction(protocol, GUEST_IP, destination, port);
+        let answered = direction(protocol, ip(answerer), UPLINK_IP, Some(40_000));
+        let connection = conntrack::Connection::between(original, answered);
+        assert_eq!(
+            refusals.in_namespace(&connection),
+            refused,
+            "in the namespace: {original:?} answered by {answerer}"
+        );
+        // The host sees it leave the namespace from its uplink; a
+        // redirected one never leaves.
+        if answerer != GATEWAY_IP.to_string() {
+            let left = direction(protocol, UPLINK_IP, destination, port);
+            let connection = conntrack::Connection::between(left, answered);
+            assert_eq!(
+                refusals.on_host(&connection),
+                refused,
+                "on the host: {left:?}"
+            );
+        }
+    }
+    // The namespace's own connections, as its name server's to the
+    // upstreams, are not the guest's; the host's own are not a sandbox's.
+    let own = direction(UDP, UPLINK_IP, ip("10.0.0.2"), Some(53));
+    let answer = direction(UDP, ip("10.0.0.2"), UPLINK_IP, Some(40_000));
+    assert!(!refusals.in_namespace(&conntrack::Connection::between(own, answer)));
+    let host = direction(TCP, ip("10.0.0.5"), ip("10.0.0.1"), Some(22));
+    let answer = direction(TCP, ip("10.0.0.1"), ip("10.0.0.5"), Some(40_000));
+    assert!(!refusals.on_host(&conntrack::Connection::between(host, answer)));
+}
+
+/// Runs `work` on a thread in a network namespace of its own, so it may
+/// change what the kernel tracks there, or skips without root (as in a
+/// user namespace of one's own: `unshare -r`), failing instead where
+/// `COMPUTE_TEST_REQUIRE` lists `lab`.
+fn in_new_namespace(work: impl FnOnce() + Send) {
+    if !rustix::process::geteuid().is_root() {
+        let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+        assert!(
+            !required.split(',').any(|listed| listed.trim() == "lab"),
+            "a required test cannot run: it needs root"
+        );
+        eprintln!("skipped: needs root");
+        return;
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                // SAFETY: only the network namespace is unshared, which
+                // no file descriptor depends on.
+                unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNET) }
+                    .unwrap();
+                work();
+            })
+            .join()
+            .unwrap();
+    });
+}
+
+/// The kernel lists, keeps and forgets connections as the rules say: those
+/// refused go, one by one, by whichever protocol; the rest stay; a second
+/// pass finds nothing more to forget.
+#[test]
+fn the_kernel_forgets_exactly_the_connections_the_rules_refuse() {
+    use conntrack::track::{self, Way};
+
+    let config = reaching();
+    let refusals = config.refusals(&config.allowed().unwrap());
+    let check = |source: Ipv4Addr, on_host: bool| {
+        let mut expected = Vec::new();
+        for (n, ((protocol, destination, port, answerer), refused)) in
+            guest_connections().into_iter().enumerate()
+        {
+            let answerer = ip(answerer);
+            if on_host && answerer == GATEWAY_IP {
+                continue;
+            }
+            let sport = 40_000 + u16::try_from(n).unwrap();
+            // An ICMP echo is told apart by its identifier, its "port".
+            let original = Way {
+                protocol,
+                source: (source, sport),
+                destination: (ip(destination), port.unwrap_or(sport)),
+            };
+            let answer = Way {
+                protocol,
+                source: (answerer, port.unwrap_or(sport)),
+                destination: (if on_host { source } else { UPLINK_IP }, sport),
+            };
+            track::connection(original, answer).unwrap();
+            expected.push((ip(destination), protocol, answerer, refused));
+        }
+        let listed = track::list().unwrap();
+        assert_eq!(listed.len(), expected.len(), "all tracked: {listed:?}");
+        let refused = expected.iter().filter(|(.., refused)| *refused).count();
+        let pick = |connection: &conntrack::Connection| {
+            if on_host {
+                refusals.on_host(connection)
+            } else {
+                refusals.in_namespace(connection)
+            }
+        };
+        assert_eq!(conntrack::forget(pick).unwrap(), refused);
+        let mut kept: Vec<_> = track::list()
+            .unwrap()
+            .into_iter()
+            .map(|connection| {
+                (
+                    connection.original.destination,
+                    connection.original.protocol,
+                    connection.reply.source,
+                )
+            })
+            .collect();
+        kept.sort_unstable();
+        let mut wanted: Vec<_> = expected
+            .iter()
+            .filter(|(.., refused)| !refused)
+            .map(|&(destination, protocol, answerer, _)| (destination, protocol, answerer))
+            .collect();
+        wanted.sort_unstable();
+        assert_eq!(kept, wanted);
+        assert_eq!(conntrack::forget(pick).unwrap(), 0, "nothing more");
+    };
+    in_new_namespace(|| check(GUEST_IP, false));
+    in_new_namespace(|| check(UPLINK_IP, true));
+}
+
+/// A connection is listed and ends, and another with the same first
+/// packet is tracked in its place, redirected to the guest's own name
+/// server, before the listed one is forgotten: the new one stays.
+#[test]
+fn a_connection_made_in_place_of_one_listed_is_kept() {
+    use conntrack::track::{self, Way};
+
+    in_new_namespace(|| {
+        let query = Way {
+            protocol: 17,
+            source: (GUEST_IP, 40_000),
+            destination: (ip("100.100.100.100"), 53),
+        };
+        let answered_privately = Way {
+            destination: (UPLINK_IP, 40_000),
+            ..query.reversed()
+        };
+        track::connection(query, answered_privately).unwrap();
+        let listed = track::list().unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(track::delete(&listed[0]).unwrap(), "it ends");
+        let redirected = Way {
+            source: (GATEWAY_IP, 53),
+            ..query.reversed()
+        };
+        track::connection(query, redirected).unwrap();
+        assert!(
+            !track::delete(&listed[0]).unwrap(),
+            "what was listed is gone"
+        );
+        let kept = track::list().unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].reply.source, GATEWAY_IP);
+    });
+}
+
 #[test]
 fn setup_names_the_namespace_link_and_tap() {
     let addresses = NetworkConfig::default().addresses(2).unwrap();
