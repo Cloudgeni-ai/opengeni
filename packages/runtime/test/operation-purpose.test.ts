@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { runBeforeAgentStartHooks, type SandboxLifecycleHook } from "../src/index";
 import {
+  instrumentSandboxClientSessionOperations,
   instrumentSandboxSessionOperations,
   sandboxHookOperationPurpose,
   withSandboxOperationPurpose,
@@ -64,6 +65,44 @@ describe("sandbox setup operation purposes", () => {
       withSandboxOperationPurpose("file_resources", () => session.exec()),
     ).rejects.toThrow("boom");
     expect(observations.map((o) => o.outcome)).toEqual(["failed"]);
+  });
+
+  test("sessions from every client creation method are measured, including lifecycle creates", async () => {
+    const observations: SandboxSetupOperationObservation[] = [];
+    const client = {
+      async create() {
+        return fakeSession();
+      },
+      async createWithLifecycle(_args: unknown, lifecycle: { onCreated(s: unknown): void }) {
+        const session = fakeSession();
+        lifecycle.onCreated(session);
+        return session;
+      },
+      async resume() {
+        return fakeSession();
+      },
+    };
+    instrumentSandboxClientSessionOperations(client, "modal", (o) => observations.push(o));
+    let announced: unknown;
+    const created = await client.create();
+    const lifecycleCreated = await client.createWithLifecycle(
+      {},
+      {
+        onCreated: (s) => {
+          announced = s;
+        },
+      },
+    );
+    const resumed = await client.resume();
+    expect(announced).toBe(lifecycleCreated);
+    for (const session of [created, lifecycleCreated, resumed]) {
+      await withSandboxOperationPurpose("hook.codemode-token", () => session.exec({ cmd: "x" }));
+    }
+    expect(observations.map((o) => `${o.op}:${o.purpose}:${o.backend}`)).toEqual([
+      "exec:hook.codemode-token:modal",
+      "exec:hook.codemode-token:modal",
+      "exec:hook.codemode-token:modal",
+    ]);
   });
 
   test("lifecycle hooks report under their bounded hook id", async () => {
