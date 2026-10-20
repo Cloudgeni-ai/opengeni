@@ -292,7 +292,9 @@ export class CuaComputerBackend implements ComputerBackend {
       // pre-dispatch rejection. The controller retains its completed receipt.
       try {
         const openedReading = async (reported: string | null) => {
-          const opened = await this.openedWindow(acted, known, reported).catch(() => null);
+          const opened = await this.openedWindow(command.targetId, acted, known, reported).catch(
+            () => null,
+          );
           return opened ? await this.observeTarget(opened).catch(() => null) : null;
         };
         // CUA names the windows it saw the action open.
@@ -301,11 +303,13 @@ export class CuaComputerBackend implements ComputerBackend {
         try {
           return await this.observeTarget(command.targetId);
         } catch (error) {
-          // The acted window closed or can no longer be read, as an Open
+          // The acted window could not be read. If it closed, as an Open
           // panel does when its app makes a new document from a key
           // equivalent CUA ran as a menu command, which it reports nothing
-          // for. The action replaced its window, so a new window of the app
+          // for, the action replaced its window, so a new window of the app
           // is the one it opened; it can appear a moment after the action.
+          // While the acted window is still listed, a read failure proves
+          // nothing about other windows, so none is taken in its place.
           const deadline = Date.now() + OPENED_WINDOW_WAIT_MS;
           while (Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, OPENED_WINDOW_POLL_MS));
@@ -434,16 +438,19 @@ export class CuaComputerBackend implements ComputerBackend {
   /** The window an action opened, such as a new document or a dialog: the
    * one window of the acted window's app not listed before the action, and,
    * given CUA's report of the windows the action opened, one that report
-   * names. A window that merely appeared meanwhile is not the action's. A
+   * names. Without a report, only once the acted window is gone: the action
+   * replaced it. A window that merely appeared meanwhile is not the action's. A
    * window lying within another window of its app is a sheet or part of a
    * panel, read through that window, so it never counts. Two candidates are
    * never guessed between. */
   private async openedWindow(
+    actedId: string,
     acted: Target,
     known: ReadonlySet<string>,
     report: string | null,
   ): Promise<string | null> {
     await this.discover();
+    if (report === null && this.targetsById.has(actedId)) return null;
     const opened = [...this.targetsById.entries()]
       .filter(
         ([id, target]) =>

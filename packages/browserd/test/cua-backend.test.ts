@@ -1266,12 +1266,17 @@ describe("CUA desktop boundary", () => {
     class OpeningFixture extends Fixture {
       acted = false;
       closes = false;
+      unreadable = false;
       listingsAfter = 0;
       report = "";
       opens: Opened[] = [];
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
-        if (name === "get_window_state" && args.window_id === 1 && !this.live)
+        if (
+          name === "get_window_state" &&
+          args.window_id === 1 &&
+          (!this.live || (this.unreadable && this.acted))
+        )
           return { ...result({}, true), structuredJson: null, text: "window 1 is gone" } as never;
         const response = await super.callTool(name, argumentsJson);
         if (name === "click") {
@@ -1367,6 +1372,23 @@ describe("CUA desktop boundary", () => {
         const observation = await backend.observe(target.id);
         const after = await backend.dispatch(command(observation));
         expect(after?.target.id).toBe("cua:window:42:2");
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The acted window cannot be read after the action but is still listed,
+    // and an unrelated window of its app appears unreported: that window is
+    // not the action's, so nothing is observed in its place.
+    {
+      const fixture = new OpeningFixture();
+      fixture.opens = [{ ...document, title: "Unrelated" }];
+      fixture.unreadable = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        expect(await backend.dispatch(command(observation))).toBeNull();
       } finally {
         await backend.close();
       }
