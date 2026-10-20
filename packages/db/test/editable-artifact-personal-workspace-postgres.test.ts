@@ -4,7 +4,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
-import { createDb, withRlsContext } from "../src/index";
+import { createDb, managedPersonalWorkspacePermissions, withRlsContext } from "../src/index";
 import { rawRows } from "../src/database";
 
 // The owner of a personal workspace creates, opens and edits documents,
@@ -61,21 +61,32 @@ async function allowed(
   workspaceId: string,
   subjectId: string,
   permission: "create" | "read" | "edit",
+  options: { actorKind?: string; serviceName?: string | undefined; priorLifecycle?: string } = {},
 ): Promise<boolean> {
   const artifactId = crypto.randomUUID().replaceAll("-", "");
-  const [row] = await withRlsContext(app.db, { accountId, workspaceId }, async (tx) =>
-    rawRows<{ allowed: boolean; lifecycle: string | null }>(
+  const [row] = await withRlsContext(app.db, { accountId, workspaceId }, async (tx) => {
+    if (options.priorLifecycle)
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', ${options.priorLifecycle}, true)`,
+      );
+    return await rawRows<{ allowed: boolean; lifecycle: string | null }>(
       tx,
       sql`select allowed,
         current_setting('opengeni.organization_tenancy_lifecycle', true) as lifecycle from opengeni_private.authorize_editable_artifact_actor(
-        ${accountId}::uuid, ${workspaceId}::uuid, ${artifactId}, 'human', ${subjectId},
-        null, null, null, null, null, ${permission}, current_schema())`,
-    ),
-  );
-  // The lifecycle scope the read used never outlives it.
-  expect(row?.lifecycle ?? "").toBe("");
+        ${accountId}::uuid, ${workspaceId}::uuid, ${artifactId}, ${options.actorKind ?? "human"}, ${subjectId},
+        null, null, null, null, ${options.serviceName ?? null}, ${permission}, current_schema())`,
+    );
+  });
+  // The lifecycle scope the read used never outlives it: the caller's own
+  // value comes back unchanged.
+  expect(row?.lifecycle ?? "").toBe(options.priorLifecycle ?? "");
   return row?.allowed === true;
 }
+
+test("the personal workspace projection holds what 0867 grants without checking the permission", () => {
+  expect(managedPersonalWorkspacePermissions).toContain("artifacts:read");
+  expect(managedPersonalWorkspacePermissions).toContain("artifacts:publish");
+});
 
 for (const bypass of [false, true]) {
   test(`a personal workspace's owner holds every editable artifact permission there (${bypass ? "BYPASSRLS" : "restricted"} owner)`, async () => {
@@ -93,9 +104,38 @@ for (const bypass of [false, true]) {
       // Memberships are unchanged: a Viewer reads but does not edit.
       expect(await allowed(org.accountId, org.team, org.colleague, "read")).toBe(true);
       expect(await allowed(org.accountId, org.team, org.colleague, "edit")).toBe(false);
+      // Only the human branch reaches the pointer: a service, configured key
+      // or agent naming the owner's subject is not the owner (refused, or
+      // rejected as an invalid actor).
+      for (const [actorKind, serviceName] of [
+        ["service", "configured_key"],
+        ["service", "site"],
+        ["agent", undefined],
+        ["agent_attempt", undefined],
+      ] as const)
+        expect({
+          actorKind,
+          serviceName,
+          allowed: await allowed(org.accountId, org.personal, org.owner, "read", {
+            actorKind,
+            serviceName,
+          }).catch(() => false),
+        }).toEqual({ actorKind, serviceName, allowed: false });
+      // A lifecycle the caller had already set is restored, not cleared.
+      expect(
+        await allowed(org.accountId, org.personal, org.owner, "edit", {
+          priorLifecycle: "session_visibility_activation",
+        }),
+      ).toBe(true);
     });
     // A suspended owner loses it at once.
     await shared.admin`update organization_memberships set status='suspended'
+      where account_id=${org.accountId} and subject_id=${org.owner}`;
+    await inPosture(bypass, async () => {
+      expect(await allowed(org.accountId, org.personal, org.owner, "read")).toBe(false);
+    });
+    // So does a revoked one.
+    await shared.admin`update organization_memberships set status='revoked', revoked_at=now()
       where account_id=${org.accountId} and subject_id=${org.owner}`;
     await inPosture(bypass, async () => {
       expect(await allowed(org.accountId, org.personal, org.owner, "read")).toBe(false);

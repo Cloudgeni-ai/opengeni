@@ -1272,6 +1272,12 @@ export async function isSiteWorkspaceMember(
  * /v1/site-auth/authorize) and is named here from the Site viewer session,
  * never taken from the page. Other subjects (configured external actors)
  * keep the plain membership answer.
+ *
+ * Precondition: callers pass only a subject the API has already proven (a
+ * Site viewer session or site-auth code); this answers for that subject, it
+ * does not authenticate it. The probed subject and the organization
+ * tenancy lifecycle that `list_self_organization_memberships` sets are both
+ * restored before returning, so a caller's transaction never keeps them.
  */
 export async function getSiteWorkspaceMemberPermissions(
   db: Database,
@@ -1291,6 +1297,10 @@ export async function getSiteWorkspaceMemberPermissions(
     };
     if (!subjectId.startsWith("user:")) return await membership();
     const priorSubjectId = await rlsSubjectIdOrEmpty(tx);
+    const [priorLifecycle] = await rawRows<{ value: string | null }>(
+      tx,
+      sql`select current_setting('opengeni.organization_tenancy_lifecycle', true) as value`,
+    );
     let completed = false;
     try {
       await setSubjectRlsContext(tx, subjectId);
@@ -1304,9 +1314,11 @@ export async function getSiteWorkspaceMemberPermissions(
       if (!live) return null;
       return permissions ?? [...managedPersonalWorkspacePermissions];
     } finally {
-      // Never leave the probed subject applied to the caller's transaction.
+      // Never leave the probed subject, or the lifecycle that opens every
+      // organization's memberships, applied to the caller's transaction.
       const restore = tx.execute(
-        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true),
+          set_config('opengeni.organization_tenancy_lifecycle', ${priorLifecycle?.value ?? ""}, true)`,
       );
       if (completed) await restore;
       else await restore.catch(() => undefined);

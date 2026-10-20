@@ -7,11 +7,16 @@
 -- pointer, as everywhere else that resolves live workspace authority.
 --
 -- A person in the human branch now also holds their own personal workspace
--- through that pointer. The owner's personal workspace permissions include
+-- through that pointer. The owner's personal workspace permissions
+-- (managedPersonalWorkspacePermissions in packages/db/src/
+-- personal-workspace-permissions.ts, pinned by
+-- editable-artifact-personal-workspace-postgres.test.ts) include
 -- artifacts:read and artifacts:publish, so every editable artifact permission
--- follows. Agents, API keys, configured keys and everyone else are unchanged.
--- The membership read uses the organization membership lifecycle scope, as
--- list_self_organization_memberships does, and restores the previous scope.
+-- follows and required_permission needs no check here. Agents, API keys,
+-- configured keys and everyone else are unchanged. The membership read sets
+-- the organization membership lifecycle scope (the one
+-- list_self_organization_memberships uses) and then restores the caller's
+-- previous value; on an error the transaction or savepoint rollback reverts it.
 --
 -- Only this function body changes; its owner and grants stay.
 SET LOCAL lock_timeout = '5s';

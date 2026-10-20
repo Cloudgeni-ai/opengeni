@@ -1048,6 +1048,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       case "models.list": {
         const assistant = await agentViewing(host, viewer, limits);
+        // No assistant for this viewer here: no models to choose from.
+        if (assistant.unavailable) return context.json({ models: [], defaultModel: null });
         const models = await siteViewerModels(host, assistant.viewer, assistant.limits);
         // The in-Site SDK reads this as the workspace model catalog, so each
         // row carries the same definition, readiness and availability as
@@ -1070,6 +1072,12 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       default:
         if (id.startsWith("sessions.")) {
           const assistant = await agentViewing(host, viewer, limits);
+          if (assistant.unavailable)
+            throw siteNotAvailableForViewer(
+              "agent",
+              "This Site's assistant is not available to you",
+              { reason: "sessions_permission_required" },
+            );
           return await sessions(request, id, host, assistant.viewer, assistant.limits);
         }
         throw unsupported();

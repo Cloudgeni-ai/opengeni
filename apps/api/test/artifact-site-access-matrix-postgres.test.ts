@@ -401,12 +401,31 @@ function matrix(f: Fixture) {
     if (config.status !== 200) return brief(config);
     return config.json.capabilities?.agent === true ? "offered" : "not offered";
   };
+  /** The model ids the Site offers this viewer, sorted. */
+  const siteModels = async (host: string, viewer: Viewer) => {
+    const listed = await f.gateway(host, "GET", "/model-catalog", viewer);
+    if (listed.status !== 200) return brief(listed);
+    return ((listed.json?.models ?? []) as Array<{ id: string }>)
+      .map((model) => model.id)
+      .sort()
+      .join(",");
+  };
+  /** The Site's audience as the console shows it. */
+  const siteVisibility = async (who: Person, workspace: Cell["workspace"], siteId: string) => {
+    const got = await f.api(who, "GET", `${sites(workspace)}/${siteId}`);
+    return got.status === 200 ? String(got.json?.artifact?.visibility) : brief(got);
+  };
   /**
    * A Site AI turn: the gateway starts the conversation, then the worker's
    * first database step (claim and the frozen learning policy) runs on it,
    * where the 19 October guest failure (42501) happened.
    */
-  const aiTurn = async (workspace: Cell["workspace"], host: string, viewer: Viewer) => {
+  const aiTurn = async (
+    workspace: Cell["workspace"],
+    host: string,
+    viewer: Viewer,
+    options: { followUp?: boolean } = {},
+  ) => {
     const started = await f.gateway(host, "POST", "/sessions", {
       ...viewer,
       body: { initialMessage: "Hello from the matrix", idempotencyKey: crypto.randomUUID() },
@@ -439,7 +458,15 @@ function matrix(f: Fixture) {
           executionGeneration: claim.turn.executionGeneration,
         },
       });
-      return "202 turn starts";
+      if (!options.followUp) return "202 turn starts";
+      // The turn finishes; the viewer sends again (live re-authorization).
+      await shared.admin`update session_turns set status = 'completed' where session_id = ${sessionId}`;
+      await shared.admin`update sessions set status = 'idle', active_turn_id = null where id = ${sessionId}`;
+      const sent = await f.gateway(host, "POST", `/sessions/${sessionId}/events`, {
+        ...viewer,
+        body: { type: "user.message", payload: { text: "And a follow-up" } },
+      });
+      return sent.status === 202 ? "202 turn starts, follow-up 202" : `202 then ${brief(sent)}`;
     } catch (error) {
       return `202 then ${nestedPostgresSqlState(error) ?? String(error).slice(0, 60)}`;
     }
@@ -469,6 +496,8 @@ function matrix(f: Fixture) {
     isViewer,
     open,
     assistantOffered,
+    siteModels,
+    siteVisibility,
     aiTurn,
     siteData,
     editable,
@@ -655,6 +684,37 @@ test("personal workspace: the owner and their agent create, share, publish and u
     agent: { enabled: true },
   });
   m.record(ws, "owner", "publish Only me Site (console)", "201", brief(privatePublish));
+  m.record(
+    ws,
+    "owner",
+    "Only me Site audience after publishing",
+    "workspace",
+    await m.siteVisibility(owner, ws, String(privateSite.json.artifact.id)),
+  );
+  // A publish that fails (a hostname already in use) leaves the Site Only me.
+  const unlucky = await m.createSite(owner, ws, "Unlucky Only me Site", "private");
+  const unluckyId = String(unlucky.json?.artifact?.id);
+  m.record(
+    ws,
+    "owner",
+    "publish Only me Site on a taken hostname",
+    "409",
+    String(
+      (
+        await m.publish(owner, ws, unluckyId, {
+          access: "public",
+          label: String(privatePublish.json?.label),
+        })
+      ).status,
+    ),
+  );
+  m.record(
+    ws,
+    "owner",
+    "Only me Site audience after a failed publish",
+    "private",
+    await m.siteVisibility(owner, ws, unluckyId),
+  );
 
   // The agent in an Only me chat (the default in a personal workspace).
   const agent = await agentTools(f, ws, owner, "user_private");
@@ -983,16 +1043,18 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
     ["owner", f.owner, "200 member", "board", "202 turn starts"],
     ["admin", f.people.admin, "200 member", "board", "202 turn starts"],
     ["member", f.people.member, "200 member", "board", "202 turn starts"],
-    ["viewer", f.people.viewer, "200 member", "guestbook", "202 turn starts"],
+    ["viewer", f.people.viewer, "200 member", "guestbook", "202 turn starts, follow-up 202"],
     ["outsider", f.outsider, "200 user", "guestbook", "202 turn starts"],
     ["guest", "guest", "200 guest", "guestbook", "202 turn starts"],
   ];
+  const publicViewers = new Map<string, Viewer>();
   for (const [actor, who, kind, collection, ai] of viewers) {
     const viewer = await m.viewerFor(who, host);
     if (!m.isViewer(viewer)) {
       m.record(ws, actor, "open public Site", kind, brief(viewer));
       continue;
     }
+    publicViewers.set(actor, viewer);
     m.record(ws, actor, "open public Site", kind, await m.open(host, viewer));
     m.record(
       ws,
@@ -1019,7 +1081,13 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
         }),
       ),
     );
-    m.record(ws, actor, "Site AI turn (public Site)", ai, await m.aiTurn(ws, host, viewer));
+    m.record(
+      ws,
+      actor,
+      "Site AI turn (public Site)",
+      ai,
+      await m.aiTurn(ws, host, viewer, { followUp: actor === "viewer" }),
+    );
     if (actor === "viewer") {
       // The Viewer's conversation is an outside visitor's (Site identity and
       // limits), never a member chat they have no permission to start.
@@ -1030,6 +1098,16 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
       m.record(ws, actor, "Site AI conversation runs as", "user", conversation?.kind ?? "none");
     }
   }
+  // The Viewer is offered exactly the models an outside visitor is (credit
+  // billed), never the workspace catalog a member chats with.
+  const outsiderModels = await m.siteModels(host, publicViewers.get("outsider")!);
+  m.record(
+    ws,
+    "viewer",
+    "Site AI models (public Site)",
+    `outsider's: ${outsiderModels}`,
+    `outsider's: ${await m.siteModels(host, publicViewers.get("viewer")!)}`,
+  );
   // A members Site admits the workspace only.
   const membersHost = String(
     (await m.publish(f.people.member, ws, own.member!.id, { access: "members" })).json?.hostname,
@@ -1062,10 +1140,76 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
       ws,
       "viewer",
       "Site AI turn (members Site)",
-      "403 forbidden",
+      "403 not_available_for_viewer",
       await m.aiTurn(ws, membersHost, viewerOnMembers),
     );
+    m.record(
+      ws,
+      "viewer",
+      "Site AI models (members Site)",
+      "none",
+      (await m.siteModels(membersHost, viewerOnMembers)) || "none",
+    );
   }
+  // An invited Site that lists the Viewer's email: they chat as invited.
+  const invitedHost = String(
+    (
+      await m.publish(f.people.admin, ws, own.admin!.id, {
+        access: "invited",
+        invitedEmails: [f.people.viewer.email],
+        agent: { enabled: true },
+      })
+    ).json?.hostname,
+  );
+  const viewerOnInvited = await m.viewerFor(f.people.viewer, invitedHost);
+  if (m.isViewer(viewerOnInvited)) {
+    m.record(
+      ws,
+      "viewer",
+      "open invited Site",
+      "200 member",
+      await m.open(invitedHost, viewerOnInvited),
+    );
+    m.record(
+      ws,
+      "viewer",
+      "Site AI turn (invited Site)",
+      "202 turn starts",
+      await m.aiTurn(ws, invitedHost, viewerOnInvited),
+    );
+    const [conversation] = await shared.admin<Array<{ kind: string }>>`
+      select viewer_kind as kind from site_runtime_conversations
+      where viewer_principal = ${`user:${f.people.viewer.subjectId}`}
+      order by created_at desc limit 1`;
+    m.record(
+      ws,
+      "viewer",
+      "invited Site AI conversation runs as",
+      "invited",
+      conversation?.kind ?? "none",
+    );
+  } else m.record(ws, "viewer", "open invited Site", "200 member", brief(viewerOnInvited));
+  // In a shared workspace, publishing an Only me Site from the console still
+  // asks its owner to share it first (sharing widens who can see it).
+  const consolePrivate = await m.createSite(f.people.member, ws, "Console Only me", "private");
+  m.record(
+    ws,
+    "member",
+    "publish Only me Site (console)",
+    "409 site_not_shared",
+    brief(
+      await m.publish(f.people.member, ws, String(consolePrivate.json?.artifact?.id), {
+        access: "public",
+      }),
+    ),
+  );
+  m.record(
+    ws,
+    "member",
+    "Only me Site audience after the refused publish",
+    "private",
+    await m.siteVisibility(f.people.member, ws, String(consolePrivate.json?.artifact?.id)),
+  );
   m.record(
     ws,
     "guest",
@@ -1073,6 +1217,28 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
     "401",
     await m.open(membersHost, { visitor: visitorId() }),
   );
+  // Site membership is live: suspending the admin's organization membership
+  // ends their member access to a members-only Site at once, even on a
+  // Site session they already hold.
+  const adminOnMembers = await m.viewerFor(f.people.admin, membersHost);
+  if (m.isViewer(adminOnMembers)) {
+    m.record(
+      ws,
+      "admin",
+      "open members Site",
+      "200 member",
+      await m.open(membersHost, adminOnMembers),
+    );
+    await shared.admin`update organization_memberships set status = 'suspended'
+      where account_id = ${f.accountId} and subject_id = ${f.people.admin.subjectId}`;
+    m.record(
+      ws,
+      "suspended admin",
+      "open members Site (existing Site session)",
+      "403 site_access_denied",
+      await m.open(membersHost, adminOnMembers),
+    );
+  } else m.record(ws, "admin", "open members Site", "200 member", brief(adminOnMembers));
 
   const mismatches = printMatrix(m.cells);
   expect(mismatches).toEqual([]);

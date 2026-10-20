@@ -31,6 +31,7 @@ import {
   getPublishedSiteVersion,
   getSiteDataSite,
   getSitePublication,
+  getSiteWorkspaceMemberPermissions,
   isSitePublishingUuid,
   getWorkspaceSiteLimitProfile,
   markSitePublicationEdgeSynced,
@@ -1023,27 +1024,42 @@ export async function siteHostnameAvailability(
  * of publishing. Only the Site's owner, or their own agent, does this (the
  * same person who could change its audience); in a shared workspace the owner
  * still shares it first, because that widens who can see it.
+ *
+ * Only a publication that is not yet active shares: once published, a Site
+ * its owner set back to Only me stays Only me, and edits answer
+ * `site_not_shared` like anywhere else until they unpublish or share it.
  */
 async function publishesPersonalOnlyMeSite(
   deps: SitePublishingDeps,
   management: SiteManagement,
+  existing: SitePublicationRecord | null,
 ): Promise<boolean> {
   const { record } = management;
+  if (existing?.status === "active") return false;
   if (record.status !== "active" || record.visibility !== "user_private") return false;
   if (!management.owner || !management.subjectId) return false;
-  return (await getWorkspace(deps.db, management.scope.workspaceId))?.kind === "personal";
+  if ((await getWorkspace(deps.db, management.scope.workspaceId))?.kind !== "personal")
+    return false;
+  // Defence in depth: the caller is this personal workspace's live owner.
+  if (management.subjectId.startsWith("user:"))
+    return (
+      (await getSiteWorkspaceMemberPermissions(deps.db, management.scope, management.subjectId)) !==
+      null
+    );
+  return true;
 }
 
 async function sharePersonalSiteForPublishing(
   deps: SitePublishingDeps,
   management: SiteManagement,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
 ): Promise<PublishedSiteRecord> {
   const { scope, record } = management;
   await updateWorkspaceArtifactVisibility(deps.db, {
     workspaceId: scope.workspaceId,
     artifactId: record.id,
     viewer: { subjectId: management.subjectId },
-    visibility: "workspace_shared",
+    visibility,
   });
   const shared = await getPublishedSite(deps.db, scope, record.id);
   if (!shared) throw sitePublishingError(404, "not_found", "site_not_found", "Site not found");
@@ -1090,7 +1106,8 @@ export async function upsertSitePublicationForManager(
     await requireSitePlatformOpen(deps, "publish");
     await requireSitePlatformQuota(deps, scope, ["requests", "storage_bytes"]);
   }
-  const sharesPersonalSite = activating && (await publishesPersonalOnlyMeSite(deps, management));
+  const sharesPersonalSite =
+    activating && (await publishesPersonalOnlyMeSite(deps, management, existing));
   if (
     activating &&
     !siteServable(sharesPersonalSite ? { ...record, visibility: "workspace_shared" } : record)
@@ -1194,29 +1211,37 @@ export async function upsertSitePublicationForManager(
       ? { invitedEmails: normalizeEmails(request.invitedEmails) }
       : {}),
   };
+  // Shared just before the publication is written, so it is served the
+  // moment it exists; if publishing fails, the Site goes back to Only me.
   if (sharesPersonalSite) record = await sharePersonalSiteForPublishing(deps, management);
   // A new publication without a label takes a suggested one; a random suffix
   // collides rarely, so retry a few times.
   let result: Awaited<ReturnType<typeof upsertSitePublication>> | null = null;
-  for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
-    try {
-      result = await upsertSitePublication(deps.db, scope, {
-        siteId: record.id,
-        defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
-        changes,
-        actor: grant.subjectId,
-        holdDays: deps.settings.sitesHostnameHoldDays,
-        defaults: { access: "members", noindex: true },
-      });
-    } catch (error) {
-      const retry =
-        error instanceof SitePublishingError &&
-        (error.code === "taken" || error.code === "held") &&
-        request.label === undefined &&
-        existing === null &&
-        attempt < 4;
-      if (!retry) throw error;
+  try {
+    for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
+      try {
+        result = await upsertSitePublication(deps.db, scope, {
+          siteId: record.id,
+          defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
+          changes,
+          actor: grant.subjectId,
+          holdDays: deps.settings.sitesHostnameHoldDays,
+          defaults: { access: "members", noindex: true },
+        });
+      } catch (error) {
+        const retry =
+          error instanceof SitePublishingError &&
+          (error.code === "taken" || error.code === "held") &&
+          request.label === undefined &&
+          existing === null &&
+          attempt < 4;
+        if (!retry) throw error;
+      }
     }
+  } catch (error) {
+    if (sharesPersonalSite)
+      await sharePersonalSiteForPublishing(deps, management, "user_private").catch(() => undefined);
+    throw error;
   }
   const { publication, created, previousLabel } = result!;
   const stopping = existing ? siteAccessNarrowed(existing, publication) : null;

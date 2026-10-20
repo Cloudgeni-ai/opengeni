@@ -445,7 +445,10 @@ Profiles:
 enforce (the agent also reflects the platform brake and whether a
 credit-billed model exists for people outside the workspace, and answers a
 member without `sessions:create` as the outside visitor the agent serves them
-as, or `false` on a members-only Site;
+as, or `false` on a members-only Site, where `models.list` is empty and
+`sessions.*` answer 403 `not_available_for_viewer`; such a member's
+`viewer.kind` stays `member`, so Site code should gate its chat UI on
+`capabilities.agent`, not on the viewer kind;
 `workspaceTools` needs a member who may use connections). Anything the
 viewer's audience can't do answers 403 `not_available_for_viewer` with a
 `feature`, and `details.legacyCode` carries the code older Site code matched
