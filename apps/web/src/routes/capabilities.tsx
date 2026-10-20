@@ -15,6 +15,7 @@ import {
   CapabilityPageSlotContext,
   type CapabilityPageSlotValue,
 } from "@/components/capabilities/capability-page-slot";
+import { SlackConnectionsPage } from "@/components/capabilities/slack-connections-page";
 import { IntegrationPage } from "@/components/capabilities/integration-page";
 import { ProviderPage, type ProviderMode } from "@/components/capabilities/provider-page";
 import {
@@ -1597,20 +1598,32 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   let detailPage: ReactNode = null;
   if (openIntegrationModel) {
     const back = backFrom(openIntegrationModel.id);
-    detailPage = (
-      <IntegrationPage
-        model={openIntegrationModel}
-        onBack={back.onBack}
-        backLabel={back.label}
-        setupLabel={
-          openIntegrationModel.id === "slack"
-            ? slackBotMode
-              ? "Add Opengeni to Slack"
-              : "Connect your Slack"
-            : undefined
-        }
-      />
-    );
+    detailPage =
+      openIntegrationModel.id === "slack" ? (
+        <SlackConnectionsPage
+          key={`${workspaceId}:${context.accessContext?.subjectId ?? ""}`}
+          workspaceId={workspaceId}
+          items={items}
+          connections={connections}
+          bindings={slackInstallationBindings}
+          refresh={refresh}
+          onRuntimeChanged={onRuntimeChanged}
+          onBack={back.onBack}
+        />
+      ) : (
+        <IntegrationPage
+          model={openIntegrationModel}
+          onBack={back.onBack}
+          backLabel={back.label}
+          setupLabel={
+            openIntegrationModel.id === "slack"
+              ? slackBotMode
+                ? "Add Opengeni to Slack"
+                : "Connect your Slack"
+              : undefined
+          }
+        />
+      );
   } else if (selectedItem) {
     const back = backFrom(selectedItem.id);
     detailPage = (

@@ -312,16 +312,22 @@ struct ServeArgs {
     /// sandbox. Must not be used for anything else.
     #[arg(long, default_value = "198.18.0.0/15")]
     network_pool: Ipv4Net,
-    /// Let sandboxes reach this host's local network (private and shared
-    /// ranges). The host itself, metadata services and other sandboxes
-    /// stay blocked.
-    #[arg(long)]
-    trusted: bool,
+    /// A destination beyond the internet that sandboxes may open TCP
+    /// connections to, and its ports: `DESTINATION:PORTS`, the destination
+    /// a DNS name, an address or `address/prefix`, the ports a list such as
+    /// `443,9443-9445`. The host resolves a name when the agent starts, and
+    /// sandboxes' name server answers it with those addresses. Nothing else
+    /// on the host's local or overlay network is reachable, and never the
+    /// host, metadata services or other sandboxes. Repeatable.
+    #[arg(long = "reach")]
+    reach: Vec<compute_host::net::Reach>,
     /// Another range sandboxes may not reach, such as the host's public
     /// address where the cloud maps it onto a private one. Repeatable.
     #[arg(long = "block")]
     blocked: Vec<Ipv4Net>,
-    /// A name server for guests; repeatable, at most two are used.
+    /// A name server the host asks for sandboxes, tried in order;
+    /// repeatable. Use public ones: whatever names it knows, sandboxes can
+    /// look up.
     #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
     dns: Vec<Ipv4Addr>,
     /// A running sandbox whose VM uses at least this percent of one
@@ -742,7 +748,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         pool,
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,
-            trusted: args.trusted,
+            reach: args.reach,
             blocked: args.blocked,
             dns: args.dns,
         }),

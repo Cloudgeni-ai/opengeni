@@ -1983,6 +1983,14 @@ rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
 is `origin/production`. The `production` pointer already exists; do not
 recreate it and do not force-push.
 
+When first activating workspace default machines and scheduled
+`executionTarget: workspace_default`, replace the API and both worker roles
+without old/new runtime overlap before accepting those settings. Older binaries
+ignore the new placement fields and would use the deployment backend instead.
+Migration 0864 itself supports rolling schema compatibility; that does not make
+mixed-version placement semantics safe. Existing chats and already accepted
+occurrences retain their frozen machine.
+
 Protect `production`: no force-push; merge commits only (disable squash and
 rebase-and-merge); required checks `Admit production PR head` and
 `Current-base source admission` (skip-success aggregate so promote PRs from

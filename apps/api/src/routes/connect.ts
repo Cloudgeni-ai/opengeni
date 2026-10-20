@@ -1109,7 +1109,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
-                ...(attempt.account ? { connectionId: attempt.account.id } : {}),
+                ...(attempt.account
+                  ? { connectionId: attempt.account.id }
+                  : { newAccount: true as const }),
               },
             });
             const authorizationUrl = started.authorizationUrl;

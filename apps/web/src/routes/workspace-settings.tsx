@@ -13,6 +13,7 @@ import { resolveWorkspaceBusySend } from "@opengeni/contracts";
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
+import { DefaultMachineRow } from "@/components/settings/default-machine-row";
 import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
@@ -464,6 +465,7 @@ function WorkspaceGeneralSettings({
             })
           }
         />
+        <DefaultMachineRow workspaceId={workspaceId} />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow

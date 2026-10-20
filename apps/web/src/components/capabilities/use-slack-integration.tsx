@@ -201,7 +201,9 @@ export function useSlackIntegration({
   sheetOpen,
   refresh,
   onRuntimeChanged,
+  selectedBotConnectionId,
 }: {
+  selectedBotConnectionId?: string;
   workspaceId: string;
   items: CapabilityCatalogItem[];
   connections: ConnectionMetadata[] | null;
@@ -289,7 +291,11 @@ export function useSlackIntegration({
     () => openGeniSlackBotConnections(connections ?? []),
     [connections],
   );
-  const botConnection = preview?.bot ?? preferredOpenGeniSlackBotConnection(botConnections);
+  const botConnection =
+    preview?.bot ??
+    (selectedBotConnectionId
+      ? (botConnections.find((connection) => connection.id === selectedBotConnectionId) ?? null)
+      : preferredOpenGeniSlackBotConnection(botConnections));
   const botMetadata = botConnection ? openGeniSlackBotUiMetadata(botConnection) : null;
   const binding = botConnection
     ? (slackInstallationBindings.find((row) => row.connectionId === botConnection.id) ?? null)
@@ -301,7 +307,11 @@ export function useSlackIntegration({
   // different Slack team. Replacing it would hide Reconnect or create loops.
   const discovery = useSlackInstallationDiscovery(
     workspaceId,
-    loaded && !botConnection && slackInstallationBindings.length === 0 && !readOnly,
+    loaded &&
+      !selectedBotConnectionId &&
+      !botConnection &&
+      slackInstallationBindings.length === 0 &&
+      !readOnly,
   );
   const canMutateInstalledBot = canInstallBot && bindingActive;
   // Reaction summon, knowledge destination, and decision publication remain
@@ -694,7 +704,7 @@ export function useSlackIntegration({
   const model =
     discovery.bindings.length > 0 || discovery.loading || discovery.failed
       ? organizationModel()
-      : canInstallBot
+      : canInstallBot || selectedBotConnectionId
         ? botModel()
         : memberModel();
 
@@ -947,7 +957,7 @@ export function useSlackIntegration({
         id: "slack-publication",
         label: "Publish important decisions to Slack",
         description: publication?.slackChannelName
-          ? `Posts to ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
+          ? `Posts as ${botConnections.find((row) => row.id === publication.connectionId)?.metadata.slackTeamName ?? "the configured Slack workspace"} · ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
           : "Posts short summaries of workspace Knowledge changes to one channel you choose.",
         checked: publication?.enabled ?? false,
         disabled: !isAdmin || !botActive || readOnly || !publicationLoaded,
@@ -1270,6 +1280,7 @@ export function useSlackIntegration({
           <SlackReactionChannelsDialog
             workspaceId={workspaceId}
             connectionId={botConnectionId}
+            connections={botConnections}
             // Opened by an enable attempt, the dialog carries that intent so
             // picking channels and saving actually enables the shortcut.
             settings={

@@ -78,7 +78,7 @@ ExecStart=/usr/local/bin/compute-host --socket /run/compute-host.sock serve \\
   --root /lab/state --firecracker /lab/bin/firecracker --jailer /lab/bin/jailer \\
   --kernel /lab/vmlinux --base-image /lab/base.ext4 --memory-profile nested \\
   --store gs://$BUCKET/archive --restore-notice-port 53 --template-ready-port 54 \\
-  --network --trusted \\
+  --network \\
   --fleet-control https://$CONTROL:8443 --fleet-name $NAME --fleet-address $ADDRESS:7443 \\
   --fleet-zone $ZONE --fleet-cert /etc/compute/host.pem --fleet-key /etc/compute/host.key \\
   --fleet-ca /etc/compute/ca.pem

@@ -209,6 +209,8 @@ describe("run credential response validation", () => {
       },
     );
     const script = commands.join("\n");
+    // Environment, one file, verification and activation share one round trip.
+    expect(commands).toHaveLength(1);
     expect(commands.every((command) => command.startsWith("set +x\n"))).toBe(true);
     expect(
       commands.every((command) =>
@@ -227,6 +229,38 @@ describe("run credential response validation", () => {
     expect(script).toContain("chmod -- 0700 ");
     expect(script).toContain("chmod -- 0600 ");
     expect(script).not.toMatch(/chmod (?:0[0-7]{3}|'0[0-7]{3}') --/);
+  });
+
+  test("packs a multi-file generation into a bounded number of round trips", async () => {
+    const commands: string[] = [];
+    const files = Array.from({ length: 8 }, (_, index) => ({
+      path: `repositories/${index}/credentials`,
+      content: `https://x-access-token:${"t".repeat(40)}@github.com\n`,
+      mode: "0400" as const,
+    }));
+    await materializeRunCredentials(
+      {} as never,
+      normalizeRunCredentialsResolution(
+        resolution({
+          environment: { GITHUB_TOKEN: "t".repeat(40), GH_TOKEN: "t".repeat(40) },
+          files,
+          fileEnvironment: {},
+        }),
+        expected,
+      ),
+      {
+        sessionId: "session-a",
+        attemptId: "attempt-a",
+        executionGeneration: 1,
+        commandRunner: async (_session, args) => {
+          commands.push(args.cmd);
+          return "__OPENGENI_RUN_CREDENTIAL_COMMAND_OK__";
+        },
+      },
+    );
+    // Previously five commands per file plus six fixed ones (46 here).
+    expect(commands.length).toBeLessThanOrEqual(3);
+    expect(commands.at(-1)).toContain("_opengeni_credential_version_name");
   });
 });
 

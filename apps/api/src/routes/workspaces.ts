@@ -65,6 +65,8 @@ import {
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
   getWorkspace,
+  getSandbox,
+  getEnrollment,
   getWorkspaceModelPolicy,
   getWorkspaceModelPolicyLayers,
   getOrganizationModelDefaults,
@@ -537,7 +539,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   // deep-merges (top-level) a settings patch, preserving unknown/future keys.
   app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -549,6 +551,33 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(422, {
         message:
           "defaultSandboxImage must be one of the images in this deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST",
+      });
+    }
+    const executionTarget = parsed.data.defaultExecutionTarget;
+    if (executionTarget?.kind === "machine") {
+      const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
+      const enrollment = machine?.enrollmentId
+        ? await getEnrollment(deps.db, grant, machine.enrollmentId)
+        : null;
+      if (
+        !deps.settings.sandboxOwnershipEnabled ||
+        !deps.settings.sandboxSelfhostedEnabled ||
+        !machine ||
+        machine.kind !== "selfhosted" ||
+        machine.scope === "user" ||
+        !enrollment ||
+        enrollment.status !== "active"
+      ) {
+        throw new HTTPException(422, {
+          message: "Choose an available shared Connected Machine for the workspace default.",
+        });
+      }
+    } else if (
+      executionTarget?.kind === "managed" &&
+      ["selfhosted", "none"].includes(deps.settings.sandboxBackend)
+    ) {
+      throw new HTTPException(422, {
+        message: "This deployment does not provide a managed sandbox.",
       });
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy

@@ -92,6 +92,9 @@ export function registerSlackBotAccessRoutes(app: Hono, deps: ApiRouteDeps): voi
           workspaceId: grant.workspaceId,
           connectionId: connectionId.data,
           enabled: request.data.enabled,
+          ...(request.data.workspaceIds !== undefined
+            ? { workspaceIds: request.data.workspaceIds }
+            : {}),
         },
         () => authorizeOrganizationIntegrationAdministration(context, deps, grant.accountId, true),
       );

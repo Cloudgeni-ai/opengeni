@@ -263,8 +263,12 @@ do not survive a restore. When the guest runs a notice handler, the agent
 tries to tell it so, along with the correct time; a failed notice is logged,
 not retried. Each sandbox has its own namespace, NAT and firewall: the
 internet is allowed; the host, private and link-local ranges (including the
-cloud metadata address) and other sandboxes are not. A host marked `trusted`
-may let guests reach its local network
+cloud metadata address) and other sandboxes are not. A host may list exact
+private destinations and TCP ports sandboxes may also open (`--reach`, such
+as a private Opengeni's API), and nothing else private opens. Every guest's
+name server is its gateway, where the host answers listed names itself and
+passes the rest to public name servers, never to the host's own, so guests
+learn no private name but those listed
 ([ADR 11](docs/adr/0011-fixed-guest-network.md)).
 
 ## New sandboxes
