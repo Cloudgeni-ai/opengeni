@@ -349,6 +349,7 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
   pollFailure: Error = new AttachedBrowserBridgeError("timeout", "poll timed out", true);
   heldInput: Promise<void> | null = null;
   heldNavigation: Promise<void> | null = null;
+  heldAttach: Promise<void> | null = null;
 
   push(method: string, params: Record<string, unknown> = {}): void {
     this.sequence += 1;
@@ -379,6 +380,7 @@ class StreamBridge implements AttachedBrowserBridgeTransport {
           ],
         } as T;
       case "debugger.attach":
+        if (this.heldAttach) await this.heldAttach;
         return { attached: true } as T;
       case "debugger.detach":
         return { detached: true } as T;
@@ -566,6 +568,42 @@ describe("attached Chrome event stream recovery", () => {
       ).rejects.toMatchObject({ code: "resource_unavailable", retryable: false });
     } finally {
       releaseInput();
+      connection.close();
+    }
+  });
+
+  test("refuses an attach that spans a stream break but still detaches it at shutdown", async () => {
+    const bridge = new StreamBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    let releaseAttach = () => {};
+    try {
+      await connection.send("Target.getTargets");
+      connection.on("Page.loadEventFired", () => undefined);
+      await eventually(
+        () => bridge.commands.some((command) => command.type === "debugger.poll"),
+        "polling to start",
+      );
+      bridge.heldAttach = new Promise<void>((resolveAttach) => {
+        releaseAttach = resolveAttach;
+      });
+      const attach = connection
+        .send("Target.attachToTarget", { targetId: "7" })
+        .catch((error: unknown) => error);
+      await eventually(
+        () => bridge.commands.some((command) => command.type === "debugger.attach"),
+        "the attach request",
+      );
+      bridge.failingPolls = 1;
+      await eventually(() => bridge.failingPolls === 0, "the stream break");
+      releaseAttach();
+      expect(await attach).toMatchObject({ code: "resource_unavailable", retryable: true });
+      await connection.shutdown();
+      expect(bridge.commands).toContainEqual({ type: "debugger.detach", tabId: "7" });
+    } finally {
+      releaseAttach();
       connection.close();
     }
   });

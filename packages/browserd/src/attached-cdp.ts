@@ -543,6 +543,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
         const streamBreaks = this.streamBreaks;
         await this.bridge.request({ type: "debugger.attach", tabId: targetId });
+        // Chrome's attachment exists now, whatever this session makes of it:
+        // shutdown must detach it even if the session is refused below.
+        this.attachedTabs.add(targetId);
         // Events of this attachment may be among those a break discarded.
         if (this.streamBreaks !== streamBreaks || this.resyncing)
           throw new InteractionControllerError(
@@ -550,13 +553,15 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             "Browser connection is recovering; observe the tab again",
             true,
           );
-        if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch)
+        if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch) {
+          // Chrome itself ended the attachment.
+          this.attachedTabs.delete(targetId);
           throw new InteractionControllerError(
             "resource_unavailable",
             "Browser tab disconnected while attaching",
             !this.canceledTabs.has(targetId),
           );
-        this.attachedTabs.add(targetId);
+        }
         const sessionId = this.tabSessions.get(targetId) ?? `attached:${targetId}:${randomUUID()}`;
         this.sessionTabs.set(sessionId, targetId);
         this.tabSessions.set(targetId, sessionId);
