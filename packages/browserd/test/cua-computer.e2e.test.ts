@@ -328,17 +328,6 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         expect(
           await supervisor.nativeCall(nativeCall("get_window_state", { include_screenshot: true })),
         ).toMatchObject({ state: "completed" });
-        const after = await supervisor.observe(reference, target.id);
-        expect(
-          await supervisor.action(
-            makeCommand(after, {
-              type: "keyboard",
-              action: "press",
-              value: "Tab",
-            }),
-          ),
-        ).toMatchObject({ state: "completed" });
-        expect((await actual()).frontmostPid).not.toBe(fixturePid);
         // A computer_act batch is one operation: every action is resolved in
         // one observation, CUA runs them in one run_steps call, and a replay
         // does not act again.
@@ -363,6 +352,16 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         await Bun.sleep(100);
         expect((await actual()).value).toBe("Batched");
         expect((await actual()).clicks).toBe(10);
+        const after = await supervisor.observe(reference, target.id);
+        expect(
+          await supervisor.action(
+            makeCommand(after, {
+              type: "keyboard",
+              action: "press",
+              value: "Tab",
+            }),
+          ),
+        ).toMatchObject({ state: "completed" });
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
       } finally {
         await stream.close();
