@@ -81,12 +81,8 @@ export function useOrganizationCodexSubscriptions({
     };
   }, []);
 
-  // An access save changes which workspaces list an account as their own.
-  useEffect(() => {
-    const changed = () => void refresh();
-    window.addEventListener("model-connections-changed", changed);
-    return () => window.removeEventListener("model-connections-changed", changed);
-  }, [refresh]);
+  // The console root owns model-connections-changed invalidation for every
+  // mounted organization/workspace reader; a per-hook listener repeats live checks.
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {

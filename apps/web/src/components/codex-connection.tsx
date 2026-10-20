@@ -777,8 +777,6 @@ export function useCodexSubscriptions({
     return () => clearInterval(timer);
   }, []);
 
-  // Re-read this list only (after a live usage read wrote the cached columns).
-  const { refresh: reloadAccounts } = accountsQuery;
   // After an account change: every retained Codex list for this workspace,
   // including session account choices, may now be wrong.
   const refreshAccounts = useCallback(
@@ -792,11 +790,12 @@ export function useCodexSubscriptions({
 
   // LIVE batched overview refresh: usage + reset-credit details settle
   // independently per account under the server's max-four provider-call cap.
-  const { refresh: reloadOverview } = overviewQuery;
   const refreshUsage = useCallback(async () => {
-    await reloadOverview();
-    await reloadAccounts();
-  }, [reloadOverview, reloadAccounts]);
+    // Also used after redemption: a completion after navigation must evict
+    // retained inventory, not silently skip a refresh with no mounted readers.
+    await invalidateSharedQueries(client, ["model-settings", "codex-overview", workspaceId]);
+    await invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId));
+  }, [client, workspaceId]);
 
   // Explicit retry still uses the independently-settled batch so reset detail
   // authority and usage can never drift.

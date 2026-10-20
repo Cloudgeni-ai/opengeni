@@ -219,7 +219,7 @@ const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 const { modelsScopeLabels } = await import("./models/models-ui");
-const { clearSharedQueries } = await import("@/lib/shared-query");
+const { clearSharedQueries, useConsoleSharedQueries } = await import("@/lib/shared-query");
 
 // Account lists are retained per client between mounts; every test starts cold.
 beforeEach(() => clearSharedQueries(context.client));
@@ -271,6 +271,29 @@ function button(container: HTMLElement, text: string | RegExp) {
 }
 
 describe("organization Codex subscriptions", () => {
+  test("one connection-change event checks each organization overview once", async () => {
+    function Console() {
+      useConsoleSharedQueries(context.client);
+      return <Harness accountId={inactiveAccountId} />;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const overviewReads = () =>
+      requestJson.mock.calls.filter(
+        ([method, path]) => method === "GET" && path.endsWith("/overview"),
+      ).length;
+    try {
+      await act(async () => root.render(<Console />));
+      await flush();
+      const before = overviewReads();
+      await act(async () => window.dispatchEvent(new Event("model-connections-changed")));
+      await flush();
+      expect(overviewReads()).toBe(before + 1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   test("usage sign-in failure refreshes account health and offers reconnection", async () => {
     usageNeedsReconnect = true;
     const container = document.createElement("div");

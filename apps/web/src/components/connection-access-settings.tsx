@@ -12,7 +12,7 @@ import { CheckboxField, FieldStack } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
 import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
 import {
-  invalidateModelSettingsQueries,
+  notifyModelConnectionsChanged,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
 } from "@/lib/shared-query";
@@ -79,8 +79,7 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
           : new Error("Couldn't save. Nothing was changed.", { cause: caught });
       }
       // Also evicts unmounted detail reads, even when the form was left during save.
-      await invalidateModelSettingsQueries(client);
-      window.dispatchEvent(new Event("model-connections-changed"));
+      await notifyModelConnectionsChanged(client);
       toast.success("Saved");
     },
     [client, target],

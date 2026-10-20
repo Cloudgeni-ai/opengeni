@@ -64,6 +64,14 @@ export function invalidateModelSettingsQueries(client: object): Promise<void> {
   ]).then(() => undefined);
 }
 
+/** Notify legacy consumers after one awaited invalidation, without repeating live checks. */
+export async function notifyModelConnectionsChanged(client: object): Promise<void> {
+  await invalidateModelSettingsQueries(client);
+  window.dispatchEvent(
+    new CustomEvent(MODEL_CONNECTIONS_CHANGED, { detail: { invalidatedClient: client } }),
+  );
+}
+
 /**
  * The console's cache wiring for its API client (called once, at the root that
  * owns `client`):
@@ -78,7 +86,10 @@ export function invalidateModelSettingsQueries(client: object): Promise<void> {
 export function useConsoleSharedQueries(client: object): void {
   useEffect(() => retainSharedQueries(client), [client]);
   useEffect(() => {
-    const changed = () => void invalidateModelSettingsQueries(client);
+    const changed = (event: Event) => {
+      const detail = (event as CustomEvent<{ invalidatedClient?: object }>).detail;
+      if (detail?.invalidatedClient !== client) void invalidateModelSettingsQueries(client);
+    };
     window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
     return () => window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
   }, [client]);

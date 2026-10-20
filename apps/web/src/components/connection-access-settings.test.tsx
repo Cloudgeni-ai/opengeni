@@ -4,7 +4,7 @@ import { OpenGeniApiError, OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
-import { retainSharedQueries, useConsoleSharedQueries } from "@/lib/shared-query";
+import { retainSharedQueries, useConsoleSharedQueries, useSharedQuery } from "@/lib/shared-query";
 
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
@@ -53,7 +53,11 @@ test("access reserves rows, never guesses Shared by, reuses remounts and invalid
     },
   });
   const release = retainSharedQueries(client);
+  const overviewRead = mock(async () => ({ usage: "fresh" }));
   function Page() {
+    useSharedQuery(client, ["model-settings", "codex-overview", "workspace"], overviewRead, {
+      staleTimeMs: 300_000,
+    });
     const access = useConnectionAccess({
       client,
       organizationId: "org",
@@ -97,9 +101,12 @@ test("access reserves rows, never guesses Shared by, reuses remounts and invalid
         .click(),
     );
     expect(container.textContent).toContain("1 model");
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(overviewRead).toHaveBeenCalledTimes(2);
     const beforeEvent = read.mock.calls.length;
     await act(async () => window.dispatchEvent(new Event("model-connections-changed")));
-    expect(read.mock.calls.length).toBeGreaterThan(beforeEvent);
+    expect(read.mock.calls.length).toBe(beforeEvent + 1);
+    expect(overviewRead).toHaveBeenCalledTimes(3);
   } finally {
     await act(async () => root.unmount());
     container.remove();

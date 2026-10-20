@@ -11,6 +11,7 @@ import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { ModelsView } from "@/lib/models-route";
+import { useConsoleSharedQueries } from "@/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -587,6 +588,7 @@ let organizationList = false;
 let workspaceSettingsAdmin: boolean | undefined;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
+  useConsoleSharedQueries(client);
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
     organizationList ? {} : { workspace: "workspace-a" },
   );
@@ -786,6 +788,49 @@ describe("Codex rows", () => {
       expect(second.container.textContent).toContain("40% left");
     } finally {
       await cleanup(second);
+      release();
+    }
+  });
+
+  test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
+    const { useCodexSubscriptions } = await import("@/components/codex-connection");
+    const { retainSharedQueries, peekSharedQuery } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    let remaining = 1;
+    client.codexOverview.mockImplementation(async () => {
+      const value = overviewFor("acct-1", remaining ? 0 : 100);
+      value.accounts["acct-1"]!.resetCredits.availableCount = remaining;
+      return value;
+    });
+    let afterRedemption!: () => Promise<void>;
+    function Reader() {
+      const codex = useCodexSubscriptions({
+        client: client as never,
+        workspaceId: "workspace-a",
+        canManage: true,
+      });
+      afterRedemption = codex.refreshUsage;
+      return <span>{codex.overviewMap["acct-1"]?.resetCredits.availableCount ?? "loading"}</span>;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("1");
+      await act(async () => root.render(null));
+      // The provider's redemption settles only after the account page was left.
+      remaining = 0;
+      await act(async () => afterRedemption());
+      expect(
+        peekSharedQuery(client, ["model-settings", "codex-overview", "workspace-a"]),
+      ).toBeNull();
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("0");
+      expect(client.codexOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
       release();
     }
   });
@@ -2722,6 +2767,9 @@ describe("One Models page for the organization and the workspace", () => {
       }
       // While the rows still read their access, no "can't start" that a kept
       // copy might contradict.
+      // This is a cold-load scenario, unlike a normal retained revisit.
+      const { clearSharedQueries } = await import("@/lib/shared-query");
+      clearSharedQueries(client);
       const held: (() => void)[] = [];
       const keptAccess = client.getModelConnectionAccess.getMockImplementation()!;
       client.getModelConnectionAccess.mockImplementation(
