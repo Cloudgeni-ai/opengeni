@@ -110,6 +110,7 @@ export const TOOL_STEP_IDS = [
   "wait",
   "withdrawNotification",
   "workInBrowser",
+  "workInExcel",
 ] as const;
 
 export type ToolStepId = (typeof TOOL_STEP_IDS)[number];
@@ -226,6 +227,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   browser_auth: "signIn",
   browser_identity: "manageSignIns",
   browser_publish: "shareBrowser",
+  excel_run: "workInExcel",
 
   // Projects, other chats and helpers
   project_list: "checkProjects",

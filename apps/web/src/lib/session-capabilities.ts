@@ -124,12 +124,13 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "interaction",
     name: "Browser and computer",
-    description: "Use browser sessions, connected computers, and human input.",
+    description: "Use browser sessions, connected computers, Excel workbooks, and human input.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("interaction_") ||
       tool.startsWith("browser_") ||
-      tool.startsWith("computer_"),
+      tool.startsWith("computer_") ||
+      tool.startsWith("excel_"),
   },
   {
     id: "secrets",

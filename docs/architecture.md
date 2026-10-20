@@ -1172,6 +1172,9 @@ Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentic
 Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
 shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
 destinations.
+Excel add-in pane: `apps/web/office/` (its own Vite entry), served with its manifest by the
+web server; its live-workbook relay and `excel_run` live in the API. See
+[`excel-addin.md`](excel-addin.md).
 
 ---
 

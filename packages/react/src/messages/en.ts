@@ -3914,6 +3914,8 @@ export const englishMessages = {
   "timeline.toolStep.withdrawNotification.running": "Withdrawing a notification",
   "timeline.toolStep.workInBrowser.done": "Worked in the browser",
   "timeline.toolStep.workInBrowser.running": "Working in the browser",
+  "timeline.toolStep.workInExcel.done": "Worked in Excel",
+  "timeline.toolStep.workInExcel.running": "Working in Excel",
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
