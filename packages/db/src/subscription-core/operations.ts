@@ -848,7 +848,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       );
       if (!connection) return { applied: false, recovered: false };
       // Preserve the fetched measurement even if generation/merge policy declines it.
-      if (observation.source === "usage_endpoint")
+      if (observation.source === "usage_endpoint" || observation.source === "response_headers")
         await recordSubscriptionUsageReading(tx, accountId, connectionId, providerId, observation);
       const refreshGeneration = Number(connection.refresh_generation);
       if (ref && observation.observedRefreshGeneration !== refreshGeneration)

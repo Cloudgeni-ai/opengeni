@@ -1049,7 +1049,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx.onUsageHeaders?.(usage);
         // Join the durable observer before returning the response. Failure is
         // telemetry-only and must not replace a provider response or refusal.
-        await ctx.persistUsageHeaders?.(usage).catch(() => undefined);
+        try {
+          await ctx.persistUsageHeaders?.(usage);
+        } catch {
+          // Both synchronous throws and rejected promises are telemetry-only.
+        }
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
         // Never log provider bodies, identifiers, or headers: they can contain

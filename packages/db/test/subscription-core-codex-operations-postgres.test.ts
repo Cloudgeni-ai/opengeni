@@ -621,11 +621,58 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       ).kind,
     ).toBe("loaded");
 
+    // Operation-scoped header history uses the same frozen personal authority,
+    // including a genuine measurement the allocator rejects as old-generation.
+    const reading = {
+      windows: [
+        { id: "primary", usedPercent: 12, resetsAt: Date.now() + 3_600_000, status: "ok" as const },
+      ],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      revision: 0,
+      observedAt: Date.now(),
+      observedRefreshGeneration: 0,
+      source: "response_headers" as const,
+    };
+    expect(
+      await recordSubscriptionCoreCodexUsageObservation(
+        client!.db,
+        turnScope(authorized),
+        personal,
+        reading,
+        {},
+        lease,
+      ),
+    ).toEqual({ applied: false, recovered: false });
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${personal}`
+      ).length,
+    ).toBe(1);
+
     // The same owner's turn without frozen authority is refused.
     const unauthorized = await runningTurn(org, {
       workspaceId: org.personalWorkspaceId,
       visibility: "user_private",
     });
+    expect(
+      await recordSubscriptionCoreCodexUsageObservation(
+        client!.db,
+        turnScope(unauthorized),
+        personal,
+        { ...reading, observedAt: reading.observedAt + 1 },
+        {},
+        lease,
+      ),
+    ).toEqual({ applied: false, recovered: false });
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${personal}`
+      ).length,
+    ).toBe(1);
     expect(
       (
         await acquireSubscriptionCoreCodexOperationLease(

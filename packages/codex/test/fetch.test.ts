@@ -2460,16 +2460,18 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
         }
       },
     );
-    await codexRequestStorage.run(
-      ctx({
-        persistUsageHeaders: async () => {
-          throw new Error("fixture persistence failure");
-        },
-      }),
+    for (const persistUsageHeaders of [
       async () => {
-        expect((await request()).status).toBe(200);
+        throw new Error("fixture rejected persistence");
       },
-    );
+      () => {
+        throw new Error("fixture synchronous persistence failure");
+      },
+    ]) {
+      await codexRequestStorage.run(ctx({ persistUsageHeaders }), async () => {
+        expect((await request()).status).toBe(200);
+      });
+    }
   });
 
   test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
