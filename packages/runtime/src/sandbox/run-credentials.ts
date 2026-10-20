@@ -11,6 +11,7 @@ import type {
   SandboxSessionLike,
   SandboxSessionState,
 } from "@openai/agents/sandbox";
+import { withSandboxOperationPurpose } from "./operation-purpose";
 
 const MAX_ENVIRONMENT_ENTRIES = 256;
 const MAX_ENVIRONMENT_VALUE_BYTES = 64 * 1024;
@@ -562,6 +563,16 @@ export type MaterializeRunCredentialsOptions = {
 
 /** Materialize one complete immutable generation, then atomically flip current. */
 export async function materializeRunCredentials(
+  session: RunCredentialCommandSession,
+  material: NormalizedRunCredentialMaterial,
+  options: MaterializeRunCredentialsOptions,
+): Promise<void> {
+  await withSandboxOperationPurpose("run_credentials", () =>
+    materializeRunCredentialsUnscoped(session, material, options),
+  );
+}
+
+async function materializeRunCredentialsUnscoped(
   session: RunCredentialCommandSession,
   material: NormalizedRunCredentialMaterial,
   options: MaterializeRunCredentialsOptions,
