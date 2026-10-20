@@ -2357,6 +2357,69 @@ jobs:
           cache-from: type=gha,scope=opengeni-ci-sandbox
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
 
+  # The Modal Computer/Browser image carries the browser controller. Publishing
+  # it with the other exact-SHA canary images keeps a deployed server and its
+  # controller on the same source revision.
+  desktop-image:
+    name: Build desktop sandbox workload image
+    needs: [automation-admission, plan, artifact-runtime]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
+    outputs:
+      desktop_digest: ${{ steps.desktop_image.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
+          path: .release/artifact-runtime
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build desktop sandbox image
+        id: desktop_image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/desktop.Dockerfile
+          platforms: linux/amd64
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-{0}', github.sha) || 'opengeni-desktop:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=opengeni-ci-desktop
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-desktop,ignore-error=true' || '' }}
+      - name: Verify anonymous desktop image resolution
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          DIGEST: ${{ steps.desktop_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Modal pulls the pinned digest without registry credentials.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker logout ghcr.io
+          export DOCKER_CONFIG="$(mktemp -d)"
+          resolved="$(docker buildx imagetools inspect "ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          [ "$resolved" = "$DIGEST" ]
+
   images:
     name: Workload image builds
     needs:
@@ -2369,6 +2432,7 @@ jobs:
       - artifact-outbox-dispatcher-image
       - relay-image
       - sandbox-image
+      - desktop-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -2384,6 +2448,7 @@ jobs:
           ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: ${{ needs.artifact-outbox-dispatcher-image.result }}
           RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}
           SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}
+          DESKTOP_IMAGE_RESULT: ${{ needs.desktop-image.result }}
         run: |
           set -euo pipefail
           test "$API_IMAGE_RESULT" = "success"
@@ -2393,6 +2458,7 @@ jobs:
           test "$ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT" = "success"
           test "$RELAY_IMAGE_RESULT" = "success"
           test "$SANDBOX_IMAGE_RESULT" = "success"
+          test "$DESKTOP_IMAGE_RESULT" = "success"
 
       - name: Check out exact aggregate source
         uses: actions/checkout@v6
@@ -2409,6 +2475,7 @@ jobs:
           RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}
           ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.artifact-materializer-image.outputs.artifact_materializer_digest }}
           ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}
+          DESKTOP_DIGEST: ${{ needs.desktop-image.outputs.desktop_digest }}
         run: |
           set -euo pipefail
           for digest in \
@@ -2418,7 +2485,8 @@ jobs:
             "$SANDBOX_DIGEST" \
             "$RELAY_DIGEST" \
             "$ARTIFACT_MATERIALIZER_DIGEST" \
-            "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST"; do
+            "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST" \
+            "$DESKTOP_DIGEST"; do
             printf '%s\n' "$digest" \
               | grep -Eq '^sha256:[0-9a-f]{64}$'
           done
@@ -2440,6 +2508,7 @@ jobs:
             --arg relayDigest "$RELAY_DIGEST" \
             --arg artifactMaterializerDigest "$ARTIFACT_MATERIALIZER_DIGEST" \
             --arg artifactOutboxDispatcherDigest "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST" \
+            --arg desktopDigest "$DESKTOP_DIGEST" \
             '{
               schemaVersion: 1,
               source: {
@@ -2461,7 +2530,8 @@ jobs:
                 sandbox: { repository: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: $sandboxDigest },
                 relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest },
                 "artifact-materializer": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-materializer", digest: $artifactMaterializerDigest },
-                "artifact-outbox-dispatcher": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher", digest: $artifactOutboxDispatcherDigest }
+                "artifact-outbox-dispatcher": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher", digest: $artifactOutboxDispatcherDigest },
+                desktop: { repository: "ghcr.io/cloudgeni-ai/opengeni-desktop", digest: $desktopDigest }
               }
             }' > canary-images.json
           sha256sum canary-images.json > canary-images.sha256
