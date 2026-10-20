@@ -108,13 +108,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.claimed(id, config, reply, *claimed);
                 self.refill();
             }
+            Event::VmEnded { id, host } => self.vm_ended(id, host),
             Event::Destroyed {
                 id,
                 host,
                 ordinal,
-                vm_ended,
                 result,
-            } => self.destroyed(id, host, ordinal, vm_ended, &result),
+            } => self.destroyed(id, host, ordinal, &result),
             Event::TornDown { id } => self.torn_down(id),
             Event::BalloonFailed { id, request } => self.input(Input::BalloonFailed {
                 sandbox: id.0,
@@ -178,26 +178,32 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let _ = reply.send(Ok(()));
     }
 
-    /// A removal ended, finished or stopped part way, with its VM ended if
-    /// `vm_ended`.
+    /// The VM of `id`, under removal, ended: its memory and processors are
+    /// free for others at once, under whichever name it was counted,
+    /// however long the rest of the removal takes and however it ends.
+    fn vm_ended(&mut self, id: Id, host: Id) {
+        self.release_vm(id, host);
+        self.spare_gone(host, true);
+    }
+
+    /// Tells the core that the VM counted as `id` or `host` has ended.
+    /// Telling it again changes nothing.
+    fn release_vm(&mut self, id: Id, host: Id) {
+        self.inputs([id, host].map(|name| Input::Unmanaged {
+            sandbox: name.0,
+            bytes: 0,
+            cpu: 0,
+        }));
+    }
+
+    /// A removal ended, finished or stopped part way.
     fn destroyed(
         &mut self,
         id: Id,
         host: Id,
         ordinal: Option<u32>,
-        vm_ended: bool,
         result: &Result<(), HostError>,
     ) {
-        if vm_ended {
-            // Its memory and processors are free for others, under
-            // whichever name it was counted, whatever the rest of the
-            // removal did.
-            self.inputs([id, host].map(|name| Input::Unmanaged {
-                sandbox: name.0,
-                bytes: 0,
-                cpu: 0,
-            }));
-        }
         // A removal that stopped part way keeps its ordinal, and its
         // id stays blocked until removing it again or the next
         // start of the agent finishes it.
@@ -208,8 +214,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 self.leftovers.remove(&id.0);
                 self.hosts.remove(&host.0);
-                // What a restart booked for it on disk shows in the next
-                // reading.
+                // Its VM has ended, as already reported unless what was
+                // left was only its files. What a restart booked for it
+                // on disk shows in the next reading.
+                self.release_vm(id, host);
                 self.inputs([id, host].map(|name| Input::Writes {
                     key: name.0,
                     disk: DiskSpace::default(),
@@ -227,7 +235,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         self.handing_away.remove(&id.0);
         self.dropped(id, result);
-        self.spare_gone(host, vm_ended);
+        // A spare whose VM ended is already gone.
+        self.spare_gone(host, result.is_ok());
     }
 
     pub(super) fn execute(&mut self, action: Action) {
@@ -848,10 +857,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 host,
                 hand_off,
             };
-            let mut vm_ended = false;
-            let result = removal
-                .run(fence, vm, &spec, &paths.dir, &mut vm_ended)
-                .await;
+            let ended = || {
+                let _ = events.send(Event::VmEnded { id, host });
+            };
+            let result = removal.run(fence, vm, &spec, &paths.dir, ended).await;
             if let Err(error) = &result {
                 tracing::error!(%id, %error, "removal stopped; the next start of the agent finishes it");
             }
@@ -859,7 +868,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 host,
                 ordinal: Some(ordinal),
-                vm_ended,
                 result,
             });
         });
@@ -897,8 +905,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 host,
                 ordinal,
-                // Its record went only once its VM had ended.
-                vm_ended: true,
                 result,
             });
         });
@@ -1020,15 +1026,15 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
     /// Records that removal began, ends the VM, deletes the store's copy,
     /// then the record, then the files. Until the record is gone a restart
     /// resumes the removal; after, the directory is an unrecorded stray
-    /// that recovery deletes. Sets `vm_ended` once its VM is known to have
-    /// ended.
+    /// that recovery deletes. Calls `ended` as soon as the VM is known to
+    /// have ended, before the rest.
     async fn run(
         &self,
         fence: Fence,
         vm: Option<(E::Vm, LiveMemory)>,
         spec: &VmSpec,
         dir: &Path,
-        vm_ended: &mut bool,
+        ended: impl FnOnce(),
     ) -> Result<(), HostError> {
         let id = self.id;
         let begun = if self.hand_off {
@@ -1056,7 +1062,7 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             None => self.engine.clean_up(spec).await,
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
-        *vm_ended = true;
+        ended();
         if let Some(net) = self.net.clone() {
             // The record holds its ordinal until it is removed below.
             let ordinal = record.allocation.link.map(|_| record.ordinal);

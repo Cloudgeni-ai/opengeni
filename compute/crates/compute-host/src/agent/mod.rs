@@ -423,15 +423,19 @@ enum Event<V> {
         id: Id,
         incarnation: u64,
     },
+    /// The VM of `id`, under removal, is known to have ended; the rest of
+    /// the removal may still be under way, or stop part way.
+    VmEnded {
+        id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
+    },
     Destroyed {
         id: Id,
         /// The name its directory and network were made under.
         host: Id,
         /// The ordinal it held, when known.
         ordinal: Option<u32>,
-        /// Whether its VM is known to have ended, even when the removal
-        /// stopped after that.
-        vm_ended: bool,
         result: Result<(), HostError>,
     },
     /// Everything a VM process of `id` left behind is released.

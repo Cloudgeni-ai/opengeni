@@ -17,6 +17,7 @@ use compute_host::{
     Stamp, Store,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, vm_name};
@@ -572,11 +573,11 @@ async fn a_vm_not_taken_back_books_all_its_processors() {
     lab.assert_clean();
 }
 
-/// A removal that ends a VM and then stops part way, here because the
-/// store cannot delete its copy, gives that VM's processors back at once:
-/// only its id stays blocked until removing it again.
+/// A removal gives its VM's processors back as soon as the VM has ended:
+/// while the store is still deleting its copy, and when that then fails.
+/// Only its id stays blocked, until removing it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_removal_that_stops_after_its_vm_ended_gives_its_processors_back() {
+async fn a_removal_gives_its_vms_processors_back_once_the_vm_ends() {
     let policy = HostPolicy {
         cpu_budget: Some(1500),
         ..HostPolicy::default()
@@ -584,9 +585,11 @@ async fn a_removal_that_stops_after_its_vm_ended_gives_its_processors_back() {
     let root = Lab::root();
     let shelf = root.join("shelf");
     let refusing = Arc::new(AtomicBool::new(false));
+    let deletes = Arc::new(Semaphore::new(0));
     let store = || Undeletable {
         inner: Directory::new(&shelf),
         refusing: Arc::clone(&refusing),
+        deletes: Arc::clone(&deletes),
     };
     let lab = Lab::start_stored_configured(root, Arc::default(), store(), |config| {
         config.policy = policy;
@@ -605,22 +608,25 @@ async fn a_removal_that_stops_after_its_vm_ended_gives_its_processors_back() {
     let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
     assert_eq!(reserved(&lab.status().await), 1000);
 
+    // The store holds the delete, and refuses it once let go.
     refusing.store(true, Ordering::SeqCst);
     let remove = Request::Remove {
         id: sandbox,
         generation: None,
     };
-    let reply = lab.client.call(&remove).await.unwrap();
-    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
-    assert!(
-        !lab.world.live.lock().unwrap().contains(&vm_name(sandbox)),
-        "its VM ended"
-    );
+    let removing = tokio::spawn({
+        let (client, remove) = (lab.client.clone(), remove.clone());
+        async move { client.call(&remove).await.unwrap() }
+    });
     lab.wait_until("its VM's processors to come back", |status| {
         reserved(status) == 0
     })
     .await;
-    assert_eq!(lab.status().await.blocked.len(), 1, "its id stays blocked");
+    assert!(
+        !lab.world.live.lock().unwrap().contains(&vm_name(sandbox)),
+        "its VM ended"
+    );
+    assert!(!removing.is_finished(), "the delete is still held");
     // They are free for a sandbox that asks for most of the host.
     let config = SandboxConfig {
         image: None,
@@ -641,17 +647,27 @@ async fn a_removal_that_stops_after_its_vm_ended_gives_its_processors_back() {
     assert_eq!(lab.run(other, &["set awake", "get"]).await, ["ok", "awake"]);
     assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
 
+    deletes.add_permits(1);
+    let reply = removing.await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    assert_eq!(lab.status().await.blocked.len(), 1, "its id stays blocked");
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
+
     refusing.store(false, Ordering::SeqCst);
+    deletes.add_permits(1);
     assert_eq!(lab.client.call(&remove).await.unwrap(), Reply::Done);
     assert_eq!(lab.status().await.blocked.len(), 0);
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
     lab.assert_clean();
 }
 
-/// A store whose deletes fail while `refusing` is set, as one out of
-/// reach does.
+/// A store whose deletes each wait for a permit from `deletes`, as a slow
+/// one's take their time, and then fail while `refusing` is set, as one
+/// out of reach does.
 struct Undeletable {
     inner: Directory,
     refusing: Arc<AtomicBool>,
+    deletes: Arc<Semaphore>,
 }
 
 impl Store for Undeletable {
@@ -686,17 +702,18 @@ impl Store for Undeletable {
         id: Id,
         own: OwnerEpoch,
     ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
-        let refused = self.refusing.load(Ordering::SeqCst);
-        let deleted = self.inner.delete(id, own);
+        let (refusing, permits) = (Arc::clone(&self.refusing), Arc::clone(&self.deletes));
+        let deleting = self.inner.delete(id, own);
         async move {
-            if refused {
+            permits.acquire().await.expect("never closed").forget();
+            if refusing.load(Ordering::SeqCst) {
                 return Err(EngineError::new(
                     ErrorKind::Transient,
                     "delete",
                     "the store is out of reach",
                 ));
             }
-            deleted.await
+            deleting.await
         }
     }
 
