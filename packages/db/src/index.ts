@@ -402,6 +402,7 @@ export {
   type SubscriptionCoreServingConnection,
 } from "./subscription-core/catalog";
 export { SubscriptionCoreError } from "./subscription-core/errors";
+export * from "./subscription-usage-pool";
 export type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
 export * from "./subscription-core-xai-adapter";

@@ -243,6 +243,8 @@ const client = {
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
   listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  getWorkspaceSubscriptionUsagePools: mock(async (_workspaceId: string) => ({ pools: [] })),
+  getOrganizationSubscriptionUsagePools: mock(async (_organizationId: string) => ({ pools: [] })),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -1808,7 +1810,7 @@ describe("One Models page for the organization and the workspace", () => {
     client.getModelConnectionAccess.mockImplementation(async () => {
       throw new Error("Connection request failed");
     });
-    const failedView = await render();
+    const failedView = await renderColdModelsFixture();
     try {
       await flush();
       const failedRow = [

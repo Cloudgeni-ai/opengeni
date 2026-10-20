@@ -34,7 +34,7 @@ export function ModelsRefreshControl({ client }: { client: object }) {
         onClick={async () => {
           setRefreshing(true);
           try {
-            await invalidateModelSettingsQueries(client);
+            await invalidateModelSettingsQueries(client, false);
             // Pool GETs project saved observations. Read them only after the
             // live checks above have recorded their newest provider readings.
             await invalidateSharedQueries(client, ["subscription-usage-pools"]);

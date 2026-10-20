@@ -4275,6 +4275,8 @@ export type ClaudeUsageRequestStatus = {
   observedAt: string;
   source?: "response_headers" | "provider" | undefined;
 };
+export type { SubscriptionUsagePool, SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
   credentialVersion: number | null;

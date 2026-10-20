@@ -42,11 +42,17 @@ export {
  * SuperGrok switcher list. For changes that can alter which accounts a
  * workspace sees, such as an "Available in" save.
  */
-export function invalidateSubscriptionAccountQueries(client: object): Promise<void> {
+export function invalidateSubscriptionAccountQueries(
+  client: object,
+  includeUsagePools = true,
+): Promise<void> {
   return Promise.all(
-    [["codex-accounts"], ["subscription-pool"], ["supergrok-accounts"]].map((prefix) =>
-      invalidateSharedQueries(client, prefix),
-    ),
+    [
+      ["codex-accounts"],
+      ["subscription-pool"],
+      ["supergrok-accounts"],
+      ...(includeUsagePools ? [["subscription-usage-pools"]] : []),
+    ].map((prefix) => invalidateSharedQueries(client, prefix)),
   ).then(() => undefined);
 }
 
@@ -57,9 +63,12 @@ export const MODEL_CONNECTIONS_CHANGED = "model-connections-changed";
 // freshness in Settings. Explicit Refresh always bypasses this five-minute TTL.
 export const MODEL_SETTINGS_STALE_TIME_MS = 5 * 60_000;
 
-export function invalidateModelSettingsQueries(client: object): Promise<void> {
+export function invalidateModelSettingsQueries(
+  client: object,
+  includeUsagePools = true,
+): Promise<void> {
   return Promise.all([
-    invalidateSubscriptionAccountQueries(client),
+    invalidateSubscriptionAccountQueries(client, includeUsagePools),
     invalidateSharedQueries(client, ["model-settings"]),
   ]).then(() => undefined);
 }

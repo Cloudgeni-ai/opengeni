@@ -122,6 +122,8 @@ export type CodexRequestContext = {
    * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
    */
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
+  /** Awaited best-effort sink for every actual reading, independently of latest-only caches. */
+  persistUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => Promise<void>;
   /** Optional per-run override, primarily for deterministic transport tests. */
   responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
   /**

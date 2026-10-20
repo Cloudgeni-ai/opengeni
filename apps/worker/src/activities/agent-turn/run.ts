@@ -52,6 +52,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
+import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -165,6 +166,7 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -867,6 +869,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       providerTurn.latestCodexUsage = snapshot;
                       creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    persistUsageHeaders: async (snapshot) => {
+                      if (!coreCodex) return;
+                      await recordCoreCodexUsageReading({
+                        db,
+                        core: coreCodex,
+                        lease: leases.codex,
+                        usage: snapshot,
+                        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+                      });
+                    },
                     beforeProviderDispatch: async (request) => {
                       if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
                       await assertCodexDispatchAdmission(

@@ -15,6 +15,7 @@ import type {
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
+  SubscriptionUsagePoolsResponse,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -5433,6 +5434,20 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
     );
+  }
+
+  /** Pooled account limits and forecasts; does not contact providers. */
+  async getWorkspaceSubscriptionUsagePools(
+    workspaceId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/subscription-usage-pools`);
+  }
+
+  /** Organization subscription limits; uses the account-list administrator boundary. */
+  async getOrganizationSubscriptionUsagePools(
+    organizationId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/organizations/${organizationId}/subscription-usage-pools`);
   }
 
   async listClaudeSubscriptionAccounts(

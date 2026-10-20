@@ -963,10 +963,17 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
   "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
   "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
+  "read_subscription_usage_history(uuid, uuid, text, text, uuid[])",
+  "append_subscription_usage_reading(uuid, uuid, text, jsonb)",
+  "prune_subscription_usage_history()",
+  "subscription_usage_history_prune_due()",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */
 export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
   "subscription_core_writer_context(text, uuid, uuid, text)",
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",

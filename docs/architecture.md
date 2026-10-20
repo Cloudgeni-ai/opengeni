@@ -1681,6 +1681,14 @@ update labeled cache; absent reset timing does not clear an exhausted window.
 
 Claude account pools: [setup and quotas](model-providers.md#claude-subscription-usage).
 
+Models' pooled-limit projection is read-only account telemetry, not allocator
+policy. `packages/db/src/subscription-usage-pool.ts` scopes canonical accounts and
+reads 30-day private observation/call history; `packages/subscriptions/src/pool-usage.ts`
+owns pure weighting and reset-aware forecasts. Organization and workspace API
+reads expose percentages and relative weights only. See
+[pooled limits](model-providers.md#pooled-subscription-limits) for estimates,
+retention and incomplete-history behavior.
+
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
 Shared-core local disconnect fences each physical request at an exact one-shot
