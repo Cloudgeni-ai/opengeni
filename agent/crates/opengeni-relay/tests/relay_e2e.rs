@@ -358,33 +358,55 @@ impl Drop for RelayProcess {
     }
 }
 
+/// Start the relay binary on `port` and wait until IT reports listening there.
+/// Readiness comes from the child's own "relay listening" log line, not from a TCP
+/// probe, which any other listener on the port would answer too; a child that ends
+/// first (its bind failed) fails the test.
 async fn relay_process(port: u16) -> RelayProcess {
-    let process = RelayProcess(
-        std::process::Command::new(env!("CARGO_BIN_EXE_opengeni-relay"))
-            .args([
-                "--bind",
-                &format!("127.0.0.1:{port}"),
-                "--advertise-ip",
-                "127.0.0.1",
-                "--stream-token-secret",
-                SECRET,
-            ])
-            .env_remove("OPENGENI_RELAY_TOKEN_SECRET")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return process;
+    use std::io::BufRead as _;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_opengeni-relay"))
+        .args([
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--advertise-ip",
+            "127.0.0.1",
+            "--stream-token-secret",
+            SECRET,
+        ])
+        .env_remove("OPENGENI_RELAY_TOKEN_SECRET")
+        .env_remove("RUST_LOG")
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let process = RelayProcess(child);
+    let listening = format!("addr=127.0.0.1:{port} ");
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<bool>();
+    // Reads the child's log until it ends, so the child never blocks on a full pipe.
+    std::thread::spawn(move || {
+        let mut ready_tx = Some(ready_tx);
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("relay listening") && line.contains(&listening) {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(true);
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("relay process did not start");
+        if let Some(tx) = ready_tx.take() {
+            let _ = tx.send(false);
+        }
+    });
+    let ready = tokio::time::timeout(Duration::from_secs(10), ready_rx)
+        .await
+        .unwrap_or_else(|_| panic!("the relay process for port {port} did not report listening"));
+    assert!(
+        matches!(ready, Ok(true)),
+        "the relay process for port {port} ended before listening"
+    );
+    process
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
