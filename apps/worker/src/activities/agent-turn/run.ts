@@ -1996,6 +1996,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       sandboxState.setupBoxSession as CodemodeTokenWriterSession,
                       downloadsToMaterialize,
                       {
+                        sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
                         onRuntimeEvent: async (event) => {
                           await eventing.publish!(
                             [{ type: event.type, payload: event.payload }],
