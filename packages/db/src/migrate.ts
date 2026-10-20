@@ -103,6 +103,7 @@ const governedLegacyConcurrentIndexMigrations = new Set([
 ]);
 export interface ConcurrentIndexMigration {
   indexName: string;
+  /** Historical directive metadata; concurrent builds must wait for old snapshots. */
   lockTimeout: string;
   skipWhenValid: boolean;
   statement: string;
@@ -158,14 +159,18 @@ function assertIdentifier(name: string, value: string): string {
  *   CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...;
  *
  * The directive is deliberately not a generic "no transaction" escape hatch:
- * only one idempotent concurrent-index statement is accepted, lock acquisition
- * is always bounded, and an invalid artifact left by a failed concurrent build
+ * only one idempotent concurrent-index statement is accepted, and an invalid
+ * artifact left by a failed concurrent build
  * is removed before retry. Seven governed historical migrations predate the
  * IF NOT EXISTS rule; only those exact filenames may use their immutable bare
  * statements, and the runner makes their retries idempotent by skipping an
  * already-valid index. This keeps additive large-table indexes online without
  * rewriting shipped history or making arbitrary partially-applied migration
  * scripts possible.
+ * The historical lock-timeout directive is parsed without rewriting shipped
+ * files, but is no longer applied: PostgreSQL also uses lock_timeout for its
+ * safe wait for old snapshots, including readers of unrelated tables when the
+ * index is partial or has expressions. Ordinary DDL keeps its short timeout.
  */
 export function parseConcurrentIndexMigration(
   file: string,
@@ -460,7 +465,13 @@ export async function executeMigrationFile(
     return;
   }
 
-  await sql`select set_config('lock_timeout', ${concurrentIndex.lockTimeout}, false)`;
+  const [priorSettings] = await sql<{ lock_timeout: string }[]>`
+    select current_setting('lock_timeout') as lock_timeout
+  `;
+  // CONCURRENTLY is the online lock strategy. Its virtual-xid waits are part
+  // of completing a valid index, not failure to acquire an exclusive DDL lock.
+  // Aborting those waits rebuilds the same index on every deploy retry.
+  await sql`select set_config('lock_timeout', '0', false)`;
   try {
     const [existing] = await sql<Array<{ valid: boolean; ready: boolean }>>`
       select i.indisvalid as valid, i.indisready as ready
@@ -477,7 +488,7 @@ export async function executeMigrationFile(
     }
     await sql.unsafe(concurrentIndex.statement);
   } finally {
-    await sql`select set_config('lock_timeout', '0', false)`;
+    await sql`select set_config('lock_timeout', ${priorSettings!.lock_timeout}, false)`;
   }
 }
 

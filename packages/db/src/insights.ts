@@ -1506,29 +1506,48 @@ export async function reconcileModelCallFacts(
           and usage_event.turn_id is not null
           and usage_event.session_id is not null
           and left(usage_event.source_resource_id, 37) = usage_event.turn_id::text || ':'
-      )
-      select usage_row.turn_id, usage_row.session_id, usage_row.source_key
-      from usage_row
-      where not exists (
+      ), missing as materialized (
+        select usage_row.* from usage_row
+        where not exists (
           select 1
           from ${schema.modelCallFacts} fact
           where fact.workspace_id = usage_row.workspace_id
             and fact.turn_id = usage_row.turn_id
             and fact.source_key = usage_row.source_key
         )
+      ), repairable_key as materialized (
+        -- Read each missing turn once. An EXISTS directly against session_events
+        -- may hash the entire event history or repeatedly policy-check every
+        -- event of a long turn: payload ->> is not leakproof under forced RLS.
+        -- Materialize extracted keys after the keyed, RLS-protected turn reads.
+        -- OFFSET 0 keeps the lateral lookup keyed even with low RLS estimates.
+        -- Reading payload also covers historical events whose usage_source_key
+        -- was intentionally not backfilled when their turn had already closed.
+        -- DISTINCT also preserves EXISTS semantics for historical empty keys,
+        -- which the current-usage unique index intentionally excludes.
+        select distinct missing_turn.turn_id, missing_turn.session_id, event.source_key
+        from (select distinct workspace_id, session_id, turn_id from missing) missing_turn
+        cross join lateral (
+          select event.payload->>'sourceKey' as source_key
+          from ${schema.sessionEvents} event
+          where event.workspace_id = ${input.workspaceId}::uuid
+            and event.session_id = missing_turn.session_id
+            and event.turn_id = missing_turn.turn_id
+            and event.type = 'agent.model.usage'
+            and event.turn_association = 'current'
+          offset 0
+        ) event
+      )
+      select usage_row.turn_id, usage_row.session_id, usage_row.source_key
+      from missing usage_row
+      left join repairable_key event
+        on event.session_id = usage_row.session_id
+        and event.turn_id = usage_row.turn_id
+        and event.source_key = usage_row.source_key
       -- Rows with no usage event stay missing on every pass; rank them last so
       -- they cannot starve repairable rows out of the bounded page.
       order by
-        not exists (
-          select 1
-          from ${schema.sessionEvents} event
-          where event.workspace_id = usage_row.workspace_id
-            and event.session_id = usage_row.session_id
-            and event.turn_id = usage_row.turn_id
-            and event.type = 'agent.model.usage'
-            and event.turn_association = 'current'
-            and event.payload->>'sourceKey' = usage_row.source_key
-        ),
+        event.turn_id is null,
         usage_row.occurred_at,
         usage_row.id
       limit ${limit + 1}
