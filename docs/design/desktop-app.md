@@ -21,7 +21,7 @@ desktop app by pointing the kit at its own web app and branding.
 | Native code | Electron APIs first; `objc-js` for small macOS gaps; a typed native module for anything larger. |
 | Look | Inset traffic lights and standard sidebar vibrancy on macOS; the page's own title row under the system caption buttons on Windows; the system title bar on Linux. No Liquid Glass. |
 | Accounts | Several accounts on several servers, each in its own isolated browser session. |
-| Local machine | "Use this computer" connects this computer in one click. The app runs the connected-machine agent itself, as its own child process, so there is one app to install, quit and grant permissions to. Headless machines keep the standalone agent service. |
+| Local machine | "Use this computer" connects this computer after sign-in. New installs run as the app's child; existing standalone agents keep their service, signed installation and permission identity. Opening the app never takes them over. |
 | Background | The agent keeps running after the window closes, with a menu bar / tray item and a pause control. While this computer is connected the app opens at login, hidden. |
 | Packaging | electron-builder: DMG (Developer ID, notarized), NSIS (Authenticode once a signing identity exists), AppImage plus deb and rpm. |
 | Updates | electron-updater for the shell; the web content updates with the server; the agent keeps its own signed updater. |
@@ -161,11 +161,10 @@ release is required for this presentation and desktop-host change.
 
 ## This computer
 
-Revised 2026-10-15. The first release installed the standalone agent as a
-separate background service. That made the computer one more thing to
-understand: macOS asked people to grant Screen Recording and Accessibility to
-an "Agent" app they never opened, quitting Opengeni left a second program
-running, and two programs updated on their own schedules.
+Revised 2026-10-20. New installs remain app-hosted. A working standalone
+installation is service-backed instead: changing its responsible process would
+discard the usefulness of its existing macOS grants. Launch and status reads
+are non-mutating; only explicit signed-in setup enables desktop management.
 
 ### What the agent needs
 
@@ -185,8 +184,9 @@ running, and two programs updated on their own schedules.
 
 ### Design
 
-On a desktop the app is the agent's supervisor and parent process; on a
-headless machine nothing changes.
+For a new app-hosted installation the app is the agent's supervisor and parent
+process. Existing services, including headless installations, keep their own
+lifecycle and launch identity.
 
 1. After sign-in the app offers "Use this computer". The app asks the server
    for a single-use personal enroll token (`scope: "user"`) and runs
@@ -212,11 +212,22 @@ headless machine nothing changes.
    release offered by any of its servers. On macOS and Linux an update execs
    the new binary in the same process, so it stays the app's child; on Windows
    the app starts the updated binary when the old one exits.
-6. An existing standalone install on a desktop is adopted: the app keeps its
-   connections and configuration folder, stops and removes its background
-   service (LaunchAgent, systemd user unit or logon task) so one agent runs,
-   and from then on starts it as its child. Earlier grants to the old agent
-   app are no longer used; macOS asks once for Opengeni.
+6. An existing standalone install is reused only after the person chooses
+   "Use this computer" while signed in. Its bundle, command symlink, service
+   definition and permission grants are preserved. No trash or TCC reset
+   migration exists. Connections reload in the live service, without restarting
+   other work. The desktop uses versioned `service status --json` and explicit
+   `service start|stop`; stop disables automatic login startup as well as
+   stopping the current process, and start re-enables the existing definition.
+   Older agents without structured inspection must be updated through Machines
+   before desktop management; the app never replaces them as a fallback.
+   Quitting the desktop leaves this service running and does not register a
+   second desktop login item. Service-backed permissions come from the current
+   account's Machines response (`runtime.macPermissions`), not an Electron
+   child or folder probe. System Settings guidance names Opengeni Agent. After
+   changing grants the person explicitly pauses/resumes the service to apply
+   them; existing work is not restarted automatically. Folder access is not
+   claimed because the service does not report it.
 7. A second account gets the same one-click offer but is never connected
    automatically.
 
