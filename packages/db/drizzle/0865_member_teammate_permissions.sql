@@ -25,7 +25,7 @@
 -- Like 0555: guard all three presets, restate the preset function, replace
 -- the 0516 writer guard's body in place (no lock on the hot table) so old
 -- writers of any earlier named Member set are lifted, then backfill exact
--- named rows through a partial index (0865/0866). Custom sets and external
+-- named rows through a partial index (0866/0867). Custom sets and external
 -- (`external_user:`) memberships are untouched.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -39,14 +39,14 @@ BEGIN
       AND tgfoid = 'opengeni_private.normalize_legacy_member_connection_read_0516()'::regprocedure
       AND tgenabled = 'O'
   ) THEN
-    RAISE EXCEPTION 'member writer guard changed before 0864';
+    RAISE EXCEPTION 'member writer guard changed before 0865';
   END IF;
   IF opengeni_private.workspace_member_role_permissions('viewer') IS DISTINCT FROM '[
     "workspace:read", "sessions:read", "stream:view", "files:read",
     "documents:search", "variable-sets:list", "connections:read",
     "rigs:use", "artifacts:read"
   ]'::jsonb THEN
-    RAISE EXCEPTION 'viewer permission preset changed before 0864';
+    RAISE EXCEPTION 'viewer permission preset changed before 0865';
   END IF;
   IF opengeni_private.workspace_member_role_permissions('member') IS DISTINCT FROM '[
     "workspace:read", "sessions:create", "sessions:read", "sessions:control",
@@ -57,7 +57,7 @@ BEGIN
     "variable-sets:use", "secrets:list", "secrets:write", "goals:manage",
     "rigs:use", "artifacts:read", "artifacts:publish"
   ]'::jsonb THEN
-    RAISE EXCEPTION 'member permission preset changed before 0864';
+    RAISE EXCEPTION 'member permission preset changed before 0865';
   END IF;
   IF opengeni_private.workspace_member_role_permissions('admin') IS DISTINCT FROM '[
     "workspace:read", "workspace:admin", "members:manage", "sessions:create",
@@ -72,7 +72,7 @@ BEGIN
     "rigs:use", "rigs:manage", "enrollments:read", "enrollments:manage",
     "artifacts:read", "artifacts:publish"
   ]'::jsonb THEN
-    RAISE EXCEPTION 'admin permission preset changed before 0864';
+    RAISE EXCEPTION 'admin permission preset changed before 0865';
   END IF;
 END
 $member_teammate_permissions$;
@@ -120,7 +120,7 @@ AS $body$
 $body$;
 
 -- Freeze the 0555 named set, independently of future preset changes.
-CREATE FUNCTION opengeni_private.workspace_member_legacy_permissions_0864()
+CREATE FUNCTION opengeni_private.workspace_member_legacy_permissions_0865()
 RETURNS jsonb
 LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog
@@ -135,7 +135,7 @@ AS $body$
     "rigs:use", "artifacts:read", "artifacts:publish"
   ]'::jsonb
 $body$;
-REVOKE ALL ON FUNCTION opengeni_private.workspace_member_legacy_permissions_0864() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.workspace_member_legacy_permissions_0865() FROM PUBLIC;
 
 -- One writer guard for every older named Member set (pre-0516, post-0516 and
 -- 0555). The attributes restate 0516's exactly.
@@ -147,14 +147,14 @@ AS $body$
 DECLARE
   pre_0516 jsonb := opengeni_private.workspace_member_legacy_permissions_0516();
   pre_0555 jsonb := opengeni_private.workspace_member_legacy_permissions_0555();
-  pre_0864 jsonb := opengeni_private.workspace_member_legacy_permissions_0864();
+  pre_0865 jsonb := opengeni_private.workspace_member_legacy_permissions_0865();
 BEGIN
   IF NEW.role = 'member'
     AND NEW.subject_id NOT LIKE 'external_user:%'
     AND (
       (NEW.permissions @> pre_0516 AND pre_0516 @> NEW.permissions)
       OR (NEW.permissions @> pre_0555 AND pre_0555 @> NEW.permissions)
-      OR (NEW.permissions @> pre_0864 AND pre_0864 @> NEW.permissions)
+      OR (NEW.permissions @> pre_0865 AND pre_0865 @> NEW.permissions)
     )
   THEN
     NEW.permissions := '[

@@ -17,12 +17,12 @@ const rollout = [
   "0556_member_collaborator_permissions_backfill_index.sql",
   "0557_member_collaborator_permissions_backfill.sql",
 ] as const;
-// 0864-0866 replace this rollout's preset and writer guard; hold them back so
+// 0865-0867 replace this rollout's preset and writer guard; hold them back so
 // this test keeps observing the 0555 contract it pins.
 const later = [
-  "0864_member_teammate_permissions.sql",
-  "0865_member_teammate_permissions_backfill_index.sql",
-  "0866_member_teammate_permissions_backfill.sql",
+  "0865_member_teammate_permissions.sql",
+  "0866_member_teammate_permissions_backfill_index.sql",
+  "0867_member_teammate_permissions_backfill.sql",
 ] as const;
 // Everything a Viewer has that the post-0516 Member lacked, plus the caller's
 // own desktop consent and artifact creation/publishing for every member.

@@ -26,7 +26,7 @@ beforeAll(async () => {
     name text primary key,
     applied_at timestamptz not null default now()
   )`;
-  // 0555-0557 and 0864-0866 replace this rollout's preset and writer guard;
+  // 0555-0557 and 0865-0867 replace this rollout's preset and writer guard;
   // hold them back so this test keeps observing the 0516 contract it pins.
   await owner`insert into schema_migrations (name)
     values ('0516_member_connection_read.sql'),
@@ -35,9 +35,9 @@ beforeAll(async () => {
       ('0555_member_collaborator_permissions.sql'),
       ('0556_member_collaborator_permissions_backfill_index.sql'),
       ('0557_member_collaborator_permissions_backfill.sql'),
-      ('0864_member_teammate_permissions.sql'),
-      ('0865_member_teammate_permissions_backfill_index.sql'),
-      ('0866_member_teammate_permissions_backfill.sql')`;
+      ('0865_member_teammate_permissions.sql'),
+      ('0866_member_teammate_permissions_backfill_index.sql'),
+      ('0867_member_teammate_permissions_backfill.sql')`;
   await migrate(owned.ownerUrl);
 }, 900_000);
 

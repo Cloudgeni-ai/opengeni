@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
 -- Lift every row still holding the exact 0555 named Member set (in any JSONB
--- order) to the 0864 named set. 0557 already lifted the older named sets, and
+-- order) to the 0865 named set. 0557 already lifted the older named sets, and
 -- the 0516 writer guard lifts any that an old writer still produces. External
 -- (`external_user:`) memberships keep their caller-chosen set. The partial
 -- index keeps candidate discovery and the empty completion probe bounded.

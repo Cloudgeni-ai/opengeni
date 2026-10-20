@@ -232,7 +232,7 @@ export function workspaceMemberPermissionGroups(): PermissionGroup[] {
  * Viewer holds plus full teammate access (live control, terminal, file edits,
  * own connections, Sandbox Environments, Connected Machine picking, artifacts),
  * minus the settings/management powers an admin grants deliberately. Mirrors
- * the server's named `member` preset (migration 0864) exactly, order included.
+ * the server's named `member` preset (migration 0865) exactly, order included.
  */
 export const defaultWorkspaceMemberPermissions = new Set<string>([
   "workspace:read",

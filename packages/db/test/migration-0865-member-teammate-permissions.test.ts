@@ -13,9 +13,9 @@ import {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const rollout = [
-  "0864_member_teammate_permissions.sql",
-  "0865_member_teammate_permissions_backfill_index.sql",
-  "0866_member_teammate_permissions_backfill.sql",
+  "0865_member_teammate_permissions.sql",
+  "0866_member_teammate_permissions_backfill_index.sql",
+  "0867_member_teammate_permissions_backfill.sql",
 ] as const;
 // Everyday teammate powers the 0555 Member lacked.
 const added = [
@@ -43,9 +43,9 @@ let owned: OwnerMigratedTestDatabase | null = null;
 let owner: postgres.Sql | null = null;
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-0864-member-teammate");
+  owned = await acquireOwnerMigratedTestDatabase("migration-0865-member-teammate");
   if (!owned) {
-    if (requireRealDatabase) throw new Error("migration 0864 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0865 requires real PostgreSQL");
     return;
   }
   owner = postgres(owned.ownerUrl, { max: 1, prepare: false });
@@ -68,10 +68,10 @@ const sameSet = (left: readonly string[], right: readonly string[]) =>
 test("migration guards every preset, replaces the 0516 writer guard, and batches the backfill", () => {
   const source = readFileSync(new URL(`../drizzle/${rollout[0]}`, import.meta.url), "utf8");
   expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-  expect(source).toContain("member permission preset changed before 0864");
-  expect(source).toContain("viewer permission preset changed before 0864");
-  expect(source).toContain("admin permission preset changed before 0864");
-  expect(source).toContain("member writer guard changed before 0864");
+  expect(source).toContain("member permission preset changed before 0865");
+  expect(source).toContain("viewer permission preset changed before 0865");
+  expect(source).toContain("admin permission preset changed before 0865");
+  expect(source).toContain("member writer guard changed before 0865");
   expect(source).toContain(
     "CREATE OR REPLACE FUNCTION opengeni_private.normalize_legacy_member_connection_read_0516()",
   );
@@ -138,7 +138,7 @@ test("named members become full teammates; custom, external and other roles are 
     { subject: "named-viewer", role: "viewer", permissions: viewer },
     { subject: "named-admin", role: "admin", permissions: admin },
     {
-      subject: "external_user:00000000-0000-4000-8000-000000000864",
+      subject: "external_user:00000000-0000-4000-8000-000000000865",
       role: "member",
       permissions: oldPreset,
     },
@@ -187,7 +187,7 @@ test("named members become full teammates; custom, external and other roles are 
   expect(await preset("admin")).toEqual(admin);
   // The frozen 0555 set is independent of the preset function.
   const [frozen] = await owner<{ permissions: string[] }[]>`
-    select opengeni_private.workspace_member_legacy_permissions_0864() as permissions`;
+    select opengeni_private.workspace_member_legacy_permissions_0865() as permissions`;
   expect(frozen!.permissions).toEqual(oldPreset);
   for (const permission of pre0555) expect(oldPreset).toContain(permission);
 
@@ -244,8 +244,8 @@ test("named members become full teammates; custom, external and other roles are 
   // Still-running old writers keep writing any earlier named Member set.
   await insert("pre-0516-writer-insert", "member", pre0516);
   await insert("pre-0555-writer-insert", "member", [...pre0555].reverse());
-  await insert("pre-0864-writer-insert", "member", oldPreset);
-  const externalInsert = "external_user:00000000-0000-4000-8000-000000000865";
+  await insert("pre-0865-writer-insert", "member", oldPreset);
+  const externalInsert = "external_user:00000000-0000-4000-8000-000000000866";
   await insert(externalInsert, "member", oldPreset);
   await owner`
     update workspace_memberships
@@ -261,7 +261,7 @@ test("named members become full teammates; custom, external and other roles are 
   for (const subject of [
     "pre-0516-writer-insert",
     "pre-0555-writer-insert",
-    "pre-0864-writer-insert",
+    "pre-0865-writer-insert",
     "named-member",
   ]) {
     sameSet(afterRow(subject).permissions, newPreset);
@@ -269,7 +269,7 @@ test("named members become full teammates; custom, external and other roles are 
   }
   expect(afterRow("custom-role").permissions).toEqual(oldPreset);
   expect(afterRow(externalInsert).permissions).toEqual(oldPreset);
-  expect(afterRow("external_user:00000000-0000-4000-8000-000000000864").permissions).toEqual(
+  expect(afterRow("external_user:00000000-0000-4000-8000-000000000865").permissions).toEqual(
     oldPreset,
   );
 

@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- opengeni:concurrent-index lock-timeout=5s
-CREATE INDEX CONCURRENTLY IF NOT EXISTS workspace_memberships_legacy_member_0864_idx
+CREATE INDEX CONCURRENTLY IF NOT EXISTS workspace_memberships_legacy_member_0865_idx
 ON workspace_memberships (id)
 WHERE role = 'member'
   AND subject_id NOT LIKE 'external_user:%'

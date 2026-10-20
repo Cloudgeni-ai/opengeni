@@ -1118,7 +1118,7 @@ connection, GitHub App, and Sandbox Environment administration, Connected
 Machines (`enrollments:read`/`enrollments:manage`, which also gate picking or
 attaching a machine for a session), terminal attach, sandbox file writes, and
 inline MCP servers stayed Admin-only after 0555.
-Migration 0864 makes Member a full teammate. It adds `stream:control`,
+Migration 0865 makes Member a full teammate. It adds `stream:control`,
 `terminal:attach`, `codemode:call`, `files:write` (edit a session's live
 filesystem), `connections:write` (connect one's own Gmail, Slack, GitHub, Drive
 or model subscriptions), `mcp_servers:attach` (session MCP servers),
