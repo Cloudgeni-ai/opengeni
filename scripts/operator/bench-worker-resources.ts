@@ -112,7 +112,7 @@ const measure = async <T>(operation: string, run: () => Promise<T>): Promise<T> 
   }
 };
 try {
-  for (let index = 0; index < 5; index++) {
+  for (let index = 0; index < Number(process.env.OPENGENI_BENCH_WORKER_SAMPLES ?? "5"); index++) {
     const id = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "benchmark",

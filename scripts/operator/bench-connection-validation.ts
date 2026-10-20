@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { createConnection, createServer } from "node:net";
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import {
@@ -20,19 +21,48 @@ import {
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { submitTestHumanPrompt } from "../../test/integration/helpers/session-control";
+import { postgresWireBudget } from "./postgres-wire-budget";
 
 // Own disposable cluster: CHECKPOINT and cluster-wide MultiXact/SLRU counters
 // must never run against a deployment or a shared test server. No provider calls.
 const services = await startTestServices({ temporal: false });
 const admin = postgres(services.databaseUrl, { max: 2, onnotice: () => undefined });
-const client = createDb(services.runtimeDatabaseUrl, { max: 16 });
+let budget: { statements: number; transactions: number; cycles: number } | undefined;
+const upstream = new URL(services.runtimeDatabaseUrl);
+const relay = createServer((frontend) => {
+  const backend = createConnection({ host: upstream.hostname, port: Number(upstream.port) });
+  frontend.on(
+    "data",
+    postgresWireBudget(() => {
+      if (budget) budget.cycles++;
+    }),
+  );
+  frontend.pipe(backend);
+  backend.pipe(frontend);
+  const close = () => {
+    frontend.destroy();
+    backend.destroy();
+  };
+  frontend.on("error", close);
+  frontend.on("close", close);
+  backend.on("error", close);
+  backend.on("close", close);
+});
+await new Promise<void>((resolve, reject) => {
+  relay.once("error", reject);
+  relay.listen(0, "127.0.0.1", resolve);
+});
+const address = relay.address();
+if (!address || typeof address === "string") throw new Error("No benchmark relay address");
+const databaseUrl = new URL(services.runtimeDatabaseUrl);
+databaseUrl.port = String(address.port);
+const client = createDb(databaseUrl.href, { max: 16 });
 const endpoint = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch: () => Response.json({ result: "local connector result" }),
 });
 const settings = testSettings({ databaseUrl: services.runtimeDatabaseUrl, sandboxBackend: "none" });
-let budget: { statements: number; transactions: number } | undefined;
 const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
 driver.options.debug = (_connection, query) => {
   if (!budget) return;
@@ -138,7 +168,11 @@ async function fiveToolTurn() {
     reasoningEffortFallback: "medium",
   });
   const model = new ScriptedModel([
-    { output: Array.from({ length: 5 }, (_, item) => functionCall("fixture_lookup", { item })) },
+    {
+      output: Array.from({ length: 5 }, (_, item) =>
+        functionCall("fixture_lookup", { item }, `fixture-call-${item}`),
+      ),
+    },
     { outputText: "All five lookups completed." },
   ]);
   const runtime = createProductionAgentRuntime({ model });
@@ -196,7 +230,7 @@ async function fiveToolTurn() {
     bus: new MemoryEventBus(),
     runtime,
   });
-  budget = { statements: 0, transactions: 0 };
+  budget = { statements: 0, transactions: 0, cycles: 0 };
   const started = performance.now(),
     cpu = process.cpuUsage();
   try {
@@ -221,6 +255,11 @@ async function fiveToolTurn() {
       toolMs,
       maxActive,
       modelCalls: model.calls,
+      modelToolHistory: Array.isArray(model.requests[1]?.input)
+        ? model.requests[1].input.filter(
+            (item) => item.type === "function_call" || item.type === "function_call_result",
+          )
+        : [],
     };
   } finally {
     budget = undefined;
@@ -315,13 +354,17 @@ try {
     throw new Error("Invalid before fixture");
   // Repeat both directions to expose warmup/order effects rather than publish
   // the fastest one-off sample. The first two turns in each phase are warmups.
-  for (const mode of ["before", "after", "before", "after"] as const) {
+  const modes: Array<"before" | "after"> =
+    process.env.OPENGENI_BENCH_TURN_ONLY === "1"
+      ? ["after"]
+      : ["before", "after", "before", "after"];
+  for (const mode of modes) {
     await admin.unsafe(mode === "before" ? before : after);
     const fixture = await validatorFixture();
     const start = await counters();
     const validators = await sampled(async () => {
       const batches = [];
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < (process.env.OPENGENI_BENCH_TURN_ONLY === "1" ? 0 : 100); i++) {
         const began = performance.now();
         await Promise.all(
           Array.from({ length: 5 }, () =>
@@ -335,7 +378,8 @@ try {
     const middle = await counters();
     const turns = await sampled(async () => {
       const results = [];
-      for (let i = 0; i < 8; i++) results.push(await fiveToolTurn());
+      for (let i = 0; i < Number(process.env.OPENGENI_BENCH_TURN_SAMPLES ?? "8"); i++)
+        results.push(await fiveToolTurn());
       return results;
     });
     const end = await counters();
@@ -358,12 +402,15 @@ try {
     phases,
     limitations:
       "Local real PostgreSQL and production worker/runtime; scripted model, local connector HTTP fixture, in-memory event bus; no Temporal persistence or external provider latency. Cluster counters include fixture setup in the turn phase. CHECKPOINT is outside timings. Wait events sampled every 10ms, not exhaustive.",
+    cycleDefinition:
+      "Frontend PostgreSQL Q/H/S synchronization messages, not TCP packets or sequential network latency. Warm samples exclude prepared-statement setup effects.",
   };
   if (process.env.OPENGENI_BENCH_OUTPUT)
     await Bun.write(process.env.OPENGENI_BENCH_OUTPUT, JSON.stringify(output, null, 2));
 } finally {
   endpoint.stop(true);
   await client.close();
+  await new Promise<void>((resolve) => relay.close(() => resolve()));
   await admin.end();
   await services.down();
 }

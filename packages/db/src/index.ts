@@ -95,6 +95,11 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+import type { TurnAttemptFenceResult } from "./session-attempt-fence";
+export type SessionEventMutation = (
+  tx: Database,
+  fence: TurnAttemptFenceResult,
+) => Promise<boolean>;
 export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
@@ -39612,9 +39617,11 @@ export async function appendSessionHistoryItems(
     expectedAttemptId: string;
     modelToolOutputTruncationTokens?: number;
     items: Array<{ position: number; item: Record<string, unknown> }>;
+    /** Tool outputs already have durable timeline events; retire their receipts with history. */
+    completedToolCallIds?: string[];
   },
 ): Promise<boolean> {
-  if (input.items.length === 0) {
+  if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
   // One idempotent transaction: a deadlock/serialization victim rolled back
@@ -39623,97 +39630,113 @@ export async function appendSessionHistoryItems(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
-    async (scopedDb) => {
-      return await scopedDb.transaction(async (tx) => {
-        const allowed = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.expectedExecutionGeneration,
-          attemptId: input.expectedAttemptId,
-        });
-        if (!allowed.allowed) return false;
-        const saved = await tx
-          .insert(schema.sessionHistoryItems)
-          .values(
-            withLosslessContentWriteVersion(
-              input.items.map((entry) => ({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                position: entry.position,
-                // This is the canonical model-memory boundary. The pending-call
-                // ledger and audit event may retain their separate raw/preview
-                // forms, but conversation truth is always the bounded Codex form
-                // without Responses output-only fields such as `status`.
-                item: canonicalizePersistedHistoryItem(
-                  entry.item,
-                  input.modelToolOutputTruncationTokens,
+    async (tx) => {
+      const allowed = await lockTurnAttemptWriteFenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.expectedExecutionGeneration,
+        attemptId: input.expectedAttemptId,
+      });
+      if (!allowed.allowed) return false;
+      const saved =
+        input.items.length === 0
+          ? []
+          : await tx
+              .insert(schema.sessionHistoryItems)
+              .values(
+                withLosslessContentWriteVersion(
+                  input.items.map((entry) => ({
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    position: entry.position,
+                    // This is the canonical model-memory boundary. The pending-call
+                    // ledger and audit event may retain their separate raw/preview
+                    // forms, but conversation truth is always the bounded Codex form
+                    // without Responses output-only fields such as `status`.
+                    item: canonicalizePersistedHistoryItem(
+                      entry.item,
+                      input.modelToolOutputTruncationTokens,
+                    ),
+                  })),
+                  "item",
+                  "itemCodecVersion",
                 ),
-              })),
-              "item",
-              "itemCodecVersion",
-            ),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionHistoryItems.workspaceId,
-              schema.sessionHistoryItems.sessionId,
-              schema.sessionHistoryItems.position,
-            ],
-          })
-          .returning({
-            position: schema.sessionHistoryItems.position,
-            turnId: schema.sessionHistoryItems.turnId,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          });
-        // A position conflict is idempotent only when the exact conversation
-        // item is already there. Never acknowledge a different item as saved.
-        // Fresh inserts already return their durable representation. Re-reading
-        // numeric positions under RLS can scan the session's history while we
-        // hold its write fence, so only fetch rows skipped by ON CONFLICT.
-        const insertedPositions = new Set(saved.map((row) => row.position));
-        const conflictingPositions = input.items
-          .map((entry) => entry.position)
-          .filter((position) => !insertedPositions.has(position));
-        if (conflictingPositions.length > 0)
-          saved.push(
-            ...(await tx
-              .select({
+              )
+              .onConflictDoNothing({
+                target: [
+                  schema.sessionHistoryItems.workspaceId,
+                  schema.sessionHistoryItems.sessionId,
+                  schema.sessionHistoryItems.position,
+                ],
+              })
+              .returning({
                 position: schema.sessionHistoryItems.position,
                 turnId: schema.sessionHistoryItems.turnId,
                 item: schema.sessionHistoryItems.item,
                 itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-              })
-              .from(schema.sessionHistoryItems)
-              .where(
-                and(
-                  eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-                  eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-                  inArray(schema.sessionHistoryItems.position, conflictingPositions),
-                ),
-              )),
+              });
+      // A position conflict is idempotent only when the exact conversation
+      // item is already there. Never acknowledge a different item as saved.
+      // Fresh inserts already return their durable representation. Re-reading
+      // numeric positions under RLS can scan the session's history while we
+      // hold its write fence, so only fetch rows skipped by ON CONFLICT.
+      const insertedPositions = new Set(saved.map((row) => row.position));
+      const conflictingPositions = input.items
+        .map((entry) => entry.position)
+        .filter((position) => !insertedPositions.has(position));
+      if (conflictingPositions.length > 0)
+        saved.push(
+          ...(await tx
+            .select({
+              position: schema.sessionHistoryItems.position,
+              turnId: schema.sessionHistoryItems.turnId,
+              item: schema.sessionHistoryItems.item,
+              itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+            })
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                inArray(schema.sessionHistoryItems.position, conflictingPositions),
+              ),
+            )),
+        );
+      const byPosition = new Map(saved.map((row) => [row.position, row]));
+      for (const entry of input.items) {
+        const row = byPosition.get(entry.position);
+        if (
+          !row ||
+          row.turnId !== input.turnId ||
+          !isDeepStrictEqual(
+            fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+            canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+          )
+        ) {
+          throw new Error(
+            `Conversation history persistence conflict at position ${entry.position}`,
           );
-        const byPosition = new Map(saved.map((row) => [row.position, row]));
-        for (const entry of input.items) {
-          const row = byPosition.get(entry.position);
-          if (
-            !row ||
-            row.turnId !== input.turnId ||
-            !isDeepStrictEqual(
-              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
-            )
-          ) {
-            throw new Error(
-              `Conversation history persistence conflict at position ${entry.position}`,
-            );
-          }
         }
-        return true;
-      });
+      }
+      if (input.completedToolCallIds?.length) {
+        await clearDurablePendingSessionToolCallsInTransaction(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            executionGeneration: input.expectedExecutionGeneration,
+            attemptId: input.expectedAttemptId,
+            callIds: input.completedToolCallIds,
+          },
+          allowed,
+        );
+      }
+      return true;
     },
   );
 }
@@ -39777,9 +39800,114 @@ function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
  * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
- * Pass the root database handle so each rollback retry starts a fresh
- * transaction, not a savepoint in a caller-owned transaction.
+ * The caller owns the transaction and has already acquired the exact attempt
+ * fence. This lets the receipt share its timeline event's atomic checkpoint.
  */
+export async function registerPendingSessionToolCallInTransaction(
+  tx: Database,
+  input: PendingSessionToolCallInput,
+  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+): Promise<{ accepted: boolean; registered: boolean }> {
+  assertPendingToolCallCheckpointScope(input, fence);
+  const inserted = await tx
+    .insert(schema.sessionPendingToolCalls)
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+          callId: input.callId,
+          callType: input.callType,
+          callItem: input.callItem,
+          modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+        },
+        "callItem",
+        "callItemCodecVersion",
+      ),
+    )
+    .onConflictDoNothing({
+      target: [
+        schema.sessionPendingToolCalls.workspaceId,
+        schema.sessionPendingToolCalls.turnId,
+        schema.sessionPendingToolCalls.callId,
+      ],
+    })
+    .returning({ id: schema.sessionPendingToolCalls.id });
+  if (inserted.length === 0) {
+    const [pending] = await tx
+      .select({
+        id: schema.sessionPendingToolCalls.id,
+        accountId: schema.sessionPendingToolCalls.accountId,
+        callType: schema.sessionPendingToolCalls.callType,
+        callItem: schema.sessionPendingToolCalls.callItem,
+        callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
+        modelToolOutputTruncationTokens:
+          schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+      })
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+          eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+          eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+          eq(schema.sessionPendingToolCalls.callId, input.callId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !pending ||
+      pending.accountId !== input.accountId ||
+      pending.callType !== input.callType ||
+      !pendingToolCallItemsEqual(
+        fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+        input.callItem,
+      )
+    ) {
+      // A duplicate acknowledges only this exact call. It neither
+      // replaces the originating attempt nor authorizes effect replay.
+      throw new Error("Pending tool receipt conflicts with the registered call");
+    }
+    assertPendingToolOutputPolicyMatches(
+      pending.modelToolOutputTruncationTokens,
+      input.modelToolOutputTruncationTokens,
+      input.callId,
+    );
+    if (
+      pending.modelToolOutputTruncationTokens === null &&
+      input.modelToolOutputTruncationTokens !== undefined
+    ) {
+      await tx
+        .update(schema.sessionPendingToolCalls)
+        .set({
+          modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+        })
+        .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+    }
+  }
+  return { accepted: true, registered: inserted.length === 1 };
+}
+
+function assertPendingToolCallCheckpointScope(
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
+  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+): void {
+  if (
+    fence.workspace.id !== input.workspaceId ||
+    fence.session.accountId !== input.accountId ||
+    fence.session.id !== input.sessionId ||
+    fence.turn.id !== input.turnId ||
+    fence.turn.executionGeneration !== input.executionGeneration ||
+    fence.attempt.id !== input.attemptId
+  )
+    throw new Error("Pending tool checkpoint does not match its locked attempt");
+}
+
+/** Root-handle entry point: each rollback retry starts a fresh fenced transaction. */
 export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
@@ -39790,98 +39918,11 @@ export async function registerPendingSessionToolCall(
       return await withRlsContext(
         db,
         { accountId: input.accountId, workspaceId: input.workspaceId },
-        async (scopedDb) =>
-          await scopedDb.transaction(async (tx) => {
-            const fence = await lockTurnAttemptWriteFenceTx(tx, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              executionGeneration: input.executionGeneration,
-              attemptId: input.attemptId,
-            });
-            if (!fence.allowed) return { accepted: false, registered: false };
-            const inserted = await tx
-              .insert(schema.sessionPendingToolCalls)
-              .values(
-                withLosslessContentWriteVersion(
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: input.turnId,
-                    executionGeneration: input.executionGeneration,
-                    attemptId: input.attemptId,
-                    callId: input.callId,
-                    callType: input.callType,
-                    callItem: input.callItem,
-                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-                  },
-                  "callItem",
-                  "callItemCodecVersion",
-                ),
-              )
-              .onConflictDoNothing({
-                target: [
-                  schema.sessionPendingToolCalls.workspaceId,
-                  schema.sessionPendingToolCalls.turnId,
-                  schema.sessionPendingToolCalls.callId,
-                ],
-              })
-              .returning({ id: schema.sessionPendingToolCalls.id });
-            if (inserted.length === 0) {
-              const [pending] = await tx
-                .select({
-                  id: schema.sessionPendingToolCalls.id,
-                  accountId: schema.sessionPendingToolCalls.accountId,
-                  callType: schema.sessionPendingToolCalls.callType,
-                  callItem: schema.sessionPendingToolCalls.callItem,
-                  callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
-                  modelToolOutputTruncationTokens:
-                    schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
-                })
-                .from(schema.sessionPendingToolCalls)
-                .where(
-                  and(
-                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-                    eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-                    eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-                    eq(schema.sessionPendingToolCalls.callId, input.callId),
-                  ),
-                )
-                .for("update")
-                .limit(1);
-              if (
-                !pending ||
-                pending.accountId !== input.accountId ||
-                pending.callType !== input.callType ||
-                !pendingToolCallItemsEqual(
-                  fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
-                  input.callItem,
-                )
-              ) {
-                // A duplicate acknowledges only this exact call. It neither
-                // replaces the originating attempt nor authorizes effect replay.
-                throw new Error("Pending tool receipt conflicts with the registered call");
-              }
-              assertPendingToolOutputPolicyMatches(
-                pending.modelToolOutputTruncationTokens,
-                input.modelToolOutputTruncationTokens,
-                input.callId,
-              );
-              if (
-                pending.modelToolOutputTruncationTokens === null &&
-                input.modelToolOutputTruncationTokens !== undefined
-              ) {
-                await tx
-                  .update(schema.sessionPendingToolCalls)
-                  .set({
-                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
-                  })
-                  .where(eq(schema.sessionPendingToolCalls.id, pending.id));
-              }
-            }
-            return { accepted: true, registered: inserted.length === 1 };
-          }),
+        async (tx) => {
+          const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+          if (!fence.allowed) return { accepted: false, registered: false };
+          return await registerPendingSessionToolCallInTransaction(tx, input, fence);
+        },
       );
     } catch (error) {
       if (!isRetryableDatabaseTransportFailure(error)) throw error;
@@ -39925,8 +39966,8 @@ export async function registerPendingSessionToolCall(
 }
 
 /** Record the raw SDK result without dropping the call receipt. */
-export async function recordPendingSessionToolCallResult(
-  db: Database,
+export async function recordPendingSessionToolCallResultInTransaction(
+  tx: Database,
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
     /** Exact agent.toolCall.output value, separate from model-facing history. */
@@ -39937,138 +39978,131 @@ export async function recordPendingSessionToolCallResult(
       requestDigest: string;
     };
   },
+  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; recorded: boolean }> {
-  // One idempotent transaction: a deadlock/serialization victim rolled back
-  // entirely, so it retries as a unit; it contains no external effect.
+  assertPendingToolCallCheckpointScope(input, fence);
+  const [pending] = await tx
+    .select()
+    .from(schema.sessionPendingToolCalls)
+    .where(
+      and(
+        eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+        eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+        eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+        eq(schema.sessionPendingToolCalls.callId, input.callId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!pending) return { accepted: true, recorded: false };
+  assertPendingToolOutputPolicyMatches(
+    pending.modelToolOutputTruncationTokens,
+    input.modelToolOutputTruncationTokens,
+    input.callId,
+  );
+  if (
+    pending.modelToolOutputTruncationTokens === null &&
+    input.modelToolOutputTruncationTokens !== undefined
+  ) {
+    await tx
+      .update(schema.sessionPendingToolCalls)
+      .set({
+        modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+      })
+      .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+  }
+  const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
+  if (
+    !resultType ||
+    historyItemType(input.resultItem) !== resultType ||
+    historyCallId(input.resultItem) !== input.callId
+  ) {
+    throw new Error(`SDK tool result does not settle ${pending.callType}:${input.callId}`);
+  }
+  const resultUpdate = withLosslessContentWriteVersion(
+    {
+      resultItem: input.resultItem,
+      resultRecordedAt: new Date(),
+    },
+    "resultItem",
+    "resultItemCodecVersion",
+  );
+  const update = Object.hasOwn(input, "eventOutput")
+    ? withLosslessContentWriteVersion(
+        {
+          ...resultUpdate,
+          eventOutput: { value: input.eventOutput },
+        },
+        "eventOutput",
+        "eventOutputCodecVersion",
+      )
+    : resultUpdate;
+  const recorded = await tx
+    .update(schema.sessionPendingToolCalls)
+    .set(update)
+    .where(
+      and(
+        eq(schema.sessionPendingToolCalls.id, pending.id),
+        sql`${schema.sessionPendingToolCalls.resultItem} is null`,
+      ),
+    )
+    .returning({ id: schema.sessionPendingToolCalls.id });
+  if (input.videoGenerationAcceptance) {
+    const [operation] = await tx
+      .select()
+      .from(schema.videoGenerationOperations)
+      .where(
+        and(
+          eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+          eq(schema.videoGenerationOperations.id, input.videoGenerationAcceptance.operationId),
+          eq(
+            schema.videoGenerationOperations.requestDigest,
+            input.videoGenerationAcceptance.requestDigest,
+          ),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!operation) throw new Error("Video generation acceptance operation disappeared");
+    await markVideoGenerationAcceptedInTransaction(tx as unknown as Database, {
+      workspaceId: input.workspaceId,
+      operation,
+      toolCallId: input.callId,
+    });
+  } else {
+    // Admission and its accepted tool result are one causal boundary. If
+    // reference preparation (or any other pre-submit work) failed, settle
+    // the still-unaccepted operation in this same result transaction so
+    // quota and managed credits cannot remain reserved.
+    await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(tx as unknown as Database, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      toolCallIds: [input.callId],
+      reason: "Video generation failed before it was accepted.",
+      now: new Date(),
+    });
+  }
+  return {
+    accepted: true,
+    recorded: recorded.length === 1,
+  };
+}
+
+/** Standalone recovery/test callers retain a fresh, exact-attempt transaction. */
+export async function recordPendingSessionToolCallResult(
+  db: Database,
+  input: Parameters<typeof recordPendingSessionToolCallResultInTransaction>[1],
+): Promise<{ accepted: boolean; recorded: boolean }> {
   return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_pending_tool_call_result", correlationId: input.callId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) {
-          return { accepted: false, recorded: false };
-        }
-        const [pending] = await tx
-          .select()
-          .from(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              eq(schema.sessionPendingToolCalls.callId, input.callId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!pending) return { accepted: true, recorded: false };
-        assertPendingToolOutputPolicyMatches(
-          pending.modelToolOutputTruncationTokens,
-          input.modelToolOutputTruncationTokens,
-          input.callId,
-        );
-        if (
-          pending.modelToolOutputTruncationTokens === null &&
-          input.modelToolOutputTruncationTokens !== undefined
-        ) {
-          await tx
-            .update(schema.sessionPendingToolCalls)
-            .set({
-              modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
-            })
-            .where(eq(schema.sessionPendingToolCalls.id, pending.id));
-        }
-        const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
-        if (
-          !resultType ||
-          historyItemType(input.resultItem) !== resultType ||
-          historyCallId(input.resultItem) !== input.callId
-        ) {
-          throw new Error(`SDK tool result does not settle ${pending.callType}:${input.callId}`);
-        }
-        const resultUpdate = withLosslessContentWriteVersion(
-          {
-            resultItem: input.resultItem,
-            resultRecordedAt: new Date(),
-          },
-          "resultItem",
-          "resultItemCodecVersion",
-        );
-        const update = Object.hasOwn(input, "eventOutput")
-          ? withLosslessContentWriteVersion(
-              {
-                ...resultUpdate,
-                eventOutput: { value: input.eventOutput },
-              },
-              "eventOutput",
-              "eventOutputCodecVersion",
-            )
-          : resultUpdate;
-        const recorded = await tx
-          .update(schema.sessionPendingToolCalls)
-          .set(update)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.id, pending.id),
-              sql`${schema.sessionPendingToolCalls.resultItem} is null`,
-            ),
-          )
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        if (input.videoGenerationAcceptance) {
-          const [operation] = await tx
-            .select()
-            .from(schema.videoGenerationOperations)
-            .where(
-              and(
-                eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
-                eq(
-                  schema.videoGenerationOperations.id,
-                  input.videoGenerationAcceptance.operationId,
-                ),
-                eq(
-                  schema.videoGenerationOperations.requestDigest,
-                  input.videoGenerationAcceptance.requestDigest,
-                ),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!operation) throw new Error("Video generation acceptance operation disappeared");
-          await markVideoGenerationAcceptedInTransaction(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            operation,
-            toolCallId: input.callId,
-          });
-        } else {
-          // Admission and its accepted tool result are one causal boundary. If
-          // reference preparation (or any other pre-submit work) failed, settle
-          // the still-unaccepted operation in this same result transaction so
-          // quota and managed credits cannot remain reserved.
-          await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(
-            tx as unknown as Database,
-            {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              toolCallIds: [input.callId],
-              reason: "Video generation failed before it was accepted.",
-              now: new Date(),
-            },
-          );
-        }
-        return {
-          accepted: true,
-          recorded: recorded.length === 1,
-        };
-      }),
+    async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      if (!fence.allowed) return { accepted: false, recorded: false };
+      return await recordPendingSessionToolCallResultInTransaction(tx, input, fence);
+    },
   );
 }
 
@@ -40224,48 +40258,50 @@ export async function listTurnOpenSuffixToolCalls(
  * durable. Until then every raw result remains available to an attempt-ending
  * transaction, including reverse-completing parallel calls.
  */
-export async function clearDurablePendingSessionToolCalls(
-  db: Database,
+export async function clearDurablePendingSessionToolCallsInTransaction(
+  tx: Database,
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
     callIds: string[];
   },
+  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+): Promise<{ accepted: boolean; cleared: number }> {
+  assertPendingToolCallCheckpointScope(input, fence);
+  if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
+  const pending = await tx
+    .select()
+    .from(schema.sessionPendingToolCalls)
+    .where(
+      and(
+        eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+        eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+        eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+        inArray(schema.sessionPendingToolCalls.callId, input.callIds),
+        sql`${schema.sessionPendingToolCalls.resultItem} is not null`,
+      ),
+    )
+    .for("update");
+  if (pending.length === 0) return { accepted: true, cleared: 0 };
+  const durableIds = await durableToolCallPairIdsTx(tx, input, pending);
+  if (durableIds.length > 0) {
+    await tx
+      .delete(schema.sessionPendingToolCalls)
+      .where(inArray(schema.sessionPendingToolCalls.id, durableIds));
+  }
+  return { accepted: true, cleared: durableIds.length };
+}
+
+export async function clearDurablePendingSessionToolCalls(
+  db: Database,
+  input: Parameters<typeof clearDurablePendingSessionToolCallsInTransaction>[1],
 ): Promise<{ accepted: boolean; cleared: number }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) return { accepted: false, cleared: 0 };
-        if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
-        const pending = await tx
-          .select()
-          .from(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              inArray(schema.sessionPendingToolCalls.callId, input.callIds),
-              sql`${schema.sessionPendingToolCalls.resultItem} is not null`,
-            ),
-          )
-          .for("update");
-        if (pending.length === 0) return { accepted: true, cleared: 0 };
-        const durableIds = await durableToolCallPairIdsTx(tx, input, pending);
-        if (durableIds.length > 0) {
-          await tx
-            .delete(schema.sessionPendingToolCalls)
-            .where(inArray(schema.sessionPendingToolCalls.id, durableIds));
-        }
-        return { accepted: true, cleared: durableIds.length };
-      }),
+    async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      if (!fence.allowed) return { accepted: false, cleared: 0 };
+      return await clearDurablePendingSessionToolCallsInTransaction(tx, input, fence);
+    },
   );
 }
 
@@ -86341,6 +86377,7 @@ export async function appendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   observer?: SessionEventAppendObserver,
+  mutate?: SessionEventMutation,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -86357,7 +86394,7 @@ export async function appendSessionEventsForTurnAttempt(
     executionGeneration,
     attemptId,
     inputs,
-    async () => true,
+    mutate ?? (async () => true),
     observer,
   );
   return {
@@ -86495,8 +86532,10 @@ async function runSessionEventAppendPhase<T>(
 
 /**
  * Commit one exact-attempt mutation and its timeline projection together. The
- * mutation runs first so Codemode's operation-row lock order remains stable;
- * returning false leaves both the mutation and projection absent.
+ * canonical lock prefix runs before the mutation. Callers receive its result:
+ * owned-state mutations must require an allowed fence, while already-incurred
+ * facts may remain durable after ownership loss. A callback returning false
+ * must leave state unchanged; throwing rolls back both mutation and projection.
  */
 export async function mutateAndAppendSessionEventsForTurnAttempt(
   db: Database,
@@ -86506,7 +86545,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  mutate: (tx: Database) => Promise<boolean>,
+  mutate: SessionEventMutation,
   observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
@@ -86570,7 +86609,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               const mutationApplied = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "mutation" },
-                async () => await mutate(tx),
+                async () => await mutate(tx, fence),
                 (applied) => (applied ? "ok" : "mutation_skipped"),
               );
               if (!mutationApplied) {

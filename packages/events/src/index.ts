@@ -16,6 +16,7 @@ import {
   type CanonicalTurnStartupMilestoneReceipt,
   type Database,
   type SessionEventAppendObserver,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   connect,
@@ -1193,6 +1194,7 @@ export async function appendAndPublishTurnEventsFenced(
   attemptId: string,
   events: AppendEventInput[],
   observe?: AppendPublishObserver,
+  mutate?: SessionEventMutation,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -1208,6 +1210,7 @@ export async function appendAndPublishTurnEventsFenced(
     attemptId,
     events,
     observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : undefined,
+    mutate,
   );
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;

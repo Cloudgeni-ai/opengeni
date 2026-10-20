@@ -241,6 +241,13 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Worker tool checkpoints commit each pending call/result receipt with its
+structural timeline event under one exact-attempt fence. The ordered stream
+batcher carries the transaction-local mutation; it never delays an individual
+result for its siblings. Stable SDK history and proven receipt retirement then
+share their own checkpoint, preserving canonical history and recovery ordering.
+See [run lifecycle](run-lifecycle.md) for the durability and retry boundaries.
+
 Subscription serving revisions are attempt-scoped; the accepted model and
 frozen connection authority remain the logical turn's contract. Shared-core
 placement, candidate-aware capacity waits and lease-backed switch events use

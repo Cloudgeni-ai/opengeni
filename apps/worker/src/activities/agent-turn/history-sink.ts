@@ -82,7 +82,11 @@ export class TurnHistorySink {
   constructor(private readonly deps: TurnHistorySinkDeps) {}
 
   reconcileConversationTruth = (
-    options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
+    options: {
+      skipInputOnlyRows?: boolean;
+      requireDurable?: boolean;
+      completedToolCallIds?: string[];
+    } = {},
   ): Promise<void> => {
     // The provider loop and the stream consumer checkpoint independently.
     // Serialize the complete read/write/acknowledgment boundary, not just the
@@ -96,6 +100,7 @@ export class TurnHistorySink {
   private reconcile = async (options: {
     skipInputOnlyRows?: boolean;
     requireDurable?: boolean;
+    completedToolCallIds?: string[];
   }) => {
     const { media } = this.deps;
     const stream = this.deps.getStream();
@@ -128,7 +133,7 @@ export class TurnHistorySink {
         );
         const shouldAppendRows =
           rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-        if (shouldAppendRows) {
+        if (shouldAppendRows || options.completedToolCallIds?.length) {
           await runMandatoryHistoryPersistenceStep("history_append", async () => {
             const appended = await appendSessionHistoryItems(this.deps.db, {
               accountId: this.deps.accountId,
@@ -139,7 +144,10 @@ export class TurnHistorySink {
               expectedAttemptId: this.deps.attemptId,
               modelToolOutputTruncationTokens:
                 this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
-              items: rows,
+              items: shouldAppendRows ? rows : [],
+              ...(options.completedToolCallIds
+                ? { completedToolCallIds: options.completedToolCallIds }
+                : {}),
             });
             if (!appended) {
               throw new TurnAttemptFencedError(

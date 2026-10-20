@@ -18,7 +18,7 @@ export type TurnAttemptFenceRejectReason =
   | "turn_terminal"
   | "not_found";
 
-type TurnAttemptFenceResult =
+export type TurnAttemptFenceResult =
   | {
       allowed: true;
       workspace: typeof schema.workspaces.$inferSelect;

@@ -1902,8 +1902,17 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
-A newly committed completed-tool receipt, followed by its durable structural
-output event, permits final acknowledgement of that exact tool's completed
+A tool call's pending receipt and structural created event commit together
+under one exact-attempt fence. Each completed result likewise commits its
+receipt and exact structural output event together; it does not wait for its
+parallel siblings. The batcher carries the database-only mutation with that
+structural event through its ordered drain. Internal SDK registration items
+without a timeline projection retain their standalone receipt path.
+Once the SDK's entire parallel batch is stable, its canonical history append
+and proven receipt retirement share one transaction. History content, ordering,
+prefix verification and the call/result-pair proof are unchanged.
+
+A newly committed completed-tool checkpoint permits final acknowledgement of that exact tool's completed
 Connected Machine foreground operations. It does not wait for parallel SDK
 history to stabilize: attempt-ending recovery preserves the recorded result.
 Missing or duplicate receipts do not permit this incremental release. The
@@ -1916,9 +1925,9 @@ observing model completion. Publish success is a retry milestone; only an exact
 native absence observation settles release. Missing retained output before
 capture is recorded as unavailable, never inferred consumed.
 
-Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
+Standalone pending-call registration retries PostgreSQL-confirmed deadlock (`40P01`)
 or serialization (`40001`) rollback, with three total attempts and 25/50 ms
-backoff. The worker supplies the root database handle: each attempt re-enters a
+backoff. Its caller supplies the root database handle: each attempt re-enters a
 fresh RLS transaction and checks the current turn attempt fence. Passing a
 caller-owned transaction would use savepoints instead and is not this contract.
 A duplicate must match the same tenant/session/turn/call identity, call type,
@@ -1929,6 +1938,11 @@ even a nested rollback SQLSTATE and stops retries. No transport/ambiguous-commit
 recovery is supported, and inference/tool execution stays outside this
 database-only boundary. Exhaustion uses the canonical sanitized persistence-error
 projection; the original cause remains internal diagnostic evidence.
+Atomic receipt/event checkpoints use the existing event-append transaction
+retry boundary, not a nested receipt transaction. Its transaction-local receipt
+helpers require the same allowed fence and verify the locked identity. Transport
+evidence takes precedence over older rollback causes in that shared retry path
+too, so a lost commit acknowledgement cannot replay a checkpoint.
 
 A completed pending tool receipt retains two deliberately separate lossless
 projections: the bounded SDK result item that may become model-visible history,

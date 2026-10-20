@@ -634,6 +634,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   eventing.publish = async (
     events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
     immediate = false,
+    mutate,
   ) => {
     const inputs = events.map((event) => ({
       ...event,
@@ -662,6 +663,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
             durationSeconds,
           }),
       },
+      mutate,
     );
     if (inputs.length > 0 && !appended.accepted) {
       throw new TurnAttemptFencedError("turn execution generation was fenced");

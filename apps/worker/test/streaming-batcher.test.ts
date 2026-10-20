@@ -22,6 +22,40 @@ const REASONING: SessionEventType = "agent.reasoning.delta";
 const PTY: SessionEventType = "terminal.pty.output.delta"; // stays structural
 const TOOLCALL: SessionEventType = "agent.toolCall.created"; // structural
 
+describe("atomic structural checkpoints", () => {
+  test("keeps each mutation with its structural event across the batch-size boundary", async () => {
+    const batches: Array<{ events: number[]; mutations: number[] }> = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
+      batches.push({ events: events.map((e) => (e.payload as { n: number }).n), mutations });
+      if (batches.length === 1) await held;
+    });
+    await batcher.push(delta(0));
+    for (let i = 1; i < 75; i++) await batcher.push(delta(i));
+    const checkpoint = batcher.push(delta(75, TOOLCALL), 75);
+    release();
+    await checkpoint;
+    expect(batches.flatMap((batch) => batch.events)).toEqual(
+      Array.from({ length: 76 }, (_, i) => i),
+    );
+    expect(batches.filter((batch) => batch.mutations.length > 0)).toEqual([
+      { events: Array.from({ length: 25 }, (_, i) => i + 51), mutations: [75] },
+    ]);
+  });
+
+  test("checkpoint persistence failure is awaited and retained", async () => {
+    const failure = new Error("checkpoint rolled back");
+    const batcher = createRuntimeBatcher<string>(async (_events, mutations) => {
+      if (mutations?.length) throw failure;
+    });
+    await expect(batcher.push(delta(1, TOOLCALL), "receipt")).rejects.toBe(failure);
+    await expect(batcher.flush()).rejects.toBe(failure);
+  });
+});
+
 function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
