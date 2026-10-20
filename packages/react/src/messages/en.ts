@@ -3013,6 +3013,8 @@ export const englishMessages = {
   "thisComputer.later": "Finish later",
   "thisComputer.ready": "Agents can use {machineName}",
   "thisComputer.reconnecting": "Connecting {machineName}…",
+  "thisComputer.serviceConnecting":
+    "Waiting for the existing agent to report its connection and permissions.",
   "thisComputer.paused": "{machineName} is paused",
   "thisComputer.resume": "Resume",
   "thisComputer.pause": "Pause",
@@ -3022,6 +3024,12 @@ export const englishMessages = {
     "Agents won't be able to use {machineName} anymore. You can turn it on again any time.",
   "thisComputer.cancel": "Cancel",
   "thisComputer.pauseHint": "You can also pause it from the {tray}.",
+  "thisComputer.existingService":
+    "Use the existing Opengeni agent. Its installation and permissions stay in place, and it keeps running when you quit this app.",
+  "thisComputer.servicePauseHint":
+    "Pause stops the background agent until you resume it, even after you log in again or restart. Quitting this app leaves it running.",
+  "thisComputer.servicePermissions":
+    "Choose Opengeni Agent in System Settings. After changing its permissions, pause and resume the agent to apply them. Pausing stops its current work.",
   "thisComputer.resumeHint": "You can also resume it from the {tray}.",
   "thisComputer.finishSetup": "Finish setting up",
   "thisComputer.finishSetupDetail": "Let agents see your screen and use the mouse and keyboard.",

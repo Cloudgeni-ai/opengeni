@@ -2350,6 +2350,16 @@ confirmed handoff through existing PKCE and `ThisComputer.connect`. The agent's
 offer/event contract is unchanged. See [embedding](embedding.md#computer-connection-offers)
 and [desktop app](design/desktop-app.md#deep-links).
 
+Desktop setup preserves existing standalone agents as service-backed runners.
+`packages/agent-host/src/this-computer.ts` never removes their service, bundle,
+symlink or privacy grants, and never starts them as desktop children. Explicit
+signed-in setup reuses their live-reloaded connection store; native
+`service status --json` is the versioned read-only lifecycle seam. Pause/resume
+persists in the service manager across logins. Quitting the desktop leaves the
+service alone. Permission status comes from the current account's Machines
+view, preserving the service's own macOS responsible-process identity. New
+app-hosted installations retain the existing child-supervision model.
+
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
 opening another stream or maintaining a second draft. Hosts with persistent

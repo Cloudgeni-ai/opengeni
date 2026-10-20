@@ -40,6 +40,22 @@ const missing = [
   { id: "accessibility" as const, granted: false },
 ];
 
+test("existing service setup explains preservation and app-independent lifetime", () => {
+  const offered = computer(status({ management: "service" }));
+  const card = renderToStaticMarkup(<ThisComputerCard computer={offered} productName="Acme" />);
+  expect(card).toContain("installation and permissions stay in place");
+  const panel = renderToStaticMarkup(
+    <ThisComputerPanel
+      computer={computer(status({ state: "connected", management: "service" }))}
+      platform="macos"
+      onSetup={() => undefined}
+    />,
+  );
+  expect(panel).toContain("Quitting this app leaves it running");
+  expect(panel).toContain("Pause");
+  expect(panel).not.toContain("You can also pause it from");
+});
+
 test("each state maps to one view", () => {
   expect(thisComputerView(null)).toBe("hidden");
   expect(thisComputerView(status({ state: "unavailable" }))).toBe("hidden");
