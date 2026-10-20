@@ -241,7 +241,11 @@ await run("an open command stream keeps the sandbox awake", async () => {
 });
 
 await run("a background command alone does not keep it awake", async () => {
-  const background = await sandbox.commands.run("sleep 600", { background: true });
+  // As with the server above, envd ends a command at its timeout (60 s unless
+  // set), and reaching a sleep level can take longer than that when the host
+  // is busy (a scheduled checkpoint upload holds it running), so this command
+  // runs with none: the test is about the host's idle rule, not envd's timer.
+  const background = await sandbox.commands.run("sleep 600", { background: true, timeoutMs: 0 });
   await background.disconnect();
   // The host's own idle rules decide when (ten seconds idle, and a guest
   // busy on processor or disk counts as used); the stream must not hold it.

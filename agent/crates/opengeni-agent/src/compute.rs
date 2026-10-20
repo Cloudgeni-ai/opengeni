@@ -298,6 +298,10 @@ mod tests {
 
     const LINK: &str = r#"{"workspace_id": "w-1", "agent_id": "a_1", "workspace_root": "/workspace", "nats_url": "nats://127.0.0.1:3958"}"#;
 
+    // The link file is written by a sandbox's Linux guest, so its paths are POSIX
+    // paths; Windows does not count `/workspace` as absolute, and compute mode
+    // never runs there.
+    #[cfg(unix)]
     #[test]
     fn the_link_file_the_guest_writes_is_read() {
         let config = ComputeConfig::parse(LINK).expect("link file");
@@ -320,6 +324,7 @@ mod tests {
         assert!(credentials.consented_whole_machine && credentials.consented_screen_control);
     }
 
+    #[cfg(unix)]
     #[test]
     fn optional_settings_are_read() {
         let config = ComputeConfig::parse(
