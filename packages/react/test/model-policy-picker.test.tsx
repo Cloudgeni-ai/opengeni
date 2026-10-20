@@ -1459,7 +1459,7 @@ describe("Ultrafast speed choice", () => {
 
   test("metered routes show the rate multiple", async () => {
     const { container } = await menu(
-      { ...withUltrafast(true, 60_000), id: "gpt-6.1-sol", provider: "openai", source: "builtin" },
+      { ...withUltrafast(true, 60_000), id: "gpt-6.1-sol", provider: "openai", source: "opengeni" },
       "ultrafast",
     );
     expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
