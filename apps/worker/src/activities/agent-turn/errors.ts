@@ -25,6 +25,7 @@ import {
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpServiceUnavailableError,
+  isFirstPartyMcpSetupUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -118,6 +119,8 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  FIRST_PARTY_MCP_SETUP_RETRY_MS,
   MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
   MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
@@ -135,7 +138,8 @@ export {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
-export function providerRecoveryLimit(failureCode: unknown): number {
+export function providerRecoveryLimit(failureCode: unknown): number | undefined {
+  if (failureCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) return undefined;
   return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
 }
 /**
@@ -200,6 +204,17 @@ export function providerRecoveryResult(input: {
   const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
   const window = windowedRecoveryPolicy(input.failureCode);
   const limit = providerRecoveryLimit(input.failureCode);
+  if (limit === undefined) {
+    return {
+      status: "recovering",
+      continueDelayMs: Math.max(
+        FIRST_PARTY_MCP_SETUP_RETRY_MS,
+        Number.isFinite(input.retryAfterMs) && (input.retryAfterMs ?? 0) > 0
+          ? Math.ceil(input.retryAfterMs!)
+          : 0,
+      ),
+    };
+  }
   const exhausted = (
     reason: "deadline" | "retry_limit" | "invalid_clock",
   ): Extract<ProviderRecoveryResult, { status: "exhausted" }> => ({
@@ -851,7 +866,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
       input.providerRecovery.providerRecoveryCount <= 0 ||
       input.providerRecovery.providerRecoveryCount >
-        providerRecoveryLimit(input.providerRecovery.failureCode) ||
+        (providerRecoveryLimit(input.providerRecovery.failureCode) ?? Infinity) ||
       !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode) ||
       !validProviderOverloadRecoveryDelay(
         input.providerRecovery.failureCode,
@@ -1702,6 +1717,13 @@ export function providerRecoveryCode(
   error: unknown,
   failure: { code?: string; retryable?: boolean },
 ): string | undefined {
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isFirstPartyMcpSetupUnavailableError(error)
+  ) {
+    return FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
+  }
   if (
     failure.code === "mcp_transport_unavailable" &&
     failure.retryable &&

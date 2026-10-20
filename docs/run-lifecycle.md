@@ -1527,6 +1527,21 @@ own socket idle timeout) classify as retryable `provider_unavailable` and use
 the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
 transport timers and classification.
 
+Required first-party MCP connect/tools-list connectivity failures are the narrow
+exception to finite provider recovery. The runtime stamps setup provenance only
+at the verified required first-party boundary; generic socket errors, third-party
+servers and tool invocations cannot acquire it. `first_party_mcp_setup_unavailable`
+keeps the accepted turn recovering at a 30-second minimum pace until the API
+returns, without a count or elapsed-time cutoff. History and quiescence gates,
+Pause/Cancel and authority checks remain unchanged. Checkpoint database recovery
+uses the next count only as an exact-state witness and preserves pacing; these
+waits never spend or reset the model provider’s retry count. A durable wait
+instant suspends its elapsed-time recovery window; the next provider recovery
+resumes the remaining window, and a completed model response clears both clocks.
+Authentication and protocol rejections retain their existing failure policy.
+This does not replay tool mutations or repair already-failed
+historical turns.
+
 Default automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-

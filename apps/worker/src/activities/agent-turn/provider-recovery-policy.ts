@@ -1,3 +1,13 @@
+import {
+  effectiveProviderRecoveryStartedAt,
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+} from "@opengeni/db/provider-recovery-clock";
+// Required first-party MCP setup has no dispatched tool to replay. Keep the
+// accepted turn pending while our own API is unavailable; human controls and
+// ordinary attempt/authority fences still decide whether it may run.
+export { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "@opengeni/db/provider-recovery-clock";
+export const FIRST_PARTY_MCP_SETUP_RETRY_MS = 30_000;
+
 /** Closed policy facts shared with the workflow's content-free recovery wire. */
 export const PROVIDER_OVERLOAD_RECOVERY_CODE = "provider_overloaded";
 export const MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES = 15;
@@ -34,6 +44,13 @@ export function windowedRecoveryPolicy(
 }
 
 export function validProviderOverloadRecoveryDelay(code: unknown, delay: unknown): boolean {
+  if (code === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) {
+    return (
+      typeof delay === "number" &&
+      Number.isSafeInteger(delay) &&
+      delay >= FIRST_PARTY_MCP_SETUP_RETRY_MS
+    );
+  }
   if (delay === undefined) return code !== PROVIDER_OVERLOAD_RECOVERY_CODE;
   return (
     code === PROVIDER_OVERLOAD_RECOVERY_CODE &&
@@ -47,9 +64,5 @@ export function validProviderOverloadRecoveryDelay(code: unknown, delay: unknown
 export function readProviderRecoveryStartedAt(
   metadata: Record<string, unknown>,
 ): number | undefined {
-  const value =
-    typeof metadata.providerRecoveryStartedAt === "string"
-      ? Date.parse(metadata.providerRecoveryStartedAt)
-      : NaN;
-  return Number.isFinite(value) ? value : undefined;
+  return effectiveProviderRecoveryStartedAt(metadata);
 }
