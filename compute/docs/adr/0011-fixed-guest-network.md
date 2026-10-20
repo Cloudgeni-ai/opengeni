@@ -48,7 +48,10 @@ Sandboxes run untrusted code next to each other and next to the host.
   in a namespace, its guest's to a refused destination that its own name
   server does not answer; on the host, any from a namespace to a refused
   destination. The next packet is then a new connection, refused or
-  redirected by the rules in place. A failure to list or forget them is
+  redirected by the rules in place. Each is forgotten by its reply
+  direction and the id the kernel listed it with, so a connection made in
+  place of one that ended meanwhile, redirected, stays: the kernel may
+  give the two one id, never one reply direction. A failure to list or forget them is
   logged, not fatal: the host's rules drop guest packets to refused
   destinations whatever is tracked.
 - The rules are enforced twice: inside the namespace, which the VMM joins

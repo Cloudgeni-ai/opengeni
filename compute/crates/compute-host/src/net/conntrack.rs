@@ -44,6 +44,7 @@ const CT_DELETE: u16 = CT_NEW | 2;
 /// The attributes used here.
 const CTA_TUPLE_ORIG: u16 = 1;
 const CTA_TUPLE_REPLY: u16 = 2;
+const CTA_ID: u16 = 12;
 const CTA_ZONE: u16 = 18;
 const CTA_TUPLE_IP: u16 = 1;
 const CTA_TUPLE_PROTO: u16 = 2;
@@ -79,8 +80,16 @@ pub(super) struct Connection {
     /// As its answers come back: from where the first packet went, unless
     /// it was redirected.
     pub reply: Direction,
-    /// What the kernel finds it by: its original direction as the kernel
-    /// gave it, and its zone if it has one.
+    /// What the kernel finds it by and checks it is: its reply direction
+    /// and its zone, as the kernel gave them, and its id.
+    ///
+    /// The kernel finds a connection by either direction, and refuses to
+    /// delete one whose id is not the one given. An id is a hash of where
+    /// the kernel keeps the connection and of its original direction, and
+    /// the kernel keeps a new connection where an ended one was soon after:
+    /// one that ended after it was listed and another with the same first
+    /// packet, redirected, can share an id, but never a reply direction.
+    /// Found by both, a connection is one the same rules decide alike.
     key: Vec<u8>,
 }
 
@@ -285,22 +294,24 @@ fn error(body: &[u8]) -> io::Result<i32> {
 }
 
 /// The connection a [`CT_NEW`] message's `body` describes, if it is
-/// complete.
+/// complete. One without an id is left out: nothing could tell it apart
+/// from another made in its place.
 fn connection(body: &[u8]) -> Option<Connection> {
-    let (mut original, mut reply, mut tuple, mut zone) = (None, None, None, None);
+    let (mut original, mut reply, mut tuple, mut zone, mut id) = (None, None, None, None, None);
     for (kind, value, whole) in attributes(body.get(NFGEN..)?) {
         match kind {
-            CTA_TUPLE_ORIG => {
-                original = direction(value);
+            CTA_TUPLE_ORIG => original = direction(value),
+            CTA_TUPLE_REPLY => {
+                reply = direction(value);
                 tuple = Some(whole);
             }
-            CTA_TUPLE_REPLY => reply = direction(value),
             CTA_ZONE => zone = Some(whole),
+            CTA_ID => id = Some(whole),
             _ => {}
         }
     }
     let mut key = Vec::new();
-    for attribute in [tuple?].into_iter().chain(zone) {
+    for attribute in [tuple?].into_iter().chain(zone).chain([id?]) {
         key.extend_from_slice(attribute);
         key.resize(aligned(key.len()), 0);
     }
@@ -428,6 +439,12 @@ pub(super) mod track {
         Netlink::open()?.list()
     }
 
+    /// Deletes `connection`, as listed, in the calling thread's
+    /// namespace: false if it is gone.
+    pub fn delete(connection: &Connection) -> io::Result<bool> {
+        Netlink::open()?.delete(&connection.key)
+    }
+
     /// A tuple attribute, as the kernel sends one; an ICMP echo's answer
     /// is an echo reply.
     pub fn tuple(kind: u16, way: Way, reply: bool) -> Vec<u8> {
@@ -501,10 +518,12 @@ mod tests {
         };
         let mut attributes = tuple(CTA_TUPLE_ORIG, query(), false);
         attributes.extend(tuple(CTA_TUPLE_REPLY, reply, true));
-        // Status, a zone (two bytes, padded) and a mark it does not need.
+        // Status, a zone (two bytes, padded), a mark it does not need and
+        // an id.
         attributes.extend(attribute(3, &0x188_u32.to_be_bytes()));
         attributes.extend(attribute(CTA_ZONE, &7_u16.to_be_bytes()));
         attributes.extend(attribute(8, &0_u32.to_be_bytes()));
+        attributes.extend(attribute(CTA_ID, &0xdead_beef_u32.to_be_bytes()));
         let batch = listing(9, &attributes);
         let read: Vec<Message<'_>> = messages(&batch).map(Result::unwrap).collect();
         assert_eq!(read.len(), 2);
@@ -530,10 +549,11 @@ mod tests {
                 port: Some(40_000),
             }
         );
-        // It is found again by its original direction and its zone,
+        // It is found again by its reply direction, its zone and its id,
         // exactly as given.
-        let mut key = tuple(CTA_TUPLE_ORIG, query(), false);
+        let mut key = tuple(CTA_TUPLE_REPLY, reply, true);
         key.extend(attribute(CTA_ZONE, &7_u16.to_be_bytes()));
+        key.extend(attribute(CTA_ID, &0xdead_beef_u32.to_be_bytes()));
         assert_eq!(found.key, key);
     }
 
@@ -544,6 +564,16 @@ mod tests {
         let batch = listing(1, &only);
         let first = messages(&batch).next().unwrap().unwrap();
         assert!(connection(first.body).is_none());
+        // No id.
+        let mut both = tuple(CTA_TUPLE_ORIG, query(), false);
+        both.extend(tuple(CTA_TUPLE_REPLY, query().reversed(), true));
+        let batch = listing(1, &both);
+        let first = messages(&batch).next().unwrap().unwrap();
+        assert!(connection(first.body).is_none());
+        both.extend(attribute(CTA_ID, &1_u32.to_be_bytes()));
+        let batch = listing(1, &both);
+        let first = messages(&batch).next().unwrap().unwrap();
+        assert!(connection(first.body).is_some());
         // A tuple without its protocol.
         let ip = attribute(CTA_IP_V4_SRC, &GUEST.octets());
         let partial = attribute(CTA_TUPLE_ORIG, &attribute(CTA_TUPLE_IP, &ip));

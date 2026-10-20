@@ -447,6 +447,42 @@ fn the_kernel_forgets_exactly_the_connections_the_rules_refuse() {
     in_new_namespace(|| check(UPLINK_IP, true));
 }
 
+/// A connection is listed and ends, and another with the same first
+/// packet is tracked in its place, redirected to the guest's own name
+/// server, before the listed one is forgotten: the new one stays.
+#[test]
+fn a_connection_made_in_place_of_one_listed_is_kept() {
+    use conntrack::track::{self, Way};
+
+    in_new_namespace(|| {
+        let query = Way {
+            protocol: 17,
+            source: (GUEST_IP, 40_000),
+            destination: (ip("100.100.100.100"), 53),
+        };
+        let answered_privately = Way {
+            destination: (UPLINK_IP, 40_000),
+            ..query.reversed()
+        };
+        track::connection(query, answered_privately).unwrap();
+        let listed = track::list().unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(track::delete(&listed[0]).unwrap(), "it ends");
+        let redirected = Way {
+            source: (GATEWAY_IP, 53),
+            ..query.reversed()
+        };
+        track::connection(query, redirected).unwrap();
+        assert!(
+            !track::delete(&listed[0]).unwrap(),
+            "what was listed is gone"
+        );
+        let kept = track::list().unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].reply.source, GATEWAY_IP);
+    });
+}
+
 #[test]
 fn setup_names_the_namespace_link_and_tap() {
     let addresses = NetworkConfig::default().addresses(2).unwrap();
