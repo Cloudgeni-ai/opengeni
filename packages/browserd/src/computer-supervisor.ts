@@ -483,7 +483,7 @@ export class ComputerSupervisor {
         displayId,
         environment,
       });
-      const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities);
+      const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities, resumed);
       let runtime: Runtime | undefined;
       const controllerDriver = driver;
       const controller = journal.withRecoveredRecords(
@@ -707,11 +707,14 @@ function isUuid(value: string): boolean {
  * the same way. An update that adds batch support applies to new sessions. A
  * session that began with batches and lost support keeps reporting them; its
  * batches are then refused before anything runs, instead of a retry repeating
- * actions one by one.
+ * actions one by one. A resumed session without a record began before batch
+ * modes were recorded, when every batch ran one action at a time, so it keeps
+ * doing that.
  */
 async function pinActionBatches(
   sessionDirectory: string,
   capabilities: ComputerSessionCapabilities,
+  resumed: boolean,
 ): Promise<ComputerSessionCapabilities> {
   const path = join(sessionDirectory, "action-batches.json");
   let pinned: boolean;
@@ -726,7 +729,7 @@ async function pinActionBatches(
     pinned = (value as { actionBatches: boolean }).actionBatches;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    pinned = capabilities.actionBatches === true;
+    pinned = !resumed && capabilities.actionBatches === true;
     const staged = `${path}.${process.pid}.tmp`;
     await writeFile(staged, JSON.stringify({ actionBatches: pinned }), { mode: 0o600 });
     await rename(staged, path);

@@ -332,6 +332,42 @@ describe("ComputerSupervisor", () => {
     },
   );
 
+  test("a session from before batch modes were recorded keeps running batches one by one", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-batch-legacy-");
+    const open = async () =>
+      await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async (context) => {
+          const driver = new FixtureComputerDriver(
+            context.computerSessionId,
+            context.controllerGeneration,
+          );
+          Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches: true } });
+          return driver;
+        },
+      });
+    let supervisor = await open();
+    try {
+      await supervisor.createSession(options());
+    } finally {
+      await supervisor.close();
+    }
+    // The layout an older controller left: a journal and no batch mode.
+    const sessionDirectory = join(rootDirectory, "computer-sessions", computerSessionId);
+    await rm(join(sessionDirectory, "action-batches.json"));
+    supervisor = await open();
+    try {
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(false);
+      expect(await readFile(join(sessionDirectory, "action-batches.json"), "utf8")).toContain(
+        "false",
+      );
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
   test("a failed resume keeps the session's batch mode and journal", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-batch-resume-");
     let actionBatches = true;
