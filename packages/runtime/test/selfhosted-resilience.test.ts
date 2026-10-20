@@ -8,7 +8,7 @@
 //   - the exec/control deadline split; and
 //   - the actionable error copy.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   type ControlRpc,
@@ -430,32 +430,28 @@ describe("SelfhostedSession control and op-stream retry boundaries", () => {
 });
 
 describe("exec / control deadline split", () => {
-  test("exec uses execTimeoutMs for the process deadline (control timeout stays short)", async () => {
-    const { requests, session, wireTimeouts } = opStreamSessionWith(
-      { frames: [{ channel: "stdout", bytes: "ok\n" }] },
-      { timeoutMs: 30_000, execTimeoutMs: 300_000 },
-    );
-    await session.exec({ cmd: "true" });
-    const start = requests.find((request) => request.op?.$case === "opStart");
-    if (start?.op?.$case !== "opStart" || start.op.opStart.op?.$case !== "exec") {
-      throw new Error("expected op-stream exec start");
+  test.each([
+    { name: "explicit exec deadline", execTimeoutMs: 300_000, expectedDeadlineMs: 300_000 },
+    { name: "control-timeout fallback", execTimeoutMs: undefined, expectedDeadlineMs: 30_000 },
+  ])("$name keeps the execution budget separate from the control timeout", async (scenario) => {
+    // These cases test deadline selection, not incidental scheduling latency.
+    // Production deducts elapsed admission time before sending OpStart.
+    const wallClock = spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      const { requests, session, wireTimeouts } = opStreamSessionWith(
+        { frames: [{ channel: "stdout", bytes: "ok\n" }] },
+        { timeoutMs: 30_000, execTimeoutMs: scenario.execTimeoutMs },
+      );
+      await session.exec({ cmd: "true" });
+      const start = requests.find((request) => request.op?.$case === "opStart");
+      if (start?.op?.$case !== "opStart" || start.op.opStart.op?.$case !== "exec") {
+        throw new Error("expected op-stream exec start");
+      }
+      expect(start.op.opStart.op.exec.timeoutMs).toBe(scenario.expectedDeadlineMs);
+      expect(wireTimeouts[0]).toBe(30_000);
+    } finally {
+      wallClock.mockRestore();
     }
-    expect(start.op.opStart.op.exec.timeoutMs).toBe(300_000);
-    expect(wireTimeouts[0]).toBe(30_000);
-  });
-
-  test("exec falls back to the control timeout when no exec deadline is threaded", async () => {
-    const { requests, session, wireTimeouts } = opStreamSessionWith(
-      { frames: [{ channel: "stdout", bytes: "ok\n" }] },
-      { timeoutMs: 30_000 },
-    );
-    await session.exec({ cmd: "true" });
-    const start = requests.find((request) => request.op?.$case === "opStart");
-    if (start?.op?.$case !== "opStart" || start.op.opStart.op?.$case !== "exec") {
-      throw new Error("expected op-stream exec start");
-    }
-    expect(start.op.opStart.op.exec.timeoutMs).toBe(30_000);
-    expect(wireTimeouts[0]).toBe(30_000);
   });
 
   test("a timed-out exec result carries the actionable hint on stderr (stdout untouched)", async () => {
