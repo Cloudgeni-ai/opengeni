@@ -31239,6 +31239,7 @@
       "InteractionSemanticSnapshot": "type",
       "InteractionSessionListOptions": "type",
       "InteractionTransport": "type",
+      "isConnectedMachineOutcomeUnknownOutput": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
