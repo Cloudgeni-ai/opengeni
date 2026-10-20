@@ -432,6 +432,12 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 
 ## Scheduling Discovery
 
+Scheduled bot posting uses ordinary selected capabilities and instructions, not a
+separate schedule-only approval field. Slack installation availability, incoming
+channel routing and workspace automation settings have distinct owners; see
+`docs/slack-bot.md` before changing them. Personal Add and Reconnect preserve
+separate Slack team/user identities.
+
 The stock Schedules chat shortcut sends the request and time zone. Its setup
 procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
 selected through the worker's configured bundled-Skill rules.

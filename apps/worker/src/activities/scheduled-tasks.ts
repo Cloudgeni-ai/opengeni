@@ -597,8 +597,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // Preserve explicit creator choices and permissions. Default-following
       // schedules resolve today's defaults, just like ordinary chats.
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
-      // A person-chosen Slack channel adds only the two bot posting tools;
-      // they post nowhere else, whatever the creator's own selection was.
+      // Scheduled work preserves the ordinary capability selection. A saved
+      // Slack destination never grants tools excluded by the creator.
       let firstPartyMcpTools = withScheduledSlackBotPostingTools(
         creatorPolicy?.firstPartyMcpTools
           ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)

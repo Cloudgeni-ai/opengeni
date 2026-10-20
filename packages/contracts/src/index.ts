@@ -13894,7 +13894,12 @@ export const AvailableOpenGeniSlackBots = /* @__PURE__ */ defineSchema(() =>
 );
 export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
 export const UpdateOpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
-  z.object({ enabled: z.boolean() }).strict(),
+  z
+    .object({
+      enabled: z.boolean(),
+      workspaceIds: z.array(z.string().uuid()).max(1000).nullable().optional(),
+    })
+    .strict(),
 );
 export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
   typeof UpdateOpenGeniSlackBotOrganizationAccess
@@ -13902,6 +13907,7 @@ export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
 export const OpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     enabled: z.boolean(),
+    workspaceIds: z.array(z.string().uuid()).nullable().optional(),
     generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }),
 );

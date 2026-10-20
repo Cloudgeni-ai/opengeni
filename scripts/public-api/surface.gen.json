@@ -20609,7 +20609,9 @@
       "shape": {
         "$": "object",
         "$.enabled": "boolean!",
-        "$.generation": "integer!"
+        "$.generation": "integer!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "OpenMachinePrivacySettingsRequest": {
@@ -27554,7 +27556,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.enabled": "boolean!"
+        "$.enabled": "boolean!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "UpdateOrganizationAgentAdminAccessRequest": {

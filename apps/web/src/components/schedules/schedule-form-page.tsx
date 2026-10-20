@@ -5,7 +5,7 @@ import { Link } from "@tanstack/react-router";
  * cadence sentence and its next runs) -> an optional Name -> one closed
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
-import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -55,11 +55,6 @@ import type { ScheduledTask, Session } from "@/types";
 
 import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
 
-// Slack posting pulls in the Slack bot helpers shared with Capabilities; load
-// it on demand so it does not reshape the chunks every session page shares.
-const ScheduleSlackPosting = lazy(async () => ({
-  default: (await import("@/components/schedule-slack-posting")).ScheduleSlackPosting,
-}));
 import { ComposerField } from "./schedule-composer";
 import { ScheduleAgentCapabilities } from "./schedule-agent-capabilities";
 import {
@@ -798,8 +793,7 @@ function AgentScheduleForm({
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
     ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
-    // A task that continues an existing chat never posts on its own.
-    ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
+
     ...(eachRun === "existing_session"
       ? []
       : [learningCustom ? "Custom agent learning" : "Workspace learning defaults"]),
@@ -1206,56 +1200,6 @@ function AgentScheduleForm({
               inheritsChatSettings={inheritsChatSettings}
             />
           </Field>
-          {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
-            <div className="-mt-3 flex min-w-0 flex-col gap-2">
-              <ConnectionAccountPicker
-                groups={connectionAccounts.accountGroups}
-                choices={accountChoices}
-                onChoose={(serverId, ids) => {
-                  setEditedAccountServerIds((current) =>
-                    current.includes(serverId) ? current : [...current, serverId],
-                  );
-                  connectionAccounts.selectAccount(serverId, ids);
-                }}
-              />
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                <p className="min-w-0 text-xs text-fg-muted">
-                  {pinnedGroupNames.length > 0
-                    ? `Pinned for ${pinnedGroupNames.join(", ")}. Other connectors use your current accounts each run.`
-                    : "Each run uses your current accounts. Changing one here pins it."}
-                </p>
-                {pinnedGroupNames.length > 0 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    onClick={usePinnedAccountsDefaults}
-                  >
-                    Use current accounts
-                  </Button>
-                ) : null}
-              </div>
-              {connectionAccounts.error ? (
-                <Notice
-                  tone="failed"
-                  action={
-                    connectionAccounts.accessDenied ? undefined : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void connectionAccounts.refresh()}
-                      >
-                        Try again
-                      </Button>
-                    )
-                  }
-                >
-                  {connectionAccounts.error}
-                </Notice>
-              ) : null}
-            </div>
-          ) : null}
           <div className="min-w-0">
             <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
               When
@@ -1294,27 +1238,80 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
-          {!inheritsChatSettings ? (
-            <ScheduleAgentCapabilities
-              workspaceId={workspaceId}
-              value={draft.agentCapabilities}
-              onChange={(agentCapabilities) =>
-                setDraft((previous) => {
-                  if (agentCapabilities !== undefined) return { ...previous, agentCapabilities };
-                  const { agentCapabilities: _dropped, ...rest } = previous;
-                  return rest;
-                })
-              }
-            />
-          ) : null}
           <Disclosure
             variant="row"
-            title="Advanced"
+            title="Settings"
             summary={advancedSummary}
             open={advancedOpen}
             onOpenChange={setAdvancedOpen}
           >
             <FieldStack>
+              {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
+                <div className="flex min-w-0 flex-col gap-2">
+                  <ConnectionAccountPicker
+                    groups={connectionAccounts.accountGroups}
+                    choices={accountChoices}
+                    onChoose={(serverId, ids) => {
+                      setEditedAccountServerIds((current) =>
+                        current.includes(serverId) ? current : [...current, serverId],
+                      );
+                      connectionAccounts.selectAccount(serverId, ids);
+                    }}
+                  />
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="min-w-0 text-xs text-fg-muted">
+                      {pinnedGroupNames.length > 0
+                        ? `Pinned for ${pinnedGroupNames.join(", ")}. Other connectors use your current accounts each run.`
+                        : "Each run uses your current accounts. Changing one here pins it."}
+                    </p>
+                    {pinnedGroupNames.length > 0 ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={usePinnedAccountsDefaults}
+                      >
+                        Use current accounts
+                      </Button>
+                    ) : null}
+                  </div>
+                  {connectionAccounts.error ? (
+                    <Notice
+                      tone="failed"
+                      action={
+                        connectionAccounts.accessDenied ? undefined : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void connectionAccounts.refresh()}
+                          >
+                            Try again
+                          </Button>
+                        )
+                      }
+                    >
+                      {connectionAccounts.error}
+                    </Notice>
+                  ) : null}
+                </div>
+              ) : null}
+              {!inheritsChatSettings ? (
+                <ScheduleAgentCapabilities
+                  bare
+                  workspaceId={workspaceId}
+                  value={draft.agentCapabilities}
+                  onChange={(agentCapabilities) =>
+                    setDraft((previous) => {
+                      if (agentCapabilities !== undefined)
+                        return { ...previous, agentCapabilities };
+                      const { agentCapabilities: _dropped, ...rest } = previous;
+                      return rest;
+                    })
+                  }
+                />
+              ) : null}
+
               {eachRun !== "new_session_per_run" ? (
                 <Field
                   label="If the previous run is still working"
@@ -1389,24 +1386,6 @@ function AgentScheduleForm({
                   error={secretVaults.error}
                   ownerIsViewer={!editing || !task || ownsSchedule(task, access.viewerSubjectId)}
                 />
-              ) : null}
-              {eachRun !== "existing_session" ? (
-                <Suspense fallback={null}>
-                  <ScheduleSlackPosting
-                    workspaceId={workspaceId}
-                    connectionId={draft.slackBotConnectionId}
-                    channelId={draft.slackBotChannelId}
-                    disabled={false}
-                    active={advancedOpen}
-                    connectionLocked={Boolean(materializedSessionId)}
-                    onChange={({ connectionId, channelId }) =>
-                      update({
-                        slackBotConnectionId: connectionId,
-                        slackBotChannelId: channelId,
-                      })
-                    }
-                  />
-                </Suspense>
               ) : null}
               {eachRun === "existing_session" ? null : learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">

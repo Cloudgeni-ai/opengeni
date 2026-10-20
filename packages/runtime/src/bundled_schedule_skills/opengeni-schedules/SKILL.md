@@ -37,6 +37,12 @@ destination or a separate-agent mode.
   `capability_catalog_search` and the available tool discovery to find the
   capability and exact operations. Follow returned connection/setup and approval
   requirements. Do not claim that discovery means the integration is ready.
+- For posting as the Opengeni Slack bot, verify the available bot and channel
+  through its tools. Record the exact Slack workspace and channel in the task
+  instructions; use an explicit connection ID when multiple bots are available.
+  Scheduled and interactive work use the same bot capability. No separate
+  schedule-specific posting setting is required. Never substitute a personal
+  account when the user requested the bot.
 
 Select only the resources and tools the task needs; saved secrets are used by
 `{{secret:…}}` reference and need no attachment. Missing

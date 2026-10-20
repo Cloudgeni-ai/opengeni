@@ -1085,8 +1085,15 @@ export type AvailableOpenGeniSlackBots = {
   connections: ConnectionMetadata[];
   organizationSharedConnectionIds: string[];
 };
-export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
-export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
+export type UpdateOpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  workspaceIds?: string[] | null;
+};
+export type OpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  generation: number;
+  workspaceIds?: string[] | null;
+};
 
 export type FikenInstallRequest = {
   apiToken: string;
