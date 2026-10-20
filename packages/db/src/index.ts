@@ -30711,6 +30711,37 @@ export async function getInitializedSessionCreateReplay(
   );
 }
 
+/** Read the canonical sequence without materializing the session presentation. */
+export async function getSessionEventSequence(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<number | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        compatibilitySequence: schema.sessions.lastSequence,
+        lastSequence: schema.sessionEventCursors.lastSequence,
+      })
+      .from(schema.sessions)
+      .leftJoin(
+        schema.sessionEventCursors,
+        and(
+          eq(schema.sessionEventCursors.sessionId, schema.sessions.id),
+          eq(schema.sessionEventCursors.accountId, schema.sessions.accountId),
+          eq(schema.sessionEventCursors.workspaceId, schema.sessions.workspaceId),
+        ),
+      )
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    if (row.lastSequence === null || row.lastSequence < row.compatibilitySequence) {
+      throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
+    }
+    return row.lastSequence;
+  });
+}
+
 export async function getSession(
   db: Database,
   workspaceId: string,
