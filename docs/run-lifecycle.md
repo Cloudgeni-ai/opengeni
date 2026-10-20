@@ -2152,6 +2152,12 @@ workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
 when the write is control-aware, then the actual `workspaces` row
 `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
 turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+Connection-use validation follows the same order but shares the session, turn
+and attempt read fences (`FOR SHARE`): it changes none of those rows. Independent
+connection uses can therefore validate concurrently, while lifecycle mutations
+still conflict. The resolver joins the existing shared workspace-control advisory
+queue before its control row, so new validators cannot bypass queued control
+mutations. Its physical-request advisory lock still serializes audit replay.
 Child-answer read acknowledgments use the same session/cursor/turn/attempt
 prefix before updating turn metadata. The imported-archive write guard also
 locks the session on a turn update; a turn-only acknowledgment would therefore
