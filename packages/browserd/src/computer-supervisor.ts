@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   ComputerNativeCommand,
@@ -447,6 +447,15 @@ export class ComputerSupervisor {
       "computer-sessions",
       options.computerSessionId,
     );
+    // A session resumed after a restart keeps its journal and batch mode even
+    // when this attempt fails; only a directory this attempt created is removed.
+    const resumed = await lstat(sessionDirectory).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     await chmod(sessionDirectory, 0o700);
     const journal = await SqliteComputerOperationJournal.open({
@@ -535,7 +544,7 @@ export class ComputerSupervisor {
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      if (driverClosed && environmentClosed && failures.length === 1) {
+      if (!resumed && driverClosed && environmentClosed && failures.length === 1) {
         try {
           await rm(sessionDirectory, { recursive: true, force: true });
         } catch (cleanupError) {

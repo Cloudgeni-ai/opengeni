@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { UnsettledCleanupError } from "../src/cleanup-error";
 import type {
@@ -331,6 +331,50 @@ describe("ComputerSupervisor", () => {
       }
     },
   );
+
+  test("a failed resume keeps the session's batch mode and journal", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-batch-resume-");
+    let actionBatches = true;
+    let failCreation = false;
+    const open = async () =>
+      await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async (context) => {
+          if (failCreation) throw new Error("transient driver start failure");
+          const driver = new FixtureComputerDriver(
+            context.computerSessionId,
+            context.controllerGeneration,
+          );
+          Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches } });
+          return driver;
+        },
+      });
+    let supervisor = await open();
+    try {
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(true);
+    } finally {
+      await supervisor.close();
+    }
+    const sessionDirectory = join(rootDirectory, "computer-sessions", computerSessionId);
+    actionBatches = false;
+    failCreation = true;
+    supervisor = await open();
+    try {
+      await expect(supervisor.createSession(options())).rejects.toThrow(
+        "transient driver start failure",
+      );
+      expect(await readFile(join(sessionDirectory, "action-batches.json"), "utf8")).toContain(
+        "true",
+      );
+      expect(await readFile(join(sessionDirectory, "operations.sqlite"))).toBeTruthy();
+      failCreation = false;
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(true);
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
 
   test("displaces other shared-seat helpers when a new ComputerSession is created", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-displace-");
