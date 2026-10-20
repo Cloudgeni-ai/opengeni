@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/compute-release.yml",
-      "sha256": "d84efdda9232be114ec0b1a117b5629d8f36a8c22f9c8e2d8b17bb9902c313a0"
+      "sha256": "d855ba559b6fdaaed5dcba2680d1df4d4c93731fc1fdf61e49543896727456bb"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -1083,7 +1083,7 @@
       "workflow": ".github/workflows/compute-release.yml",
       "job": "promote",
       "step": "Name the candidate",
-      "sha256": "616c553f4387e7347118291a4d02c626bd8b0814eb0322a756ac9b3e26583a18"
+      "sha256": "448805c8f4036248eab08575cbcab4632f630f2b40ba11a231c1838099367a23"
     },
     {
       "workflow": ".github/workflows/compute-release.yml",
