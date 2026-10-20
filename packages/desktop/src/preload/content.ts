@@ -9,6 +9,8 @@ import {
   DESKTOP_BRIDGE_VERSION,
   DESKTOP_IPC,
   type DesktopAccountsSnapshot,
+  type DesktopAppShotResult,
+  type DesktopAppShotStatus,
   type DesktopBridge,
   type DesktopCommand,
   type DesktopPlatform,
@@ -52,6 +54,14 @@ if (origin && window.location.origin === origin) {
     if (command === "newSession") window.location.assign(`/workspaces/${workspaceId}/sessions`);
     if (command === "openInbox") window.location.assign(`/workspaces/${workspaceId}/inbox`);
   });
+  // Captures go to the page's newest listener. One that arrives before the
+  // page listens (the window was just opened for it) waits briefly for it.
+  let appShotListener: ((result: DesktopAppShotResult) => void) | null = null;
+  let waitingAppShot: { result: DesktopAppShotResult; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.appShotsCaptured, (_event, result: DesktopAppShotResult) => {
+    if (appShotListener) appShotListener(result);
+    else waitingAppShot = { result, at: Date.now() };
+  });
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -62,6 +72,7 @@ if (origin && window.location.origin === origin) {
       "thisComputerDisconnect",
       "openExternal",
       "commands",
+      "appShots",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -98,6 +109,24 @@ if (origin && window.location.origin === origin) {
       },
     },
     setAppearance: (appearance) => ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
+    appShots: {
+      status: () => ipcRenderer.invoke(DESKTOP_IPC.appShotsStatus) as Promise<DesktopAppShotStatus>,
+      update: (settings) =>
+        ipcRenderer.invoke(DESKTOP_IPC.appShotsUpdate, settings) as Promise<DesktopAppShotStatus>,
+      requestPermission: (id) => ipcRenderer.invoke(DESKTOP_IPC.appShotsRequestPermission, id),
+      onCapture: (listener) => {
+        appShotListener = listener;
+        const waiting = waitingAppShot;
+        waitingAppShot = null;
+        if (waiting && Date.now() - waiting.at < 60_000) {
+          queueMicrotask(() => appShotListener?.(waiting.result));
+        }
+        return () => {
+          if (appShotListener === listener) appShotListener = null;
+        };
+      },
+      onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+    },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }

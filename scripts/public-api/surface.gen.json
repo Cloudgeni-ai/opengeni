@@ -10642,6 +10642,42 @@
         "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
       }
     },
+    "AppShotCapture": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.app": "string!",
+        "$.browser": "object?",
+        "$.browser.profiles": "array?",
+        "$.browser.profiles[]": "object",
+        "$.browser.profiles[].deviceId": "string!",
+        "$.browser.profiles[].name": "string!",
+        "$.browser.url": "string!",
+        "$.bundleId": "string?",
+        "$.capturedAt": "string!",
+        "$.computer": "object?",
+        "$.computer.name": "string!",
+        "$.computer.sandboxId": "string?",
+        "$.platform": "ref(AppShotPlatform)!",
+        "$.text": "string?",
+        "$.textTruncated": "boolean?",
+        "$.title": "string!",
+        "$.window": "object?",
+        "$.window.processId": "integer!",
+        "$.window.windowId": "integer!"
+      }
+    },
+    "AppShotPlatform": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"linux\\\"\",\"\\\"macos\\\"\",\"\\\"windows\\\"\"]"
+      }
+    },
     "AppendArchivedSessionEventsRequest": {
       "io": [
         "input"
@@ -14397,6 +14433,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appShot": "ref(AppShotCapture)?",
         "$.contentType": "string!",
         "$.filename": "string!",
         "$.scope": "ref(ConnectionOwnership)?",
@@ -15872,6 +15909,7 @@
       "shape": {
         "$": "object",
         "$.access": "ref(FileAccess)?",
+        "$.appShot": "ref(AppShotCapture)?",
         "$.bucket": "string!",
         "$.contentType": "string!",
         "$.createdAt": "string!",
@@ -30722,6 +30760,7 @@
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "ApproveSlackUserLinkAccessRequest": "type",
+      "AppShotCapture": "type",
       "ArtifactCatalogItem": "type",
       "ArtifactCatalogKind": "type",
       "ArtifactCatalogListOptions": "type",

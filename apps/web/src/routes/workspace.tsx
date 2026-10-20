@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { DesktopThisComputerProvider } from "@/components/desktop/this-computer";
+import { AppShotCoordinator } from "@/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@/lib/secrets-ui";
 import { workspaceManagementLocation } from "@/lib/workspace-management-location";
@@ -561,6 +562,7 @@ function AuthorizedWorkspaceShell({
           tokenizer and generator. */}
       <SecretsUiProvider value={webSecretsUi}>
         <DesktopThisComputerProvider workspaceId={workspaceId}>
+          <AppShotCoordinator workspaceId={workspaceId} />
           {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}

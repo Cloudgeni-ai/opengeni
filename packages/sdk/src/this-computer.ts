@@ -139,6 +139,12 @@ export interface ThisComputerStatus {
   errorCode?: ThisComputerErrorCode;
   /** The computer's name as agents see it. */
   machineName: string;
+  /**
+   * When linked to this workspace (connected or paused), the computer's
+   * enrollment id, as agents see it in their list of machines. Absent from
+   * older apps.
+   */
+  enrollmentId?: string;
   /** While the agent downloads during setup, how much has arrived, from 0 to 1. */
   setupProgress?: number;
   /**

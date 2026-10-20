@@ -6,6 +6,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  globalShortcut,
   ipcMain,
   Menu,
   nativeTheme,
@@ -44,12 +45,15 @@ import {
 import {
   DESKTOP_IPC,
   type DesktopAccountsSnapshot,
+  type DesktopAppShotPermissionId,
+  type DesktopAppShotResult,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
+import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
@@ -161,6 +165,8 @@ export class DesktopShell {
   /** Beside System Settings while a screen-control permission is being allowed there. */
   private readonly permissionGuide: PermissionGuide;
   private readonly inbox: InboxNotifier;
+  /** The shortcut that sends the window in front into the composer. */
+  private readonly appShots: AppShots;
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
@@ -275,6 +281,33 @@ export class DesktopShell {
         void this.refreshTray();
       },
     });
+    const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
+    this.appShots = new AppShots({
+      platform:
+        process.platform === "darwin"
+          ? new MacAppShots({
+              ownPid: process.pid,
+              openSystemSettings: (url) => void shell.openExternal(url),
+              guide: (id, granted) => {
+                if (id && granted) this.permissionGuide.granted();
+                else if (id) this.permissionGuide.show(id);
+                else this.permissionGuide.hide();
+              },
+              requested: () => appShotStore.requested(),
+              markRequested: (id) => appShotStore.markRequested(id),
+              onPermissionsChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
+            })
+          : null,
+      store: appShotStore,
+      globalShortcut,
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+      deliver: (result) => this.deliverAppShot(result),
+      onChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
+      log: (message, caught) => console.warn(message, caught),
+    });
     this.inbox = new InboxNotifier({
       accounts: () => {
         const signedIn = this.store.snapshot().accounts.filter((account) => !account.signedOut);
@@ -336,6 +369,7 @@ export class DesktopShell {
 
   start(): void {
     this.registerIpc();
+    this.appShots.start();
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -365,7 +399,10 @@ export class DesktopShell {
     process.once("SIGTERM", quitUnasked);
     process.once("SIGINT", quitUnasked);
     // However the app ends, its agent doesn't outlive it.
-    app.on("will-quit", () => this.computer.shutdownNow());
+    app.on("will-quit", () => {
+      this.appShots.stop();
+      this.computer.shutdownNow();
+    });
     app.on("window-all-closed", () => {
       if (process.platform !== "darwin" && !this.tray) app.quit();
     });
@@ -1035,6 +1072,13 @@ export class DesktopShell {
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
+    handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
+    handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
+    handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
+      if (id === "screenRecording" || id === "accessibility") {
+        await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
+      }
+    });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
       this.senderWelcome(event);
@@ -1072,6 +1116,18 @@ export class DesktopShell {
     for (const contents of targets) {
       if (!contents.isDestroyed()) contents.send(channel, payload);
     }
+  }
+
+  /** A capture goes to the account the window shows, once its page has loaded. */
+  private deliverAppShot(result: DesktopAppShotResult): void {
+    const accountId = this.window?.accountId;
+    const contents = accountId ? this.window?.contentsFor(accountId) : null;
+    if (!contents || contents.isDestroyed()) return;
+    const send = () => {
+      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.appShotsCaptured, result);
+    };
+    if (contents.isLoading()) contents.once("did-finish-load", send);
+    else send();
   }
 
   private accountsChanged(): void {

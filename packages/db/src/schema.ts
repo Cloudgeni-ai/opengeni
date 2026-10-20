@@ -6228,6 +6228,8 @@ export const files = pgTable(
     sha256: text("sha256"),
     bucket: text("bucket").notNull(),
     objectKey: text("object_key").notNull(),
+    /** An app-shot's capture (AppShotCapture); written with the upload, never changed. */
+    appShot: jsonb("app_shot"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

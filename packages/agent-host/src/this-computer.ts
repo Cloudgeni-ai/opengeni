@@ -536,6 +536,7 @@ export class ThisComputer {
     return {
       ...base,
       state: this.state.paused ? "paused" : "connected",
+      enrollmentId: connection.agentId,
       ...(permissions
         ? {
             permissions,

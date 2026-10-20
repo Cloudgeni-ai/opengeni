@@ -17,6 +17,8 @@ export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./file-access";
 import { FileAccess } from "./file-access";
+export * from "./app-shot";
+import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -6455,6 +6457,8 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     updatedAt: z.string(),
     /** Present on upload, publish and sharing results: who can open the file. */
     access: FileAccess.optional(),
+    /** A screenshot sent as an app-shot: the window it shows and what it said. */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6489,6 +6493,12 @@ export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
     contentType: z.string().min(1),
     sizeBytes: z.number().int().positive(),
     sha256: z.string().min(1).optional(),
+    /**
+     * The upload is an app-shot: an image of another app's window plus what
+     * the window said. Stored with the file once and never changed. Only for
+     * images.
+     */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type CreateFileUploadRequest = z.infer<typeof CreateFileUploadRequest>;
