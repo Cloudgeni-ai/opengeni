@@ -63,9 +63,16 @@ export type ArtifactReturnSearch = {
    * full view, and leaving the full view shows the detail page.
    */
   browse?: boolean;
-  /** A Site's own sub-page: `publish` is Publish to web. */
+  /**
+   * A Site's own sub-page. `publish` is kept for links made before Publish to
+   * web moved into the Site's Settings tab, and opens that tab.
+   */
   view?: "publish";
+  /** A Site page's tab other than the Site itself. */
+  tab?: SiteDetailTab;
 };
+
+export type SiteDetailTab = "versions" | "conversations" | "data" | "settings";
 
 export function artifactReturnSearch(search: Record<string, unknown>): ArtifactReturnSearch {
   // Router match search merges validation over raw input. An omitted key would
@@ -90,5 +97,12 @@ export function artifactReturnSearch(search: Record<string, unknown>): ArtifactR
     status: search.status === "archived" ? "archived" : undefined,
     browse: search.browse === true ? true : undefined,
     view: search.view === "publish" ? "publish" : undefined,
+    tab:
+      search.tab === "versions" ||
+      search.tab === "conversations" ||
+      search.tab === "data" ||
+      search.tab === "settings"
+        ? search.tab
+        : undefined,
   };
 }

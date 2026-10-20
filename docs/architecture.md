@@ -160,7 +160,12 @@ see `docs/connected-machines.md`.
 Connected Machine control replies use a negotiated, process-scoped receipt
 journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
 rebuilds transport, not execution: immutable delivery identities join accepted
-work or replay its reply. Expired deliveries cannot execute after receipt GC;
+work or replay its reply. Private batches of receiver-issued single-use tokens
+are prefetched per authenticated bus and exact process, so warm calls add no
+round trip. A fixed per-call elapsed offset preserves exec and receipt deadlines
+without charging idle prefetch age. Tokens have a suspend-inclusive monotonic lifetime; neither admission nor requester retry budgets depend
+on synchronized wall clocks. Unknown/expired tokens and changed payloads return
+prompt non-retryable errors preserving uncertain outcomes. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
 bounded recovery. The requester listens for the exact process's hello before
@@ -793,6 +798,15 @@ verified checkpoint, else continues empty, warning every member; never replays.
 See migrations 0495/0526/0548, [run lifecycle](run-lifecycle.md).
 Operator reauthorization supersedes verified public recovery;
 [provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
+Current portable archives are revalidated on a new attempt even after a prior
+non-retryable restore verdict; cold replacement election adopts the accepted
+backend without rewriting archive provenance. Human recovery uses the same
+session recovery endpoint for exact-archive retry or deliberate empty-workspace
+continuation. Empty continuation preserves group identity, requires control of
+every quiescent member (or operator authority), retains archives and records a
+permanent notice/warning for every member. The supported operator entry point is
+`scripts/operator/sandbox-recovery.ts`; see
+[current workspace recovery](run-lifecycle.md#current-workspace-retry-and-deliberate-empty-continuation).
 
 Opengeni compute (`compute`) is a managed sandbox whose provider session is the
 machine agent: leases, groups, setup and usage follow the managed path, while
@@ -1457,10 +1471,19 @@ For turns using deferred MCP disclosure, the worker starts non-eager preparation
 at main provider dispatch or earlier real tool/recovery demand. The runtime also
 starts it on a substantive provider response when no dispatch hook is available.
 One completion fence owns tool readiness and cleanup; closing before start does
-not create unused connections. Embedded callers keep immediate background
+not create unused connections. Explicit provider-dispatch preparation also
+defers catalog construction and persistence when every server already joined
+the required/eager connection barrier. Those connected servers keep their
+frozen first-request schemas; an unfinished catalog alone does not imply an
+unknown server catalog or expose an extra conditional search router.
+Embedded callers keep immediate background
 preparation by default. Factory-created attempt catalogs are detached immutable
 snapshots whose exact identity can reuse verification; deserialized catalogs
-still receive full checks. See [startup decisions and measurements](design/typing-turn-preparation.md).
+still receive full structure and digest checks. Gateway input/output validators
+compile together on the first call to a tool, before authorization or execution,
+against its preparation-time schema snapshot. Unused tools do not compile;
+schema compilation failures are retained for that tool, not argument-repair
+errors or a failure of every catalog entry. See [startup decisions and measurements](design/typing-turn-preparation.md).
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -2628,11 +2651,13 @@ The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
 Node for official Sigstore/TUF cryptography; package builds and packing stay on
 Bun. Signed split-source bundles survive failures as separate, hash-linked public
 provenance evidence. Diagnostic categories do not settle unknown registry writes.
-Canary packages prepack the complete cohort, retain write acknowledgements, then
-perform bounded strict read-only verification before producing Site pins.
-Post-write verification selects current tags and one immutable version manifest;
-each actual GET shares the original request quota, deadline and custody limits,
-including final complete-cohort qualification. Pre-write discovery is unchanged.
+Canary packages prepack the complete cohort and retain write acknowledgements in
+the credentialed `publish` job. npm accepts writes with 202 and processes them
+asynchronously, so a separate credential-free `confirm` job waits for every
+version with time-based backoff, rereads the complete cohort strictly, and only
+then produces Site pins. Re-running a failed `confirm` job resumes waiting without
+publishing. Verification selects current tags and one immutable version manifest;
+pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 For a completely acknowledged failed canary, the protected
 `reconcile-canary-publication.yml` controller can independently verify retained

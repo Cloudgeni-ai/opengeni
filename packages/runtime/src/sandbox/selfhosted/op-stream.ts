@@ -1133,10 +1133,18 @@ class OpConsumer {
           {
             $case: "opStart",
             opStart: {
-              op: { $case: "exec", exec },
+              // The remaining budget to the run's one fixed deadline, measured on
+              // this process's own clock: a retry never extends it.
+              op: {
+                $case: "exec",
+                exec: {
+                  ...exec,
+                  timeoutMs: deadlineAt > 0 ? Math.max(1, deadlineAt - Date.now()) : 0,
+                },
+              },
               windowBytes: String(this.windowBytes),
-              // Absolute epoch deadline (the runner's clock decides the actual
-              // budget; host clock skew shifts it — a known wire caveat).
+              // Legacy peers use the absolute field. A v2 delivery uses the
+              // relative exec budget from receiver token issuance instead.
               deadlineMs: absoluteDeadline,
               originId: this.deps.rpcSubject,
               connectionGeneration: startGeneration,
@@ -1170,6 +1178,7 @@ class OpConsumer {
         if (!(error instanceof SelfhostedControlError)) {
           throw error;
         }
+        if (error.detail.outcome_unknown === "true") throw error;
         // A PROTOCOL/UNSUPPORTED refusal of the START ITSELF means the runner
         // does not speak the required op-stream protocol. The op provably
         // never started, so surface a typed availability error without trying

@@ -155,6 +155,8 @@ struct World {
     refuse_guarantees: AtomicBool,
     /// Each VM started: its name and the memory limit it started under.
     started_limits: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each VM started: its name and the processor weight it started at.
+    started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
     /// Times a guest was asked to write its disks out.
@@ -261,6 +263,11 @@ impl Fake {
             .lock()
             .unwrap()
             .push((name.clone(), spec.memory_limit));
+        self.world
+            .started_weights
+            .lock()
+            .unwrap()
+            .push((name.clone(), spec.cpu_weight));
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
         }
@@ -922,6 +929,7 @@ impl Lab {
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
             agent_link: None,
+            processor_share: None,
         }
     }
 

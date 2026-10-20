@@ -151,6 +151,7 @@ export type TurnInputOptions = {
   codemodeContinuationNote?: string;
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
+  workspaceRecoveryNote?: string;
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
@@ -716,6 +717,7 @@ export async function turnInput(
     options.mcpAvailabilityNote,
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
+    options.workspaceRecoveryNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {

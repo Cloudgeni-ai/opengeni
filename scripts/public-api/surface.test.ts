@@ -469,6 +469,78 @@ describe("schema compatibility rules", () => {
     });
     expect(breakingIds(before, narrowed)).toEqual(["schema:Req:$.source"]);
   });
+
+  test("an inline union variant moved into a named schema breaks only when its shape breaks", () => {
+    const key = z.object({ type: z.literal("key"), key: z.string() });
+    const text = z.object({ type: z.literal("text"), value: z.string(), delay: z.number() });
+    const stricter = text.extend({ submit: z.boolean() });
+    const inline = (variant: z.ZodObject) =>
+      snapshot({
+        schemas: {
+          Action: {
+            io: ["input"],
+            shape: shapeOf(z.discriminatedUnion("type", [key, variant]), "input"),
+          },
+        },
+      });
+    const named = (variant: z.ZodObject) => {
+      const shape = { ...inline(text).schemas.Action!.shape };
+      for (const path of Object.keys(shape)) {
+        if (path.startsWith("$|type=text.")) delete shape[path];
+      }
+      shape["$|type=text"] = "ref(TextAction)";
+      return snapshot({
+        schemas: {
+          Action: { io: ["input"], shape },
+          TextAction: { io: ["input"], shape: shapeOf(variant, "input") },
+        },
+      });
+    };
+    expect(diffSnapshots(inline(text), named(text))).toEqual([
+      {
+        id: "schema:Action:$|type=text",
+        breaking: false,
+        message: "Action $|type=text: type changed object -> ref(TextAction) (compatible shape)",
+      },
+    ]);
+    // The reverse move, from a named schema back inline, is judged the same way.
+    expect(breakingIds(named(text), inline(text))).toEqual([]);
+    // A move that also changes the value is still reported, field by field.
+    expect(breakingIds(inline(text), named(stricter))).toContain("schema:Action:$|type=text");
+    expect(breakingIds(named(text), inline(stricter))).toContain("schema:Action:$|type=text");
+  });
+
+  test("a field widened into a union that keeps its previous value is additive", () => {
+    const action = shapeOf(z.object({ type: z.literal("click"), x: z.number() }), "input");
+    const request = (shape: Record<string, string>) =>
+      snapshot({
+        schemas: { Req: { io: ["input"], shape }, Action: { io: ["input"], shape: action } },
+      });
+    const before = request({ $: "object", "$.action": "ref(Action)!" });
+    const widened = request({
+      $: "object",
+      "$.action": 'union!=["0","type=batch"]',
+      "$.action|0": "ref(Action)",
+      "$.action|type=batch": "object",
+      "$.action|type=batch.type": 'const!=["\\"batch\\""]',
+      "$.action|type=batch.steps": "array!",
+      "$.action|type=batch.steps[]": "string",
+    });
+    expect(breakingIds(before, widened)).toEqual([]);
+    expect(diffSnapshots(before, widened).map((finding) => finding.message)).toEqual([
+      "Req $.action: type changed ref(Action) -> union (still accepts ref(Action))",
+      "Req $.action: values added: 0, type=batch",
+      "Req $.action|type=batch: field added",
+    ]);
+    // A union none of whose variants keeps the old value still breaks callers.
+    const replaced = request({
+      $: "object",
+      "$.action": 'union!=["a","b"]',
+      "$.action|a": "string",
+      "$.action|b": "number",
+    });
+    expect(breakingIds(before, replaced)).toEqual(["schema:Req:$.action"]);
+  });
 });
 
 describe("surface-level rules", () => {

@@ -229,9 +229,10 @@ export function workspaceMemberPermissionGroups(): PermissionGroup[] {
 
 /**
  * The default permission set for a newly-added workspace member: everything a
- * Viewer holds plus full collaborator access, minus the admin/management powers
- * (which an admin grants deliberately). Mirrors the server's named `member`
- * preset (migration 0555) exactly, order included.
+ * Viewer holds plus full teammate access (live control, terminal, file edits,
+ * own connections, Sandbox Environments, Connected Machine picking, artifacts),
+ * minus the settings/management powers an admin grants deliberately. Mirrors
+ * the server's named `member` preset (migration 0865) exactly, order included.
  */
 export const defaultWorkspaceMemberPermissions = new Set<string>([
   "workspace:read",
@@ -239,15 +240,20 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "sessions:read",
   "sessions:control",
   "stream:view",
+  "stream:control",
   "stream:acknowledge",
+  "terminal:attach",
+  "codemode:call",
   "files:upload",
   "files:read",
+  "files:write",
   "documents:manage",
   "documents:search",
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "github:use",
   "connections:read",
+  "connections:write",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -255,8 +261,11 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "variable-sets:use",
   "secrets:list",
   "secrets:write",
+  "mcp_servers:attach",
   "goals:manage",
   "rigs:use",
+  "rigs:manage",
+  "enrollments:read",
   "artifacts:read",
   "artifacts:publish",
 ]);

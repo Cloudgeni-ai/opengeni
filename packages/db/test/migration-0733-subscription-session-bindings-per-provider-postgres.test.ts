@@ -501,6 +501,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "runtime role cannot read the subscription plan catalog",
       // Nor the private-file lookup (0854).
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+      // Nor selected-workspace Slack bot access (0864).
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),

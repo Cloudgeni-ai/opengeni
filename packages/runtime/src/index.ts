@@ -105,6 +105,7 @@ import {
 } from "@opengeni/codemode";
 import {
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -435,6 +436,13 @@ import {
   installManagedCodemodeClient,
   loadManagedCodemodeClient,
   managedCodemodeClientDirectory,
+  type ManagedCodemodeClientDownload,
+} from "./sandbox/codemode-client";
+export {
+  loadManagedCodemodeClient,
+  managedCodemodeClientBytes,
+  managedCodemodeClientDigest,
+  type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
@@ -2347,6 +2355,9 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
+  // Signed, digest-addressed URL for the release's managed Codemode client so a
+  // fresh box fetches it in one command. Absent: the bytes are staged as before.
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   /**
    * Whether this attempt exposes the frozen Codemode catalog. Managed sandboxes
    * infer this from `codemodeTokenSeed`; Connected Machines set it explicitly
@@ -2793,6 +2804,7 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
+const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
 // A missing-title directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -2873,7 +2885,14 @@ export async function secretQuestionRejection(
       return `Question "${question.id}" saves to "Only me", but no person is acting in this run. Use saveTo "task" or "workspace" and call request_human_input again.`;
     }
     if (spec.vault && context.validateQuestionVault) {
-      const reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      let reason: string | null;
+      try {
+        reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      } catch (error) {
+        // This runs in a tool input guardrail, and a guardrail that throws fails
+        // the whole turn. A vault lookup that cannot complete is a tool error.
+        return `Question "${question.id}" names vault "${spec.vault}", which could not be checked, so nothing was asked. Omit vault to use the default vault for saveTo, or call request_human_input again. Error: ${exactErrorMessage(error)}`;
+      }
       if (reason) {
         return `Question "${question.id}" names vault "${spec.vault}": ${reason} Omit vault to use the default vault for saveTo, then call request_human_input again.`;
       }
@@ -2894,6 +2913,17 @@ export function mcpToolErrorOutput(error: unknown): {
   // carries the ready request_human_input call (never a value).
   if (isSecretReferenceError(error)) {
     return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+  }
+  if (error instanceof ToolGatewaySchemaCompilationError) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "The tool was not called because its input or output schema is invalid. Changing the arguments will not fix this. Use another tool or report the unavailable tool.",
+        },
+      ],
+    };
   }
   const text =
     invalidToolArgumentsText(error) ??
@@ -3294,6 +3324,7 @@ export function buildOpenGeniAgent(
       options.approvedToolCallId,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+    installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -3394,6 +3425,9 @@ export function buildOpenGeniAgent(
   if (options.codemodeTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentCodemodeTokenSeed.set(agent, options.codemodeTokenSeed);
     agentCodemodeTokenSessionId.set(agent, options.codemodeTokenSessionId!);
+    if (options.codemodeClientDownload) {
+      agentCodemodeClientDownload.set(agent, options.codemodeClientDownload);
+    }
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3424,6 +3458,7 @@ export function buildOpenGeniAgent(
     options.approvedToolCallId,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+  installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -3485,6 +3520,14 @@ function maybeInstallLazyToolTransport(
     options.agentConfig != null,
     options.toolRouterInHistory === true,
     options.startToolPreparation,
+    new Set(
+      mcpServers
+        .filter(
+          (server) =>
+            (server as MCPServer & { deferredPreparation?: boolean }).deferredPreparation === true,
+        )
+        .map((server) => mcpServerRegistryId(server)),
+    ),
   );
 }
 
@@ -3573,6 +3616,110 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
 function modelMcpSourceCallId(modelName: string): string | undefined {
   const identity = modelMcpCallIdentity.getStore();
   return identity?.modelName === modelName ? identity.callId : undefined;
+}
+
+const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
+
+/**
+ * Dynamic approval hooks installed by Opengeni's own approval wrappers. Only
+ * these run fallible preflight work (bindings, previews, policy prepare), so
+ * only these are contained. Every other tool keeps its original approval
+ * function identity: the SDK recognizes static policies by identity and
+ * handles, for example, malformed JSON differently for dynamic ones.
+ */
+const opengeniApprovalHooks = new WeakSet<object>();
+function opengeniApprovalHook<T extends object>(hook: T): T {
+  opengeniApprovalHooks.add(hook);
+  return hook;
+}
+
+/** Model-facing result for a call whose approval preflight failed. Nothing ran. */
+export function toolPreflightFailureOutput(error: unknown): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  const message = exactErrorMessage(error);
+  const bounded =
+    message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
+      ? `${message.slice(0, TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS)}…`
+      : message;
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text:
+          "The tool was not run: it failed while being prepared, before anything was executed, so no change was made. " +
+          `Error: ${bounded}`,
+      },
+    ],
+  };
+}
+
+/**
+ * Contain every error thrown while the model SDK asks a tool whether it needs
+ * approval. The SDK treats a throwing `needsApproval` as a fatal
+ * `ToolCallError` that ends the whole turn, and the per-tool MCP errorFunction
+ * only covers the invocation itself. Approval preflight runs policy lookups,
+ * connector bindings, review-context parsing and provider preview reads, any
+ * of which can fail because of model arguments or a transient dependency.
+ *
+ * Instead, the failure is remembered for that exact call id and the SDK is told
+ * no approval is needed; the matching `invoke` then returns the failure as an
+ * ordinary tool error without calling any inner wrapper, so the action never
+ * executes and the model can correct itself. A call without an id cannot be
+ * correlated and keeps the original behavior. A remembered failure is only
+ * cleared by its own invoke or by a later successful preflight of the same
+ * call: evicting it early would let a still-pending call fall through to
+ * execution. Entries live only as long as this agent instance (one turn).
+ *
+ * This must be installed last so it wraps every other approval wrapper, and is
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
+  const failures = new Map<string, unknown>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof needsApproval>[0],
+          parsedInput: Parameters<typeof needsApproval>[1],
+          callId: Parameters<typeof needsApproval>[2],
+        ) => {
+          try {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (callId) failures.delete(callId);
+            return required;
+          } catch (error) {
+            if (!callId) throw error;
+            failures.set(callId, error);
+            return false;
+          }
+        },
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && failures.has(callId)) {
+            const error = failures.get(callId);
+            failures.delete(callId);
+            return toolPreflightFailureOutput(error) as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installToolPreflightContainment(cloned);
+      return cloned;
+    };
+  }
 }
 
 /**
@@ -3683,37 +3830,39 @@ function installMcpApprovalPolicy(
       };
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return (
-              recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return (
+                recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
+              );
+            }
+            if (!callId) {
+              throw new Error("Connector action is missing its durable approval identity");
+            }
+            const preparation = await prepareConnectorReview(
+              connectorCall(callId, parsedInput),
+              connectorActionPolicy,
+              identity?.readReview,
             );
-          }
-          if (!callId) {
-            throw new Error("Connector action is missing its durable approval identity");
-          }
-          const preparation = await prepareConnectorReview(
-            connectorCall(callId, parsedInput),
-            connectorActionPolicy,
-            identity?.readReview,
-          );
-          preparations.set(callId, preparation);
-          if (preparation.managed && preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          // An explicit Allow is a decision, not an exemption from one of several floors.
-          const requiresApproval = preparation.managed
-            ? preparation.decision === "ask"
-            : recommendsApproval;
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+            preparations.set(callId, preparation);
+            if (preparation.managed && preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            // An explicit Allow is a decision, not an exemption from one of several floors.
+            const requiresApproval = preparation.managed
+              ? preparation.decision === "ask"
+              : recommendsApproval;
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           if (!connectorActionPolicy && !policy.connectorBacked) {
             throw new Error(
@@ -3806,40 +3955,42 @@ function installAttemptConnectorActionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return await originalNeedsApproval(runContext, parsedInput, callId);
-          }
-          if (!callId) {
-            throw new Error("Attempt connector action is missing its durable approval identity");
-          }
-          let call: ConnectorActionToolCall;
-          try {
-            call = binding.call(callId, parsedInput);
-          } catch (error) {
-            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
-            // Exact-resource and connection bindings are evaluated before the
-            // provider can run. A model can name a repository outside the
-            // accepted turn resources; that is an ordinary rejected tool call,
-            // not an Agents SDK lifecycle failure.
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const preparation = await connectorActionPolicy.prepare(call);
-          preparations.set(callId, preparation);
-          if (!preparation.managed || preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const requiresApproval = preparation.decision === "ask";
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return await originalNeedsApproval(runContext, parsedInput, callId);
+            }
+            if (!callId) {
+              throw new Error("Attempt connector action is missing its durable approval identity");
+            }
+            let call: ConnectorActionToolCall;
+            try {
+              call = binding.call(callId, parsedInput);
+            } catch (error) {
+              if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+              // Exact-resource and connection bindings are evaluated before the
+              // provider can run. A model can name a repository outside the
+              // accepted turn resources; that is an ordinary rejected tool call,
+              // not an Agents SDK lifecycle failure.
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const preparation = await connectorActionPolicy.prepare(call);
+            preparations.set(callId, preparation);
+            if (!preparation.managed || preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const requiresApproval = preparation.decision === "ask";
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           const callId = details?.toolCall?.callId;
           if (!callId) {
@@ -5485,7 +5636,12 @@ export async function prepareAgentTools(
         options.subjectId ?? "worker:mcp-model",
       )
     : null;
-  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
+  // Eager servers must connect before disclosure, but their complete execution
+  // catalog is still independent of the first model request. The same deferred
+  // lifecycle owns catalog work even when no server needs a deferred connection.
+  const exposesDeferredPreparation =
+    deferNonEager &&
+    (deferredEntries.length > 0 || options.deferredPreparationStart === "provider-dispatch");
   const closePublishedServers = async (): Promise<void> => {
     await localToolServer?.close().catch(() => undefined);
     await connectedEagerBestEffort?.close().catch(() => undefined);
@@ -5601,7 +5757,7 @@ export async function prepareAgentTools(
     }
   };
 
-  if (!deferNonEager || deferredEntries.length === 0) {
+  if (!exposesDeferredPreparation) {
     return await completePreparation();
   }
 
@@ -9503,6 +9659,7 @@ async function runAgentStreamInternal(
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
     const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
     const ownedCodemodeTokenSeed = codemodeTokenSeedForAgent(agent);
+    const ownedCodemodeClientDownload = agentCodemodeClientDownload.get(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
       // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -9529,6 +9686,9 @@ async function runAgentStreamInternal(
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
       ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
+      ...(ownedCodemodeClientDownload
+        ? { codemodeClientDownload: ownedCodemodeClientDownload }
+        : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
@@ -10301,6 +10461,7 @@ export async function runOwnedSandboxSetup(
     gitTokenSeedOverride?: string;
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
     codemodeTokenSeedOverride?: string;
+    codemodeClientDownloadOverride?: ManagedCodemodeClientDownload;
     commandRunner?: SandboxLifecycleCommandRunner;
     /** Durable host coordinator for immutable rig setup on one exact managed
      * sandbox. Turn-private hooks always run after this callback returns. */
@@ -10332,6 +10493,8 @@ export async function runOwnedSandboxSetup(
   const ownedGitCredentialBindings =
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
   const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
+  const ownedCodemodeClientDownload =
+    opts.codemodeClientDownloadOverride ?? agentCodemodeClientDownload.get(agent);
   const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedRigSetupHooks = sandboxRigSetupHooksForAgent(agent);
@@ -10352,6 +10515,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
     ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
+    ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -10587,76 +10751,127 @@ async function materializeSandboxFileDownloadsUnscoped(
   if (normalizedDownloads.length === 0) {
     return { failures: [] };
   }
-  const failures: SandboxFileDownloadFailure[] = [];
   const workspaceRoot = sandboxSessionWorkspaceRoot(session);
-  for (const download of normalizedDownloads) {
-    const targetRelativePath = sandboxDownloadRelativePath(download);
-    const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
-    const payload = {
-      fileId: download.fileId,
-      path: targetPath,
-      sizeBytes: download.sizeBytes ?? null,
-      expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
-    };
+  // Each download is one sandbox command whose cost is dominated by the
+  // provider's per-command round trip, not by the transfer. Run independent
+  // targets concurrently; downloads that share a target path stay ordered in
+  // their own lane so the last one written is still the last one listed.
+  // Failures are reported in input order regardless of completion order.
+  const failuresByIndex: (SandboxFileDownloadFailure | undefined)[] = [];
+  const lanes = new Map<string, number[]>();
+  normalizedDownloads.forEach((download, index) => {
+    const key = sandboxDownloadRelativePath(download);
+    const lane = lanes.get(key);
+    if (lane) lane.push(index);
+    else lanes.set(key, [index]);
+  });
+  const pending = [...lanes.values()];
+  let cancellation: { error: unknown } | undefined;
+  const runLanes = async (): Promise<void> => {
+    for (let lane = pending.shift(); lane && !cancellation; lane = pending.shift()) {
+      for (const index of lane) {
+        if (cancellation) return;
+        try {
+          failuresByIndex[index] = await materializeOneSandboxFileDownload(
+            session,
+            normalizedDownloads[index]!,
+            workspaceRoot,
+            context,
+          );
+        } catch (error) {
+          cancellation ??= { error };
+          return;
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SANDBOX_FILE_DOWNLOAD_CONCURRENCY, lanes.size) }, runLanes),
+  );
+  if (cancellation) throw cancellation.error;
+  return {
+    failures: failuresByIndex.filter(
+      (failure): failure is SandboxFileDownloadFailure => failure !== undefined,
+    ),
+  };
+}
+
+const SANDBOX_FILE_DOWNLOAD_CONCURRENCY = 6;
+
+/** Download one file into the sandbox. Resolves to its failure (or undefined on
+ * success); rejects only for turn cancellation or a runtime-event publication
+ * failure, either of which aborts the whole batch as it did when sequential. */
+async function materializeOneSandboxFileDownload(
+  session: SandboxSessionLike,
+  download: SandboxFileDownload,
+  workspaceRoot: string,
+  context: SandboxFileDownloadMaterializationContext,
+): Promise<SandboxFileDownloadFailure | undefined> {
+  const targetRelativePath = sandboxDownloadRelativePath(download);
+  const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
+  const payload = {
+    fileId: download.fileId,
+    path: targetPath,
+    sizeBytes: download.sizeBytes ?? null,
+    expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload: { name: "file-resource-download", ...payload },
+  });
+  if (!session.exec && !session.execCommand) {
+    const failure = sandboxFileDownloadFailure(
+      download,
+      targetPath,
+      "Sandbox file download materialization requires command execution support",
+    );
     await context.onRuntimeEvent?.({
-      type: "sandbox.operation.started",
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+      },
+    });
+    return failure;
+  }
+  let result: unknown;
+  try {
+    result = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: sandboxFileDownloadCommand(download, targetRelativePath),
+        workdir: workspaceRoot,
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 20_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
       payload: { name: "file-resource-download", ...payload },
     });
-    if (!session.exec && !session.execCommand) {
-      const failure = sandboxFileDownloadFailure(
-        download,
-        targetPath,
-        "Sandbox file download materialization requires command execution support",
-      );
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-        },
-      });
-      continue;
-    }
-    let result: unknown;
-    try {
-      result = await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
-          workdir: workspaceRoot,
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 20_000,
-        },
-        context.commandRunner,
-      );
-      assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.completed",
-        payload: { name: "file-resource-download", ...payload },
-      });
-    } catch (error) {
-      if (error instanceof TurnSandboxCommandCancelledError) throw error;
-      const failure = explainConnectedMachineRootDownloadFailure(
-        sandboxFileDownloadFailure(download, targetPath, error, result),
-        { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
-      );
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-          ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
-          ...(failure.output ? { output: failure.output } : {}),
-        },
-      });
-    }
+    return undefined;
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    const failure = explainConnectedMachineRootDownloadFailure(
+      sandboxFileDownloadFailure(download, targetPath, error, result),
+      { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
+    );
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+        ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+        ...(failure.output ? { output: failure.output } : {}),
+      },
+    });
+    return failure;
   }
-  return { failures };
 }
 
 function sandboxFileDownloadFailure(
@@ -11117,6 +11332,7 @@ export type SandboxLifecycleHookContext = {
   gitCredentialBindings?: GitCredentialBindingSeed[];
   codemodeTokenSeed?: string;
   codemodeTokenFile?: string;
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -11157,6 +11373,9 @@ export type SandboxLifecycleHook = {
   id: string;
   phase: SandboxLifecycleHookPhase;
   shouldRun?: (context: SandboxLifecycleHookContext) => boolean;
+  /** The hook neither depends on nor affects any other hook, so it may run
+   * concurrently with them. Hooks without this flag keep their relative order. */
+  independent?: boolean;
   run: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>;
 };
 
@@ -11210,10 +11429,54 @@ export async function runBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
-    await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+  await runApplicableBeforeAgentStartHooks(
+    session,
+    applicableBeforeAgentStartHooks(hooks, context),
+    context,
+  );
+}
+
+/**
+ * Each hook costs at least one provider round trip, so independent hooks start
+ * at once and overlap the ordered ones; ordered hooks still run one after
+ * another and stop at the first failure. Setup waits for every started hook,
+ * then reports the failure of the earliest hook in declaration order, so the
+ * error does not depend on which round trip happened to finish first.
+ */
+async function runApplicableBeforeAgentStartHooks(
+  session: SandboxSessionLike,
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
+    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
       hook.run(session, context),
     );
+  if (!hooks.some((hook) => hook.independent)) {
+    for (const hook of hooks) await runHook(hook);
+    return;
+  }
+  const failures = new Map<SandboxLifecycleHook, unknown>();
+  const record = (hook: SandboxLifecycleHook) => (error: unknown) => {
+    failures.set(hook, error);
+  };
+  const independent = hooks
+    .filter((hook) => hook.independent)
+    .map((hook) => runHook(hook).catch(record(hook)));
+  const ordered = (async () => {
+    for (const hook of hooks) {
+      if (hook.independent) continue;
+      try {
+        await runHook(hook);
+      } catch (error) {
+        record(hook)(error);
+        return;
+      }
+    }
+  })();
+  await Promise.all([...independent, ordered]);
+  for (const hook of hooks) {
+    if (failures.has(hook)) throw failures.get(hook);
   }
 }
 
@@ -11229,11 +11492,7 @@ export function withSandboxLifecycleHooks(
   const seen = new WeakSet<object>();
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
-      for (const hook of beforeAgentStartHooks) {
-        await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
-          hook.run(session, context),
-        );
-      }
+      await runApplicableBeforeAgentStartHooks(session, beforeAgentStartHooks, context);
       seen.add(session);
     }
     return session;
@@ -11306,6 +11565,7 @@ export function sandboxArtifactRuntimeDoctorHooks(
     {
       id: "artifact-runtime-doctor",
       phase: "beforeAgentStart",
+      independent: true,
       run: async (session, context) => {
         const result = await runSandboxLifecycleCommand(
           session,
@@ -11365,6 +11625,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
               {
                 id: "codemode-client",
                 phase: "beforeAgentStart" as const,
+                independent: true,
                 run: runManagedCodemodeClientHook,
               },
             ]
@@ -12891,6 +13152,8 @@ export async function runManagedCodemodeClientHook(
           context.commandRunner,
         ),
       context.runAs,
+      "/workspace",
+      context.codemodeClientDownload,
     ),
   );
 }

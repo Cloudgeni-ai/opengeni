@@ -262,7 +262,16 @@ export function withModelTransportObservation<T>(
   observe: (transport: ModelRequestTransport) => void,
   fn: () => T,
 ): T {
-  return dispatchObservation.run(observe, fn);
+  const previous = dispatchObservation.getStore();
+  return dispatchObservation.run((transport) => {
+    for (const observer of [previous, observe]) {
+      try {
+        observer?.(transport);
+      } catch {
+        /* Diagnostics never gate dispatch. */
+      }
+    }
+  }, fn);
 }
 
 /** Preserve timeout classification while retaining the selected socket route. */
@@ -623,9 +632,15 @@ export function responsesTransport(
   const createSocket =
     options.createSocket === undefined ? nodeWebSocketFactory() : options.createSocket;
   if (!createSocket) {
-    return Object.assign((input: string | URL | Request, init?: RequestInit) => http(input, init), {
-      warm: () => undefined,
-    });
+    return Object.assign(
+      (input: string | URL | Request, init?: RequestInit) => {
+        dispatchObservation.getStore()?.({ kind: "http", reason: "unavailable" });
+        return http(input, init);
+      },
+      {
+        warm: () => undefined,
+      },
+    );
   }
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
@@ -879,6 +894,7 @@ export function responsesTransport(
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body;
     if (!url || method !== "POST" || !endpoint.url.test(url)) {
+      dispatchObservation.getStore()?.({ kind: "http", reason: "not_eligible" });
       return await http(input, init);
     }
     const turn = responsesConversation.getStore();

@@ -49,6 +49,9 @@ pub struct Capacity {
     /// Memory in MiB it can still promise to sandboxes that wake, beyond
     /// what it keeps spare.
     pub free_memory_mib: u64,
+    /// Processor time in millicores it can still promise to sandboxes
+    /// that wake; `None` when it does not say, so it is not checked.
+    pub free_cpu_millis: Option<u64>,
     /// Disk in MiB it can still promise.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
@@ -64,6 +67,8 @@ pub struct Demand {
     pub memory_mib: u64,
     /// All its guest memory in MiB, which a host on huge pages reserves.
     pub memory_max_mib: u64,
+    /// Processor time in millicores it is guaranteed while awake.
+    pub cpu_millis: u64,
     /// Disk in MiB it needs.
     pub disk_mib: u64,
     /// The hosts it would rather go to.
@@ -283,6 +288,9 @@ impl Fleet {
             capacity.free_memory_mib = capacity
                 .free_memory_mib
                 .saturating_sub(demand.memory_on(entry.info));
+            if let Some(free) = capacity.free_cpu_millis.as_mut() {
+                *free = free.saturating_sub(demand.cpu_millis);
+            }
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
@@ -303,6 +311,10 @@ impl Fleet {
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
                     && entry.capacity.free_memory_mib >= demand.memory_on(entry.info)
+                    && entry
+                        .capacity
+                        .free_cpu_millis
+                        .is_none_or(|free| free >= demand.cpu_millis)
                     && entry.capacity.free_disk_mib >= demand.disk_mib
             })
         };

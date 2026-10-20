@@ -92,6 +92,12 @@ pub struct HostConfig {
     /// The host's agent links, for sandboxes that run Opengeni's agent
     /// (see [`link`](super::link)). `None` refuses their guests' connections.
     pub agent_link: Option<compute_link::Hub>,
+    /// The processor share of the VMs' group, which the agent reads again
+    /// every few seconds, setting the group's weight and the processor
+    /// time the host guarantees anew as the groups beside it change (see
+    /// [`crate::cpu_share`]). `None` leaves both as they are, as in tests
+    /// with fake VMs.
+    pub processor_share: Option<crate::cpu_share::ProcessorShare>,
 }
 
 impl HostConfig {

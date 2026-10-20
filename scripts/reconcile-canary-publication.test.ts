@@ -26,6 +26,7 @@ import {
 import {
   admitController,
   admitFailedPublisher,
+  holdReconciliation,
   reconcileAcknowledgedCanaries,
   RecoveryGets,
   RecoveryStore,
@@ -316,7 +317,7 @@ function providerFixture() {
     html_url: `${REPOSITORY_URL}/actions/runs/123`,
   };
   const jobs = {
-    total_count: 1,
+    total_count: 2,
     jobs: [
       {
         name: "Publish canary.N",
@@ -329,10 +330,18 @@ function providerFixture() {
           { name: "Set up job", conclusion: "success" },
           { name: "Verify exact source", conclusion: "success" },
           { name: "Publish canary versions", conclusion: "failure" },
-          { name: "Retain exact Site package pins for this deployment", conclusion: "skipped" },
           { name: "Retain bounded publication and registry receipts", conclusion: "success" },
           { name: "Complete job", conclusion: "success" },
         ],
+      },
+      {
+        name: "Confirm canary.N registry receipts",
+        status: "completed",
+        conclusion: "skipped",
+        run_id: 123,
+        run_attempt: 1,
+        head_sha: origin.source,
+        steps: [] as { name: string; conclusion: string }[],
       },
     ],
   };
@@ -341,7 +350,7 @@ function providerFixture() {
     artifacts: [
       {
         id: 10,
-        name: `canary-publication-receipts-${origin.source}`,
+        name: `canary-publication-receipts-${origin.source}-1`,
         expired: false,
         digest: `sha256:${"a".repeat(64)}`,
         size_in_bytes: 10,
@@ -402,6 +411,54 @@ describe("protected recovery admission", () => {
   test("provider confirms exact failed origin and absent Site artifact", () => {
     const f = providerFixture();
     expect(admitFailedPublisher(f.run, f.jobs, f.artifacts, origin).id).toBe(10);
+    f.jobs.jobs.pop();
+    f.jobs.total_count = 1;
+    expect(admitFailedPublisher(f.run, f.jobs, f.artifacts, origin).id).toBe(10);
+  });
+  test("selects the exact attempt's receipts when a re-run retained another attempt's", () => {
+    const f = providerFixture();
+    f.artifacts.artifacts.unshift({
+      ...structuredClone(f.artifacts.artifacts[0]!),
+      id: 9,
+      name: `canary-publication-receipts-${origin.source}-2`,
+    });
+    f.artifacts.total_count = 2;
+    expect(admitFailedPublisher(f.run, f.jobs, f.artifacts, origin).id).toBe(10);
+    f.artifacts.artifacts.pop();
+    f.artifacts.total_count = 1;
+    expect(() => admitFailedPublisher(f.run, f.jobs, f.artifacts, origin)).toThrow(
+      `Publisher receipt artifact canary-publication-receipts-${origin.source}-1 is absent`,
+    );
+  });
+  test("a failed confirmation job is resumed by re-running it, not by reconciliation", () => {
+    const f = providerFixture();
+    f.jobs.jobs[0]!.conclusion = "success";
+    f.jobs.jobs[1]!.conclusion = "failure";
+    expect(() => admitFailedPublisher(f.run, f.jobs, f.artifacts, origin)).toThrow(
+      "re-run that failed job in the publisher run",
+    );
+  });
+  test("a hold retains and reports the exact reason", () => {
+    const f = providerFixture();
+    f.artifacts.artifacts[0]!.name = `canary-publication-receipts-${origin.source}`;
+    const store = new RecoveryStore(join(directory(), "receipts"), controller, origin);
+    let failure: unknown;
+    try {
+      admitFailedPublisher(f.run, f.jobs, f.artifacts, origin);
+    } catch (error) {
+      failure = error;
+    }
+    const held = holdReconciliation(store, failure);
+    expect(held.message).toContain(
+      `Canary reconciliation held: Publisher receipt artifact canary-publication-receipts-${origin.source}-1 is absent`,
+    );
+    const records = readdirSync(store.directory).map((file) =>
+      JSON.parse(readFileSync(join(store.directory, file), "utf8")),
+    );
+    expect(records.find((record) => record.kind === "RECONCILIATION_HELD")).toMatchObject({
+      reason: `Publisher receipt artifact canary-publication-receipts-${origin.source}-1 is absent`,
+      noReplay: true,
+    });
   });
   for (const [key, value] of Object.entries({
     conclusion: "success",
@@ -848,7 +905,7 @@ describe("bounded GET-only recovery", () => {
     "final-integrity",
     "signature",
     "null",
-    "quota",
+    "hidden",
   ] as const) {
     test(`refuses ${mode} without emitting pins`, async () => {
       const s = setup();
@@ -857,12 +914,15 @@ describe("bounded GET-only recovery", () => {
       const request = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input.toString();
         if (url.includes("?write=true") && !url.includes("/dist-tags")) versionReads++;
+        if (mode === "hidden" && url.includes("?write=true") && !url.includes("/dist-tags"))
+          return new Response("{}", { status: 404 });
         const response = await s.request(input, init);
         if (!url.includes("?write=true")) return response;
         const value = (await response.json()) as JsonObject;
         if (url.includes("/dist-tags")) {
           if (mode === "latest") value.latest = "9.9.9";
-          if (mode === "canary") value.canary = "1.0.2-canary.999001";
+          // An older tag means npm has not applied this publication's tag yet.
+          if (mode === "canary") value.canary = "1.0.2-canary.122001";
         } else {
           if (mode === "null") return Response.json(null);
           if (mode === "final-integrity" && versionReads > 4)
@@ -882,7 +942,6 @@ describe("bounded GET-only recovery", () => {
           request,
           verify: mode === "signature" ? async () => [] : s.verify,
           poll: {
-            maxReads: mode === "quota" ? 8 : 256,
             now: () => elapsed,
             sleep: async (ms) => {
               elapsed += ms;
@@ -933,7 +992,11 @@ describe("bounded GET-only recovery", () => {
       const gets = new RecoveryGets(s.store, request, "synthetic", () => performance.now(), 20);
       await expect(
         gets.get("https://registry.npmjs.org/example", "first", "selected", 100),
-      ).rejects.toThrow("no retry");
+      ).rejects.toThrow(
+        phase === "headers"
+          ? "Recovery GET first failed (request timed out); no retry"
+          : "Recovery GET first failed (response body could not be retained, HTTP 200); no retry",
+      );
       await expect(
         gets.get("https://registry.npmjs.org/example", "second", "selected", 100),
       ).rejects.toThrow("admission closed");
@@ -945,6 +1008,29 @@ describe("bounded GET-only recovery", () => {
       }
     });
   }
+  test("an unexpected status names the request and status without exposing the URL", async () => {
+    const s = setup();
+    const gets = new RecoveryGets(
+      s.store,
+      async () => new Response("missing", { status: 404 }),
+      "synthetic-token",
+    );
+    await expect(
+      gets.get(
+        `https://api.github.com/repos/${REPOSITORY}/actions/runs/1`,
+        "publisher-run",
+        "provider",
+        100,
+      ),
+    ).rejects.toThrow(
+      "Recovery GET publisher-run failed (GET returned unsupported status, HTTP 404); no retry",
+    );
+    const failed = readdirSync(s.store.directory)
+      .filter((p) => p.endsWith(".json"))
+      .map((p) => JSON.parse(readFileSync(join(s.store.directory, p), "utf8")))
+      .find((record) => record.kind === "GET_FAILED");
+    expect(failed).toMatchObject({ label: "publisher-run", stage: "admission", status: 404 });
+  });
   test("provider ZIP request accepts JSON before an uncredentialed binary redirect", async () => {
     const s = setup(),
       observed: { url: string; init?: RequestInit | undefined }[] = [];

@@ -93,7 +93,9 @@ describe("Slack installation binding browser acceptance", () => {
       expect((await settings.textContent()) ?? "").not.toContain(workspaceId);
       // Healthy: Reconnect is a secondary action in the page's ⋯ menu, and it is available.
       expect(await settings.getByRole("button", { name: "Reconnect" }).count()).toBe(0);
-      await settings.getByRole("button", { name: "More actions for Slack", exact: true }).click();
+      await settings
+        .getByRole("button", { name: "More actions for Slack Binding Team", exact: true })
+        .click();
       const reconnectItem = page.getByRole("menuitem", { name: "Reconnect", exact: true });
       await reconnectItem.waitFor();
       expect(await reconnectItem.getAttribute("aria-disabled")).toBeNull();
@@ -130,11 +132,21 @@ async function openSlackSettings(page: Page, chip: string) {
     .getByRole("button", { name: healthy ? "Slack" : `Slack ${chip}`, exact: true });
   await row.waitFor({ state: "visible", timeout: 15_000 });
   await row.click();
-  // The connection opens as its own Capabilities page.
-  const settings = page.locator("[data-capability-page]");
-  await settings.waitFor({ state: "visible", timeout: 15_000 });
-  expect(await settings.locator("h1").textContent()).toBe("Slack");
+  // Slack opens as one page listing its bot workspaces and personal accounts.
+  const slack = page.locator("[data-capability-page]");
+  await slack.waitFor({ state: "visible", timeout: 15_000 });
+  expect(await slack.locator("h1").textContent()).toBe("Slack");
   expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
+  // Each bot workspace opens as its own page, named for the Slack team.
+  const bot = slack
+    .getByRole("list", { name: "Slack bot workspaces", exact: true })
+    .getByRole("button", { name: /^Slack Binding Team/ });
+  await bot.waitFor({ state: "visible", timeout: 15_000 });
+  await bot.click();
+  const settings = page.locator("[data-capability-page]");
+  await page
+    .locator("[data-capability-page] h1", { hasText: "Slack Binding Team" })
+    .waitFor({ state: "visible", timeout: 15_000 });
   // A healthy connection carries no badge in the header; attention does.
   const headerBadge = settings.locator(
     '[data-slot="detail-page-header"] [data-slot="status-badge"]',
@@ -234,6 +246,12 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
       return json({
         bindings: state.bindingState ? [slackBinding(state.bindingState)] : [],
+      });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/available`) {
+      return json({
+        connections: [slackConnection(state.connectionStatus)],
+        organizationSharedConnectionIds: [],
       });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`) {

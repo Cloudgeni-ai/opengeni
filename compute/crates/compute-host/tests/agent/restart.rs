@@ -1,15 +1,23 @@
 //! Agent restarts and removal: VMs taken back, ids blocked, generations
 //! fenced, teardowns ordered.
 
-use std::sync::atomic::Ordering;
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use compute_core::HostPolicy;
+use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
     SleepConfig,
 };
+use compute_host::{
+    Archive, Claimed, Directory, FetchInto, FetchedMemory, Owned, OwnerEpoch, Receipt, SavedFiles,
+    Stamp, Store,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, vm_name};
@@ -520,6 +528,210 @@ async fn a_vm_that_cannot_be_checked_is_left_running() {
     assert_eq!(reply, Reply::Done);
     assert!(!lab.world.live.lock().unwrap().contains(&vm_name(sandbox)));
     lab.assert_clean();
+}
+
+/// A VM the restarted agent cannot take back books all its processors,
+/// however little its sandbox asks for: the agent that started it set its
+/// weight, which may stand for any request up to them, such as all of
+/// them before requests had a smaller default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_not_taken_back_books_all_its_processors() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::new(Delays::default(), policy).await;
+    let sandbox = id(44);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
+    assert_eq!(
+        reserved(&lab.status().await),
+        100,
+        "one vCPU at the default"
+    );
+    let (root, world) = lab.stop().await;
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+
+    let lab = Lab::start(root, world, Delays::default(), policy).await;
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert_eq!(reserved(&status), 1000, "{status:?}");
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.wait_until("its VM's processors to come back", |status| {
+        reserved(status) == 0
+    })
+    .await;
+    lab.assert_clean();
+}
+
+/// A removal gives its VM's processors back as soon as the VM has ended:
+/// while the store is still deleting its copy, and when that then fails.
+/// Only its id stays blocked, until removing it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_gives_its_vms_processors_back_once_the_vm_ends() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let root = Lab::root();
+    let shelf = root.join("shelf");
+    let refusing = Arc::new(AtomicBool::new(false));
+    let deletes = Arc::new(Semaphore::new(0));
+    let store = || Undeletable {
+        inner: Directory::new(&shelf),
+        refusing: Arc::clone(&refusing),
+        deletes: Arc::clone(&deletes),
+    };
+    let lab = Lab::start_stored_configured(root, Arc::default(), store(), |config| {
+        config.policy = policy;
+    })
+    .await;
+    let sandbox = id(48);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let (root, world) = lab.stop().await;
+    // Not taken back, it books all its processors.
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+    let lab = Lab::start_stored_configured(root, world, store(), |config| {
+        config.policy = policy;
+    })
+    .await;
+    let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
+    assert_eq!(reserved(&lab.status().await), 1000);
+
+    // The store holds the delete, and refuses it once let go.
+    refusing.store(true, Ordering::SeqCst);
+    let remove = Request::Remove {
+        id: sandbox,
+        generation: None,
+    };
+    let removing = tokio::spawn({
+        let (client, remove) = (lab.client.clone(), remove.clone());
+        async move { client.call(&remove).await.unwrap() }
+    });
+    lab.wait_until("its VM's processors to come back", |status| {
+        reserved(status) == 0
+    })
+    .await;
+    assert!(
+        !lab.world.live.lock().unwrap().contains(&vm_name(sandbox)),
+        "its VM ended"
+    );
+    assert!(!removing.is_finished(), "the delete is still held");
+    // They are free for a sandbox that asks for most of the host.
+    let config = SandboxConfig {
+        image: None,
+        vcpus: 1,
+        memory_mib: 256,
+        memory_request_mib: None,
+        cpu_request_millis: Some(1000),
+        sleep: NEVER,
+        link: None,
+    };
+    let other = id(49);
+    let reply = lab
+        .client
+        .call(&Request::Create { id: other, config })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    assert_eq!(lab.run(other, &["set awake", "get"]).await, ["ok", "awake"]);
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
+
+    deletes.add_permits(1);
+    let reply = removing.await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    assert_eq!(lab.status().await.blocked.len(), 1, "its id stays blocked");
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
+
+    refusing.store(false, Ordering::SeqCst);
+    deletes.add_permits(1);
+    assert_eq!(lab.client.call(&remove).await.unwrap(), Reply::Done);
+    assert_eq!(lab.status().await.blocked.len(), 0);
+    assert_eq!(reserved(&lab.status().await), 1000, "the new sandbox's");
+    lab.assert_clean();
+}
+
+/// A store whose deletes each wait for a permit from `deletes`, as a slow
+/// one's take their time, and then fail while `refusing` is set, as one
+/// out of reach does.
+struct Undeletable {
+    inner: Directory,
+    refusing: Arc<AtomicBool>,
+    deletes: Arc<Semaphore>,
+}
+
+impl Store for Undeletable {
+    fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
+        self.inner.archive(id, save, files, cancel)
+    }
+
+    fn verify(
+        &self,
+        id: Id,
+        receipt: &Receipt,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send {
+        self.inner.verify(id, receipt)
+    }
+
+    fn fetch(
+        &self,
+        id: Id,
+        into: &FetchInto,
+    ) -> impl Future<Output = Result<FetchedMemory, EngineError>> + Send {
+        self.inner.fetch(id, into)
+    }
+
+    fn delete(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
+        let (refusing, permits) = (Arc::clone(&self.refusing), Arc::clone(&self.deletes));
+        let deleting = self.inner.delete(id, own);
+        async move {
+            permits.acquire().await.expect("never closed").forget();
+            if refusing.load(Ordering::SeqCst) {
+                return Err(EngineError::new(
+                    ErrorKind::Transient,
+                    "delete",
+                    "the store is out of reach",
+                ));
+            }
+            deleting.await
+        }
+    }
+
+    fn claim(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
+        self.inner.claim(id, own)
+    }
+
+    fn forget_memory(
+        &self,
+        id: Id,
+        change: Stamp,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
+        self.inner.forget_memory(id, change)
+    }
 }
 
 /// A VM that died is torn down before its replacement starts, however long

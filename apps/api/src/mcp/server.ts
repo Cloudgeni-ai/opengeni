@@ -3537,7 +3537,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),

@@ -509,6 +509,7 @@ export type {
 } from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -1298,6 +1299,7 @@ export type {
   SessionControlResponse,
   SessionRetryRequest,
   SandboxRecoverySelection,
+  SandboxRecoveryTarget,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   SandboxRecoveryResponse,

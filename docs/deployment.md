@@ -1957,6 +1957,11 @@ and accepts its own commit or a normally merged ancestor with successful exact-s
 main CI. For an ancestor, its controller and package source remain separate and
 the signed provenance names both; the run's head SHA is not the package source.
 Select the source-named artifact from the successful canonical publisher run.
+The artifact is uploaded by the run's credential-free `confirm` job once npm serves
+every accepted version. npm processes accepted writes asynchronously, sometimes for
+more than 18 minutes; if `confirm` fails because a version is still invisible after
+its 30-minute window, re-run that failed job. It publishes nothing and completes
+the same run.
 Environment approval and ordinary image/CI/deployment checks remain mandatory.
 Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
 reconciliation lane; stop for reviewed recovery rather than relabel or replay them.

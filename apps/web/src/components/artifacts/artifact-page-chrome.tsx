@@ -62,7 +62,8 @@ export const ARTIFACT_DETAIL_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0"
 export function useArtifactFullView(): [boolean, (fullView: boolean) => void] {
   const navigate = useNavigate();
   const search: ArtifactReturnSearch = useSearch({ strict: false });
-  const fullView = search.browse !== true && search.view === undefined;
+  // A link to one of a Site's tabs (Settings, Versions…) lands on its page.
+  const fullView = search.browse !== true && search.view === undefined && search.tab === undefined;
   const setFullView = (next: boolean) =>
     void navigate({
       to: ".",

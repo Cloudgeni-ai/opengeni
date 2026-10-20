@@ -6543,6 +6543,19 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+      "sdk": [
+        "OpenGeniClient.duplicateWorkspaceArtifact"
+      ],
+      "request": [
+        "DuplicateWorkspaceArtifactRequest"
+      ],
+      "response": [
+        "WorkspaceArtifactMutationResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
       "sdk": [
@@ -9836,6 +9849,7 @@
       "sandbox.operation.completed",
       "sandbox.operation.failed",
       "sandbox.operation.started",
+      "sandbox.recovery.selected",
       "session.agent.updated",
       "session.command.backgrounded",
       "session.command.finished",
@@ -15447,6 +15461,16 @@
         "$.note": "string!",
         "$.quote": "string!",
         "$.source": "ref(TimelineAnnotationSource)!"
+      }
+    },
+    "DuplicateWorkspaceArtifactRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.idempotencyKey": "string!",
+        "$.title": "string?"
       }
     },
     "EditSessionQueueItemRequest": {
@@ -23230,9 +23254,13 @@
         "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
         "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
+        "$.freshWorkspaceAvailable": "boolean?",
+        "$.groupSessionCount": "integer?",
         "$.operationId": "string! null",
         "$.reason": "string! null",
+        "$.retryAvailable": "boolean?",
         "$.status": "enum!=[\"\\\"blocked\\\"\",\"\\\"consent_accepted\\\"\",\"\\\"eligible\\\"\",\"\\\"restored\\\"\",\"\\\"restoring\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.target": "ref(SandboxRecoveryTarget)?",
         "$.version": "const!=[\"1\"]"
       }
     },
@@ -23241,10 +23269,20 @@
         "input"
       ],
       "shape": {
-        "$": "object",
-        "$.acceptHistoricalCheckpoint": "const!=[\"true\"]",
-        "$.operationId": "string!",
-        "$.selection": "ref(SandboxRecoverySelection)!"
+        "$": "union=[\"acceptHistoricalCheckpoint=true\",\"action=continue_fresh\",\"action=retry\"]",
+        "$|acceptHistoricalCheckpoint=true": "object",
+        "$|acceptHistoricalCheckpoint=true.acceptHistoricalCheckpoint": "const!=[\"true\"]",
+        "$|acceptHistoricalCheckpoint=true.operationId": "string!",
+        "$|acceptHistoricalCheckpoint=true.selection": "ref(SandboxRecoverySelection)!",
+        "$|action=retry": "object",
+        "$|action=retry.action": "const!=[\"\\\"retry\\\"\"]",
+        "$|action=retry.operationId": "string!",
+        "$|action=retry.target": "ref(SandboxRecoveryTarget)!",
+        "$|action=continue_fresh": "object",
+        "$|action=continue_fresh.acceptEmptyWorkspace": "const!=[\"true\"]",
+        "$|action=continue_fresh.action": "const!=[\"\\\"continue_fresh\\\"\"]",
+        "$|action=continue_fresh.operationId": "string!",
+        "$|action=continue_fresh.target": "ref(SandboxRecoveryTarget)!"
       }
     },
     "SandboxRecoveryResponse": {
@@ -23276,6 +23314,26 @@
         "$.sandboxGroupId": "string!",
         "$.sessionId": "string!",
         "$.version": "const!=[\"1\"]",
+        "$.workspaceGeneration": "integer!"
+      }
+    },
+    "SandboxRecoveryTarget": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveGeneration": "integer! null",
+        "$.authorityEpoch": "integer!",
+        "$.leaseEpoch": "integer!",
+        "$.leaseId": "string!",
+        "$.restoreCompletedAt": "string! null",
+        "$.restoreStatus": "string!",
+        "$.revision": "string! null",
+        "$.routeEpoch": "integer!",
+        "$.sandboxGroupId": "string!",
+        "$.sessionId": "string!",
         "$.workspaceGeneration": "integer!"
       }
     },
@@ -24170,7 +24228,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -30934,6 +30992,7 @@
       "DocumentStatus": "type",
       "DocumentVisibility": "type",
       "DraftTimelineAnnotation": "type",
+      "DuplicateWorkspaceArtifactRequest": "type",
       "EditableArtifactListResource": "type",
       "EditableArtifactMaterializationFormat": "type",
       "EditableArtifactMaterializationJobResource": "type",
@@ -31670,6 +31729,7 @@
       "SandboxRecoveryRequest": "type",
       "SandboxRecoveryResponse": "type",
       "SandboxRecoverySelection": "type",
+      "SandboxRecoveryTarget": "type",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "SaveAgentLearningSettingsRequest": "type",
       "SaveComposerDraftRequest": "type",
@@ -36023,6 +36083,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -36734,6 +36795,7 @@
       "downloadCatalogAsset",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -37453,6 +37515,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -39030,6 +39093,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41461,6 +41527,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43687,6 +43756,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -46063,6 +46135,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -48258,6 +48333,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

@@ -120,3 +120,35 @@ export function instrumentSandboxSessionOperations<T>(
   }
   return session;
 }
+
+/** Every raw provider client method that returns a new live session. Modal
+ * creates production boxes through `createWithLifecycle`, so wrapping only
+ * `create` would leave every fresh Modal box unmeasured. */
+const SESSION_RETURNING_CLIENT_METHODS = [
+  "create",
+  "createWithLifecycle",
+  "resume",
+  "resumeExact",
+] as const;
+
+/** Sessions the raw provider client creates or resumes report the operations
+ * issued inside a setup purpose scope. Patch before the exact-resume contract
+ * freezes `resumeExact`, so its ordinary delegation also returns measured
+ * sessions. Session identity is unchanged. */
+export function instrumentSandboxClientSessionOperations(
+  raw: unknown,
+  backend: string,
+  observe: (observation: SandboxSetupOperationObservation) => void,
+): void {
+  if (!raw || typeof raw !== "object") return;
+  const client = raw as Record<string, unknown>;
+  for (const method of SESSION_RETURNING_CLIENT_METHODS) {
+    const original = client[method];
+    if (typeof original !== "function") continue;
+    const descriptor = Object.getOwnPropertyDescriptor(client, method);
+    if (descriptor && descriptor.writable === false) continue;
+    const bound = (original as (...args: unknown[]) => Promise<unknown>).bind(raw);
+    client[method] = async (...args: unknown[]) =>
+      instrumentSandboxSessionOperations(await bound(...args), backend, observe);
+  }
+}

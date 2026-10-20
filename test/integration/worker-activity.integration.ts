@@ -2768,25 +2768,37 @@ describe("worker activities integration", () => {
 
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls.length).toBeGreaterThan(3);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
-    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+    // Client installation is independent of the ordered seed/renewal/clone
+    // chain. Locate the operations, not their absolute exec positions; loading
+    // the client bytes can let the token seed reach the sandbox first.
+    const clientInstall = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes("fs.constants.X_OK"),
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    const tokenSeed = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes('printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"'),
     );
+    expect(clientInstall).toBeGreaterThanOrEqual(0);
+    expect(tokenSeed).toBeGreaterThanOrEqual(0);
+    // Compare booleans so a failed assertion never prints a command's bearer.
+    expect(
+      String(sandboxExecCalls[clientInstall]?.cmd).includes("OPENGENI_CODEMODE_TOKEN_SEED"),
+    ).toBe(false);
+    expect(
+      String(sandboxExecCalls[tokenSeed]?.cmd).includes(
+        "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+      ),
+    ).toBe(true);
     const launchers = sandboxExecCalls.flatMap(({ cmd }, index) =>
       String(cmd).includes("opengeni_setup_program=") ? [index] : [],
     );
     // Missing program, staged once, then the same one-command launcher again.
     expect(launchers).toHaveLength(2);
-    expect(launchers[0]).toBe(2);
+    expect(launchers[0]).toBeGreaterThan(tokenSeed);
     const launcher = String(sandboxExecCalls[launchers[0]!]?.cmd);
     expect(launcher).toContain("opengeni_setup_program='/workspace/.opengeni/setup-programs-");
     expect(launcher).toContain('exec /bin/sh "$opengeni_setup_program"');
     expect(String(sandboxExecCalls[launchers[1]!]?.cmd)).toBe(launcher);
-    const chunks = sandboxExecCalls.slice(2).flatMap(({ cmd }) => {
+    const chunks = sandboxExecCalls.slice(launchers[0]!).flatMap(({ cmd }) => {
       const match = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
       return match ? [match[1]!] : [];
     });

@@ -47,6 +47,21 @@ impl Shape {
     pub fn bytes(self) -> u64 {
         u64::from(self.memory_mib) << 20
     }
+
+    /// The `cpu.weight` of a VM of this shape that is not a sandbox yet,
+    /// such as a template build or a ready sandbox filling: all its
+    /// processors, as a sandbox requesting them all.
+    #[must_use]
+    pub fn cpu_weight(self) -> u16 {
+        u16::from(self.vcpus) * 100
+    }
+
+    /// Millicores of processor time such a VM is guaranteed, and books
+    /// while its guest runs: what [`Self::cpu_weight`] gives it.
+    #[must_use]
+    pub fn cpu_millis(self) -> u64 {
+        u64::from(self.cpu_weight()) * 10
+    }
 }
 
 impl fmt::Display for Shape {

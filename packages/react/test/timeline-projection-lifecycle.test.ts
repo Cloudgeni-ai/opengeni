@@ -6,6 +6,18 @@ import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
+test("an explicit empty-workspace selection is a durable notice, not an agent reply", () => {
+  const text = "An empty workspace was selected. The old archive is retained.";
+  const items = buildTimeline(englishText, [
+    event(1, "sandbox.recovery.selected", {
+      mode: "fresh_workspace",
+      text,
+    }),
+  ]);
+  expect(items).toContainEqual(expect.objectContaining({ kind: "notice", text }));
+  expect(items.some((item) => item.kind === "agent-message")).toBe(false);
+});
+
 function event(
   sequence: number,
   type: string,

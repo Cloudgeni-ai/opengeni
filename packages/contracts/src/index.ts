@@ -146,6 +146,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./desktop-app";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
@@ -155,6 +156,7 @@ export * from "./secret-totp";
 
 export {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -16182,6 +16184,7 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "sandbox.operation.started",
     "sandbox.operation.completed",
     "sandbox.operation.failed",
+    "sandbox.recovery.selected",
     "session.command.backgrounded",
     "session.command.finished",
     "session.wait.started",

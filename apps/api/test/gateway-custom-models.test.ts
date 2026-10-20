@@ -418,7 +418,18 @@ describe("workspace Gateway custom model API", () => {
         expectedVersion: current!.version,
         operationId: crypto.randomUUID(),
       };
-      const permissions: Permission[] = ["connections:read", "connections:write"];
+      // A workspace provider key is integration administration, not a Member action.
+      const memberDenied = await request(
+        path,
+        { method: "PATCH", permissions: ["connections:read", "connections:write"], body },
+        publicApp,
+      );
+      expect(memberDenied.status).toBe(403);
+      const permissions: Permission[] = [
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ];
       const rotated = await request(path, { method: "PATCH", permissions, body }, publicApp);
       expect(rotated.status).toBe(200);
       const publicBody = await rotated.json();
@@ -757,7 +768,12 @@ describe("workspace Gateway custom model API", () => {
       availability: { selectable: false, reason: "needs_reauth" },
     });
 
-    const permissions: Permission[] = ["connections:read", "connections:write"];
+    const permissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      // Workspace model-provider keys are integration administration.
+      "capabilities:manage",
+    ];
     const connectBody = (apiKey: string) => ({
       providerDomain: "api.opper.ai",
       kind: "api_key",

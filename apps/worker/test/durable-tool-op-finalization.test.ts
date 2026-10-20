@@ -30,6 +30,8 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
       spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
       spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+      // No explicit workspace recovery adds a discontinuity notice here.
+      spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),

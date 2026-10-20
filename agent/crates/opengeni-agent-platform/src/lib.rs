@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+mod continuous_clock;
 mod desktop;
 mod error;
 #[cfg(unix)]
@@ -61,6 +62,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use continuous_clock::continuous_time;
 pub use opengeni_agent_engine::update_drain::WorkReservation;
 pub use work_scope::{
     current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,

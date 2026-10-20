@@ -338,5 +338,10 @@ export const embeddingMigrationTail = [
   // Patches 0855's fork routines and temporarily disables the sessions fence
   // trigger installed by withheld 0345.
   "0856_session_fork_workflow_identity.sql",
+  // Replaces the Slack message routine and alters the access table created by
+  // withheld 0622; replay after it.
+  "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

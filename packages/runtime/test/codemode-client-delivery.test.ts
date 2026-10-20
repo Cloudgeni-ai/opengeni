@@ -83,6 +83,75 @@ function cleanupClient(release: string): ManagedCodemodeClient {
   };
 }
 
+describe("managed Codemode client download", () => {
+  function serve(body: () => string | null) {
+    return Bun.serve({
+      port: 0,
+      fetch: () => {
+        const value = body();
+        return value === null ? new Response("missing", { status: 404 }) : new Response(value);
+      },
+    });
+  }
+
+  test("a fresh box installs from the signed URL in one command, and warm reuse is one command", async () => {
+    const client = cleanupClient("download-one");
+    const directory = managedCodemodeClientDirectory(client);
+    const server = serve(() => JSON.stringify(client));
+    const commands: string[] = [];
+    const run = async (cmd: string) => {
+      commands.push(cmd);
+      return await shell(cmd);
+    };
+    const download = { url: `http://127.0.0.1:${server.port}/client.json?sig=secret` };
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // No file ingress at all: the box fetches the bytes itself.
+      await installReleaseClient({} as never, client, run, undefined, sandboxRoot, download);
+      expect(commands).toHaveLength(1);
+      expect(await readFile(`${directory}/ogtool`, "utf8")).toBe(client.files.ogtool);
+      await installReleaseClient({} as never, client, run, undefined, sandboxRoot, download);
+      expect(commands).toHaveLength(2);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["missing", "tampered"] as const)(
+    "a %s download falls back to editor staging without logging the URL",
+    async (mode) => {
+      const client = cleanupClient(`download-${mode}`);
+      const directory = managedCodemodeClientDirectory(client);
+      const server = serve(() =>
+        mode === "missing" ? null : JSON.stringify(cleanupClient("someone-else")),
+      );
+      const staged: string[] = [];
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await installReleaseClient(
+          fileSession(false, false, staged) as never,
+          client,
+          shell,
+          undefined,
+          sandboxRoot,
+          { url: `http://127.0.0.1:${server.port}/client.json?sig=secret` },
+        );
+        expect(staged).toHaveLength(1);
+        expect(await readFile(`${directory}/client.mjs`, "utf8")).toBe(client.files["client.mjs"]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(warn.mock.calls)).not.toContain("sig=secret");
+      } finally {
+        warn.mockRestore();
+        server.stop(true);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe("managed release-owned Codemode delivery", () => {
   test("installs, verifies warm reuse, repairs damaged bytes, and keeps releases separate", async () => {
     const first: ManagedCodemodeClient = {

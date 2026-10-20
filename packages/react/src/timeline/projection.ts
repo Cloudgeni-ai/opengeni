@@ -1203,6 +1203,18 @@ export function buildTimeline(
         break;
       }
 
+      case "sandbox.recovery.selected": {
+        if (payload.mode === "fresh_workspace" && typeof payload.text === "string")
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text: payload.text,
+            occurredAt: event.occurredAt,
+          });
+        break;
+      }
+
       case "subscription.account.switched": {
         // One neutral receipt, not its provider-specific compatibility alias.
         // Never expose connection ids, personal labels, or provider error text.
