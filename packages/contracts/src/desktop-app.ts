@@ -34,3 +34,17 @@ export function desktopAppReturnUrl(returnUrl: string, consoleOrigin: string | n
   handBack.searchParams.set("url", returnUrl);
   return handBack.toString();
 }
+
+/**
+ * The same hand-back for flows that name their destination as a console path
+ * (`/workspaces/…`) and add their outcome parameters to it when they finish;
+ * the hand-back page carries those parameters on to the destination. A path
+ * that is not console-relative, or is already the hand-back page, is returned
+ * unchanged.
+ */
+export function desktopAppReturnPath(returnPath: string): string {
+  if (!returnPath.startsWith("/") || returnPath.startsWith("//")) return returnPath;
+  const base = "https://console.invalid";
+  if (new URL(returnPath, base).pathname === DESKTOP_APP_RETURN_PATH) return returnPath;
+  return `${DESKTOP_APP_RETURN_PATH}?${new URLSearchParams({ url: returnPath }).toString()}`;
+}
