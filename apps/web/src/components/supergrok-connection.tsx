@@ -14,7 +14,7 @@ import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-co
 
 import { userErrorText } from "@/lib/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
-import { invalidateSharedQueries } from "@/lib/shared-query";
+import { invalidateSharedQueries, MODEL_SETTINGS_STALE_TIME_MS } from "@/lib/shared-query";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
 // organization scope: the data and every mutation. Rows, the account page and
@@ -55,10 +55,23 @@ export function useSuperGrokSubscriptions({
 }) {
   const operations = useMemo(
     () => ({
-      load: () =>
-        organizationId
+      load: async () => {
+        if (!organizationId) {
+          // This existing endpoint probes the effective shared primary's
+          // models, or the owner's personal primary's usage when no shared
+          // primary exists. List AFTER it so any stored quota/status update
+          // reaches the meter. There is no all-account/org usage-refresh API.
+          // A failed probe must not hide an otherwise readable account list.
+          try {
+            await client.supergrokStatus(workspaceId!);
+          } catch {
+            // Preserve saved readings (and their original checkedAt).
+          }
+        }
+        return organizationId
           ? client.listOrganizationSuperGrokAccounts(organizationId)
-          : client.listSuperGrokAccounts(workspaceId!),
+          : client.listSuperGrokAccounts(workspaceId!);
+      },
       rotation: (rotationEnabled: boolean) =>
         organizationId
           ? client.setOrganizationSuperGrokRotationSettings(organizationId, { rotationEnabled })
@@ -97,6 +110,7 @@ export function useSuperGrokSubscriptions({
     workspaceId,
     canManage,
     enabled: readEnabled,
+    pollIntervalMs: organizationId ? undefined : MODEL_SETTINGS_STALE_TIME_MS,
     relatedQueryPrefixes: SUPERGROK_RELATED_QUERIES,
   });
   const [busy, setBusy] = useState(false);

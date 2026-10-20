@@ -4,6 +4,9 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { ClaudeSubscriptionUsage } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import { ClaudeAccountUsageReadout } from "./claude-subscription-models";
+import { ModelsRefreshControl } from "./models-refresh-control";
 import {
   ClaudeUsage,
   ClaudeUsageReadout,
@@ -242,9 +245,10 @@ test("credentials replaced mid-refresh cannot revive an old reading", async () =
     finish = resolve;
   });
   let version = 1;
+  let checks = 0;
   const client = {
-    getOrganizationClaudeSubscriptionUsage: async () => usage(version),
-    refreshOrganizationClaudeSubscriptionUsage: async () => pending,
+    refreshOrganizationClaudeSubscriptionUsage: async () =>
+      ++checks === 2 ? pending : usage(version),
   } as unknown as OpenGeniBrowserClient;
   let state!: ClaudeUsageState;
   function Harness({ credentialVersion }: { credentialVersion: number }) {
@@ -276,9 +280,10 @@ test("credentials replaced mid-refresh cannot revive an old reading", async () =
 });
 
 test("refresh failure preserves the last reported quota", async () => {
+  let checks = 0;
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => usage(),
     refreshWorkspaceClaudeSubscriptionUsage: async () => {
+      if (++checks === 1) return usage();
       throw new Error("Usage service unavailable");
     },
   } as unknown as OpenGeniBrowserClient;
@@ -313,7 +318,7 @@ test("recreated connections discard in-flight results even when their versions m
   let calls = 0;
   const fresh = { ...usage(), windows: [] };
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => (++calls === 1 ? pending : fresh),
+    refreshWorkspaceClaudeSubscriptionUsage: async () => (++calls === 1 ? pending : fresh),
   } as unknown as OpenGeniBrowserClient;
   let state!: ClaudeUsageState;
   function Harness({ id }: { id: string }) {
@@ -339,7 +344,7 @@ test("a revisit shows the last reading at once and never another credential's", 
   let release: ((value: ClaudeSubscriptionUsage) => void) | null = null;
   let reads = 0;
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => {
+    refreshWorkspaceClaudeSubscriptionUsage: async () => {
       reads++;
       if (reads === 1) return usage(1);
       return await new Promise<ClaudeSubscriptionUsage>((resolve) => (release = resolve));
@@ -428,7 +433,7 @@ test("a reading whose credential is unknown (people who can't manage it) is neve
 test("an access refusal drops the retained reading", async () => {
   let refuse = false;
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => {
+    refreshWorkspaceClaudeSubscriptionUsage: async () => {
       if (refuse) throw Object.assign(new Error("Forbidden"), { status: 403 });
       return usage(1);
     },
@@ -456,6 +461,7 @@ test("an access refusal drops the retained reading", async () => {
       "connection",
       "claude-connection",
       1,
+      "live",
     ])?.data,
   ).toBeNull();
   await act(async () => root.render(<></>));
@@ -492,14 +498,14 @@ test("readers share a single request, retain it for five minutes, and share expl
         </>,
       ),
     );
-    expect(reads).toBe(1);
-    expect(checks).toBe(0);
+    expect(reads).toBe(0);
+    expect(checks).toBe(1);
     await act(async () => root.render(<></>));
     now += 5 * 60_000 - 1;
     await act(async () => root.render(<Harness />));
-    expect(reads).toBe(1);
+    expect(checks).toBe(1);
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
-    expect(reads).toBe(1);
+    expect(checks).toBe(1);
     await act(async () => root.render(<></>));
     now++;
     await act(async () =>
@@ -510,12 +516,13 @@ test("readers share a single request, retain it for five minutes, and share expl
         </>,
       ),
     );
-    expect(reads).toBe(2);
+    expect(checks).toBe(2);
     await act(async () => frames.at(-1)!.refresh());
-    expect(checks).toBe(1);
+    expect(checks).toBe(3);
     expect(frames.slice(-2).every((state) => state.value?.windows.length === 0)).toBe(true);
     await act(async () => invalidateSharedQueries(client, ["model-settings"]));
-    expect(reads).toBe(3);
+    expect(checks).toBe(4);
+    expect(reads).toBe(0);
   } finally {
     clock.mockRestore();
     retained();
@@ -524,11 +531,11 @@ test("readers share a single request, retain it for five minutes, and share expl
 
 test("switching clients never renders the previous client's usage", async () => {
   const first = {
-    getWorkspaceClaudeSubscriptionUsage: async () => usage(),
+    refreshWorkspaceClaudeSubscriptionUsage: async () => usage(),
   } as unknown as OpenGeniBrowserClient;
   let finish!: (value: ClaudeSubscriptionUsage) => void;
   const second = {
-    getWorkspaceClaudeSubscriptionUsage: () =>
+    refreshWorkspaceClaudeSubscriptionUsage: () =>
       new Promise<ClaudeSubscriptionUsage>((resolve) => {
         finish = resolve;
       }),
@@ -556,15 +563,17 @@ test("switching clients never renders the previous client's usage", async () => 
   expect(state.value?.windows).toEqual([]);
 });
 
-test("a clear during a live check refuses the late writer", async () => {
+test("a clear during a live check discards the late response", async () => {
   let finish!: (value: ClaudeSubscriptionUsage) => void;
   let current = usage();
+  let checks = 0;
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => current,
-    refreshWorkspaceClaudeSubscriptionUsage: () =>
-      new Promise<ClaudeSubscriptionUsage>((resolve) => {
-        finish = resolve;
-      }),
+    refreshWorkspaceClaudeSubscriptionUsage: async () =>
+      ++checks === 2
+        ? new Promise<ClaudeSubscriptionUsage>((resolve) => {
+            finish = resolve;
+          })
+        : current,
   } as unknown as OpenGeniBrowserClient;
   const frames: ClaudeUsageState[] = [];
   const Harness = revisitHarness({ client, credentialId: "account", frames });
@@ -586,7 +595,7 @@ test("a shared revalidation reporting reconnect reloads metadata only once", asy
   let reconnect = false,
     metadataReads = 0;
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => ({
+    refreshWorkspaceClaudeSubscriptionUsage: async () => ({
       ...usage(),
       refreshStatus: reconnect ? "reconnect" : "not_checked",
     }),
@@ -619,8 +628,8 @@ test("a shared revalidation reporting reconnect reloads metadata only once", asy
 
 test("a pool account's reading and the connection's reading never share an entry", async () => {
   const client = {
-    getWorkspaceClaudeSubscriptionUsage: async () => usage(1),
-    getClaudeSubscriptionAccountUsage: async () => usage(1),
+    refreshWorkspaceClaudeSubscriptionUsage: async () => usage(1),
+    refreshClaudeSubscriptionAccountUsage: async () => usage(1),
   } as unknown as OpenGeniBrowserClient;
   const retained = retainSharedQueries(client);
   const frames: ClaudeUsageState[] = [];
@@ -637,4 +646,119 @@ test("a pool account's reading and the connection's reading never share an entry
   await act(async () => root.render(<PoolAccount />));
   expect(frames[0]?.value).toBeNull();
   retained();
+});
+
+for (const scope of ["workspace", "organization"] as const) {
+  test(`global Refresh and stale ${scope} Claude meters check live once, fresh mounts do not`, async () => {
+    let now = Date.now(),
+      liveChecks = 0,
+      storedReads = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    let reading = usage();
+    const live = async () => {
+      liveChecks++;
+      return reading;
+    };
+    const stored = async () => {
+      storedReads++;
+      return usage();
+    };
+    const client = {
+      refreshClaudeSubscriptionAccountUsage: live,
+      refreshOrganizationClaudeSubscriptionAccountUsage: live,
+      getClaudeSubscriptionAccountUsage: stored,
+      getOrganizationClaudeSubscriptionAccountUsage: stored,
+    } as unknown as OpenGeniBrowserClient;
+    const retain = retainSharedQueries(client);
+    const account = {
+      id: "account",
+      version: 1,
+      status: "active",
+      allocatorEnabled: true,
+    } as ClaudeSubscriptionAccount;
+    let detail!: ClaudeUsageState;
+    function Harness() {
+      detail = useClaudeUsage({
+        client,
+        scope,
+        scopeId: "scope",
+        credentialId: account.id,
+        credentialVersion: account.version,
+        enabled: true,
+        connected: true,
+        canManage: true,
+        accountPool: true,
+      });
+      return (
+        <>
+          <ModelsRefreshControl client={client} />
+          <ClaudeAccountUsageReadout
+            client={client}
+            scope={scope}
+            scopeId="scope"
+            account={account}
+            canManage
+          />
+        </>
+      );
+    }
+    try {
+      await act(async () => root.render(<Harness />));
+      expect(liveChecks).toBe(1);
+      expect(storedReads).toBe(0);
+      await act(async () => root.render(<></>));
+      now += 5 * 60_000 - 1;
+      await act(async () => root.render(<Harness />));
+      expect(liveChecks).toBe(1);
+      await act(async () => root.render(<></>));
+      now++;
+      await act(async () => root.render(<Harness />));
+      expect(liveChecks).toBe(2);
+      reading = { ...usage(), windows: [{ ...usage().windows[1]!, usedPercent: 25 }] };
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("button")!.click();
+      });
+      expect(liveChecks).toBe(3);
+      expect(storedReads).toBe(0);
+      expect(detail.value).toEqual(reading);
+      expect(container.textContent).toContain("75% left");
+      expect(container.textContent).not.toContain("Refreshing…");
+    } finally {
+      clock.mockRestore();
+      retain();
+    }
+  });
+}
+
+test("read-only usage never attempts the live mutation, including global Refresh", async () => {
+  let storedReads = 0,
+    liveChecks = 0;
+  const client = {
+    getClaudeSubscriptionAccountUsage: async () => {
+      storedReads++;
+      return usage();
+    },
+    refreshClaudeSubscriptionAccountUsage: async () => {
+      liveChecks++;
+      return usage();
+    },
+  } as unknown as OpenGeniBrowserClient;
+  function Harness() {
+    useClaudeUsage({
+      client,
+      scope: "workspace",
+      scopeId: "workspace",
+      credentialId: "account",
+      credentialVersion: 1,
+      enabled: true,
+      connected: true,
+      canManage: false,
+      accountPool: true,
+    });
+    return <ModelsRefreshControl client={client} />;
+  }
+  await act(async () => root.render(<Harness />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  expect(storedReads).toBe(2);
+  expect(liveChecks).toBe(0);
 });

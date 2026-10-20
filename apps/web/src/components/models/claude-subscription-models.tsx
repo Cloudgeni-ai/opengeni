@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useState, type ReactNode } from "react";
 import {
   ConnectionAccessFormPage,
@@ -19,6 +20,7 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { invalidateSharedQueries } from "@/lib/shared-query";
 import { organizationReachLabel } from "./models-ui";
 import {
   ProviderCustomModels,
@@ -50,6 +52,46 @@ export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.React
       }}
     />
   );
+}
+
+// A usage check can discover a disconnected credential. Reload its metadata,
+// not the usage query itself (which would repeat the live check it just made).
+function refreshClaudeAccountMetadata(client: object): Promise<void> {
+  return Promise.all([
+    invalidateSharedQueries(client, ["subscription-pool", "Claude"]),
+    invalidateSharedQueries(client, ["model-settings", "workspace-snapshots"]),
+  ]).then(() => undefined);
+}
+
+/** Row and detail meters observe the same client/scoped live usage query. */
+export function ClaudeAccountUsageReadout({
+  client,
+  scope,
+  scopeId,
+  account,
+  canManage,
+}: {
+  client: OpenGeniBrowserClient;
+  scope: "workspace" | "organization";
+  scopeId: string;
+  account: ClaudeSubscriptionAccount;
+  canManage: boolean;
+}) {
+  const usage = useClaudeUsage({
+    client,
+    scope,
+    scopeId,
+    enabled: account.status === "active" && account.allocatorEnabled,
+    connected: account.status === "active",
+    credentialId: account.id,
+    credentialVersion: account.version,
+    canManage,
+    accountPool: true,
+    onCredentialChanged: () => refreshClaudeAccountMetadata(client),
+  });
+  if (account.status !== "active") return null;
+  if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
+  return <ClaudeUsageReadout state={usage} />;
 }
 export function ClaudeRow({
   claude,
@@ -89,7 +131,17 @@ export function ClaudeRow({
                 : places.scope.workspace),
         claudePlan(account),
       ]}
-      cells={{ usage: claudeUsageCell(account) }}
+      cells={{
+        usage: (
+          <ClaudeAccountUsageReadout
+            client={claude.client}
+            scope={claude.organizationId ? "organization" : "workspace"}
+            scopeId={claude.organizationId ?? claude.workspaceId!}
+            account={account}
+            canManage={claude.canManageAccounts}
+          />
+        ),
+      }}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }
@@ -155,7 +207,7 @@ function AccountUsage({
     credentialId: account.id,
     credentialVersion: account.version,
     canManage: claude.canManageAccounts,
-    onCredentialChanged: claude.refresh,
+    onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
   return <ClaudeUsage state={usage} onReconnect={onReconnect} />;

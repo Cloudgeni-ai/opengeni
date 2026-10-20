@@ -53,6 +53,8 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   workspaceId?: string | undefined;
   canManage: boolean;
   enabled?: boolean | undefined;
+  /** Providers whose listing follows a live status probe can refresh while visible. */
+  pollIntervalMs?: number | undefined;
   /** Other shared-cache prefixes an account change makes wrong. */
   relatedQueryPrefixes?: readonly SharedQueryKey[] | undefined;
 }) {
@@ -81,7 +83,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
       input.organizationId ?? input.workspaceId ?? input.identity,
     ],
     () => input.operations.load(),
-    { enabled, staleTimeMs: 5 * 60_000 },
+    { enabled, staleTimeMs: 5 * 60_000, pollIntervalMs: input.pollIntervalMs },
   );
   const [mutation, setMutation] = useState<{ epoch: Epoch; working: string | null }>({
     epoch: current,

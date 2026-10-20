@@ -1,6 +1,6 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
@@ -11,9 +11,7 @@ import {
   type UsageWindowReading,
 } from "@/components/ui/usage-meter";
 import {
-  invalidateSharedQueries,
-  isSharedQueryAccessRefusal,
-  sharedQueryWriter,
+  MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
   type SharedQueryKey,
 } from "@/lib/shared-query";
@@ -38,6 +36,7 @@ function claudeUsageQueryKey(input: {
   accountPool: boolean;
   credentialId?: string | null | undefined;
   credentialVersion?: number | null | undefined;
+  canManage: boolean;
 }): SharedQueryKey | null {
   if (!input.credentialId || input.credentialVersion === undefined) return null;
   if (input.credentialVersion === null) return null;
@@ -49,6 +48,7 @@ function claudeUsageQueryKey(input: {
     input.accountPool ? "pool-account" : "connection",
     input.credentialId,
     input.credentialVersion,
+    input.canManage ? "live" : "stored",
   ];
 }
 export function useClaudeUsage({
@@ -81,6 +81,7 @@ export function useClaudeUsage({
     accountPool,
     credentialId,
     credentialVersion,
+    canManage,
   });
   // Unknown credentials still use the shared read machinery, but never reuse
   // another mount's reading: a replacement cannot be identified reliably.
@@ -92,6 +93,7 @@ export function useClaudeUsage({
     accountPool ? "pool-account" : "connection",
     credentialId ?? null,
     credentialVersion ?? null,
+    canManage ? "live" : "stored",
     "reader",
     readerId,
   ];
@@ -128,19 +130,16 @@ export function useClaudeUsage({
               : client.getOrganizationClaudeSubscriptionUsage(scopeId)),
     [client, scope, scopeId, credentialId, accountPool],
   );
-  const query = useSharedQuery(client, queryKey, () => load(false), {
+  // GET only projects saved quota. Manageable accounts use the live POST for
+  // cold/stale reads and invalidation (including the global Models Refresh).
+  // All paths share the cache's in-flight and generation fencing; a fresh
+  // remount does not contact Claude again. Read-only viewers keep using GET.
+  const query = useSharedQuery(client, queryKey, () => load(canManage), {
     enabled: readable,
-    staleTimeMs: 5 * 60_000,
-    pollIntervalMs: 5 * 60_000,
+    staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
+    pollIntervalMs: MODEL_SETTINGS_STALE_TIME_MS,
     ...(retainedKey ? {} : { retainMs: 0 }),
   });
-  const [refreshState, setRefreshState] = useState<{
-    epoch: typeof epoch;
-    refreshing: boolean;
-    error: boolean;
-    refused: boolean;
-  } | null>(null);
-  const pending = useRef<typeof epoch | null>(null);
   useEffect(() => {
     epoch.active = true;
     return () => {
@@ -156,40 +155,16 @@ export function useClaudeUsage({
   useEffect(() => {
     if (epoch.active && needsMetadata) void credentialChanged.current?.();
   }, [epoch, needsMetadata]);
-  // A successful subsequent GET also clears a previous explicit-check error.
-  useEffect(() => {
-    if (query.updatedAt !== null) setRefreshState(null);
-  }, [epoch, query.updatedAt]);
+  const { refresh: refreshQuery } = query;
   const refresh = useCallback(async () => {
-    if (!epoch.active || !readable || !canManage || pending.current === epoch) return;
-    pending.current = epoch;
-    setRefreshState({ epoch, refreshing: true, error: false, refused: false });
-    // Capture before the provider call, never after: a cleared client scope
-    // must reject this response even if the hook is still mounted.
-    const write = sharedQueryWriter(client);
-    try {
-      const result = await load(true);
-      if (!epoch.active) return;
-      write(JSON.parse(key) as SharedQueryKey, result);
-    } catch (error) {
-      if (!epoch.active) return;
-      const refused = isSharedQueryAccessRefusal(error);
-      if (refused) void invalidateSharedQueries(client, JSON.parse(key) as SharedQueryKey);
-      setRefreshState({ epoch, refreshing: false, error: true, refused });
-    } finally {
-      if (pending.current === epoch) pending.current = null;
-      if (epoch.active)
-        setRefreshState((previous) =>
-          previous?.epoch === epoch ? { ...previous, refreshing: false } : previous,
-        );
-    }
-  }, [epoch, client, readable, canManage, load, key]);
-  const local = refreshState?.epoch === epoch ? refreshState : null;
+    if (!epoch.active || !readable || !canManage) return;
+    await refreshQuery();
+  }, [epoch, readable, canManage, refreshQuery]);
   return {
-    value: mismatch || local?.refused ? null : query.data,
-    error: Boolean(query.error || local?.error || mismatch),
+    value: mismatch ? null : query.data,
+    error: Boolean(query.error || mismatch),
     loading: query.loading,
-    refreshing: Boolean(local?.refreshing),
+    refreshing: query.fetching && !query.loading,
     canRefresh: canManage && readable,
     refresh,
   };

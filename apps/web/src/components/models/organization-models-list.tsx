@@ -6,6 +6,7 @@ import {
   ClaudeSettingRows,
   claudePlan,
   claudeUsageCell,
+  ClaudeAccountUsageReadout,
 } from "./claude-subscription-models";
 import type {
   CodexAccount,
@@ -406,7 +407,17 @@ export function OrganizationModelsList({
           email={account.email}
           primary={account.active}
           meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
-          cells={{ usage: claudeUsageCell(account) }}
+          cells={{
+            usage: (
+              <ClaudeAccountUsageReadout
+                client={client}
+                scope="workspace"
+                scopeId={workspace.id}
+                account={account}
+                canManage={workspace.canManage}
+              />
+            ),
+          }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
