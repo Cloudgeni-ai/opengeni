@@ -8,6 +8,7 @@ import { Hono } from "hono";
 // after the durable application seam returns, at each separately authorized read.
 const realCore = await import("@opengeni/core");
 const realDb = await import("@opengeni/db");
+const realChannelA = await import("../src/sandbox/channel-a");
 const fakeDb = {};
 const workspaceId = crypto.randomUUID();
 const sessionId = crypto.randomUUID();
@@ -40,6 +41,16 @@ let commits = 0;
 let reads = 0;
 let failRead = 0;
 let rejectConsent = false;
+let establishments = 0;
+let failEstablishment = false;
+mock.module("@opengeni/db", () => ({ ...realDb, getSession: async () => ({ id: sessionId }) }));
+mock.module("../src/sandbox/channel-a", () => ({
+  ...realChannelA,
+  withChannelARead: async () => {
+    establishments++;
+    if (failEstablishment) throw new Error("private provider details");
+  },
+}));
 mock.module("@opengeni/core", () => ({
   ...realCore,
   requireAccessGrant: async () => ({ accountId: "account", subjectId: "subject" }),
@@ -65,6 +76,8 @@ beforeEach(() => {
   reads = 0;
   failRead = 0;
   rejectConsent = false;
+  establishments = 0;
+  failEstablishment = false;
 });
 function app() {
   const instance = new Hono();
@@ -80,13 +93,13 @@ function app() {
   } as unknown as ApiRouteDeps);
   return instance;
 }
-function post() {
+function post(body: SandboxRecoveryRequest = request) {
   return app().request(
     `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
+      body: JSON.stringify(body),
     },
   );
 }
@@ -127,3 +140,30 @@ test("authorized status stays distinct from consent acceptance", async () => {
   expect(commits).toBe(1);
   expect(reads).toBe(2);
 });
+
+for (const action of ["retry", "continue_fresh"] as const) {
+  test(`${action} starts establishment after acceptance even if an observation already moved past consent`, async () => {
+    const {
+      version: _version,
+      artifactId: _artifactId,
+      capturedAt: _capturedAt,
+      ...identity
+    } = request.selection;
+    const body: SandboxRecoveryRequest = {
+      operationId: request.operationId,
+      action,
+      ...(action === "continue_fresh" ? { acceptEmptyWorkspace: true as const } : {}),
+      target: { ...identity, restoreStatus: "unrecoverable", restoreCompletedAt: null },
+    } as SandboxRecoveryRequest;
+    failEstablishment = true;
+    const response = await post(body);
+    expect(response.status).toBe(200);
+    expect(commits).toBe(1);
+    expect(establishments).toBe(1);
+    expect(reads).toBe(2);
+    expect(await response.json()).toMatchObject({
+      outcome: "accepted",
+      recovery: { status: "restoring" },
+    });
+  });
+}

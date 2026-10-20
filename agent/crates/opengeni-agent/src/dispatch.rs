@@ -162,6 +162,7 @@ async fn dispatch_future<P: Platform>(
             RespResult::Ping(v1::PingResponse {
                 nonce: req.nonce,
                 agent_monotonic_ms: ctx.monotonic_ms(),
+                control_replay_tokens: Vec::new(),
             }),
         ),
         Op::Metrics(_) => metrics_response(request_id).await,
@@ -754,7 +755,13 @@ mod tests {
     #[tokio::test]
     async fn ping_is_answered_by_the_agent() {
         let platform = Arc::new(FakePlatform::default());
-        let req = request(5, Op::Ping(v1::PingRequest { nonce: 99 }));
+        let req = request(
+            5,
+            Op::Ping(v1::PingRequest {
+                nonce: 99,
+                ..Default::default()
+            }),
+        );
         let resp = dispatch(req, &platform, &ctx()).await;
         match resp.result {
             Some(RespResult::Ping(p)) => assert_eq!(p.nonce, 99),

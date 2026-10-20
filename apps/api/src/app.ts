@@ -791,6 +791,9 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Chunk-Sha256",
       "X-OpenGeni-Chunk-Start-Milliseconds",
       "X-OpenGeni-Correlation-Id",
+      // Set by the console inside a desktop app; only changes where a finished
+      // browser sign-in returns.
+      "X-OpenGeni-Desktop-App",
       "X-OpenGeni-Session-Csrf",
       // Session scope for a session proxy; the API itself ignores it.
       "X-OpenGeni-Session-Id",

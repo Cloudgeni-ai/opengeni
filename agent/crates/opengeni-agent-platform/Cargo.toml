@@ -42,7 +42,7 @@ image = { workspace = true }
 # Linux X11 desktop: capture (GetImage) + computer-use input (XTEST) + geometry
 # (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
+nix = { workspace = true, features = ["time"] }
 # Claims the descriptors a running command's handover carried across exec.
 opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 

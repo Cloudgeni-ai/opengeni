@@ -12,8 +12,8 @@ use crate::layout::{Images, Paths, sync_parent};
 use crate::observe::Cause;
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
-    BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
-    SandboxConfig, SandboxStatus, SleepConfig, step_name,
+    BlockedSandbox, CapacityStatus, CpuStatus, DiskStatus, FailedStep, HostStatus, Id,
+    MemoryStatus, SandboxConfig, SandboxStatus, SleepConfig, step_name,
 };
 use crate::rootfs::Missing;
 use crate::state::{Change, Identity, Record, check_generation};
@@ -736,6 +736,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 occupied: capacity.occupied,
                 free: capacity.free(),
                 awake: capacity.awake,
+            }),
+            cpu: self.core.cpu_capacity().map(|cpu| CpuStatus {
+                total: cpu.budget,
+                reserved: cpu.reserved,
+                free: cpu.free(),
             }),
             disk: self.core.disk().map(|disk| {
                 let free = disk.free();

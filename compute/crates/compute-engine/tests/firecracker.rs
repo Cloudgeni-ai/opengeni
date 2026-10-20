@@ -446,6 +446,11 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
         .hold(&vm, disk.try_clone().unwrap().into())
         .await
         .unwrap();
+    // As an earlier agent may have rounded its request otherwise.
+    let weight = std::path::Path::new("/sys/fs/cgroup/compute-test")
+        .join(&name)
+        .join("cpu.weight");
+    std::fs::write(&weight, "7").unwrap();
     // The agent goes away: its handles are dropped, nothing is stopped.
     drop(vm);
     drop(first);
@@ -454,6 +459,11 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     let (vm, found) = second.adopt(&spec).await.unwrap().expect("VM not adopted");
     assert_eq!(found, Found::Running);
     assert_eq!(vm.pid(), pid);
+    assert_eq!(
+        std::fs::read_to_string(&weight).unwrap().trim(),
+        spec.cpu_weight.to_string(),
+        "an adopted VM gets today's processor share"
+    );
     let kept = std::fs::File::from(second.held(&vm).await.unwrap().expect("nothing kept"));
     // One open file description: a status flag set through one descriptor
     // shows through the other.

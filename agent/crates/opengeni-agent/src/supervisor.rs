@@ -1675,10 +1675,21 @@ impl<P: Platform + 'static> Supervisor<P> {
                     receipt.deliver(&client, reply).await;
                 });
             }
-            crate::rpc_replay::Admission::Rejected => {
-                // No execution and no fabricated tool result. The caller retains
-                // its existing timeout/unknown-outcome semantics.
-                warn!("rejected expired or conflicting control delivery");
+            crate::rpc_replay::Admission::Rejected(reason) => {
+                // Refusing this delivery does not prove that an earlier attempt
+                // never executed. Return that uncertainty promptly, not silence.
+                warn!(?reason, "rejected control delivery");
+                let request_id = ControlRequest::decode(message.payload.as_ref())
+                    .map(|request| request.request_id)
+                    .unwrap_or_default();
+                publish_response(
+                    client,
+                    reply,
+                    reason.response(request_id),
+                    "control_replay",
+                    client.server_info().max_payload,
+                )
+                .await;
             }
         }
     }
@@ -1799,6 +1810,33 @@ impl<P: Platform + 'static> Supervisor<P> {
         match route {
             Route::Liveness => {
                 debug!(request_id = %request_id, op = label, "serving liveness rpc outside admission");
+                if let Some(v1::control_request::Op::Ping(ping)) = &request.op {
+                    if ping.control_replay_window_ms != 0 {
+                        let issued = link
+                            .replies
+                            .lock()
+                            .expect("control receipts")
+                            .issue_batch(Duration::from_millis(ping.control_replay_window_ms));
+                        let response = match issued {
+                            Ok(token) => v1::ControlResponse {
+                                request_id,
+                                error: None,
+                                result: Some(v1::control_response::Result::Ping(
+                                    v1::PingResponse {
+                                        nonce: ping.nonce,
+                                        agent_monotonic_ms: self
+                                            .ctx(link, max_payload)
+                                            .monotonic_ms(),
+                                        control_replay_tokens: token,
+                                    },
+                                )),
+                            },
+                            Err(reason) => reason.response(request_id),
+                        };
+                        publish_response(client, reply, response, label, max_payload).await;
+                        return;
+                    }
+                }
                 serve_request(
                     client,
                     reply,
@@ -2039,6 +2077,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 "",
                 false,
                 false,
+                &[],
             )
             .await;
             publish_agent_update_progress(
@@ -2051,6 +2090,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 "",
                 false,
                 false,
+                &[],
             )
             .await;
 
@@ -2059,7 +2099,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             // never give up on a busy host: the accepted update waits without
             // fencing, and each attempt fences only for its own short idle proof.
             // A busy attempt reopens admission and tries again later.
-            let mut reported_busy: Option<&'static str> = None;
+            let mut reported_busy = None;
+            let mut last_busy_report = tokio::time::Instant::now();
             loop {
                 if shutdown.is_requested() {
                     // The successor's Hello settles this update as replaced.
@@ -2069,6 +2110,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 if !update_drain.is_accepted(&update.operation_id) {
                     return;
                 }
+                let mut blockers = Vec::new();
                 let mut busy_code = match update_drain.fence_update(&update.operation_id) {
                     UpdateReservation::Started | UpdateReservation::AlreadyAccepted => {
                         update_busy_code(&update_drain, &engine, handing_over)
@@ -2083,8 +2125,14 @@ impl<P: Platform + 'static> Supervisor<P> {
                 if busy_code.is_none() {
                     if let Some(backend) = browser_control.as_ref() {
                         busy_code = match backend.begin_update(&update.operation_id).await {
-                            Ok(true) => None,
-                            Ok(false) => Some("update_busy_work"),
+                            Ok(proof) => {
+                                blockers = proof.blockers;
+                                if proof.idle {
+                                    None
+                                } else {
+                                    Some("update_busy_interactions")
+                                }
+                            }
                             Err(_) => Some("update_state_unavailable"),
                         };
                     }
@@ -2103,6 +2151,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                     }
                 }
                 let Some(code) = busy_code else { break };
+                if blockers.is_empty() {
+                    blockers = native_update_blockers(&update_drain, &engine, handing_over);
+                }
                 if let Some(backend) = browser_control.as_ref() {
                     if backend.release_update(&update.operation_id).await.is_err() {
                         warn!("browser controller update fence could not be released");
@@ -2126,11 +2177,32 @@ impl<P: Platform + 'static> Supervisor<P> {
                         update_drain.unavailable_code(),
                         true,
                         false,
+                        &blockers,
                     )
                     .await;
                     return;
                 }
-                if reported_busy != Some(code) {
+                blockers.sort_by(|a, b| {
+                    (&a.kind, &a.resource_id, a.count).cmp(&(&b.kind, &b.resource_id, b.count))
+                });
+                let changed = reported_busy.as_ref().is_none_or(
+                    |(previous_code, previous): &(
+                        &str,
+                        Vec<opengeni_agent_platform::UpdateBlocker>,
+                    )| {
+                        *previous_code != code
+                            || previous
+                                .iter()
+                                .map(|b| (&b.kind, &b.resource_id))
+                                .ne(blockers.iter().map(|b| (&b.kind, &b.resource_id)))
+                    },
+                );
+                if changed || last_busy_report.elapsed() >= Duration::from_secs(60) {
+                    info!(
+                        reason = code,
+                        ?blockers,
+                        "self-update is waiting for retained work"
+                    );
                     // Say what the update is waiting for, once per reason.
                     publish_agent_update_progress(
                         &client,
@@ -2142,9 +2214,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                         code,
                         true,
                         false,
+                        &blockers,
                     )
                     .await;
-                    reported_busy = Some(code);
+                    reported_busy = Some((code, blockers));
+                    last_busy_report = tokio::time::Instant::now();
                 }
                 tokio::select! {
                     () = tokio::time::sleep(UPDATE_IDLE_RECHECK) => {}
@@ -2173,7 +2247,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             crate::update::ManagedUpdatePhase::Applying => v1::AgentUpdateStage::Applying,
                         };
                         publish_agent_update_progress(
-                            &client, &events_subject, &agent_id, &update, stage, "", "", false, false,
+                            &client, &events_subject, &agent_id, &update, stage, "", "", false, false, &[],
                         ).await;
                     }
                     joined = &mut apply => break joined,
@@ -2214,6 +2288,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         "",
                         false,
                         false,
+                        &[],
                     )
                     .await;
                     let _ = client.flush().await;
@@ -2241,6 +2316,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         &code,
                         !rolled_back,
                         rolled_back,
+                        &[],
                     )
                     .await;
                     update_drain.finish_update(&update.operation_id);
@@ -2262,6 +2338,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         "update_worker_failed",
                         true,
                         false,
+                        &[],
                     )
                     .await;
                     update_drain.finish_update(&update.operation_id);
@@ -2918,7 +2995,20 @@ async fn publish_agent_update_progress(
     error_code: &str,
     retryable: bool,
     rolled_back: bool,
+    blockers: &[opengeni_agent_platform::UpdateBlocker],
 ) {
+    // This event is enrollment-wide, unlike the individual controller scopes.
+    // Never export private session IDs; bound the snapshot across all scopes.
+    let mut counts = std::collections::BTreeMap::<String, u32>::new();
+    for blocker in blockers {
+        let kind = if counts.contains_key(&blocker.kind) || counts.len() < 32 {
+            blocker.kind.clone()
+        } else {
+            "other_work".to_owned()
+        };
+        let count = counts.entry(kind).or_default();
+        *count = count.saturating_add(blocker.count);
+    }
     let event = AgentEvent {
         agent_id: agent_id.to_string(),
         event: Some(Event::AgentUpdateProgress(v1::AgentUpdateProgress {
@@ -2929,6 +3019,14 @@ async fn publish_agent_update_progress(
             error_code: error_code.to_string(),
             retryable,
             rolled_back,
+            blockers: counts
+                .into_iter()
+                .map(|(kind, count)| v1::AgentUpdateBlocker {
+                    kind,
+                    resource_id: String::new(),
+                    count,
+                })
+                .collect(),
         })),
     };
     if let Err(error) = client
@@ -3063,7 +3161,7 @@ async fn publish_response(
         }
     } else {
         let mut headers = async_nats::HeaderMap::new();
-        headers.insert("Opengeni-Control-Replay", "1");
+        headers.insert("Opengeni-Control-Replay", "2");
         if let Err(publish_error) = client
             .publish_with_headers(reply, headers, payload.into())
             .await
@@ -3252,6 +3350,53 @@ async fn hand_over_for_update<P: Platform>(
     };
     *handover.pending.lock().expect("pending handover") = Some(pending);
     Ok(())
+}
+
+/// Diagnostic counters for the same ownership layers as the admission proof.
+/// They can overlap and are not a count of distinct commands.
+fn native_update_blockers(
+    drain: &UpdateDrain,
+    engine: &Engine,
+    handover: bool,
+) -> Vec<opengeni_agent_platform::UpdateBlocker> {
+    let Some(pending) = drain.snapshot() else {
+        return vec![opengeni_agent_platform::UpdateBlocker {
+            kind: "native_cleanup".into(),
+            resource_id: String::new(),
+            count: 1,
+        }];
+    };
+    let admission = engine.admission_snapshot();
+    let (live, running) = if handover {
+        engine.handover_counts()
+    } else {
+        (0, 0)
+    };
+    [
+        ("upload", pending.uploads),
+        (
+            "native_request",
+            pending
+                .routed
+                .saturating_sub(if handover { pending.handover } else { 0 }),
+        ),
+        ("native_operation", engine.live_ops().saturating_sub(live)),
+        ("native_light_running", admission.light_running),
+        ("native_light_queued", admission.light_queued),
+        (
+            "native_heavy_running",
+            admission.heavy_running.saturating_sub(running),
+        ),
+        ("native_heavy_queued", admission.heavy_queued),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .map(|(kind, count)| opengeni_agent_platform::UpdateBlocker {
+        kind: kind.into(),
+        resource_id: String::new(),
+        count: u32::try_from(count).unwrap_or(u32::MAX),
+    })
+    .collect()
 }
 
 /// Why an update cannot proceed yet. With `handover`, jobs the update will
@@ -3920,6 +4065,10 @@ mod tests {
             Some("update_busy_work")
         );
         assert_eq!(update_busy_code(&drain, &engine, true), None);
+        assert!(native_update_blockers(&drain, &engine, true).is_empty());
+        assert!(native_update_blockers(&drain, &engine, false)
+            .iter()
+            .any(|blocker| blocker.kind == "native_heavy_running" && blocker.count == 1));
         assert!(!drain.seal_update("synthetic-update"));
         assert!(drain.seal_update_with_handover("synthetic-update"));
         drain.release_update("synthetic-update");
@@ -4134,8 +4283,14 @@ mod tests {
         struct InteractionProof(AtomicU8);
         #[async_trait::async_trait]
         impl BrowserControlBackend for InteractionProof {
-            async fn begin_update(&self, _: &str) -> PlatformResult<bool> {
-                self.is_idle().await
+            async fn begin_update(
+                &self,
+                _: &str,
+            ) -> PlatformResult<opengeni_agent_platform::UpdateAdmission> {
+                Ok(opengeni_agent_platform::UpdateAdmission {
+                    idle: self.is_idle().await?,
+                    blockers: Vec::new(),
+                })
             }
             async fn release_update(&self, _: &str) -> PlatformResult<()> {
                 Ok(())
@@ -4180,7 +4335,10 @@ mod tests {
         let mut replies = client.subscribe("audit.interaction.out").await.unwrap();
         let mut events = client.subscribe(link.events_subject()).await.unwrap();
         client.flush().await.unwrap();
-        for (state, code) in [(0, "update_busy_work"), (1, "update_state_unavailable")] {
+        for (state, code) in [
+            (0, "update_busy_interactions"),
+            (1, "update_state_unavailable"),
+        ] {
             backend.0.store(state, Ordering::Release);
             let operation_id = uuid::Uuid::new_v4().to_string();
             let request = ControlRequest {
@@ -4904,7 +5062,10 @@ mod tests {
         };
         // Liveness never enters admission.
         assert!(matches!(
-            classify(&request(Op::Ping(v1::PingRequest { nonce: 1 }))),
+            classify(&request(Op::Ping(v1::PingRequest {
+                nonce: 1,
+                ..Default::default()
+            }))),
             Route::Liveness
         ));
         // Git runs as an engine job through its adapter; fs ops are light.
@@ -5579,7 +5740,10 @@ mod tests {
             request_id: "still-live".to_string(),
             epoch: 0,
             resource_policy: None,
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 42 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 42,
+                ..Default::default()
+            })),
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(5),
@@ -5724,7 +5888,10 @@ mod tests {
             link.rpc_subject(),
             request(
                 "after-reconnect",
-                v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 }),
+                v1::control_request::Op::Ping(v1::PingRequest {
+                    nonce: 7,
+                    ..Default::default()
+                }),
             ),
         )
         .await;
@@ -5984,7 +6151,10 @@ mod tests {
                 request_id: "after-refusal".to_string(),
                 epoch: 0,
                 resource_policy: None,
-                op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 9 })),
+                op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                    nonce: 9,
+                    ..Default::default()
+                })),
             },
         )
         .await;
@@ -6412,7 +6582,10 @@ mod tests {
             request_id: "example-other-workspace".into(),
             epoch: 0,
             resource_policy: None,
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 7,
+                ..Default::default()
+            })),
         };
         let response = client
             .request(second_link.rpc_subject(), ping.encode_to_vec().into())
@@ -6696,7 +6869,15 @@ mod tests {
             }
             async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
                 let number = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
-                std::fs::write(self.root.join(format!("execution-{number}")), b"once").unwrap();
+                let wall_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                std::fs::write(
+                    self.root.join(format!("execution-{number}")),
+                    wall_ms.to_string(),
+                )
+                .unwrap();
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 Ok(())
             }
@@ -6712,6 +6893,9 @@ mod tests {
             root: root.clone(),
         });
         let mut credentials = it::test_credentials(&url);
+        if let Ok(bearer) = std::env::var("OPENGENI_ROTATION_PROBE_BEARER") {
+            credentials.nats_bearer = bearer;
+        }
         credentials.consented_screen_control = true;
         let definition = SupervisorLink::new(
             "rotation-probe",
@@ -6807,7 +6991,10 @@ mod tests {
 
         let ping = ControlRequest {
             request_id: "probe".into(),
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 0 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 120_000,
+            })),
             ..Default::default()
         };
         let probe = client
@@ -6817,21 +7004,24 @@ mod tests {
         assert_eq!(
             probe
                 .headers
+                .as_ref()
                 .unwrap()
                 .get("Opengeni-Control-Replay")
                 .unwrap()
                 .as_str(),
-            "1"
+            "2"
         );
-        let expires = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            + 120_000;
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(probe.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
         let delivery = format!(
-            "{}.replay.{expires}.{}",
+            "{}.replay.{}",
             link.rpc_subject(),
-            uuid::Uuid::new_v4()
+            lease.control_replay_tokens[0]
         );
         let request = ControlRequest {
             request_id: "move-once".into(),
@@ -6860,10 +7050,82 @@ mod tests {
         .await
         .expect("the original request executed");
 
+        // Refusals must reply, not leave a machine looking online while every
+        // caller waits for its transport timeout. None licenses fresh execution.
+        let mut short_ping = ping.clone();
+        let Some(v1::control_request::Op::Ping(short)) = &mut short_ping.op else {
+            unreachable!()
+        };
+        short.control_replay_window_ms = 1;
+        let short_reply = client
+            .request(link.rpc_subject(), short_ping.encode_to_vec().into())
+            .await
+            .unwrap();
+        let Some(v1::control_response::Result::Ping(short_lease)) =
+            ControlResponse::decode(short_reply.payload).unwrap().result
+        else {
+            panic!("short lease response")
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut changed = request.clone();
+        changed.request_id = "changed-request".into();
+        for (target, payload, failure) in [
+            (
+                format!(
+                    "{}.replay.{}",
+                    link.rpc_subject(),
+                    short_lease.control_replay_tokens[0]
+                ),
+                request.encode_to_vec(),
+                "control_delivery_expired",
+            ),
+            (
+                format!(
+                    "{}.replay.9999999999999.{}",
+                    link.rpc_subject(),
+                    uuid::Uuid::new_v4()
+                ),
+                request.encode_to_vec(),
+                "control_delivery_expired",
+            ),
+            (
+                delivery.clone(),
+                changed.encode_to_vec(),
+                "control_delivery_conflict",
+            ),
+        ] {
+            let refusal = tokio::time::timeout(
+                Duration::from_secs(1),
+                client.request(target, payload.into()),
+            )
+            .await
+            .expect("rejection must reply promptly")
+            .unwrap();
+            let error = ControlResponse::decode(refusal.payload)
+                .unwrap()
+                .error
+                .unwrap();
+            assert_eq!(error.code, v1::ErrorCode::Protocol as i32);
+            assert!(!error.retryable);
+            assert_eq!(error.detail["failure_code"], failure);
+            assert_eq!(error.detail["outcome_unknown"], "true");
+        }
+
+        let probe = client
+            .request(link.rpc_subject(), ping.encode_to_vec().into())
+            .await
+            .unwrap();
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(probe.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
         let input_delivery = format!(
-            "{}.replay.{expires}.{}",
+            "{}.replay.{}",
             link.rpc_subject(),
-            uuid::Uuid::new_v4()
+            lease.control_replay_tokens[0]
         );
         let input_request = ControlRequest {
             request_id: "input-once".into(),

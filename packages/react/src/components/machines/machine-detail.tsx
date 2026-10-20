@@ -23,6 +23,7 @@ import {
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
 import type { MachineView, MetricSample } from "../../types/machines";
+import { connectionStatusForState } from "../../types/machines";
 import { AgentStatusIcon } from "./agent-status-icon";
 import { deriveHealth, HEALTH_TOKEN, healthPulses } from "./health";
 import {
@@ -161,7 +162,9 @@ function MachineAgentPanel({
   const authority = machine.connectionAuthority;
   const runtime = machine.runtime;
   if (!runtime && authority.state === "not_applicable") return null;
-  const agent = runtime ? describeAgentRuntime(t, runtime, now) : null;
+  const agent = runtime
+    ? describeAgentRuntime(t, runtime, now, connectionStatusForState(machine.state) === "online")
+    : null;
   const action =
     agent?.action && machine.enrollmentId && onUpdateAgent && machine.state !== "offline"
       ? agent.action

@@ -137,7 +137,13 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     };
 
     let window = clamp_window(engine, &op_id, start.window_bytes);
-    let deadline = deadline_instant(start.deadline_ms);
+    let deadline = match crate::rpc_replay::current() {
+        Some(receipt) => match receipt.exec_deadline(exec.timeout_ms) {
+            Ok(deadline) => deadline,
+            Err(reason) => return reason.response(request_id),
+        },
+        None => deadline_instant(start.deadline_ms),
+    };
     let stdin = exec.stdin.to_vec();
     let outcome = engine.start_job(
         &op_id,

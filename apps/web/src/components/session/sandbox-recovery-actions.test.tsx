@@ -77,6 +77,47 @@ function button(text: string): HTMLButtonElement {
   if (!result) throw new Error(`Missing button: ${text}. UI: ${document.body.textContent}`);
   return result;
 }
+
+test("fresh recovery confirms all affected chats and retained archive; cancel never writes", async () => {
+  let writes = 0;
+  const target = {
+    sessionId: "session",
+    sandboxGroupId: "group",
+    leaseId: "lease",
+    routeEpoch: 0,
+    authorityEpoch: 1,
+    leaseEpoch: 3,
+    workspaceGeneration: 7,
+    archiveGeneration: 7,
+    revision: "retained",
+    restoreStatus: "unrecoverable",
+    restoreCompletedAt: null,
+  };
+  await render({
+    getSandboxRecovery: async () => ({
+      version: 1,
+      status: "eligible",
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+      target,
+      retryAvailable: true,
+      freshWorkspaceAvailable: true,
+      groupSessionCount: 3,
+    }),
+    recoverSandbox: async () => {
+      writes++;
+      throw new Error("should not submit");
+    },
+  });
+  expect(button("Retry restoring files").disabled).toBe(false);
+  await click("Continue with empty workspace");
+  expect(document.body.textContent).toContain("all 3 chats");
+  expect(document.body.textContent).toContain("old archive is retained");
+  expect(document.body.textContent).toContain("No commands will be replayed");
+  await click("Cancel");
+  expect(writes).toBe(0);
+});
 async function click(text: string) {
   await act(async () => button(text).click());
 }
@@ -240,6 +281,7 @@ test("acceptance is not restoration and double clicks never replay mutation", as
     accept.click();
   });
   expect(requests).toHaveLength(1);
+  if (!("selection" in requests[0]!)) throw new Error("Expected historical checkpoint consent");
   expect(requests[0]!.selection).toEqual(eligible.checkpoint!);
   expect(container.textContent).toContain("consent accepted");
   expect(container.textContent).toContain("Restoration has not completed");

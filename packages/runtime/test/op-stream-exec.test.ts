@@ -1836,6 +1836,30 @@ describe("op-stream exec (fake runner)", () => {
     expect(responder.requests).toHaveLength(0);
   });
 
+  test("an expired delivery receipt preserves an unknown OpStart outcome without retry", async () => {
+    const { runner, session, requests } = buildRig();
+    runner.script("call_expired:0", {
+      frames: [],
+      startError: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "Earlier execution may have occurred; inspect the outcome before retrying.",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await expect(
+      runWithToolCallCorrelation("call_expired", () => session.exec({ cmd: "do-not-repeat" })),
+    ).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      retryable: false,
+      neverSent: false,
+      detail: { outcome_unknown: "true" },
+    });
+    expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(1);
+  });
+
   test("a runner that refuses OpStart (protocol) is unsupported without fallback", async () => {
     const transport = new InMemoryOpStreamTransport();
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");

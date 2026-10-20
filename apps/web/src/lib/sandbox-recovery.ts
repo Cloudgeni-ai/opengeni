@@ -1,11 +1,24 @@
-import type { SandboxRecoveryProjection, SandboxRecoverySelection } from "@opengeni/sdk";
+import type {
+  SandboxRecoveryProjection,
+  SandboxRecoverySelection,
+  SandboxRecoveryTarget,
+  SandboxRecoveryRequest,
+} from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
-export type SandboxRecoveryRequest = {
-  operationId: string;
-  acceptHistoricalCheckpoint: true;
-  selection: SandboxRecoverySelection;
-};
+export type { SandboxRecoveryRequest } from "@opengeni/sdk";
+
+export function sameRecoveryTarget(
+  left: SandboxRecoveryTarget | undefined,
+  right: SandboxRecoveryTarget,
+): boolean {
+  return (
+    !!left &&
+    (Object.keys(right) as Array<keyof SandboxRecoveryTarget>).every(
+      (key) => left[key] === right[key],
+    )
+  );
+}
 
 export type SandboxRecoveryClient = {
   getSandboxRecovery: (
@@ -87,6 +100,12 @@ const TIMED_RECOVERY_WAITS: ReadonlySet<string> = new Set([
 
 function sandboxRecoveryBlockerMessage(reason: string): string {
   const messages: Record<string, string> = {
+    group_control_required:
+      "Starting an empty workspace affects every chat sharing it. Ask your operator if you do not control them all.",
+    fresh_workspace_selected:
+      "An empty workspace was selected. Previous files were not restored; their archive is retained. Your conversation and external changes are unchanged.",
+    archive_retry_selected:
+      "The retained archive was selected for another restore attempt. No commands were replayed.",
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
     managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
     connected_machine_selected:
@@ -182,13 +201,20 @@ export function createSandboxRecoveryController(
         const observedRequest = Boolean(
           state.request &&
           projection.operationId === state.request.operationId &&
-          ["consent_accepted", "restoring", "restored"].includes(projection.status),
+          (["consent_accepted", "restoring", "restored"].includes(projection.status) ||
+            "action" in state.request),
         );
         update({
           projection,
           error: null,
           notApplicable: false,
           ...(observedRequest ? { uncertain: false } : {}),
+          ...(observedRequest &&
+          state.request &&
+          "action" in state.request &&
+          ["eligible", "blocked", "restored"].includes(projection.status)
+            ? { request: null }
+            : {}),
         });
         return projection;
       } catch (error) {
@@ -213,6 +239,44 @@ export function createSandboxRecoveryController(
     })();
     return read;
   }
+  async function submit(request: SandboxRecoveryRequest): Promise<boolean> {
+    revision++;
+    update({ request, submitting: true, error: null });
+    try {
+      const response = await client.recoverSandbox(workspaceId, sessionId, request);
+      if (response.operationId !== request.operationId)
+        throw new Error("Mismatched recovery receipt");
+      revision++;
+      const settled =
+        "action" in request &&
+        ["eligible", "blocked", "restored"].includes(response.recovery.status);
+      update({
+        projection: response.recovery,
+        uncertain: false,
+        ...(settled ? { request: null } : {}),
+      });
+      return true;
+    } catch (error) {
+      revision++;
+      const rejected =
+        error instanceof OpenGeniApiError &&
+        !error.outcomeUnknown &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        ![401, 403, 404].includes(error.status);
+      update({
+        projection: null,
+        request: rejected ? null : request,
+        uncertain: !rejected,
+        error: rejected
+          ? "Recovery was not accepted. Check availability and review the selection again."
+          : "The recovery outcome is not confirmed. Check status; the original request is retained and no request will be sent again automatically.",
+      });
+      return false;
+    } finally {
+      update({ submitting: false });
+    }
+  }
   return {
     getSnapshot: () => state,
     subscribe: (listener: () => void) => {
@@ -222,6 +286,37 @@ export function createSandboxRecoveryController(
       };
     },
     refresh,
+    async recoverWorkspace(
+      action: "retry" | "continue_fresh",
+      target: SandboxRecoveryTarget,
+    ): Promise<boolean> {
+      if (confirming || state.request || state.submitting) return false;
+      confirming = true;
+      try {
+        const current = await refresh();
+        if (
+          !current ||
+          target.sessionId !== sessionId ||
+          !sameRecoveryTarget(current.target, target) ||
+          !(action === "retry" ? current.retryAvailable : current.freshWorkspaceAvailable)
+        ) {
+          update({
+            error: "Recovery availability changed. Review the current workspace before continuing.",
+          });
+          return false;
+        }
+        const common = { operationId: crypto.randomUUID(), target: Object.freeze({ ...target }) };
+        return await submit(
+          Object.freeze(
+            action === "retry"
+              ? { ...common, action }
+              : { ...common, action, acceptEmptyWorkspace: true as const },
+          ),
+        );
+      } finally {
+        confirming = false;
+      }
+    },
     async consent(selection: SandboxRecoverySelection): Promise<boolean> {
       if (confirming || state.request || state.submitting) return false;
       confirming = true;
@@ -244,37 +339,7 @@ export function createSandboxRecoveryController(
           acceptHistoricalCheckpoint: true,
           selection: Object.freeze({ ...selection }),
         });
-        revision++;
-        update({ request, submitting: true, error: null });
-        try {
-          const response = await client.recoverSandbox(workspaceId, sessionId, request);
-          if (response.operationId !== request.operationId)
-            throw new Error("Mismatched recovery receipt");
-          revision++;
-          update({ projection: response.recovery, uncertain: false });
-          return true;
-        } catch (error) {
-          revision++;
-          const rejected =
-            error instanceof OpenGeniApiError &&
-            !error.outcomeUnknown &&
-            error.status >= 400 &&
-            error.status < 500 &&
-            // An older API may return access denial from a post-commit read.
-            // Losing access is not evidence that the consent was rolled back.
-            ![401, 403, 404].includes(error.status);
-          update({
-            projection: null,
-            request: rejected ? null : request,
-            uncertain: !rejected,
-            error: rejected
-              ? "Recovery was not accepted. Check availability and review the checkpoint again."
-              : "The recovery outcome is not confirmed. Check status; the original consent is retained and no request will be sent again automatically.",
-          });
-          return false;
-        } finally {
-          update({ submitting: false });
-        }
+        return await submit(request);
       } finally {
         confirming = false;
       }

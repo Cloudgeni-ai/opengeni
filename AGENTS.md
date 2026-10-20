@@ -515,6 +515,10 @@ origin and absent Site artifact. Only complete positive acknowledged cohorts are
 eligible; unknown writes never replay. Distinct linked receipts and Site pins are
 nonpromotable and require explicit manual staging consumer authority. Do not relax
 the canonical receipt verifier's source equality, production or scheduled release guards.
+Canary publication is two jobs: `publish` writes with credentials and hands the
+acknowledged cohort to the credential-free `confirm` job, which waits for npm's
+asynchronous processing and uploads the Site pins. When npm is slow, re-run the
+failed `confirm` job; reconciliation is only for a failed `publish` job.
 Exact-source canary publication may select a normally merged protected-main ancestor
 with successful exact-source CI through `scripts/canary-source-admission.ts`.
 The trusted current-main controller stays checked out separately, and supplied

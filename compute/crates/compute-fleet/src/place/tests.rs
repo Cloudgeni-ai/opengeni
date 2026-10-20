@@ -16,6 +16,7 @@ fn capacity(free_mib: u64) -> Capacity {
     Capacity {
         memory_mib: 64 * 1024,
         free_memory_mib: free_mib,
+        free_cpu_millis: None,
         free_disk_mib: 100_000,
         ready: Vec::new(),
         sandboxes: 0,
@@ -26,6 +27,7 @@ fn demand(memory_mib: u64) -> Demand {
     Demand {
         memory_mib,
         memory_max_mib: memory_mib * 2,
+        cpu_millis: 0,
         disk_mib: 1_000,
         prefer: Prefer::Any,
     }

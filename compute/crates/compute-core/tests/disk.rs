@@ -221,6 +221,7 @@ fn a_wake_short_only_of_what_ended_since_the_last_reading_waits_for_the_next() {
             bytes: GIB,
             disk,
             filling: disk == copy,
+            cpu: 0,
         });
     }
     assert_eq!(rig.booked(), 2 * GIB);
@@ -582,6 +583,7 @@ fn a_fetch_that_fails_keeps_its_booking_for_its_retry_and_gives_it_up_with_its_w
     rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 0);
@@ -596,12 +598,13 @@ fn a_spare_vm_keeps_what_it_wrote_booked_until_the_next_reading() {
         bytes: 2 * GIB,
         inodes: 4,
     };
-    assert!(rig.host.spare_fits(GIB, copy));
+    assert!(rig.host.spare_fits(GIB, copy, 0));
     rig.send(Input::Spare {
         sandbox: spare,
         bytes: GIB,
         disk: copy,
         filling: true,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 2 * GIB);
     // Filled: it writes nothing more, but its copy shows only in the next
@@ -611,6 +614,7 @@ fn a_spare_vm_keeps_what_it_wrote_booked_until_the_next_reading() {
         bytes: GIB,
         disk: DiskSpace::default(),
         filling: false,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 2 * GIB);
     rig.disk(8 * GIB, 10_000);
@@ -654,6 +658,7 @@ fn a_removed_vm_keeps_its_booking_until_it_has_ended() {
     rig.send(Input::Unmanaged {
         sandbox: SandboxId(1),
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 5 * GIB);
     let actions = rig.disk(8 * GIB, 10_000);
@@ -679,16 +684,19 @@ fn a_spare_vm_that_could_not_be_ended_keeps_its_booking() {
         bytes: GIB,
         disk: copy,
         filling: true,
+        cpu: 0,
     });
     rig.send(Input::Unmanaged {
         sandbox: spare,
         bytes: GIB,
+        cpu: 0,
     });
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 2 * GIB, "it may still write");
     rig.send(Input::Unmanaged {
         sandbox: spare,
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.booked(), 2 * GIB, "what it wrote shows in a reading");
     rig.disk(8 * GIB, 10_000);

@@ -1073,7 +1073,7 @@ impl Engine for Firecracker {
             .map_err(io::Error::other)
             .and_then(|lost| lost);
         match lost {
-            Ok(false) => self.answering(vm).await,
+            Ok(false) => self.answering(vm, spec.cpu_weight).await,
             Ok(true) => {
                 // Established: its next missing page would wait forever.
                 self.kill(&vm).await?;
@@ -1231,6 +1231,7 @@ impl Firecracker {
     async fn answering(
         &self,
         vm: FirecrackerVm,
+        cpu_weight: u16,
     ) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
         const OP: &str = "adopt";
         let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
@@ -1238,15 +1239,18 @@ impl Firecracker {
             Ok(Ok(Some(found))) => {
                 // Whatever an earlier agent left behind: zswap closed,
                 // since a compression it ran ended with it, and the
-                // guarantee as for the state found.
+                // guarantee as for the state found. Its processor share is
+                // today's for its request, which an earlier agent may have
+                // rounded otherwise.
                 let guarded = match found {
                     Found::Running => vm.guard_running(),
                     Found::Paused => vm
                         .cgroup
                         .close_zswap()
                         .and_then(|()| vm.cgroup.set_memory_low(0)),
-                };
-                guarded.map_err(|error| unsure(format!("guarding its memory: {error}")))?;
+                }
+                .and_then(|()| vm.cgroup.set_cpu_weight(cpu_weight));
+                guarded.map_err(|error| unsure(format!("setting its guarantees: {error}")))?;
                 Ok(Some((vm, found)))
             }
             // The VMM says it never started a guest: a launch cut short.

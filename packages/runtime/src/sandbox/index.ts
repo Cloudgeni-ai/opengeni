@@ -103,9 +103,10 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
-import { instrumentSandboxSessionOperations } from "./operation-purpose";
+import { instrumentSandboxClientSessionOperations } from "./operation-purpose";
 export {
   currentSandboxOperationPurpose,
+  instrumentSandboxClientSessionOperations,
   instrumentSandboxSessionOperations,
   SANDBOX_OPERATION_PURPOSES,
   sandboxHookOperationPurpose,
@@ -868,35 +869,17 @@ export function createSandboxClientForBackend(
     ...(metrics ? { metrics } : {}),
   });
   if (metrics?.onSandboxSetupOperation) {
-    instrumentClientSessionOperations(built, registration.backend, metrics.onSandboxSetupOperation);
+    instrumentSandboxClientSessionOperations(
+      built,
+      registration.backend,
+      metrics.onSandboxSetupOperation,
+    );
   }
   const raw = withProviderExactResumeContract(registration, built);
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
     : raw;
-}
-
-/** Sessions the raw provider client creates or resumes report the operations
- * issued inside a setup purpose scope. Patch before the exact-resume contract
- * freezes `resumeExact`, so its ordinary delegation also returns measured
- * sessions. Session identity is unchanged. */
-function instrumentClientSessionOperations(
-  raw: unknown,
-  backend: string,
-  observe: NonNullable<RuntimeMetricsHooks["onSandboxSetupOperation"]>,
-): void {
-  if (!raw || typeof raw !== "object") return;
-  const client = raw as Record<string, unknown>;
-  for (const method of ["create", "resume", "resumeExact"] as const) {
-    const original = client[method];
-    if (typeof original !== "function") continue;
-    const descriptor = Object.getOwnPropertyDescriptor(client, method);
-    if (descriptor && descriptor.writable === false) continue;
-    const bound = (original as (...args: unknown[]) => Promise<unknown>).bind(raw);
-    client[method] = async (...args: unknown[]) =>
-      instrumentSandboxSessionOperations(await bound(...args), backend, observe);
-  }
 }
 
 function withProviderExactResumeContract(

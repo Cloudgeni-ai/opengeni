@@ -5,7 +5,9 @@
 //! [`Host::spare_fits`]), and ready ones are the first memory given back,
 //! ahead of any sandbox, since ending one loses nothing but a refill. What
 //! one may still write to local disk, such as a template build's snapshot,
-//! is booked with the saves of sandboxes (see [`Host::disk`]).
+//! is booked with the saves of sandboxes (see [`Host::disk`]). One still
+//! coming up runs its guest, so it books processor time as an awake
+//! sandbox does until it is ready (paused) or gone.
 
 use std::collections::HashMap;
 
@@ -24,6 +26,8 @@ pub(super) struct Spare {
     disk: DiskSpace,
     /// Still coming up: what it takes is not in any reading yet.
     filling: bool,
+    /// Millicores of processor time it is guaranteed while filling.
+    cpu: u64,
     /// Asked to end for memory.
     ending: bool,
     /// Whether [`Action::Discard`] went out for it.
@@ -48,6 +52,15 @@ impl Spares {
     /// Bytes of those coming up, which no reading shows yet.
     pub(super) fn filling(&self) -> u64 {
         self.sum(|spare| spare.filling)
+    }
+
+    /// Millicores booked by those coming up, whose guests run.
+    pub(super) fn filling_cpu(&self) -> u64 {
+        self.vms
+            .values()
+            .filter(|spare| spare.filling)
+            .map(|spare| spare.cpu)
+            .sum()
     }
 
     /// Bytes of those asked to end, freed once they have.
@@ -84,28 +97,44 @@ fn endable(spare: &Spare) -> bool {
 
 impl Host {
     /// Takes in [`crate::Input::Unmanaged`].
-    pub(super) fn unmanaged(&mut self, sandbox: SandboxId, bytes: u64) {
+    pub(super) fn unmanaged(&mut self, sandbox: SandboxId, bytes: u64, cpu: u64) {
         if bytes == 0 {
             self.unmanaged.remove(&sandbox);
+            self.unmanaged_cpu.remove(&sandbox);
             self.removed_claims.remove(&sandbox);
             self.removal_ended(sandbox);
         } else {
             // A spare VM that could not be ended moves to this book: it
             // freed nothing, so it is no relief. One still filling may go
-            // on taking memory and writing, so its claim and its disk
-            // booking last until it is gone.
+            // on taking memory, processor time and writing, so its claim,
+            // its processor time and its disk booking last until it is
+            // gone.
+            let mut cpu = cpu;
             if let Some(spare) = self.spares.vms.remove(&sandbox) {
                 if spare.filling {
                     *self.removed_claims.entry(sandbox).or_default() += spare.bytes;
+                    cpu = cpu.max(spare.cpu);
                 }
                 self.book_removed(sandbox, spare.disk);
             }
             self.unmanaged.insert(sandbox, bytes);
+            if cpu > 0 {
+                self.unmanaged_cpu.insert(sandbox, cpu);
+            } else {
+                self.unmanaged_cpu.remove(&sandbox);
+            }
         }
     }
 
     /// Takes in [`crate::Input::Spare`].
-    pub(super) fn spare(&mut self, sandbox: SandboxId, bytes: u64, disk: DiskSpace, filling: bool) {
+    pub(super) fn spare(
+        &mut self,
+        sandbox: SandboxId,
+        bytes: u64,
+        disk: DiskSpace,
+        filling: bool,
+        cpu: u64,
+    ) {
         if bytes == 0 {
             let Some(spare) = self.spares.vms.remove(&sandbox) else {
                 return;
@@ -126,6 +155,7 @@ impl Host {
             bytes,
             disk,
             filling,
+            cpu,
             ending: false,
             sent: false,
             order,
@@ -142,6 +172,7 @@ impl Host {
         spare.bytes = bytes;
         spare.disk = disk;
         spare.filling = filling;
+        spare.cpu = cpu;
     }
 
     /// Bytes of memory a new spare VM may take now: room above the
@@ -177,13 +208,18 @@ impl Host {
         Some(if waiting { 0 } else { room })
     }
 
-    /// Whether a new spare VM that takes `bytes` of memory and may write
-    /// `disk` to local disk fits now: within [`Self::spare_room`], and
-    /// within what the disk can still book, nothing before its first
-    /// reading.
+    /// Whether a new spare VM that takes `bytes` of memory, may write
+    /// `disk` to local disk and books `cpu` millicores while it comes up
+    /// fits now: within [`Self::spare_room`], within what the disk can
+    /// still book, nothing before its first reading, and within the
+    /// processor time free, none while a wake waits.
     #[must_use]
-    pub fn spare_fits(&self, bytes: u64, disk: DiskSpace) -> bool {
-        self.spare_room().is_none_or(|room| room >= bytes) && self.disk_shortage(disk).is_none()
+    pub fn spare_fits(&self, bytes: u64, disk: DiskSpace, cpu: u64) -> bool {
+        self.spare_room().is_none_or(|room| room >= bytes)
+            && self.disk_shortage(disk).is_none()
+            && self
+                .cpu_capacity()
+                .is_none_or(|capacity| self.refused.is_empty() && capacity.free() >= cpu)
     }
 
     /// Asks ready spare VMs to end, oldest first, until they free `needed`

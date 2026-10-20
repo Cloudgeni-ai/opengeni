@@ -398,7 +398,9 @@ can be built and tested.
 - **Autoscaling.** The leader compares the fleet's spare memory (free
   above each host's buffer, per memory profile) with a target, the larger
   of a fraction of the fleet and room for a few of the largest shapes, and
-  sets the host group's size through the cloud's scale-set API (Azure
+  keeps rooms for those shapes counted host by host, since one lands
+  whole on one host; it sets the host group's size through the cloud's
+  scale-set API (Azure
   virtual machine scale sets, Google managed instance groups). It scales
   in by draining a host before deleting it.
 - **Checked by simulation.** `compute-fleet`'s seeded simulation runs the

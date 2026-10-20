@@ -40,7 +40,7 @@ export const subscriptionPoolQueryPrefix = (providerName: string) =>
 /**
  * The same list, mutations and scope-epoch fencing for every subscription provider.
  * The list is read through the client-scoped shared cache: revisiting a page
- * renders the retained accounts at once and re-reads in the background, and
+ * renders fresh retained accounts without another read for five minutes, and
  * every account change invalidates the provider's pools in every scope
  * (organization changes can change what a workspace inherits).
  */
@@ -53,6 +53,8 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   workspaceId?: string | undefined;
   canManage: boolean;
   enabled?: boolean | undefined;
+  /** Providers whose listing follows a live status probe can refresh while visible. */
+  pollIntervalMs?: number | undefined;
   /** Other shared-cache prefixes an account change makes wrong. */
   relatedQueryPrefixes?: readonly SharedQueryKey[] | undefined;
 }) {
@@ -81,7 +83,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
       input.organizationId ?? input.workspaceId ?? input.identity,
     ],
     () => input.operations.load(),
-    { enabled },
+    { enabled, staleTimeMs: 5 * 60_000, pollIntervalMs: input.pollIntervalMs },
   );
   const [mutation, setMutation] = useState<{ epoch: Epoch; working: string | null }>({
     epoch: current,
@@ -95,9 +97,11 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   const invalidateLists = useCallback(
     () =>
       Promise.all(
-        [subscriptionPoolQueryPrefix(input.providerName), ...(relatedQueryPrefixes ?? [])].map(
-          (prefix) => invalidateSharedQueries(current.client, prefix),
-        ),
+        [
+          subscriptionPoolQueryPrefix(input.providerName),
+          ["model-settings"],
+          ...(relatedQueryPrefixes ?? []),
+        ].map((prefix) => invalidateSharedQueries(current.client, prefix)),
       ).then(() => undefined),
     [current, input.providerName, relatedQueryPrefixes],
   );

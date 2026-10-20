@@ -105,6 +105,7 @@ import {
 } from "@opengeni/codemode";
 import {
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -435,6 +436,13 @@ import {
   installManagedCodemodeClient,
   loadManagedCodemodeClient,
   managedCodemodeClientDirectory,
+  type ManagedCodemodeClientDownload,
+} from "./sandbox/codemode-client";
+export {
+  loadManagedCodemodeClient,
+  managedCodemodeClientBytes,
+  managedCodemodeClientDigest,
+  type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
@@ -2347,6 +2355,9 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
+  // Signed, digest-addressed URL for the release's managed Codemode client so a
+  // fresh box fetches it in one command. Absent: the bytes are staged as before.
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   /**
    * Whether this attempt exposes the frozen Codemode catalog. Managed sandboxes
    * infer this from `codemodeTokenSeed`; Connected Machines set it explicitly
@@ -2793,6 +2804,7 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
+const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
 // A missing-title directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -2901,6 +2913,17 @@ export function mcpToolErrorOutput(error: unknown): {
   // carries the ready request_human_input call (never a value).
   if (isSecretReferenceError(error)) {
     return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+  }
+  if (error instanceof ToolGatewaySchemaCompilationError) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "The tool was not called because its input or output schema is invalid. Changing the arguments will not fix this. Use another tool or report the unavailable tool.",
+        },
+      ],
+    };
   }
   const text =
     invalidToolArgumentsText(error) ??
@@ -3402,6 +3425,9 @@ export function buildOpenGeniAgent(
   if (options.codemodeTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentCodemodeTokenSeed.set(agent, options.codemodeTokenSeed);
     agentCodemodeTokenSessionId.set(agent, options.codemodeTokenSessionId!);
+    if (options.codemodeClientDownload) {
+      agentCodemodeClientDownload.set(agent, options.codemodeClientDownload);
+    }
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3494,6 +3520,14 @@ function maybeInstallLazyToolTransport(
     options.agentConfig != null,
     options.toolRouterInHistory === true,
     options.startToolPreparation,
+    new Set(
+      mcpServers
+        .filter(
+          (server) =>
+            (server as MCPServer & { deferredPreparation?: boolean }).deferredPreparation === true,
+        )
+        .map((server) => mcpServerRegistryId(server)),
+    ),
   );
 }
 
@@ -5602,7 +5636,12 @@ export async function prepareAgentTools(
         options.subjectId ?? "worker:mcp-model",
       )
     : null;
-  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
+  // Eager servers must connect before disclosure, but their complete execution
+  // catalog is still independent of the first model request. The same deferred
+  // lifecycle owns catalog work even when no server needs a deferred connection.
+  const exposesDeferredPreparation =
+    deferNonEager &&
+    (deferredEntries.length > 0 || options.deferredPreparationStart === "provider-dispatch");
   const closePublishedServers = async (): Promise<void> => {
     await localToolServer?.close().catch(() => undefined);
     await connectedEagerBestEffort?.close().catch(() => undefined);
@@ -5718,7 +5757,7 @@ export async function prepareAgentTools(
     }
   };
 
-  if (!deferNonEager || deferredEntries.length === 0) {
+  if (!exposesDeferredPreparation) {
     return await completePreparation();
   }
 
@@ -9620,6 +9659,7 @@ async function runAgentStreamInternal(
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
     const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
     const ownedCodemodeTokenSeed = codemodeTokenSeedForAgent(agent);
+    const ownedCodemodeClientDownload = agentCodemodeClientDownload.get(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
       // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -9646,6 +9686,9 @@ async function runAgentStreamInternal(
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
       ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
+      ...(ownedCodemodeClientDownload
+        ? { codemodeClientDownload: ownedCodemodeClientDownload }
+        : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
@@ -10418,6 +10461,7 @@ export async function runOwnedSandboxSetup(
     gitTokenSeedOverride?: string;
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
     codemodeTokenSeedOverride?: string;
+    codemodeClientDownloadOverride?: ManagedCodemodeClientDownload;
     commandRunner?: SandboxLifecycleCommandRunner;
     /** Durable host coordinator for immutable rig setup on one exact managed
      * sandbox. Turn-private hooks always run after this callback returns. */
@@ -10449,6 +10493,8 @@ export async function runOwnedSandboxSetup(
   const ownedGitCredentialBindings =
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
   const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
+  const ownedCodemodeClientDownload =
+    opts.codemodeClientDownloadOverride ?? agentCodemodeClientDownload.get(agent);
   const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedRigSetupHooks = sandboxRigSetupHooksForAgent(agent);
@@ -10469,6 +10515,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
     ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
+    ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -11285,6 +11332,7 @@ export type SandboxLifecycleHookContext = {
   gitCredentialBindings?: GitCredentialBindingSeed[];
   codemodeTokenSeed?: string;
   codemodeTokenFile?: string;
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -11325,6 +11373,9 @@ export type SandboxLifecycleHook = {
   id: string;
   phase: SandboxLifecycleHookPhase;
   shouldRun?: (context: SandboxLifecycleHookContext) => boolean;
+  /** The hook neither depends on nor affects any other hook, so it may run
+   * concurrently with them. Hooks without this flag keep their relative order. */
+  independent?: boolean;
   run: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>;
 };
 
@@ -11378,10 +11429,54 @@ export async function runBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
-    await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+  await runApplicableBeforeAgentStartHooks(
+    session,
+    applicableBeforeAgentStartHooks(hooks, context),
+    context,
+  );
+}
+
+/**
+ * Each hook costs at least one provider round trip, so independent hooks start
+ * at once and overlap the ordered ones; ordered hooks still run one after
+ * another and stop at the first failure. Setup waits for every started hook,
+ * then reports the failure of the earliest hook in declaration order, so the
+ * error does not depend on which round trip happened to finish first.
+ */
+async function runApplicableBeforeAgentStartHooks(
+  session: SandboxSessionLike,
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
+    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
       hook.run(session, context),
     );
+  if (!hooks.some((hook) => hook.independent)) {
+    for (const hook of hooks) await runHook(hook);
+    return;
+  }
+  const failures = new Map<SandboxLifecycleHook, unknown>();
+  const record = (hook: SandboxLifecycleHook) => (error: unknown) => {
+    failures.set(hook, error);
+  };
+  const independent = hooks
+    .filter((hook) => hook.independent)
+    .map((hook) => runHook(hook).catch(record(hook)));
+  const ordered = (async () => {
+    for (const hook of hooks) {
+      if (hook.independent) continue;
+      try {
+        await runHook(hook);
+      } catch (error) {
+        record(hook)(error);
+        return;
+      }
+    }
+  })();
+  await Promise.all([...independent, ordered]);
+  for (const hook of hooks) {
+    if (failures.has(hook)) throw failures.get(hook);
   }
 }
 
@@ -11397,11 +11492,7 @@ export function withSandboxLifecycleHooks(
   const seen = new WeakSet<object>();
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
-      for (const hook of beforeAgentStartHooks) {
-        await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
-          hook.run(session, context),
-        );
-      }
+      await runApplicableBeforeAgentStartHooks(session, beforeAgentStartHooks, context);
       seen.add(session);
     }
     return session;
@@ -11474,6 +11565,7 @@ export function sandboxArtifactRuntimeDoctorHooks(
     {
       id: "artifact-runtime-doctor",
       phase: "beforeAgentStart",
+      independent: true,
       run: async (session, context) => {
         const result = await runSandboxLifecycleCommand(
           session,
@@ -11533,6 +11625,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
               {
                 id: "codemode-client",
                 phase: "beforeAgentStart" as const,
+                independent: true,
                 run: runManagedCodemodeClientHook,
               },
             ]
@@ -13059,6 +13152,8 @@ export async function runManagedCodemodeClientHook(
           context.commandRunner,
         ),
       context.runAs,
+      "/workspace",
+      context.codemodeClientDownload,
     ),
   );
 }

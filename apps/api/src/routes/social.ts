@@ -6,6 +6,7 @@ import {
   SocialOAuthStartRequest,
 } from "@opengeni/contracts";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   createSocialConnection,
   createSocialPost,
@@ -135,7 +136,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
         personalOwnershipAllowed,
         requestUrl: c.req.url,
-        payload,
+        payload: withDesktopAppReturnPath(c, payload),
       },
     );
     return c.json(OAuthStartResponse.parse(result));

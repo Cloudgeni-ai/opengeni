@@ -173,7 +173,7 @@ export function SuperGrokRow({
   account: SuperGrokAccount;
   places: SuperGrokPlaces;
   /** Overrides the tag, for an organization account whose "Available in" is known. */
-  scopeLabel?: string | undefined;
+  scopeLabel?: ReactNode;
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;

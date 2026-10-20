@@ -29,6 +29,7 @@ import type {
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
+import type { UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserDownloadExportRequest,
@@ -986,14 +987,33 @@ export class BrowserSupervisor {
    * session (external providers, launches without a durable working runtime)
    * or any admitted command still blocks. */
   isIdle(): boolean {
-    return (
-      !this.cleanupUncertain &&
-      this.creationRequests.size === 0 &&
-      this.creating.size === 0 &&
-      this.ending.size === 0 &&
-      this.stateTransferTails.size === 0 &&
-      [...this.sessions.values()].every((runtime) => restartPreservesRuntime(runtime))
-    );
+    return this.updateBlockers().length === 0;
+  }
+
+  updateBlockers(): UpdateBlocker[] {
+    const blockers: UpdateBlocker[] = [];
+    if (this.cleanupUncertain) blockers.push({ kind: "browser_cleanup", count: 1 });
+    // Each admitted creation is also a creation request. These are overlapping
+    // ownership views, not two distinct openings.
+    const openings = Math.max(this.creationRequests.size, this.creating.size);
+    if (openings) blockers.push({ kind: "browser_creation", count: openings });
+    for (const resourceId of this.ending.keys())
+      blockers.push({ kind: "browser_closing", resourceId, count: 1 });
+    if (this.stateTransferTails.size)
+      blockers.push({ kind: "browser_state_transfer", count: this.stateTransferTails.size });
+    for (const runtime of this.sessions.values()) {
+      if (restartPreservesRuntime(runtime)) continue;
+      const kind =
+        runtime.recovery !== null
+          ? "browser_recovery"
+          : runtime.externalAuthTail !== null
+            ? "browser_authentication"
+            : !runtime.controller.isIdle()
+              ? "browser_action"
+              : "browser_session";
+      blockers.push({ kind, resourceId: runtime.options.browserSessionId, count: 1 });
+    }
+    return blockers;
   }
 
   /** No session of any lifecycle remains and no work is in flight. */

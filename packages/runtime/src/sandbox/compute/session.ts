@@ -378,7 +378,10 @@ function pingRequest(): ControlRequest {
     resourcePolicy: undefined,
     op: {
       $case: "ping",
-      ping: { nonce: String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)) },
+      ping: {
+        nonce: String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)),
+        controlReplayWindowMs: "0",
+      },
     },
   };
 }

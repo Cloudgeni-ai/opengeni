@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { verifyDirectModelAccess } from "@opengeni/core";
+import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
@@ -748,7 +749,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const payload = await parseRequestJson(c, FikenOAuthStartRequest);
+    const payload = withDesktopAppReturnPath(c, await parseRequestJson(c, FikenOAuthStartRequest));
     requireEnvironmentEncryption(settings);
     return c.json(
       FikenOAuthStartResponse.parse(
@@ -1521,7 +1522,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: parsed.error.issues[0]?.message ?? "invalid OAuth start request",
       });
     }
-    const payload = parsed.data;
+    const payload = withDesktopAppReturnPath(c, parsed.data);
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
@@ -1562,7 +1563,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
-          payload: parsed.data,
+          payload: withDesktopAppReturnPath(c, parsed.data),
         }),
       ),
     );

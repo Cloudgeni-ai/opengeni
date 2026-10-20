@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0872_agent_update_blockers.sql",
       "0867_member_teammate_permissions_backfill.sql",
       "0866_member_teammate_permissions_backfill_index.sql",
       "0865_member_teammate_permissions.sql",
@@ -2883,6 +2884,7 @@ describe("release schema contract", () => {
       "0868_humanless_personal_workspace_learning.sql",
       "0869_personal_workspace_editable_artifacts.sql",
       "0870_invitation_binding_seat_scope.sql",
+      "0871_explicit_workspace_recovery.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

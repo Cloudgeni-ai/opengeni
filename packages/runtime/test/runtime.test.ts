@@ -19,6 +19,7 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import {
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   createWorkspaceToolGateway,
 } from "@opengeni/tool-gateway";
 import {
@@ -2371,6 +2372,49 @@ describe("runtime event normalization", () => {
         },
       });
       expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
+    });
+
+    test("a malformed tool schema is unavailable rather than repairable model arguments", async () => {
+      let executions = 0;
+      const { gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "fixture", toolName: "broken" },
+            modelName: "fixture__broken",
+            inputSchema: { type: "object" },
+            outputSchema: { type: "invalid-schema-type" },
+            source: "mcp",
+            approval: "none",
+            execute: () => {
+              executions++;
+              return { content: [] };
+            },
+          },
+        ],
+      });
+      const error = await gateway
+        .callModel({
+          modelName: "fixture__broken",
+          arguments: {},
+          subjectId: "agent:test",
+        })
+        .catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(ToolGatewaySchemaCompilationError);
+      expect(executions).toBe(0);
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const render = (agent as any).mcpConfig.errorFunction;
+      expect(render({ context: {}, error })).toEqual({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "The tool was not called because its input or output schema is invalid. Changing the arguments will not fix this. Use another tool or report the unavailable tool.",
+          },
+        ],
+      });
     });
 
     test("an argument-validation rejection names the missing properties instead of retrying", async () => {

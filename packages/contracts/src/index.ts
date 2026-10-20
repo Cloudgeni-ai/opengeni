@@ -147,6 +147,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./desktop-app";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
@@ -16184,6 +16185,7 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "sandbox.operation.started",
     "sandbox.operation.completed",
     "sandbox.operation.failed",
+    "sandbox.recovery.selected",
     "session.command.backgrounded",
     "session.command.finished",
     "session.wait.started",
@@ -20751,6 +20753,14 @@ export const MachineUpdateStatus = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
 
+export const MachineUpdateBlocker = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    count: z.number().int().nonnegative().max(0xffff_ffff),
+  }),
+);
+export type MachineUpdateBlocker = z.infer<typeof MachineUpdateBlocker>;
+
 export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
   z.object({
     operationId: z.string().uuid(),
@@ -20761,6 +20771,7 @@ export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
       .regex(/^[0-9a-f]{64}$/)
       .nullable(),
     errorCode: z.string().nullable(),
+    blockers: z.array(MachineUpdateBlocker).optional(),
     retryable: z.boolean(),
     rolledBack: z.boolean(),
     requestedAt: z.string(),

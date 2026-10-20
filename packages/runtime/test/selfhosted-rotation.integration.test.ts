@@ -2,9 +2,9 @@
 // pass OPENGENI_ROTATION_PROBE_BINARY plus OPENGENI_NATS_SERVER_BIN. The broker
 // issues real short-lived JWTs; no production agent or enrollment is touched.
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ControlRequest } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   connect,
   createNatsEventBus,
@@ -18,6 +18,9 @@ import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 
 const agentBinary = process.env.OPENGENI_ROTATION_PROBE_BINARY;
 const brokerBinary = process.env.OPENGENI_NATS_SERVER_BIN;
+// Optional Linux preload built from fixtures/realtime-offset.c. Only the test
+// agent sees it; the broker, caller and host retain their real clocks.
+const clockShim = process.env.OPENGENI_TEST_CLOCK_SHIM;
 
 test.skipIf(!agentBinary || !brokerBinary)(
   "native control requests survive repeated JWT expiry without duplicate execution",
@@ -101,6 +104,9 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         },
       });
       await auth.flush();
+      const clockOffsetFile = join(root, "clock-offset");
+      const bootOffsetFile = join(root, "boot-offset");
+      if (clockShim) await writeFile(clockOffsetFile, "25200");
       child = Bun.spawn(
         [agentBinary!, "--exact", "supervisor::tests::control_rotation_probe_agent", "--nocapture"],
         {
@@ -108,6 +114,13 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
             ...process.env,
             OPENGENI_ROTATION_PROBE_NATS: url,
             OPENGENI_ROTATION_PROBE_ROOT: root,
+            ...(clockShim
+              ? {
+                  LD_PRELOAD: clockShim,
+                  OPENGENI_TEST_CLOCK_OFFSET_FILE: clockOffsetFile,
+                  OPENGENI_TEST_BOOT_OFFSET_FILE: bootOffsetFile,
+                }
+              : {}),
           },
           stdout: Bun.file(join(root, "agent.log")),
           stderr: Bun.file(join(root, "agent-stderr.log")),
@@ -149,7 +162,60 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         latencies.push(performance.now() - start);
       };
       const end = Date.now() + 12_000;
+      let execs = 0;
+      const checkExecDeadline = async () => {
+        const opId = `clock-exec-${execs++}`;
+        const started = await rpc.request(
+          subject,
+          ControlRequest.fromPartial({
+            requestId: opId,
+            op: {
+              $case: "opStart",
+              opStart: {
+                op: {
+                  $case: "exec",
+                  exec: { command: ["/bin/sh", "-c", "sleep 0.05"], timeoutMs: 2000 },
+                },
+                deadlineMs: String(Date.now() + 2000),
+              },
+            },
+          }),
+          { timeoutMs: 5000 },
+        );
+        expect(started.error).toBeUndefined();
+        const until = performance.now() + 4000;
+        for (;;) {
+          const queried = await rpc.request(
+            subject,
+            ControlRequest.fromPartial({
+              requestId: crypto.randomUUID(),
+              op: { $case: "opQuery", opQuery: { opId } },
+            }),
+            { timeoutMs: 5000 },
+          );
+          expect(queried.error).toBeUndefined();
+          const status = queried.result?.$case === "opStatus" ? queried.result.opStatus : undefined;
+          if (status?.exit) {
+            expect(status.exit.timedOut).toBe(false);
+            expect(status.exit.exitCode).toBe(0);
+            break;
+          }
+          expect(performance.now()).toBeLessThan(until);
+          await Bun.sleep(10);
+        }
+      };
+      if (clockShim) await checkExecDeadline();
+      const clockChanges = clockShim
+        ? (async () => {
+            for (const offset of ["0", "-25200", "0"]) {
+              await Bun.sleep(3000);
+              await writeFile(clockOffsetFile, offset);
+              await checkExecDeadline();
+            }
+          })()
+        : Promise.resolve();
       await Promise.all([
+        clockChanges,
         ...Array.from({ length: 3 }, async () => {
           while (Date.now() < end) {
             await invoke(true);
@@ -165,11 +231,62 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
       ]);
       expect(hellos).toBeGreaterThan(3);
       expect(authorizations).toBeGreaterThan(6);
-      expect((await readdir(root)).filter((name) => name.startsWith("execution-"))).toHaveLength(
-        inputs,
-      );
+      const executions = (await readdir(root)).filter((name) => name.startsWith("execution-"));
+      expect(executions).toHaveLength(inputs);
+      if (clockShim) {
+        const walls = await Promise.all(
+          executions.map(async (name) => Number(await readFile(join(root, name), "utf8"))),
+        );
+        // Prove the shim affected the native process, not just the test inputs.
+        expect(walls.some((wall) => wall - Date.now() > 25_000_000)).toBe(true);
+        expect(walls.some((wall) => Date.now() - wall > 25_000_000)).toBe(true);
+        expect(walls.some((wall) => Math.abs(wall - Date.now()) < 60_000)).toBe(true);
+      }
       if (baseline) expect(Math.max(...latencies)).toBeGreaterThan(55_000);
       else expect(Math.max(...latencies)).toBeLessThan(5_000);
+      if (clockShim) {
+        const lease = await connection.request(
+          subject,
+          ControlRequest.encode(
+            ControlRequest.fromPartial({
+              requestId: "before-suspend",
+              op: { $case: "ping", ping: { controlReplayWindowMs: "1000" } },
+            }),
+          ).finish(),
+          { timeout: 1000 },
+        );
+        const issued = ControlResponse.decode(lease.data).result;
+        expect(issued?.$case).toBe("ping");
+        if (issued?.$case !== "ping") throw new Error("missing suspend probe lease");
+        // Model elapsed sleep without suspending the host or advancing timers.
+        await writeFile(bootOffsetFile, "3600");
+        const refusal = await connection.request(
+          `${subject}.replay.${issued.ping.controlReplayTokens[0]}`,
+          ControlRequest.encode(
+            ControlRequest.fromPartial({
+              requestId: "delayed-after-suspend",
+              op: { $case: "ping", ping: {} },
+            }),
+          ).finish(),
+          { timeout: 1000 },
+        );
+        expect(ControlResponse.decode(refusal.data).error).toMatchObject({
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+        });
+        // Prefetched tokens also expired during sleep. Refuse promptly, without
+        // replaying under a different identity, then refresh for the next call.
+        const stale = await rpc.request(
+          subject,
+          ControlRequest.fromPartial({
+            requestId: "pooled-after-suspend",
+            op: { $case: "ping", ping: {} },
+          }),
+          { timeoutMs: 1000 },
+        );
+        expect(stale.error?.detail.failure_code).toBe("control_delivery_expired");
+        await invoke(false);
+      }
       console.info(
         JSON.stringify({
           calls: latencies.length,
@@ -177,6 +294,9 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
           authorizations,
           maxMs: Math.round(Math.max(...latencies)),
           meanMs: Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length),
+          clockOffsetsSeconds: clockShim ? [25200, 0, -25200, 0] : [0],
+          execs,
+          simulatedSuspendSeconds: clockShim ? 3600 : 0,
         }),
       );
       // The recovering transport must keep the native request API's immediate

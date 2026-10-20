@@ -1301,6 +1301,7 @@ export type {
   SessionControlResponse,
   SessionRetryRequest,
   SandboxRecoverySelection,
+  SandboxRecoveryTarget,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   SandboxRecoveryResponse,

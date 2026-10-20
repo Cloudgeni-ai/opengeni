@@ -987,12 +987,19 @@ message GpuSample {
 message PingRequest {
   // Echoed back so the caller can correlate / measure RTT.
   uint64 nonce = 1;
+  // Optional receiver-issued control delivery batch, measured on the agent's
+  // suspend-inclusive monotonic clock. Zero is an ordinary liveness-only ping.
+  uint64 control_replay_window_ms = 2;
 }
 
 message PingResponse {
   uint64 nonce = 1;
   // The agent's monotonic clock, for skew estimation.
   uint64 agent_monotonic_ms = 2;
+  // Opaque, single-delivery identities for background replenishment. Empty on
+  // older agents or ordinary pings. Each token is used for only one call;
+  // retries retain its exact subject (including timing) and request bytes.
+  repeated string control_replay_tokens = 3;
 }
 
 // Sent by the agent on a clean stop (SIGINT/SIGTERM) so the lease flips to
@@ -1152,6 +1159,15 @@ message AgentUpdateProgress {
   string error_code = 5;
   bool retryable = 6;
   bool rolled_back = 7;
+  // Content-free blockers from this idle proof, not permission to stop work.
+  repeated AgentUpdateBlocker blockers = 8;
+}
+
+message AgentUpdateBlocker {
+  string kind = 1;
+  // Unused: enrollment-wide diagnostics must never carry private session IDs.
+  string resource_id = 2;
+  uint32 count = 3;
 }
 
 // =============================================================================
@@ -1266,7 +1282,8 @@ message OpStart {
   uint64 window_bytes = 10;
   // Absolute runner-enforced deadline, unix-epoch ms (0 = none). Runner-side
   // enforcement is authoritative (process-tree kill + Exit{timed_out}); the
-  // server wall-clock is advisory.
+  // server wall-clock is advisory. Legacy one-shot delivery uses this field;
+  // replay v2 uses ExecRequest.timeout_ms from the token's fixed call offset instead.
   int64 deadline_ms = 11;
   // The originating session id, for per-origin fair admission.
   string origin_id = 12;

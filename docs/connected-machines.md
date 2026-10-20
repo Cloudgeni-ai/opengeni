@@ -44,17 +44,43 @@ it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
 
-For control reply recovery, a read-only ping negotiates the NATS response header
-`Opengeni-Control-Replay: 1`. Supporting agents accept an immutable delivery at
-`<exact-process-rpc-subject>.replay.<expiry-unix-ms>.<delivery-uuid>`, with the
-unchanged protobuf request as its payload. One atomic admission owns execution;
-duplicates join its pending reply or retrieve the exact retained bytes. A changed
-payload or expiry under an existing identity is refused. The journal survives
+For control reply recovery, a read-only ping obtains a batch of 64 single-use
+tokens and negotiates the NATS response header `Opengeni-Control-Replay: 2`.
+The caller caches them by authenticated bus and exact process subject, including
+across one-off RPC adapters. Warm calls take a token without another round trip;
+at 16 remaining tokens the caller replenishes in the background, sharing one
+pending refill across concurrent callers. Cold, expired or exhausted pools wait
+for a batch. No idle timer or recurring ping is introduced. The batch window is
+twice the requested call timeout plus recovery allowance; the caller discards
+tokens without enough remaining headroom, conservatively measured from before
+the batch request. The receiver retains each opaque token's deadline on a
+suspend-inclusive elapsed clock (Linux BOOTTIME, macOS MONOTONIC_RAW, Windows
+GetTickCount64), never civil time. Sleeping does not extend the delivery window.
+Supporting callers send the immutable delivery to
+`<exact-process-rpc-subject>.replay.<token>.<age-ms>.<lifetime-ms>`, with the unchanged protobuf request
+as its payload. Only issued, unexpired tokens can admit work. First admission
+binds the payload digest and timing; duplicates join its pending reply or retrieve the exact
+retained bytes. Changed payloads or timing are refused. The journal survives
 socket/JWT/credential replacement, including removal and re-addition of the same
 exact origin/connection/process scope, but is not shared across different scopes.
-Receipts are collected after expiry; the expired delivery itself remains
-inadmissible, including after an observed wall-clock rollback. Controller and
-machine clocks must be synchronized, as for absolute command deadlines.
+Receipts and unused tokens are collected after expiry; unknown tokens are never
+admitted, so collection cannot license another execution. Neither admission nor
+the caller's retry budget reads wall time: clock skew, jumps and corrections do
+not poison this transport. The call offset is elapsed caller time since receiving
+the batch, anchored at the receiver's issuance time. This conservatively includes
+return-path latency in the call budget, but not idle prefetch age. Future offsets
+are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+call offset plus lifetime. Streamed exec uses its existing relative timeout from
+that same call offset; delivery or retries cannot reset the deadline.
+The absolute exec deadline remains only for legacy one-shot peers. This does not
+change external authentication systems' clock requirements.
+
+Private batch allocation avoids distributing the same single-use token to several
+workers through a broadcast hello. It also avoids estimating wall-clock offsets
+from heartbeats, which can become stale when a clock jumps. Long machine sleep can
+expire already-prefetched tokens: the first refused call is not silently retried
+under a fresh identity; the caller discards its pool and refreshes for the next
+call. An unknown token never grants fresh execution.
 
 The requester retries transient transport failures within the operation's request
 timeout plus a two-minute recovery allowance, preserving the delivery identity
@@ -68,19 +94,25 @@ removed when the request settles. This continuity requires the runtime deploymen
 and agent readiness ordering; older agents remain wire-compatible, and mutations
 without negotiated journal support remain one-shot.
 
-It never retries a received tool error. A later no-responder cannot
+It never retries a received tool error. Rejected expired/unknown or conflicting
+deliveries return a non-retryable protocol error promptly, explicitly preserving
+an unknown prior outcome instead of silently timing out. A later no-responder cannot
 erase uncertainty from an earlier send. Accepted physical work and any unflushed
 reply retain the existing update-drain reservation until a successful socket
-publication; expiry without that proof remains unsettled. This is transport proof,
+publication or receipt expiry; independent physical producers retain their own
+reservations until they settle. This is transport proof,
 not proof that a caller consumed the reply.
 
 The guarantee requires both the updated server runtime and a native agent with
-the journal. An older agent does not advertise the header and retains the
-existing conservative mutation behavior. Native process replacement, revoked
+the v2 journal. Mixed versions (including a v1 journal) use the existing
+conservative one-shot mutation behavior. An old caller with a cached v1
+negotiation receives an explicit unknown-receipt error from a v2 receiver, never
+fresh execution. Native process replacement, revoked
 authority, genuine tool errors, and outages beyond the recovery deadline are not
 transparent successes: the existing failure/unknown-outcome semantics remain,
 and ambiguous mutations are never automatically reissued as fresh deliveries.
-No model-visible schema, result text, or previously sent history changes.
+No tool schema or previously sent history changes. Protocol rejection messages
+can reach tools and therefore require model-facing review.
 
 Retrying stops early when the agent process a request was sent to is replaced.
 While an attempt waits for its reply (every second, from Opengeni's own records,
@@ -385,6 +417,19 @@ origin. Older agent releases that only accept the development origin cannot
 connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
+
+Where the browser finds the native host depends on the platform. On macOS and
+Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
+browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look
+the host up in the per-user registry instead: the agent writes the one manifest
+to `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json` and
+sets the default value of
+`HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
+matching keys for Chromium, Edge and Brave when those browsers are present) to
+that path. Removal deletes only keys that still name this agent's manifest.
+When the extension cannot reach the agent, its popup says why: no agent is set
+up on this computer, the agent is too old for the extension, or it is not
+running.
 
 The bridge generation is an opaque unpadded-base64url token: leading `-` and
 `_` are valid and retained verbatim in inventory and discovery. Rejecting either
@@ -718,7 +763,7 @@ means a verified self-update is draining accepted work; `queue_breaker` and
 detail remains an unspecified admission refusal. The same distinction survives
 retry exhaustion and structured tool-error rendering. A self-update on a busy
 host is accepted and waits for idle: the agent reports `waiting_for_idle` with
-the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
+the current reason (`update_busy_work`, `update_busy_uploads`, `update_busy_interactions` or a transiently
 unreadable controller as `update_state_unavailable`), keeps admitting new work,
 and every few seconds re-attempts a short fenced idle proof, reopening
 admission whenever it is still busy. It never cancels accepted work, stops
@@ -749,14 +794,35 @@ remains in that group. The browsers it launched run in their own sessions and
 are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
-attached browser sessions, browsers without a durable working runtime, and
+busy attached browser sessions, browsers without a durable working runtime, and
 isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
 adopts the same process on its next request, even when the old launcher was
 killed with the stopped service or came from an earlier agent release. A
 session whose browser already ended and a computer session on the machine's
-own physical seat do not keep the host busy either. Older agents still end a
+own physical seat do not keep the host busy either.
+
+The idle proof also carries bounded blocker snapshots: categories and counts,
+not private session IDs, command text, page titles, URLs or filesystem paths.
+Controller scopes can belong to different workspaces on the same host, so
+session identities never leave that boundary in update diagnostics. The
+agent emits a progress event when the reason/categories change and refreshes
+counts at most once per minute. Enrollment
+progress retains it under the existing exact operation/process fence, clears
+it when the update advances or its accepting process is replaced, and exposes
+it through Machines and fleet. Machines highlights a hold after ten minutes and
+shows elapsed time from the original request; this is presentation, not a
+deadline or permission to end work. The snapshot is last-reported evidence,
+not a live ownership query, and the counters can describe overlapping ownership
+layers rather than distinct commands. Older ambiguous `update_busy_work`
+receipts cannot identify a culprit and are labeled accordingly. A settled
+attached-transport error does not itself hold admission: the uncertain action
+remains journaled without retaining a running queue or replaying the action.
+These diagnostics do not establish the cause of an earlier hold whose admission
+snapshot was not recorded, and do not change the admission decision or cancel work.
+
+Older agents still end a
 busy update with retryable `update_busy_work`. Nobody has to request updates:
 the control plane asks every live machine behind its channel's promoted build
 to update from its heartbeat, and asks an older busy agent again every 10

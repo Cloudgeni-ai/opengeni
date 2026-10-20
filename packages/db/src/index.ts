@@ -299,6 +299,7 @@ import {
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
+  SandboxRecoveryTarget,
   SandboxRecoveryResponse,
   SandboxFreshWorkspaceRecovery,
   SandboxFreshWorkspaceReason,
@@ -43237,6 +43238,19 @@ export class SandboxLeaseRecoveryBlockedError extends Error {
 // filesystem out from under the OTHER sessions, so we refuse. The turn activity surfaces
 
 // holder never hits this — acquireLease requests a reaper-owned durable rotation instead.
+export class SandboxBackendConflictError extends Error {
+  readonly name = "SandboxBackendConflictError";
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly actualBackend: string,
+    public readonly requestedBackend: string,
+  ) {
+    super(
+      `Sandbox group ${sandboxGroupId} still owns provider work on ${actualBackend}; cannot use ${requestedBackend} until it is cold`,
+    );
+  }
+}
+
 export class SandboxImageConflictError extends Error {
   constructor(
     public readonly sandboxGroupId: string,
@@ -43525,12 +43539,20 @@ function hasCompleteWorkspaceArchive(row: LeaseRow): boolean {
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
   return (
     recoveryStateFromLeaseRow(row).archive.status === "available" &&
+    !currentWorkspaceArchiveWasAbandoned(row) &&
     Number.isSafeInteger(workspaceGeneration) &&
     workspaceGeneration >= 0 &&
     archiveGeneration !== null &&
     Number.isSafeInteger(archiveGeneration) &&
     archiveGeneration === workspaceGeneration
   );
+}
+
+/** No filesystem discontinuity: an earlier failed restore can be tried again
+ * against the same current archive. Explicit public recovery retains its own
+ * immutable selection and consent lifecycle. */
+function canRevalidateCurrentWorkspaceArchive(row: LeaseRow): boolean {
+  return row.public_recovery === null && hasCompleteWorkspaceArchive(row);
 }
 
 function parseArchiveRevision(value: unknown): SandboxArchiveRevision | null {
@@ -43720,6 +43742,9 @@ type FreshWorkspaceRecoveryMarker = {
   status: "accepted" | "verified";
   authorizedAt: string;
   verifiedAt?: string;
+  source?: "explicit";
+  /** Retained for forensics, never an implicit recovery source after reset. */
+  abandonedRevision?: string;
 };
 
 function freshWorkspaceRecoveryMarker(
@@ -43743,6 +43768,21 @@ function pendingFreshWorkspaceRecovery(
 ): FreshWorkspaceRecoveryMarker | null {
   const marker = freshWorkspaceRecoveryMarker(resumeState);
   return marker?.status === "accepted" ? marker : null;
+}
+
+function retainedFreshWorkspaceRecovery(
+  resumeState: Record<string, unknown> | null | undefined,
+): FreshWorkspaceRecoveryMarker | null {
+  const marker = freshWorkspaceRecoveryMarker(resumeState);
+  return marker?.status === "accepted" || marker?.abandonedRevision ? marker : null;
+}
+
+function currentWorkspaceArchiveWasAbandoned(row: LeaseRow): boolean {
+  const revision = freshWorkspaceRecoveryMarker(row.resume_state)?.abandonedRevision;
+  return (
+    typeof revision === "string" &&
+    revision === recoveryStateFromLeaseRow(row).archive.current?.revision
+  );
 }
 
 /** Durable evidence that the exact provider object of this lease lineage was
@@ -43821,13 +43861,17 @@ function resumeStateWithPreservedArchives(
   const preserved = resumeStateWithPreservedArchiveFields(resumeState, archiveSource);
   // A pending empty-workspace decision and the loss evidence behind it are not
   // archive truth, so they survive even when the lost lease had no archive.
-  const fresh = pendingFreshWorkspaceRecovery(archiveSource);
+  const fresh = retainedFreshWorkspaceRecovery(archiveSource);
   const loss = providerLossRecord(archiveSource);
-  if (!fresh && !loss) return preserved;
+  const retry = archiveSource?.opengeniWorkspaceRecoveryRequest;
+  if (!fresh && !loss && !retry) return preserved;
   return {
     ...(preserved ?? {}),
     ...(fresh ? { [FRESH_WORKSPACE_RECOVERY_KEY]: fresh } : {}),
     ...(loss ? { [PROVIDER_LOSS_KEY]: loss } : {}),
+    // Preserve the accepted operation across provider envelopes so a client
+    // whose POST response was lost can reconcile the verified result by ID.
+    ...(retry ? { opengeniWorkspaceRecoveryRequest: retry } : {}),
   };
 }
 
@@ -43913,8 +43957,11 @@ function archiveOnlyResumeState(
           opengeniAutomaticCheckpointRecovery: current.opengeniAutomaticCheckpointRecovery,
         }
       : {}),
-    ...(pendingFreshWorkspaceRecovery(current)
-      ? { [FRESH_WORKSPACE_RECOVERY_KEY]: pendingFreshWorkspaceRecovery(current) }
+    ...(retainedFreshWorkspaceRecovery(current)
+      ? { [FRESH_WORKSPACE_RECOVERY_KEY]: retainedFreshWorkspaceRecovery(current) }
+      : {}),
+    ...(current?.opengeniWorkspaceRecoveryRequest
+      ? { opengeniWorkspaceRecoveryRequest: current.opengeniWorkspaceRecoveryRequest }
       : {}),
     ...(carriedLoss ? { [PROVIDER_LOSS_KEY]: carriedLoss } : {}),
     opengeniRecovery: recovery,
@@ -44240,6 +44287,18 @@ async function acquireLeaseOnce(
           };
         }
         const existingSnapshot = warmBillingSnapshot(row);
+        // The accepted session route selects a replacement backend, not the
+        // backend label of a box that was drained before a deployment move.
+        // Never retarget an existing instance or an outcome-unknown create.
+        if (
+          row.backend !== backend &&
+          (liveness !== "cold" ||
+            row.instance_id !== null ||
+            row.provider_create_attempt?.instanceId === null ||
+            recoveryStateFromLeaseRow(row).continuity)
+        ) {
+          throw new SandboxBackendConflictError(sandboxGroupId, row.backend, backend);
+        }
         if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
         }
@@ -44474,6 +44533,13 @@ async function acquireLeaseOnce(
           const freshWorkspaceRecoveryId = await authorizedFreshWorkspaceRecoveryId(tx, row);
           if (
             freshWorkspaceRecoveryId === null &&
+            // A failure verdict describes an earlier restore, not immutable
+            // archive truth. Revalidate the exact CURRENT generation with the
+            // current loader/provider configuration. Election, selected-revision
+            // verification and warm publication still fence every replacement.
+            // Missing/unverified archives and generation gaps need an explicit
+            // recovery decision; never silently substitute an older archive.
+            !canRevalidateCurrentWorkspaceArchive(row) &&
             ((recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
               recovery.restore.status === "unrecoverable") &&
             (await authorizedHistoricalArchiveGeneration(tx, row)) === null
@@ -44490,6 +44556,7 @@ async function acquireLeaseOnce(
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
+            backend = ${backend},
             ${
               input.warmBilling
                 ? sql`resume_state = coalesce(resume_state, '{}'::jsonb) ||
@@ -44779,6 +44846,10 @@ export async function sessionEffectiveSandboxRecoveryBlocked(
     if (!blockers.lease && !blockers.current && !blockers.others) return false;
   }
   const recovery = recoveryStateFromLeaseRow(row);
+  // Retrying a current archive is non-destructive revalidation, not consent to
+  // lose newer files. An old loader/configuration failure must not strand the
+  // conversation before the next cold election can run today's verifier.
+  if (canRevalidateCurrentWorkspaceArchive(row)) return false;
   return (
     recovery.restore.status === "unrecoverable" ||
     (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
@@ -44791,7 +44862,135 @@ type PublicRecoveryScope = {
   workspaceId: string;
   sessionId: string;
   subjectId: string;
+  /** Core reauthorizes every member under the held tenancy/control fence.
+   * Absent callback never grants group-wide data-loss consent. */
+  canControlMember?: (tx: Database, sessionId: string) => Promise<boolean>;
 };
+
+function recoveryTargetForSession(
+  row: LeaseRow,
+  session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
+): SandboxRecoveryTarget {
+  const recovery = recoveryStateFromLeaseRow(row);
+  return {
+    sessionId: session.id,
+    sandboxGroupId: row.sandbox_group_id,
+    leaseId: row.id,
+    routeEpoch: session.activeEpoch,
+    authorityEpoch: session.authorityEpoch,
+    leaseEpoch: Number(row.lease_epoch),
+    workspaceGeneration: Number(row.workspace_generation),
+    archiveGeneration: row.archive_generation === null ? null : Number(row.archive_generation),
+    revision: recovery.archive.current?.revision ?? null,
+    restoreStatus: recovery.restore.status,
+    restoreCompletedAt: recovery.restore.completedAt,
+  };
+}
+
+async function currentWorkspaceRecoveryProjection(
+  tx: Database,
+  input: PublicRecoveryScope,
+  row: LeaseRow,
+  session: typeof schema.sessions.$inferSelect,
+  operator = false,
+): Promise<SandboxRecoveryProjection | null> {
+  const recovery = recoveryStateFromLeaseRow(row);
+  const failed =
+    recovery.restore.status === "unrecoverable" || recovery.restore.status === "degraded";
+  const fresh = freshWorkspaceRecoveryMarker(row.resume_state);
+  const retryMarker = row.resume_state?.opengeniWorkspaceRecoveryRequest as
+    | { operationId?: string }
+    | undefined;
+  if (!failed && fresh?.source !== "explicit" && !retryMarker?.operationId) return null;
+  if (fresh?.source === "explicit" && (fresh.status === "accepted" || !failed)) {
+    return {
+      version: 1,
+      status:
+        fresh.status === "verified" && recovery.workspace.status === "ready"
+          ? "restored"
+          : row.liveness === "warming"
+            ? "restoring"
+            : "consent_accepted",
+      reason: "fresh_workspace_selected",
+      checkpoint: null,
+      operationId: fresh.operationId,
+    };
+  }
+  if (!failed && retryMarker?.operationId)
+    return {
+      version: 1,
+      status:
+        recovery.workspace.status === "ready"
+          ? "restored"
+          : row.liveness === "warming"
+            ? "restoring"
+            : "consent_accepted",
+      reason: "archive_retry_selected",
+      checkpoint: null,
+      operationId: retryMarker.operationId,
+    };
+  const target = recoveryTargetForSession(row, session);
+  const blocked = (reason: string): SandboxRecoveryProjection => ({
+    version: 1,
+    status: "blocked",
+    reason,
+    checkpoint: null,
+    operationId: retryMarker?.operationId ?? null,
+    target,
+    retryAvailable: false,
+    freshWorkspaceAvailable: false,
+  });
+  if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
+    return blocked("lease_not_quiescent");
+  if (row.archive_capture_id !== null || row.provider_create_attempt?.instanceId === null)
+    return blocked("execution_unresolved");
+  if (
+    (row.public_recovery as Record<string, unknown> | null)?.status === "accepted" ||
+    automaticCheckpointMarker(row.resume_state)?.status === "accepted"
+  )
+    return blocked("automatic_recovery_pending");
+  const members = await sandboxGroupMembersTx(tx, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: row.sandbox_group_id,
+  });
+  const blockers = await sandboxGroupRecoveryBlockersTx(tx, {
+    row,
+    sessionId: session.id,
+    attemptId: null,
+  });
+  const [queued] = await withCompleteSandboxGroupScope(tx, () =>
+    rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists(select 1 from session_turns turn join sessions member on member.id = turn.session_id
+      where member.workspace_id = ${input.workspaceId} and member.sandbox_group_id = ${row.sandbox_group_id}
+        and turn.status in ('queued','running','recovering','requires_action','waiting_capacity')) as present`,
+    ),
+  );
+  if (blockers.lease || blockers.current || blockers.others || queued?.present)
+    return blocked("execution_unresolved");
+  let controlsGroup = operator;
+  if (!controlsGroup && input.canControlMember && members.length > 0) {
+    controlsGroup = true;
+    for (const member of members) {
+      if (!(await input.canControlMember(tx, member.id))) {
+        controlsGroup = false;
+        break;
+      }
+    }
+  }
+  return {
+    version: 1,
+    status: "eligible",
+    reason: controlsGroup ? null : "group_control_required",
+    checkpoint: null,
+    operationId: retryMarker?.operationId ?? null,
+    target,
+    retryAvailable: canRevalidateCurrentWorkspaceArchive(row),
+    freshWorkspaceAvailable: controlsGroup,
+    ...(controlsGroup ? { groupSessionCount: members.length } : {}),
+  };
+}
 
 /** Count the complete tenant group, not the actor-visible subset. The caller
  * has already authorized the selected session; this returns no member data. */
@@ -45003,6 +45202,7 @@ async function verifiedAutomaticCheckpointSelectionTx(
   const descriptor = recovery.archive.current;
   if (
     recovery.archive.status !== "available" ||
+    currentWorkspaceArchiveWasAbandoned(row) ||
     descriptor?.version !== 2 ||
     row.current_checkpoint_artifact_id === null ||
     row.archive_generation === null ||
@@ -45156,10 +45356,8 @@ async function automaticRecoveryLaneTx(
   session: typeof schema.sessions.$inferSelect,
 ): Promise<AutomaticRecoveryLane> {
   if (
-    session.sandboxBackend !== "modal" ||
     session.sandboxGroupId !== row.sandbox_group_id ||
     (session.activeSandboxId !== null && session.activeSandboxId !== row.sandbox_group_id) ||
-    row.backend !== "modal" ||
     row.public_recovery !== null ||
     (row.liveness !== "cold" && row.liveness !== "warming")
   )
@@ -45181,6 +45379,8 @@ async function automaticRecoveryLaneTx(
     };
   if (pendingFreshWorkspaceRecovery(row.resume_state))
     return { kind: "unavailable", reason: "authorization_invalid" };
+  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
+    return { kind: "unavailable", reason: "not_applicable" };
   const automatic = automaticCheckpointMarker(row.resume_state);
   if (automatic?.status === "accepted") {
     const generation = await authorizedHistoricalArchiveGeneration(tx, row);
@@ -45426,6 +45626,18 @@ async function projectPublicSandboxRecovery(
   input: PublicRecoveryScope,
   purpose: "preview" | "consent" = "preview",
 ): Promise<SandboxRecoveryProjection> {
+  let currentWorkspace: SandboxRecoveryProjection | null = null;
+  const workspaceOptions = () =>
+    currentWorkspace?.target
+      ? {
+          target: currentWorkspace.target,
+          retryAvailable: currentWorkspace.retryAvailable,
+          freshWorkspaceAvailable: currentWorkspace.freshWorkspaceAvailable,
+          ...(currentWorkspace.groupSessionCount
+            ? { groupSessionCount: currentWorkspace.groupSessionCount }
+            : {}),
+        }
+      : {};
   const unavailable = (
     reason: string,
     checkpoint: SandboxRecoverySelection | null = null,
@@ -45437,6 +45649,7 @@ async function projectPublicSandboxRecovery(
     checkpoint,
     operationId: null,
     ...(availableAt ? { availableAt } : {}),
+    ...workspaceOptions(),
   });
   const [session] = await tx
     .select()
@@ -45468,13 +45681,22 @@ async function projectPublicSandboxRecovery(
       status: "unsupported",
     };
   }
-  if (session.sandboxBackend !== "modal")
+  if (session.sandboxBackend === "none" || session.sandboxBackend === "selfhosted")
     return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
   const [row] =
     await tx.execute<LeaseRow>(sql`select * from sandbox_leases where workspace_id = ${input.workspaceId}
     and sandbox_group_id = ${session.sandboxGroupId}`);
   if (!row) return { ...unavailable("historical_checkpoint_not_required"), status: "unsupported" };
-  if (row.backend !== "modal")
+  currentWorkspace = await currentWorkspaceRecoveryProjection(tx, input, row, session);
+  if (
+    currentWorkspace &&
+    (currentWorkspace.reason === "fresh_workspace_selected" ||
+      currentWorkspace.reason === "archive_retry_selected" ||
+      canRevalidateCurrentWorkspaceArchive(row) ||
+      row.backend !== "modal")
+  )
+    return currentWorkspace;
+  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
     return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
   const publicRecovery = row.public_recovery as Record<string, unknown> | null;
   const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
@@ -45506,6 +45728,7 @@ async function projectPublicSandboxRecovery(
               : null,
       checkpoint: acceptedSelection.data,
       operationId: String(publicRecovery.operationId),
+      ...workspaceOptions(),
     };
   }
   // System continuity first: a definitively lost box is never a dead end when
@@ -45555,8 +45778,11 @@ async function projectPublicSandboxRecovery(
     automaticCheckpointMarker(row.resume_state)?.status === "accepted"
   )
     return unavailable("automatic_recovery_pending");
+  if (currentWorkspace && !row.current_checkpoint_artifact_id) return currentWorkspace;
   if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
-    return { ...unavailable("singleton_required"), status: "unsupported" };
+    return currentWorkspace?.freshWorkspaceAvailable
+      ? currentWorkspace
+      : { ...unavailable("singleton_required"), status: "unsupported" };
   const recovery = recoveryStateFromLeaseRow(row);
   // No authoritative recovery failure: a model/transport failure must keep its
   // ordinary remedies even before the first checkpoint or lease exists.
@@ -45617,7 +45843,14 @@ async function projectPublicSandboxRecovery(
     sql`select consent_enabled from opengeni_private.sandbox_recovery_rollout where singleton`,
   );
   if (!activation?.consent_enabled) return unavailable("recovery_not_enabled", selection);
-  return { version: 1, status: "eligible", reason: null, checkpoint: selection, operationId: null };
+  return {
+    version: 1,
+    status: "eligible",
+    reason: null,
+    checkpoint: selection,
+    operationId: null,
+    ...workspaceOptions(),
+  };
 }
 
 /** Authorized caller only; provider-free and mutation-free (transaction scope only). */
@@ -45668,6 +45901,9 @@ export async function consentPublicSandboxRecovery(
       const session = locks.sessions[0];
       if (!session || session.accountId !== input.accountId)
         throw new SandboxRecoveryConflictError("Session is unavailable");
+      if ("action" in input.request) {
+        return applySandboxWorkspaceRecoveryTx(activity, input, session, input.request, false);
+      }
       const reserved = await reserveSessionCommandReceipt(activity, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -45739,6 +45975,239 @@ export async function consentPublicSandboxRecovery(
       };
       await updateSessionCommandReceiptResult(activity, reserved.receipt.id, { result });
       return result;
+    },
+    undefined,
+    "none",
+  );
+}
+
+type WorkspaceRecoveryRequest = Extract<SandboxRecoveryRequest, { action: string }>;
+
+/** Shared human/operator decision seam. The caller holds organization tenancy,
+ * workspace control and session locks; no provider work happens in this transaction. */
+async function applySandboxWorkspaceRecoveryTx(
+  tx: Database,
+  input: PublicRecoveryScope,
+  session: typeof schema.sessions.$inferSelect,
+  request: WorkspaceRecoveryRequest,
+  operator: boolean,
+): Promise<SandboxRecoveryResponse> {
+  const members = await sandboxGroupMembersTx(tx, {
+    ...input,
+    sandboxGroupId: session.sandboxGroupId,
+  });
+  if (request.action === "continue_fresh" && !operator) {
+    if (!input.canControlMember || members.length === 0)
+      throw new SandboxRecoveryConflictError("Control of the complete sandbox group is required");
+    for (const member of members) {
+      if (!(await input.canControlMember(tx, member.id)))
+        throw new SandboxRecoveryConflictError("Control of the complete sandbox group is required");
+    }
+  }
+  await lockSessionEventWriteRows(tx, {
+    workspaceId: input.workspaceId,
+    controlLock: "none",
+    sessionIds: members.map((member) => member.id),
+  });
+  const reserved = await reserveSessionCommandReceipt(tx, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    targetSessionId: input.sessionId,
+    targetTurnId: null,
+    actor: { type: operator ? "service" : "human", subjectId: input.subjectId },
+    action: "sandbox.recovery.request",
+    operationKey: request.operationId,
+    canonicalRequestHash: canonicalSessionCommandHash(request),
+  });
+  if (reserved.replay)
+    return { ...SandboxRecoveryResponse.parse(reserved.receipt.result), outcome: "replayed" };
+  await lockSandboxLeaseAdmission(tx, input.workspaceId, session.sandboxGroupId);
+  const [row] = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+    where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId} for update`);
+  if (
+    !row ||
+    (session.activeSandboxId !== null && session.activeSandboxId !== session.sandboxGroupId) ||
+    canonicalSessionCommandHash(recoveryTargetForSession(row, session)) !==
+      canonicalSessionCommandHash(request.target)
+  )
+    throw new SandboxRecoveryConflictError("Recovery selection changed; review its current status");
+  const projection = await currentWorkspaceRecoveryProjection(tx, input, row, session, operator);
+  if (
+    !projection ||
+    (request.action === "retry" ? !projection.retryAvailable : !projection.freshWorkspaceAvailable)
+  )
+    throw new SandboxRecoveryConflictError(
+      "Recovery is not available until the sandbox group is quiescent and authorized",
+    );
+  const recovery = recoveryStateFromLeaseRow(row);
+  const now = (await transactionNow(tx)).toISOString();
+  const fresh = request.action === "continue_fresh";
+  await tx.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        id: request.operationId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: fresh ? FRESH_WORKSPACE_RECOVERY_ACTION : "sandbox.archive_recovery.retried",
+        targetType: "sandbox_group",
+        targetId: row.sandbox_group_id,
+        metadata: {
+          version: 1,
+          leaseId: row.id,
+          leaseEpoch: Number(row.lease_epoch),
+          sessionId: session.id,
+          workspaceGeneration: Number(row.workspace_generation),
+          archiveGeneration:
+            row.archive_generation === null ? null : Number(row.archive_generation),
+          archiveRevision: recovery.archive.current?.revision ?? null,
+          previousRecovery: recovery,
+          previousPublicRecovery: row.public_recovery,
+          groupSessionCount: members.length,
+          operator,
+          ...(fresh ? { freshWorkspace: true, reason: "restore_abandoned", lostAt: now } : {}),
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
+  if (fresh) {
+    await writeAutomaticRecoveryReceiptsTx(tx, {
+      ...input,
+      row,
+      operationId: request.operationId,
+      initiatingSessionId: session.id,
+      currentSessionId: session.id,
+      actor: { type: operator ? "service" : "human", subjectId: input.subjectId },
+      members,
+      lane: {
+        kind: "fresh_workspace",
+        state: "authorized",
+        operationId: request.operationId,
+        initiatingSessionId: session.id,
+        reason: "restore_abandoned",
+        lostAt: now,
+      },
+    });
+    const marker: FreshWorkspaceRecoveryMarker = {
+      version: 1,
+      operationId: request.operationId,
+      sessionId: session.id,
+      status: "accepted",
+      authorizedAt: now,
+      source: "explicit",
+      ...(recovery.archive.current?.revision
+        ? { abandonedRevision: recovery.archive.current.revision }
+        : {}),
+    };
+    await tx.execute(sql`update sandbox_leases set public_recovery = null,
+      resume_state = (coalesce(resume_state, '{}'::jsonb) #- '{opengeniRecovery,lateArchiveCapture}') ||
+        ${JSON.stringify({ [FRESH_WORKSPACE_RECOVERY_KEY]: marker })}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+    await withCompleteSandboxGroupScope(tx, () =>
+      appendSessionEventToSandboxGroup(tx, input.workspaceId, row.sandbox_group_id, {
+        type: "sandbox.recovery.selected",
+        payload: {
+          operationId: request.operationId,
+          mode: "fresh_workspace",
+          text: "An empty workspace was selected for this chat and any chats sharing it. Previous files were not restored. The old archive is retained; conversations and changes outside the workspace are unchanged. No commands were replayed.",
+        },
+      }),
+    );
+  } else {
+    const pending: SandboxRecoveryState = {
+      ...recovery,
+      restore: {
+        status: "pending",
+        rematerializationId: null,
+        selectedRevision: null,
+        startedAt: null,
+        completedAt: null,
+      },
+      workspace: { status: "not_ready", verifiedRevision: null, verifiedAt: null },
+    };
+    await tx.execute(sql`update sandbox_leases set
+      resume_state = ${JSON.stringify({
+        ...resumeStateWithRecovery(row.resume_state, pending),
+        opengeniWorkspaceRecoveryRequest: {
+          operationId: request.operationId,
+          sessionId: session.id,
+        },
+      })}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+  }
+  const result: SandboxRecoveryResponse = {
+    outcome: "accepted",
+    operationId: request.operationId,
+    recovery: {
+      version: 1,
+      status: "consent_accepted",
+      reason: fresh ? "fresh_workspace_selected" : "archive_retry_selected",
+      checkpoint: null,
+      operationId: request.operationId,
+    },
+  };
+  await updateSessionCommandReceiptResult(tx, reserved.receipt.id, { result });
+  return result;
+}
+
+/** Operator-controlled database access is the authority boundary. Shares the
+ * exact human recovery transaction and never edits archive bytes/generations. */
+export async function readSandboxWorkspaceRecoveryAsOperator(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; subjectId: string },
+): Promise<SandboxRecoveryProjection | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [session] = await tx
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      );
+    if (!session) return null;
+    const [row] = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId}`);
+    return row ? currentWorkspaceRecoveryProjection(tx, input, row, session, true) : null;
+  });
+}
+
+export async function recoverSandboxWorkspaceAsOperator(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    request: WorkspaceRecoveryRequest;
+  },
+): Promise<SandboxRecoveryResponse> {
+  if (!input.subjectId.trim())
+    throw new SandboxRecoveryConflictError("An identified operator is required");
+  return withRlsContext(
+    db,
+    input,
+    async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+      );
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${input.workspaceId}`}, 0))`,
+      );
+      await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!session || session.accountId !== input.accountId)
+        throw new SandboxRecoveryConflictError("Session is unavailable");
+      return applySandboxWorkspaceRecoveryTx(tx, input, session, input.request, true);
     },
     undefined,
     "none",
@@ -46128,6 +46597,9 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
       sessionId: input.sessionId,
       status: "accepted",
       authorizedAt: new Date().toISOString(),
+      ...(freshWorkspaceRecoveryMarker(row.resume_state)?.abandonedRevision
+        ? { abandonedRevision: freshWorkspaceRecoveryMarker(row.resume_state)!.abandonedRevision }
+        : {}),
     };
     // The decision retires any late-capture receipt in the same commit, so a
     // capture of the lost generation can no longer land behind the empty box.
@@ -46169,6 +46641,7 @@ export async function getSandboxRecoveryDiscontinuity(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  projection: "all" | "legacy_instructions" | "explicit_notice" = "all",
 ): Promise<string | null> {
   return withWorkspaceRls(db, workspaceId, async (tx) => {
     const rows = await tx
@@ -46186,6 +46659,13 @@ export async function getSandboxRecoveryDiscontinuity(
             "sandbox.recovery.automatic",
             "sandbox.recovery.fresh_workspace",
           ]),
+          projection === "explicit_notice"
+            ? sql`${schema.sessionCommandReceipts.action} = 'sandbox.recovery.fresh_workspace'
+                and ${schema.sessionCommandReceipts.result} #>> '{freshWorkspace,reason}' = 'restore_abandoned'`
+            : projection === "legacy_instructions"
+              ? sql`not (${schema.sessionCommandReceipts.action} = 'sandbox.recovery.fresh_workspace'
+                  and coalesce(${schema.sessionCommandReceipts.result} #>> '{freshWorkspace,reason}', '') = 'restore_abandoned')`
+              : undefined,
         ),
       )
       .orderBy(desc(schema.sessionCommandReceipts.createdAt))
@@ -47332,6 +47812,10 @@ export async function commitWarmingToWarm(
             controller_data_plane_url = null,
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
+            -- Publishing an explicitly empty filesystem is a new generation,
+            -- even before its first command. Its retained old archive must not
+            -- become a current recovery source if this replacement is lost.
+            workspace_generation = workspace_generation + ${freshWorkspace && pendingFresh?.source === "explicit" ? 1 : 0},
             lease_epoch       = lease_epoch + 1,
             reaper_hold_id    = null,
             reaper_hold_until = null,
@@ -60567,6 +61051,7 @@ export type EnrollmentAgentUpdateRecord = {
   targetVersion: string;
   expectedBinarySha256: string | null;
   errorCode: string | null;
+  blockers?: Array<{ kind: string; count: number }>;
   retryable: boolean;
   rolledBack: boolean;
   connectionInstanceId: string;
@@ -60695,6 +61180,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
             targetVersion: row.agentUpdateTargetVersion,
             expectedBinarySha256: row.agentUpdateExpectedBinarySha256 ?? null,
             errorCode: row.agentUpdateErrorCode ?? null,
+            blockers: row.agentUpdateBlockers,
             retryable: row.agentUpdateRetryable,
             rolledBack: row.agentUpdateRolledBack,
             connectionInstanceId: row.agentUpdateConnectionInstanceId,
@@ -62341,6 +62827,10 @@ export async function setEnrollmentAgentRuntime(
             when ${acceptingProcessWasReplaced} then 'accepting_process_replaced'
             else ${schema.enrollments.agentUpdateErrorCode}
           end`,
+          agentUpdateBlockers: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced} then '[]'::jsonb
+            else ${schema.enrollments.agentUpdateBlockers}
+          end`,
           agentUpdateRetryable: sql`case
             when ${successorProvesCompletion} then false
             when ${acceptingProcessWasReplaced} then true
@@ -62422,6 +62912,7 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateTargetVersion: input.targetVersion,
           agentUpdateExpectedBinarySha256: null,
           agentUpdateErrorCode: null,
+          agentUpdateBlockers: [],
           agentUpdateRetryable: false,
           agentUpdateRolledBack: false,
           agentUpdateConnectionInstanceId: input.connectionInstanceId,
@@ -62480,6 +62971,7 @@ export async function advanceEnrollmentAgentUpdate(
     status: Exclude<AgentUpdateStatus, "requested" | "succeeded">;
     expectedBinarySha256?: string | null;
     errorCode?: string | null;
+    blockers?: Array<{ kind: string; count: number }>;
     retryable?: boolean;
     rolledBack?: boolean;
   },
@@ -62508,6 +63000,7 @@ export async function advanceEnrollmentAgentUpdate(
             ? { agentUpdateExpectedBinarySha256: input.expectedBinarySha256 }
             : {}),
           agentUpdateErrorCode: input.errorCode ?? null,
+          agentUpdateBlockers: input.status === "waiting_for_idle" ? (input.blockers ?? []) : [],
           agentUpdateRetryable: input.retryable ?? false,
           agentUpdateRolledBack: input.rolledBack ?? false,
           agentUpdateUpdatedAt: now,
@@ -70459,7 +70952,7 @@ async function planInboxBatch(
 export type ClaimSessionWorkForAttemptInput = {
   /** Internal worker-build declaration, never request-derived or universally
    * stamped by createDb. Only builds that always reconstruct the warning opt in. */
-  filesystemDiscontinuityProtocol?: 1 | 2 | 3;
+  filesystemDiscontinuityProtocol?: 1 | 2 | 3 | 4;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -71630,26 +72123,29 @@ async function acknowledgeConsumedChildSequencesInTransaction(
 /** Scope the worker-build declaration to registration, including nested claims. */
 async function withSandboxRecoveryWarningClaimProtocol<T>(
   tx: Database,
-  version: 1 | 2 | 3 | undefined,
+  version: 1 | 2 | 3 | 4 | undefined,
   register: () => Promise<T>,
 ): Promise<T> {
   const [prior] = await rawRows<{
     consent_protocol: string;
     automatic_protocol: string;
     fresh_protocol: string;
+    explicit_protocol: string;
   }>(
     tx,
     sql`select
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as consent_protocol,
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v2', true), '') as automatic_protocol,
-      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v3', true), '') as fresh_protocol`,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v3', true), '') as fresh_protocol,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v4', true), '') as explicit_protocol`,
   );
   // Each protocol version reconstructs every earlier warning kind as well.
   await tx.execute(
     sql`select
-      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 || version === 2 || version === 3 ? "1" : ""}, true),
-      set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 || version === 3 ? "2" : ""}, true),
-      set_config('opengeni.filesystem_discontinuity_protocol_v3', ${version === 3 ? "3" : ""}, true)`,
+      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 || version === 2 || version === 3 || version === 4 ? "1" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 || version === 3 || version === 4 ? "2" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v3', ${version === 3 || version === 4 ? "3" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v4', ${version === 4 ? "4" : ""}, true)`,
   );
   let completed = false;
   try {
@@ -71661,7 +72157,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
       sql`select
         set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.consent_protocol ?? ""}, true),
         set_config('opengeni.filesystem_discontinuity_protocol_v2', ${prior?.automatic_protocol ?? ""}, true),
-        set_config('opengeni.filesystem_discontinuity_protocol_v3', ${prior?.fresh_protocol ?? ""}, true)`,
+        set_config('opengeni.filesystem_discontinuity_protocol_v3', ${prior?.fresh_protocol ?? ""}, true),
+        set_config('opengeni.filesystem_discontinuity_protocol_v4', ${prior?.explicit_protocol ?? ""}, true)`,
     );
     if (completed) await restore;
     else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
