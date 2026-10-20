@@ -90,6 +90,29 @@ describe("BrowserDownloadStore", () => {
     await reopened.close();
   });
 
+  test("removes a named file that completed over its quota", async () => {
+    const { store } = await fixture({ maxFileBytes: 5, maxSessionBytes: 20 });
+    await store.begin({ guid: "over", targetId: null, suggestedFilename: "large.bin" });
+    const path = join(store.filesDirectory, "large.bin");
+    await writeFile(path, "ten bytes!");
+    await expect(
+      store.progress({
+        guid: "over",
+        state: "completed",
+        receivedBytes: 10,
+        totalBytes: 10,
+        filePath: path,
+      }),
+    ).resolves.toEqual({ cancelReason: "download_quota_exceeded" });
+    await store.reject("over", "download_quota_exceeded");
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_quota_exceeded",
+    });
+    await expect(readFile(path)).rejects.toThrow();
+    await store.close();
+  });
+
   test("never follows a reported file outside its folder", async () => {
     const { store } = await fixture();
     await store.begin({ guid: "escape", targetId: null, suggestedFilename: "x.txt" });

@@ -256,6 +256,12 @@ export class BrowserDownloadStore {
         (totalBytes !== null && totalBytes > this.maxFileBytes) ||
         projectedBytes > this.maxSessionBytes
       ) {
+        // Chromium cannot cancel a download it already completed, so its
+        // saved file is removed here; the caller then rejects the download.
+        if (event.state === "completed" && event.filePath) {
+          const fileName = downloadedFileName(this.filesDirectory, event.filePath);
+          if (fileName) await this.removePhysicalFiles(guid, fileName);
+        }
         return { cancelReason: "download_quota_exceeded" };
       }
       if (event.state === "canceled") {
