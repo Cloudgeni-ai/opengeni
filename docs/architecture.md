@@ -1251,6 +1251,26 @@ model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
 `delivery: "steer"`, or a pending agent Steer instruction). When one exists,
 admission throws `ModelStepHandover` before the request leaves the worker.
 
+At the next claim, an already-queued leading run of plain, never-started Steers
+from the same initiating person shares one replacement attempt. Each message
+keeps its own accepted-time history item and goal snapshot; all but the last
+are settled as superseded without a worker attempt. The last turn alone owns
+execution settings, credentials and grants. Files, personal-resource attachments,
+scheduled or previously started work, realtime delegations, another initiator,
+and ordinary Sends stop the batch; grants and files are never combined.
+Pending machine inputs are delivered once against the final turn, after all
+batched user messages. This can move a pending update later than the former
+one-at-a-time claim order, but never changes an existing history prefix.
+Claim and pre-claim failure settlement share target selection, so rollback or
+failure cannot accidentally settle the first message for an error in the last.
+There is no debounce: a Steer accepted after claim still uses the next-step
+handover above. Batch supersession receipts carry `beforeAttempt: true`, so
+they do not create empty UI responses without hiding real handover text in a
+partial timeline. Conversation monitoring and search share the canonical prompt
+visibility predicate: the server-written batch supersession receipt proves its
+message was consumed, including after compaction or archival purges history.
+Queued, withdrawn and admission-rejected prompts remain hidden until consumed.
+
 The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
 (`session.control.steer_requested`, `session.queue.changed`,

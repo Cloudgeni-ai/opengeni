@@ -416,44 +416,66 @@ test("a handover after parallel tool calls keeps every call and result, even wit
   ]);
 });
 
-test("two Steers during one step are read together by the next model request", async () => {
-  const ctx = await fixture();
-  const session = await startSession(ctx);
-  let steered = false;
-  const scripted = new ScriptedModel([
-    { id: `step-1-${session.id}`, output: [functionCall("local_fixture", {}, "call-1")] },
-    { id: `answer-${session.id}`, output: [assistantMessage("Status, and noted.")] },
-  ]);
-  const runtime = scriptedRuntime(scripted, async () => {
-    if (steered) return;
-    steered = true;
-    await send(ctx, session.id, "What is the status?", "steer");
-    await send(ctx, session.id, "Also keep notes", "steer");
-  });
+test.each(["new", "queued"] as const)(
+  "two %s Steers share one replacement attempt",
+  async (mode) => {
+    const ctx = await fixture();
+    const session = await startSession(ctx);
+    let steered = false;
+    const scripted = new ScriptedModel([
+      { id: `step-1-${session.id}`, output: [functionCall("local_fixture", {}, "call-1")] },
+      { id: `answer-${session.id}`, output: [assistantMessage("Status, and noted.")] },
+    ]);
+    const runtime = scriptedRuntime(scripted, async () => {
+      if (steered) return;
+      steered = true;
+      for (const text of ["What is the status?", "Also keep notes"]) {
+        const accepted = await send(ctx, session.id, text, mode === "new" ? "steer" : "send");
+        if (mode === "queued") {
+          const [queued] = await shared.admin<Array<{ version: number }>>`
+          select version from session_turns where id = ${accepted.turnId}`;
+          await withWorkspaceSessionActivityRls(app.db, ctx.workspaceId, (db) =>
+            db.transaction((tx) =>
+              steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+                accountId: ctx.accountId,
+                workspaceId: ctx.workspaceId,
+                sessionId: session.id,
+                turnId: accepted.turnId,
+                expectedTurnVersion: queued!.version,
+                actor: { type: "human", subjectId: ctx.subjectId },
+                operationKey: crypto.randomUUID(),
+              }),
+            ),
+          );
+        }
+      }
+    });
 
-  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
-  expect(scripted.calls).toBe(1);
-  // The first Steer's turn hands over to the second before any inference of
-  // its own, so one model request reads both messages in order.
-  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
-  expect(scripted.calls).toBe(1);
-  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
-  expect(scripted.calls).toBe(2);
-  expect((await turns(session.id)).map((turn) => turn.status)).toEqual([
-    "superseded",
-    "superseded",
-    "completed",
-  ]);
-  const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
-  expect(historyShape(history)).toEqual([
-    "user:task",
-    "call:local_fixture",
-    "result",
-    "user:status",
-    "user:notes",
-    "assistant",
-  ]);
-});
+    expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+    expect(scripted.calls).toBe(1);
+    // One claim consumes the waiting Steer prefix. The earlier prompt keeps its
+    // own history item without paying for an empty worker attempt.
+    expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+    expect(scripted.calls).toBe(2);
+    expect((await turns(session.id)).map((turn) => turn.status)).toEqual([
+      "superseded",
+      "superseded",
+      "completed",
+    ]);
+    const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+    expect(historyShape(history)).toEqual([
+      "user:task",
+      "call:local_fixture",
+      "result",
+      "user:status",
+      "user:notes",
+      "assistant",
+    ]);
+    const [attempts] = await shared.admin<Array<{ count: number }>>`
+    select count(*)::int as count from session_turn_attempts where session_id = ${session.id}`;
+    expect(attempts?.count).toBe(2);
+  },
+);
 
 test("an API caller's interrupt on a waiting Steer still stops the running attempt", async () => {
   const ctx = await fixture();
@@ -671,9 +693,7 @@ test("several quick Steers while the model generates are read in order by one re
   expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
   // One cut request, however many Steers arrived while it streamed.
   expect(model.preemptedAt).toEqual([0]);
-  // The first Steer hands over to the second before any request of its own.
-  expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
-  expect(model.calls).toBe(1);
+  // Both waiting messages reach the model in one replacement attempt.
   expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
   expect(model.calls).toBe(2);
   const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);

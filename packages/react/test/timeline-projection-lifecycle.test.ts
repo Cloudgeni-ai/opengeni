@@ -44,6 +44,55 @@ const prose = (groups: TimelineGroup[]) =>
   );
 
 describe("projection lifecycle audit regressions", () => {
+  test("coalesced Steers keep their user bubbles without empty agent turns", () => {
+    const items = buildTimeline(englishText, [
+      event(
+        1,
+        "user.message",
+        { text: "First direction", routing: "accepted_for_steering" },
+        "steer-1",
+      ),
+      event(
+        2,
+        "user.message",
+        { text: "Second direction", routing: "accepted_for_steering" },
+        "steer-2",
+      ),
+      event(
+        3,
+        "turn.superseded",
+        { reason: "steer", targetTurnId: "steer-2", beforeAttempt: true },
+        "steer-1",
+      ),
+      event(4, "turn.started", {}, "steer-2"),
+      event(
+        5,
+        "agent.message.completed",
+        { messageId: "answer", phase: "final_answer", text: "Both handled." },
+        "steer-2",
+      ),
+      event(6, "turn.completed", {}, "steer-2"),
+    ]);
+    expect(items.filter((item) => item.kind === "user-message")).toHaveLength(2);
+    expect(items.filter((item) => item.kind === "agent-message")).toHaveLength(1);
+    expect(items.some((item) => item.kind === "turn-end" && item.turnId === "steer-1")).toBe(false);
+  });
+  test("a partial history retains a real handover's cut-off text without its start", () => {
+    const items = buildTimeline(englishText, [
+      event(10, "turn.superseded", {
+        reason: "steer",
+        atModelStep: true,
+        cutOffText: "Preserved partial answer",
+      }),
+    ]);
+    expect(items).toContainEqual(
+      expect.objectContaining({
+        kind: "agent-message",
+        text: "Preserved partial answer",
+      }),
+    );
+    expect(items).toContainEqual(expect.objectContaining({ kind: "turn-end", turnId: "turn-1" }));
+  });
   for (const newerTurn of [false, true]) {
     test(`a late final-only receipt cannot create live old work (newer turn=${newerTurn})`, () => {
       const events = [

@@ -496,6 +496,7 @@ import {
 } from "@opengeni/contracts";
 import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
+import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibility";
 import { withDatabaseStatementTimeout } from "./database";
 import { withPoolWakeServiceScopeInTransaction } from "./subscription-session-access";
 import {
@@ -35873,54 +35874,6 @@ async function sessionDiscoveryClaimsForSessions(
     grouped.set(row.sessionId, entry);
   }
   return grouped;
-}
-
-/**
- * Excludes a human/API `user.message` whose accepted turn was never claimed.
- * Such a prompt was never model input: it is waiting work (represented by
- * `queuedPromptCount`) or a queue row that reached a terminal state before any
- * claim (deleted, edited, cancelled), so agent discovery and monitoring must
- * not present it as conversation. The predicate is `session_turns.started_at
- * IS NULL`: every claim path (`claimSessionWorkForAttempt` and the
- * create-and-claim inserts for internal turns) stamps `started_at` in the same
- * transaction that moves the turn to `running`, and nothing clears it, so it
- * is exactly "a claim happened" and cannot drift with the status vocabulary.
- * Once claimed the exact stored row is visible at its original sequence.
- * Stored events are never rewritten; forensic, SSE, and REST reads never apply
- * this filter.
- *
- * Two consequences are deliberate. An admission-rejected human/API turn
- * (never claimed, settled `failed`) keeps its prompt hidden from agent
- * monitoring while its `turn.failed` event stays visible. And a narrow
- * historical window exists: turns requeued by the removed
- * `requeuePreemptedTurn` path (Jun 12 - Jul 14 2026) had `started_at` cleared,
- * so one of those rows that was cancelled before any re-claim is treated as
- * never claimed and its prompt stays hidden from agent monitoring; forensic
- * reads still return it. No current writer clears `started_at`.
- *
- * The probe is served by the partial index
- * `session_turns_unclaimed_prompt_trigger_idx` (workspace_id, session_id,
- * trigger_event_id) WHERE started_at IS NULL (migration 0322); without it the
- * NOT EXISTS degrades to a hashed SubPlan over every session_turns row of the
- * workspace per statement. The literal `workspaceId` bound is deliberate next
- * to the correlated column: when the planner hashes the subplan it keeps the
- * literal as the index condition, so the build reads only this workspace's
- * unclaimed rows rather than the whole partial index.
- */
-function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
-  return sql`(
-    ${schema.sessionEvents.type} <> 'user.message'
-    or not exists (
-      select 1
-      from ${schema.sessionTurns} unclaimed_prompt_turn
-      where unclaimed_prompt_turn.workspace_id = ${workspaceId}
-        and unclaimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
-        and unclaimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
-        and unclaimed_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
-        and unclaimed_prompt_turn.source in ('user', 'api')
-        and unclaimed_prompt_turn.started_at is null
-    )
-  )`;
 }
 
 /**
@@ -72184,6 +72137,98 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
   }
 }
 
+/** The session lock must already be held. Shared with pre-claim failure settlement
+ * so a failed batch claim is attributed to the same logical turn. */
+async function selectQueuedSessionClaimBatch(
+  tx: Database,
+  session: typeof schema.sessions.$inferSelect,
+  pendingAgentSteer: boolean,
+): Promise<Array<typeof schema.sessionTurns.$inferSelect>> {
+  // Only fetch full prompt/authority rows for the leading Steer run (or the
+  // ordinary head). A long queue of later Sends must not inflate claim memory.
+  const previews = await rawRows<{ id: string; version: number }>(
+    tx,
+    sql`
+    with ordered as (
+      select id, version, position, created_at,
+        row_number() over (order by position, created_at, id) as ordinal,
+        count(*) filter (where metadata->>'delivery' is distinct from 'steer')
+          over (order by position, created_at, id rows unbounded preceding) as sends
+      from session_turns
+      where workspace_id = ${session.workspaceId} and session_id = ${session.id}
+        and status = 'queued' and source in ('user', 'api')
+        and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    )
+    select id, version from ordered where ordinal = 1 or sends = 0
+    order by position, created_at, id`,
+  );
+  if (previews.length === 0) return [];
+  const locked = await lockSessionEventWriteRows(tx, {
+    workspaceId: session.workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: previews.map((turn) => turn.id),
+  });
+  const lockedById = new Map(locked.turns.map((turn) => [turn.id, turn]));
+  const queued = previews.map((preview) => {
+    const turn = lockedById.get(preview.id);
+    if (
+      !turn ||
+      turn.accountId !== session.accountId ||
+      turn.sessionId !== session.id ||
+      turn.status !== "queued" ||
+      turn.version !== preview.version
+    ) {
+      throw new SessionControlInvariantError(
+        "Queued claim selection changed under the session lock",
+      );
+    }
+    return turn;
+  });
+  const first = queued[0];
+  if (!first) return [];
+  const plainSteer = (turn: typeof first) =>
+    turn.metadata?.delivery === "steer" &&
+    turn.executionGeneration === 0 &&
+    turn.activeAttemptId === null &&
+    turn.startedAt === null &&
+    turn.scheduledTaskRunId === null &&
+    !isSessionRealtimeDelegationTurnMetadata(turn.metadata) &&
+    Array.isArray(turn.resources) &&
+    turn.resources.length === 0 &&
+    turn.personalResourceAttachmentSummary === null;
+  const batch = [first];
+  // Validate before adding another member: a corrupt member must remain the
+  // target of the ordinary claim/failure path, not fail an unrelated last row.
+  const validHistory = (turn: typeof first) => {
+    try {
+      const dispatch = readTurnDispatchMetadata(turn.metadata);
+      if (dispatch.kind === "malformed" || dispatch.generation >= Number.MAX_SAFE_INTEGER)
+        return false;
+      TimelineAnnotations.parse(turn.annotations);
+      if (turn.goalSnapshot !== null) SessionGoalSnapshot.parse(turn.goalSnapshot);
+      fromPostgresLosslessText(turn.prompt, turn.promptCodecVersion);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (const next of queued.slice(1)) {
+    if (
+      !plainSteer(batch[batch.length - 1]!) ||
+      !validHistory(batch[batch.length - 1]!) ||
+      !plainSteer(next) ||
+      next.initiatorKind !== first.initiatorKind ||
+      next.initiatorSubjectId !== first.initiatorSubjectId ||
+      next.initiatingHumanSubjectId !== first.initiatingHumanSubjectId ||
+      stableJson(next.initiatorContext) !== stableJson(first.initiatorContext)
+    )
+      break;
+    batch.push(next);
+  }
+  return batch;
+}
+
 /**
  * Claim and register one inference attempt after a turn worker has accepted the
  * Temporal activity. This is the only transition into `running`: queue choice,
@@ -73529,42 +73574,14 @@ export async function claimSessionWorkForAttempt(
         // internal instruction is delivered as context on that same human turn
         // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
-        const rows = await rawRows<{
-          id: string;
-          trigger_event_id: string;
-          metadata: Record<string, unknown>;
-        }>(
+        const queuedBatch = await selectQueuedSessionClaimBatch(
           tx as unknown as Database,
-          sql`select id, trigger_event_id, metadata from session_turns
-              where workspace_id = ${workspaceId} and session_id = ${sessionId}
-                and status = 'queued' and source in ('user', 'api')
-                and (
-                  ${Boolean(pendingAgentSteer)} = false
-                  or metadata->>'delivery' = 'steer'
-                )
-              order by position asc, created_at asc, id asc
-              limit 1`,
+          session,
+          Boolean(pendingAgentSteer),
         );
-        const queuedTurnPreview = rows[0];
-        const queuedLocks = queuedTurnPreview
-          ? await lockSessionEventWriteRows(tx as unknown as Database, {
-              workspaceId,
-              controlLock: "already_locked",
-              workspaceLock: "already_locked",
-              turnIds: [queuedTurnPreview.id],
-            })
-          : null;
-        const queuedTurnRow = queuedLocks?.turns[0];
-        if (
-          queuedTurnRow &&
-          (queuedTurnRow.sessionId !== sessionId || queuedTurnRow.accountId !== session.accountId)
-        ) {
-          throw new Error(
-            `Queued turn ${queuedTurnRow.id} does not belong to session ${sessionId}`,
-          );
-        }
-        if (queuedTurnRow) {
-          await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, queuedTurnRow);
+        const queuedTurnRow = queuedBatch.at(-1);
+        for (const member of queuedBatch) {
+          await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, member);
         }
         const queuedTurn = queuedTurnRow
           ? {
@@ -74691,32 +74708,67 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
+        const historyTurns = [...queuedBatch.slice(0, -1), row];
         await tx.insert(schema.sessionHistoryItems).values(
-          withLosslessContentWriteVersion(
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: row.id,
-              position: Number(historyPosition),
-              item: omitOutputOnlyHistoryItemFields(
-                durableUserHistoryItem(
-                  fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
-                  Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
-                  TimelineAnnotations.parse(row.annotations),
-                  row.modelContext,
-                  SessionGoalSnapshot.parse(row.goalSnapshot),
-                  // Acceptance time, not claim time: a queued message keeps the
-                  // moment the user sent it.
-                  row.createdAt,
-                  humanTurnSenderLabel(row),
+          historyTurns.map((historyTurn, index) =>
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: historyTurn.id,
+                position: Number(historyPosition) + index,
+                item: omitOutputOnlyHistoryItemFields(
+                  durableUserHistoryItem(
+                    fromPostgresLosslessText(historyTurn.prompt, historyTurn.promptCodecVersion),
+                    Array.isArray(historyTurn.resources)
+                      ? (historyTurn.resources as ResourceRef[])
+                      : [],
+                    TimelineAnnotations.parse(historyTurn.annotations),
+                    historyTurn.modelContext,
+                    SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+                    // Acceptance time, not claim time: a queued message keeps the
+                    // moment the user sent it.
+                    historyTurn.createdAt,
+                    humanTurnSenderLabel(historyTurn),
+                  ),
                 ),
-              ),
-            },
-            "item",
-            "itemCodecVersion",
+              },
+              "item",
+              "itemCodecVersion",
+            ),
           ),
         );
+        const consumed = queuedBatch.slice(0, -1);
+        const consumedEvents: SessionEventInsertWithPayload[] = consumed.map((member, index) => ({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          turnId: member.id,
+          sequence: session.lastSequence + index + 1,
+          type: "turn.superseded",
+          payload: { reason: "steer", targetTurnId: row.id, beforeAttempt: true },
+          occurredAt: now,
+        }));
+        if (consumed.length > 0) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              status: "superseded",
+              version: sql`${schema.sessionTurns.version} + 1`,
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                inArray(
+                  schema.sessionTurns.id,
+                  consumed.map((member) => member.id),
+                ),
+              ),
+            );
+        }
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
         // Cross-session updates are already projected through
         // delegation.context.append. Keep them pending instead of consuming
@@ -74728,7 +74780,7 @@ export async function claimSessionWorkForAttempt(
               session.accountId,
               row.id,
               row.executionGeneration,
-              session.lastSequence + 1,
+              session.lastSequence + consumed.length + 1,
               now,
               undefined,
               { supersedeGoalContinuations: true, deliverUpdates: false },
@@ -74737,7 +74789,7 @@ export async function claimSessionWorkForAttempt(
               session.accountId,
               row.id,
               row.executionGeneration,
-              session.lastSequence + 1,
+              session.lastSequence + consumed.length + 1,
               now,
               undefined,
               {
@@ -74756,11 +74808,15 @@ export async function claimSessionWorkForAttempt(
             (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
           childSessionIds: delivered.childSessionIds,
         });
-        if (delivered.events.length > 0) {
+        if (consumedEvents.length + delivered.events.length > 0) {
           await tx
             .insert(schema.sessionEvents)
             .values(
-              withLosslessContentWriteVersion(delivered.events, "payload", "payloadCodecVersion"),
+              withLosslessContentWriteVersion(
+                [...consumedEvents, ...delivered.events],
+                "payload",
+                "payloadCodecVersion",
+              ),
             );
         }
         await tx
@@ -77551,27 +77607,13 @@ async function settleSessionWorkBeforeAttemptClaim(
               desc(schema.sessionSystemUpdates.id),
             )
             .limit(1);
-          const queuedRows = await rawRows<{ id: string }>(
+          const queuedBatch = await selectQueuedSessionClaimBatch(
             tx as unknown as Database,
-            sql`select id from session_turns
-                where workspace_id = ${workspaceId} and session_id = ${input.sessionId}
-                  and status = 'queued' and source in ('user', 'api')
-                  and (
-                    ${Boolean(pendingAgentSteer)} = false
-                    or metadata->>'delivery' = 'steer'
-                  )
-                order by position asc, created_at asc, id asc
-                limit 1`,
+            session,
+            Boolean(pendingAgentSteer),
           );
-          const queuedPreview = queuedRows[0];
-          if (queuedPreview) {
-            const exactLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
-              workspaceId,
-              controlLock: "already_locked",
-              workspaceLock: "already_locked",
-              turnIds: [queuedPreview.id],
-            });
-            turn = exactLocks.turns[0] ?? null;
+          if (queuedBatch.length > 0) {
+            turn = queuedBatch.at(-1) ?? null;
             if (
               !turn ||
               turn.accountId !== session.accountId ||
