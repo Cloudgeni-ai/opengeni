@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import { isConnectedMachineOutcomeUnknownOutput, type GitFileDiff } from "@opengeni/sdk";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOpsFromToolItem,
@@ -208,7 +208,7 @@ export function readableToolError(text: string): string {
     value
       .trim()
       .replace(/^An error occurred while running the tool\. Please try again\.\s*(Error:\s*)?/, "")
-      .replace(/^[A-Za-z][\w.-]{0,40} API \d{3}:\s*/, "");
+      .replace(/^(?:[A-Za-z][\w.-]{0,40} )?API \d{3}:\s*/, "");
   let message = stripTransport(text);
   const parsed = tryParseJson(message);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -247,6 +247,16 @@ export function execPresentation(
     title,
     titleMono: true,
   };
+
+  if (isConnectedMachineOutcomeUnknownOutput(out)) {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
+      body: { kind: "term", command: null, workdir, output: out, failed: true },
+    };
+  }
 
   // No output event ever arrived: the turn failed before the output insert —
   // most likely a NUL byte in the command output prevented storage.
@@ -1541,6 +1551,15 @@ export function plainToolRow(
     const failed =
       row.iconTone === "failed" || row.chip?.tone === "bad" || item.status === "failed";
     plain.title = toolStepLabel(t, "runCommand", failed ? "running" : toolStepPhase(item.status));
+    if (isConnectedMachineOutcomeUnknownOutput(item.output)) {
+      // The call has ended, but its effects remain unknown. Keep that verdict
+      // in the chip, with the explanation available without raw command output.
+      return {
+        ...plain,
+        title: toolStepLabel(t, "runCommand", "done"),
+        body: { kind: "note", tone: "error", text: t("toolActionReview.itMayHaveRunCheck") },
+      };
+    }
     const computeLabel = context.computeLabel ?? null;
     if (computeLabel) plain.preview = textPreview(computeLabel, row.running);
     else delete plain.preview;

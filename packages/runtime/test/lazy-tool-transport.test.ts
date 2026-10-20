@@ -2066,8 +2066,8 @@ describe("OpenAI/Azure native client tool search", () => {
           model: "scripted",
           instructions: formatSkillCatalog([
             {
-              id: "builtin:opengeni-skills",
-              name: "opengeni-skills",
+              id: "builtin:skill-management",
+              name: "skill-management",
               description: "Manage Skills",
             },
           ]),
@@ -2103,7 +2103,7 @@ describe("OpenAI/Azure native client tool search", () => {
         await running;
         expect(outcome).toBe("completed");
         expect(reads).toBe(1);
-        expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+        expect(JSON.stringify(model.requests[0])).toContain("builtin:skill-management");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
           "load_skill",

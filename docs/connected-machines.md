@@ -1417,6 +1417,25 @@ own computer, the agent posts the **Connected Machine card**: either
 `sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
 `tool.auth_needed` event with that capability id; the event carries no token.
 
+The card also appears without an agent decision. When `sandbox_swap`,
+`sandbox_attach` or `run_on` is refused with
+`personal_machine_permission_required` (the machine's owner started the turn
+but has not allowed this chat yet), the API posts the same card in the calling
+turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
+reads then says the card is posted in this chat in Opengeni, carries the chat
+link (`chatUrl`), and tells the agent to tell the person in one sentence: that
+they can allow it in the chat, or, when they read the chat elsewhere (Slack, a
+worker or a scheduled chat), to open the link. It must not wait or retry:
+choosing the machine sends the message that continues the chat. A repeated
+refusal in the same turn reuses that turn's machine card, since one card lists
+every machine; the lookup and append run atomically under the turn-attempt
+fence (`appendTurnCapabilityCardOnce`), so parallel refusals cannot stack
+copies. Cards for other capabilities, such as Slack and GitHub in the same
+turn, are never limited. `personal_machine_not_permitted` (not
+the owner, or not the owner's turn) and every other failure stay plain
+refusals, and callers without an exact agent attempt get no card. If the card
+cannot be posted, the original refusal is returned unchanged.
+
 The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
 
 - lists the workspace's enrolled machines with **Use in this chat**, which swaps

@@ -3,13 +3,13 @@ import { loadNativeToolSkillArtifacts } from "../src/runtime-skills";
 
 test("packaged Documents Skill carries the direct and secondary report delivery gate", async () => {
   const source = await Bun.file(
-    new URL("../src/bundled_artifact_skills/opengeni-documents/SKILL.md", import.meta.url),
+    new URL("../src/bundled_artifact_skills/documents/SKILL.md", import.meta.url),
   ).text();
   const artifact = loadNativeToolSkillArtifacts({
     projects: false,
     editableArtifacts: true,
     videoGeneration: false,
-  }).find((entry) => entry.name === "opengeni-documents");
+  }).find((entry) => entry.name === "documents");
   expect(artifact).toBeDefined();
   expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toBe(source);
   const prose = source.replace(/\s+/g, " ");

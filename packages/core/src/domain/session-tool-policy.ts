@@ -425,22 +425,16 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
     ),
   );
   return bundledSkillIds.some((id) => {
-    if (
-      [
-        "builtin:opengeni-documents",
-        "builtin:opengeni-spreadsheets",
-        "builtin:opengeni-presentations",
-      ].includes(id)
-    ) {
+    if (["builtin:documents", "builtin:spreadsheets", "builtin:presentations"].includes(id)) {
       return tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
     }
-    if (id === "builtin:opengeni-sites") {
+    if (id === "builtin:sites") {
       return tools.has("artifacts_create") && tools.has("artifacts_publish");
     }
-    if (id === "builtin:opengeni-video-generation") {
+    if (id === "builtin:video-generation") {
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
-    if (id === "builtin:opengeni-secrets") return tools.has("secret_search");
+    if (id === "builtin:secrets") return tools.has("secret_search");
     return true;
   });
 }

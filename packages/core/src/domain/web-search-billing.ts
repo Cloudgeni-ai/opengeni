@@ -52,7 +52,7 @@ export class WebSearchBillingRefusedError extends Error {
 
 /** Model-facing refusal when the workspace turned Opengeni credits off. */
 export const WEB_SEARCH_CREDITS_DISABLED_MESSAGE =
-  "Web search uses Opengeni credits, which are turned off in this workspace.";
+  "Web search uses credits, which are turned off in this workspace.";
 
 /**
  * Admission and post-use settlement for paid web search, matching paid
@@ -93,7 +93,7 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
       if (balance.balanceMicros <= 0) {
         throw new WebSearchBillingRefusedError(
           "insufficient_credits",
-          "Web search needs Opengeni credits, and this account has none left.",
+          "Web search needs credits, and this account has none left.",
         );
       }
       const refusal = await checkWorkspaceAllowance(deps.db, {

@@ -20,7 +20,7 @@ export interface ApiErrorFacts {
   serverMessage: string | undefined;
 }
 
-const API_PREFIX = /^(?:OpenGeni|Opengeni) API \d{3}:\s*/u;
+const API_PREFIX = /^(?:(?:OpenGeni|Opengeni) )?API \d{3}:\s*/u;
 const REFERENCE_SUFFIX = /\s*Reference:\s*([\w.:-]+?)\.?\s*$/u;
 
 /** Splits an error into the facts it carries. Never throws. */

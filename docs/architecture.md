@@ -1516,7 +1516,7 @@ Repository descriptors use sandbox-bound `repository_skill_read`, not managed
 Skills: `.agents/skills`; runtime bundles:
 `packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
 client assets/docs from `.agents/skills/opengeni-client`; drift-tested.
-Tools/host-gated `opengeni-schedules`; shortcut sends only request/time zone.
+Tools/host-gated `schedules`; shortcut sends only request/time zone.
 
 Reading/management/host selection: [Skill design](design/skills-system.md).
 
@@ -1898,7 +1898,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:projects`.
 
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.

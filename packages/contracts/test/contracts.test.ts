@@ -357,7 +357,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "Opengeni is temporarily unavailable — retry.",
+          message: "The workspace is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -367,7 +367,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",
@@ -381,7 +381,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient Opengeni credits",
+          message: "insufficient workspace credits",
           retryable: false,
         },
       }),
@@ -389,7 +389,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient Opengeni credits",
+        message: "insufficient workspace credits",
         retryable: false,
       },
     });

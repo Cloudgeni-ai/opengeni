@@ -410,7 +410,7 @@ export function automaticRecoveryUnavailableFailure<
   });
   return {
     ...failure,
-    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    error: `${subject}. This turn couldn't be retried automatically. Try again, or send a message to continue.`,
     retryable: false,
     automaticRecovery: "unavailable",
     lastRetryableError: failure.error,
@@ -1886,7 +1886,7 @@ function baseAgentRunFailurePayload(
     const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
     const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
     return {
-      error: "Opengeni encountered a database error.",
+      error: "A database error occurred.",
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
@@ -2239,7 +2239,7 @@ function baseAgentRunFailurePayload(
     if (isExactStatuslessUpstreamConnectivityMessage(message)) {
       return {
         error:
-          "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+          "An upstream service could not be reached. The same turn will retry after a short delay.",
         code: "upstream_connectivity_unavailable",
         retryable: true,
       };

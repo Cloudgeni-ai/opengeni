@@ -43090,7 +43090,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient Opengeni credits to admit paid sandbox compute");
+    super("Insufficient workspace credits to admit paid sandbox compute");
   }
 }
 
@@ -86236,6 +86236,58 @@ export async function appendSessionEventsForTurnAttempt(
     events: result.events,
     accepted: result.accepted,
     canonicalStartupMilestones: result.canonicalStartupMilestones,
+  };
+}
+
+/**
+ * Append a capability card for the calling turn unless that turn already shows
+ * a current card for the same capability. The lookup runs inside the attempt
+ * write fence, which locks the session row, so parallel callers in one turn
+ * cannot both append. Cards for other capabilities are never consulted.
+ */
+export async function appendTurnCapabilityCardOnce(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  executionGeneration: number,
+  attemptId: string,
+  capabilityId: string,
+  input: AppendEventInput,
+): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
+  let existingEventId: string | null = null;
+  const result = await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    workspaceId,
+    sessionId,
+    turnId,
+    executionGeneration,
+    attemptId,
+    [input],
+    async (tx) => {
+      const [existing] = await rawRows<{ id: string }>(
+        tx,
+        sql`
+          select id from session_events
+          where workspace_id = ${workspaceId}::uuid
+            and session_id = ${sessionId}::uuid
+            and turn_id = ${turnId}::uuid
+            and type = 'tool.auth_needed'
+            and duplicate_of_event_id is null
+            and (turn_association is null or turn_association = 'current')
+            and payload -> 'capability' ->> 'id' = ${capabilityId}
+          order by sequence
+          limit 1
+        `,
+      );
+      existingEventId = existing?.id ?? null;
+      return existingEventId === null;
+    },
+  );
+  return {
+    events: result.events,
+    accepted: result.accepted || existingEventId !== null,
+    existingEventId,
   };
 }
 

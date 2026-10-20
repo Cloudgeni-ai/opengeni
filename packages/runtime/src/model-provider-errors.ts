@@ -116,8 +116,8 @@ export class WorkspaceModelPolicyBlockedError extends Error {
   constructor(modelName: string, providerId: string, reason: "provider" | "model" | "credits") {
     super(
       reason === "credits"
-        ? `Model "${modelName}" uses Opengeni credits, which are turned off in this workspace. ` +
-            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on.`
+        ? `Model "${modelName}" uses credits, which are turned off in this workspace. ` +
+            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn credits back on.`
         : reason === "provider"
           ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`

@@ -35,7 +35,8 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { codexRouteDisposition } from "./codex-core";
 import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 

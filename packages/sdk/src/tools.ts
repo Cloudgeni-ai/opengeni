@@ -130,7 +130,7 @@ export class OpenGeniToolCallError extends Error {
     super(
       typeof structured?.error?.message === "string"
         ? structured.error.message
-        : "Opengeni tool call failed",
+        : "Tool call failed",
     );
     this.name = "OpenGeniToolCallError";
     this.code = typeof structured?.error?.code === "string" ? structured.error.code : "tool_error";

@@ -74,7 +74,7 @@ const RULES_FOR_WORK = `# Rules for getting work done
 
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
-    ? "First check whether Opengeni already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+    ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
   return blocks(
     `## Autonomy and persistence

@@ -187,6 +187,27 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
         "iifname \"tap0\" ip saddr 169.254.0.21 ip daddr 169.254.0.22 tcp dport 53 accept"
     ));
     assert!(rules.contains("oifname \"tap0\" ip saddr 169.254.0.22 ct state established accept"));
+    // A query to a name server the guest may not reach, such as a private
+    // one an older host named, goes to its own name server instead; one to
+    // a name server it may reach goes where it was sent.
+    for proto in ["udp", "tcp"] {
+        let redirect = rules
+            .lines()
+            .find(|line| line.ends_with(&format!("{proto} dport 53 dnat ip to 169.254.0.22")))
+            .unwrap_or_else(|| panic!("{proto} queries are not redirected: {rules}"));
+        assert!(redirect.contains(
+            "iifname \"tap0\" ip saddr 169.254.0.21 ip daddr != 169.254.0.22 ip daddr { "
+        ));
+        for closed in [
+            "100.64.0.0/10",
+            "10.0.0.0/8",
+            "169.254.0.0/16",
+            "198.18.0.0/15",
+        ] {
+            assert!(redirect.contains(closed), "{closed}: {redirect}");
+        }
+    }
+    assert!(rules.contains("type nat hook prerouting priority dstnat; policy accept;"));
     let host = plain.host_rules(&none);
     assert!(host.contains("iifname \"ogc*\" oifname \"ogc*\" drop"));
     // The host refuses its sandboxes at once rather than letting their
@@ -205,6 +226,16 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
         .find(open)
         .expect("the sandbox opens the listed ports");
     assert!(opened < rules.find("ip daddr != {").unwrap());
+    // Listed destinations pass the redirect untouched, ahead of it, so one
+    // that lists port 53 keeps its queries.
+    let kept = "iifname \"tap0\" ip saddr 169.254.0.21 ip daddr 10.20.0.7/32 tcp dport \
+                { 443, 9443-9445 } accept";
+    let kept = rules
+        .find(kept)
+        .expect("listed destinations keep their queries");
+    assert!(kept < rules.find("dnat ip to").unwrap());
+    assert!(rules.find("chain prerouting").unwrap() < kept);
+    assert!(kept < rules.find("chain input").unwrap());
     let host = reaching.host_rules(&allowed);
     let open = "iifname \"ogc*\" ip daddr 10.20.0.7/32 tcp dport { 443, 9443-9445 } accept";
     let opened = host.find(open).expect("the host opens the listed ports");

@@ -62,7 +62,7 @@ export async function createGatewayRealtimeConnectionSecret(input: {
     throw new GatewayRealtimeBrokerError(
       "credential_unavailable",
       resolved.source === "managed"
-        ? "Opengeni Gateway voice is not configured"
+        ? "Managed voice is not configured"
         : "The workspace AI Gateway connection is unavailable",
     );
   }
@@ -117,7 +117,7 @@ async function mintGatewayClientSecret(input: {
       rejected ? "credential_unavailable" : "provider_error",
       rejected
         ? input.source === "managed"
-          ? "Opengeni voice is temporarily unavailable. Try another voice model."
+          ? "Voice is temporarily unavailable. Try another voice model."
           : "Your AI Gateway key was rejected. Update it in workspace settings."
         : "The voice provider could not start a call. Try again.",
       response.status,

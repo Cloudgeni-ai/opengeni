@@ -180,6 +180,18 @@ describe("shared tool row presentation", () => {
       }),
     );
     expect(wrapped.preview).toEqual({ kind: "text", text: "The issue already exists." });
+    const neutral = toolRowPresentation(
+      englishText,
+      call({
+        name: "issues_create",
+        status: "failed",
+        output: "API 500: The workspace could not complete the request. Reference: req_tool_1.",
+      }),
+    );
+    expect(neutral.preview).toEqual({
+      kind: "text",
+      text: "The workspace could not complete the request.",
+    });
   });
 
   test("a tool_invoke call reads as the tool it ran", () => {

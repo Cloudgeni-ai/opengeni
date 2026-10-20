@@ -14,6 +14,7 @@ import {
   codexUsageReadings,
   hasResetInventory,
   planLabel,
+  planReportsNoResets,
   useCodexSubscriptions,
   type CodexSubscriptions,
 } from "@/components/codex-connection";
@@ -1311,7 +1312,7 @@ function CodexAccountDetail({
             </SettingRowGroup>
           </DetailSection>
         ) : null}
-        {!organizationAccount ? (
+        {!organizationAccount && !planReportsNoResets(overview, attempts) ? (
           <DetailSection
             title={resetCount > 0 ? `Usage limit resets (${resetCount})` : "Usage limit resets"}
           >

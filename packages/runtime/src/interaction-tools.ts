@@ -3113,7 +3113,7 @@ function chooseAttachedProfile(
   if (!chosen) {
     throw new OpenGeniApiError(
       409,
-      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
       { code: "attached_browser_unavailable", retryable: false },
     );
   }
@@ -4153,7 +4153,7 @@ function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
-    throw new Error("First-party MCP URL cannot be projected to the Opengeni API base URL");
+    throw new Error("First-party MCP URL cannot be projected to the API base URL");
   }
   url.pathname = url.pathname.slice(0, -suffix.length) || "/";
   url.search = "";

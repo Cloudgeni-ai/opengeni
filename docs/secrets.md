@@ -203,7 +203,7 @@ The always-on prompt block teaches the reference syntax and the login ladder
 (reuse a session, sign in with the saved login and `/otp`, enroll your own 2FA,
 read email or SMS codes through connectors, create accounts with generated
 passwords when the task allows it, solve CAPTCHAs). Playbooks live in the
-bundled `opengeni-secrets` skill.
+bundled `secrets` skill.
 
 The retired `variable_set_*` and `environment_*` tools are no longer offered.
 

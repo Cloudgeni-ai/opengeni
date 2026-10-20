@@ -307,7 +307,7 @@ export function personalMachineRefusal(
       code: "personal_machine_permission_required",
       reason:
         "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
-        "The owner can allow it from this chat: choose the machine with Use in this chat, then allow it once, for this chat, or always.",
+        "To ask them, call capability_authorization_request once with capabilityId api:connected-machine: the card it posts lets them allow it, so do not describe buttons or steps.",
     };
   }
   if (
@@ -618,9 +618,13 @@ export function fleetAgentNotice(fleet: FleetListResult): string {
     "before answering, call capability_authorization_request once with capabilityId api:connected-machine so they can connect it. They then see what to do, so do not describe buttons, commands or install steps.";
   const unlisted = `If the computer the person means is not in this list, it is not connected: ${offer}`;
   if (computers.length === 0) return `None of the person's computers is connected. ${unlisted}`;
-  if (offline.length === 0) return unlisted;
+  // A listed personal computer may still need its owner's permission for this
+  // chat. Trying it is the way to ask: that refusal shows the owner a card.
+  const allow =
+    "A listed computer may still need its owner to allow this chat: just use it, and if it is not allowed yet, the chat shows the owner a card to allow it.";
+  if (offline.length === 0) return `${unlisted} ${allow}`;
   const names = offline.map((entry) => entry.name).join(", ");
-  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer}`;
+  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer} ${allow}`;
 }
 
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
@@ -985,6 +989,8 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  /** Typed refusal for a personal (Only me) machine this attempt may not use. */
+  code?: PersonalMachineRefusalCode;
   notice?: string;
 };
 
@@ -1354,14 +1360,15 @@ export async function runOnSandbox(
         };
       }
     } catch (error) {
+      const refusal = personalMachineRefusal(error);
       return {
         target,
         targetName: sandbox.name,
         kind: op.kind,
         ok: false,
         reason:
-          personalMachineRefusal(error)?.reason ??
-          "personal Connected Machine authority is not live for this attempt",
+          refusal?.reason ?? "personal Connected Machine authority is not live for this attempt",
+        ...(refusal ? { code: refusal.code } : {}),
       };
     }
   }

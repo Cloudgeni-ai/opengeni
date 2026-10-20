@@ -90,7 +90,7 @@ Connecting accounts:
   action until it reports connected or expired. The person signs in with their
   own provider account. Never ask for their model-provider password or keys;
   they enter provider API keys and setup tokens in the settings page
-  themselves. For credentials to other services, follow the `opengeni-secrets`
+  themselves. For credentials to other services, follow the `secrets`
   Skill when it is available.
 - Claude sign-in is tied to the person's browser. Send them to the Claude
   account page, or use a setup token they create and paste in themselves.

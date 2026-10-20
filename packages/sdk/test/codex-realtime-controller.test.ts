@@ -1747,7 +1747,7 @@ describe("Codex realtime browser controller", () => {
               402,
               JSON.stringify({
                 code: "insufficient_credits",
-                message: "Live voice needs Opengeni credits. Add credits to continue.",
+                message: "Live voice needs credits. Add credits to continue.",
               }),
             );
           }
@@ -1770,7 +1770,7 @@ describe("Codex realtime browser controller", () => {
                 replay: false,
                 stop: {
                   code: "insufficient_credits",
-                  message: "Live voice needs Opengeni credits. Add credits to continue.",
+                  message: "Live voice needs credits. Add credits to continue.",
                 },
               }
             : { mode: current, replay: false },
@@ -1800,7 +1800,7 @@ describe("Codex realtime browser controller", () => {
     expect(controller.snapshot()).toMatchObject({
       status: "error",
       mode: null,
-      error: "Live voice needs Opengeni credits. Add credits to continue.",
+      error: "Live voice needs credits. Add credits to continue.",
       refusal: { code: "insufficient_credits" },
       diagnostic: { kind: "terminal_stop", recoverable: false },
     });
@@ -1845,7 +1845,7 @@ describe("Codex realtime browser controller", () => {
       status: "error",
       mode: null,
       refusal: { code: "insufficient_credits" },
-      error: "Live voice needs Opengeni credits. Add credits to continue.",
+      error: "Live voice needs credits. Add credits to continue.",
     });
   });
 

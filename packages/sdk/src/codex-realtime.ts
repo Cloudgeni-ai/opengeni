@@ -269,7 +269,7 @@ export async function startCodexRealtimeWebrtc(
       answer.model !== (options.expectedModel ?? "gpt-live-1-boulder-alpha") ||
       !answer.sdp
     ) {
-      throw new Error("Opengeni returned an incompatible Codex realtime answer");
+      throw new Error("The voice service returned an incompatible Codex realtime answer");
     }
     await peerConnection.setRemoteDescription({
       type: "answer",

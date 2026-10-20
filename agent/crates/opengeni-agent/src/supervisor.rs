@@ -3433,6 +3433,9 @@ fn update_busy_code(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use opengeni_agent_platform::UpdateBlocker;
+
     #[test]
     fn update_cleanup_failure_names_the_producer_and_recovery() {
         let drain = std::sync::Arc::new(UpdateDrain::default());
@@ -4065,7 +4068,8 @@ mod tests {
             Some("update_busy_work")
         );
         assert_eq!(update_busy_code(&drain, &engine, true), None);
-        assert!(native_update_blockers(&drain, &engine, true).is_empty());
+        let blockers = native_update_blockers(&drain, &engine, true);
+        assert_eq!(blockers, [] as [UpdateBlocker; 0]);
         assert!(native_update_blockers(&drain, &engine, false)
             .iter()
             .any(|blocker| blocker.kind == "native_heavy_running" && blocker.count == 1));

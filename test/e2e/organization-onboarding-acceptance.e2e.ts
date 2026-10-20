@@ -222,8 +222,10 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
       pathname,
     ) ||
     // Sending from the new-chat page routes to the new session, which can
-    // cancel that session's first composer-draft read.
-    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/composer-draft$/u.test(pathname) ||
+    // cancel that session's first composer-draft and secrets reads.
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/(?:composer-draft|secrets)$/u.test(
+      pathname,
+    ) ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname)
   );
 }

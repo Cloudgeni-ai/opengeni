@@ -5,7 +5,12 @@ import type { CodexAccountOverview } from "@opengeni/sdk";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CodexDeviceCodePanel, ResetCreditInventory, codexUsageReadings } from "./codex-connection";
+import {
+  CodexDeviceCodePanel,
+  ResetCreditInventory,
+  codexUsageReadings,
+  planReportsNoResets,
+} from "./codex-connection";
 import { UsageMeter } from "./ui/usage-meter";
 
 beforeAll(() => {
@@ -363,5 +368,36 @@ describe("ResetCreditInventory", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+});
+
+describe("planReportsNoResets", () => {
+  const overview = (
+    detailState: CodexAccountOverview["resetCredits"]["detailState"],
+    availableCount: number | null,
+  ): CodexAccountOverview => ({
+    accountId: "account-plan",
+    usage: { source: "none", fetchedAt: null, stale: false, error: null, value: null },
+    resetCredits: {
+      source: "provider",
+      fetchedAt: null,
+      stale: false,
+      error: null,
+      detailState,
+      detailsComplete: true,
+      availableCount,
+      credits: [],
+    },
+    canRedeem: false,
+    redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
+    canResumeRedemption: false,
+    redemptions: [],
+  });
+
+  test("only a loaded plan that doesn't report resets has no reset section", () => {
+    expect(planReportsNoResets(undefined, [])).toBe(false);
+    expect(planReportsNoResets(overview("unsupported", null), [])).toBe(true);
+    expect(planReportsNoResets(overview("detailed", 0), [])).toBe(false);
+    expect(planReportsNoResets(overview("unsupported", 1), [])).toBe(false);
   });
 });

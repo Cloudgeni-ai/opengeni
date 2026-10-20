@@ -63,8 +63,8 @@ describe("video generation runtime surface", () => {
       sites: false,
       videoGeneration: true,
     });
-    expect(disabled.index.map((entry) => entry.name)).not.toContain("opengeni-video-generation");
-    expect(enabled.index.map((entry) => entry.name)).toContain("opengeni-video-generation");
+    expect(disabled.index.map((entry) => entry.name)).not.toContain("video-generation");
+    expect(enabled.index.map((entry) => entry.name)).toContain("video-generation");
   });
 
   test("keeps video tools and server-readable guidance on connected machines", () => {
@@ -95,7 +95,7 @@ describe("video generation runtime surface", () => {
       "skill_read",
     ]);
     expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain(
-      "opengeni-video-generation",
+      "video-generation",
     );
   });
 

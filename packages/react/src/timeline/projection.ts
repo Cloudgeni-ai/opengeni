@@ -1,4 +1,5 @@
 import {
+  isConnectedMachineOutcomeUnknownOutput,
   parseCustomMcpSetupRequest,
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
@@ -3736,6 +3737,8 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
     return true;
   }
   const output = payload.output;
+  // Older receipts predate the explicit event error flag.
+  if (isConnectedMachineOutcomeUnknownOutput(output)) return true;
   return (
     !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
   );
