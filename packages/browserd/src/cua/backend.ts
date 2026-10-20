@@ -245,10 +245,13 @@ export class CuaComputerBackend implements ComputerBackend {
       const operations = await this.operations(command);
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
+      const acted = await this.target(command.targetId);
+      let openedWindow = false;
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
         try {
-          await callDesktop(this.runtime, operation.name, operation.args, true);
+          const { result } = await callDesktop(this.runtime, operation.name, operation.args, true);
+          if (result.text.includes(OPENED_WINDOW_REPORT)) openedWindow = true;
         } catch (error) {
           if (index > 0)
             throw new ComputerBackendError(
@@ -277,6 +280,11 @@ export class CuaComputerBackend implements ComputerBackend {
       // Post-action observation failure cannot turn a delivered action into a
       // pre-dispatch rejection. The controller retains its completed receipt.
       try {
+        const opened = openedWindow ? await this.openedWindow(acted).catch(() => null) : null;
+        if (opened) {
+          const reading = await this.observeTarget(opened).catch(() => null);
+          if (reading) return reading;
+        }
         return await this.observeTarget(command.targetId);
       } catch {
         return null;
@@ -391,6 +399,22 @@ export class CuaComputerBackend implements ComputerBackend {
 
   private args(target: Target): Record<string, unknown> {
     return { pid: target.pid, window_id: target.windowId, session: this.session };
+  }
+
+  /** The window an action opened, such as a new document or a dialog, once
+   * CUA reported that it opened one: the one window of the acted window's
+   * app not listed before. A window lying within another window of its app
+   * is a sheet or part of a panel, read through that window, so it never
+   * counts. Two candidates are never guessed between. */
+  private async openedWindow(acted: Target): Promise<string | null> {
+    const known = new Set(this.targetsById.keys());
+    const opened = (await this.discover()).filter(
+      (target) =>
+        !known.has(target.id) &&
+        target.processId === acted.pid &&
+        this.sheetHosts(this.targetsById.get(target.id)!).length === 0,
+    );
+    return opened.length === 1 ? opened[0]!.id : null;
   }
 
   /** Other windows of the same macOS app that a window lies within: where a
@@ -1070,6 +1094,10 @@ function procParentPid(pid: number): number | null {
 /** How long a launch waits for the app's first window: up to a second. */
 const LAUNCH_WINDOW_RETRIES = 4;
 const LAUNCH_WINDOW_RETRY_MS = 250;
+
+/** What CUA appends to an action's result text when it saw the action open
+ * new windows. It names them only by app and title. */
+const OPENED_WINDOW_REPORT = "Action opened new window(s):";
 
 /** A launched app's processes and the windows launch_app reported, which
  * have list_windows' shape. */

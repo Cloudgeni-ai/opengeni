@@ -1213,6 +1213,121 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("an action that opens one window of its app observes that window", async () => {
+    // After the action, list_windows adds the windows in `opens`, and CUA's
+    // result says it saw new windows when `reported` is set.
+    class OpeningFixture extends Fixture {
+      acted = false;
+      reported = true;
+      opens: Array<{ pid: number; window_id: number; bounds: Record<string, number> }> = [];
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "click") {
+          this.acted = true;
+          if (this.reported)
+            return {
+              ...response,
+              text: 'Clicked.\n\n🪟 Action opened new window(s): Fixture ("Untitled").',
+            };
+        }
+        if (name === "list_windows" && this.acted) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens)
+            data.windows.push({ ...window, title: "Untitled", app_name: "Fixture" });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const beside = { x: 300, y: 50, width: 200, height: 100 };
+    const within = { x: 60, y: 60, width: 100, height: 50 };
+    for (const { opens, reported, observed } of [
+      // A new document window of the app.
+      { opens: [{ pid: 42, window_id: 2, bounds: beside }], reported: true, observed: 2 },
+      // Two candidates are never guessed between.
+      {
+        opens: [
+          { pid: 42, window_id: 2, bounds: beside },
+          { pid: 42, window_id: 3, bounds: beside },
+        ],
+        reported: true,
+        observed: 1,
+      },
+      // A sheet is read through the window it is attached to.
+      { opens: [{ pid: 42, window_id: 2, bounds: within }], reported: true, observed: 1 },
+      // Another app's window is not this target's.
+      { opens: [{ pid: 43, window_id: 2, bounds: beside }], reported: true, observed: 1 },
+      // Without CUA's report, the windows are not listed again.
+      { opens: [{ pid: 42, window_id: 2, bounds: beside }], reported: false, observed: 1 },
+    ]) {
+      const fixture = new OpeningFixture();
+      fixture.opens = opens;
+      fixture.reported = reported;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const listings = fixture.calls.filter((call) => call.name === "list_windows").length;
+        const after = await backend.dispatch(command(observation));
+        expect(after?.target.id).toBe(
+          `cua:window:${observed === 1 ? 42 : opens[0]!.pid}:${observed}`,
+        );
+        expect(fixture.calls.filter((call) => call.name === "list_windows").length).toBe(
+          listings + (reported ? 1 : 0),
+        );
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The controller records the opened window's observation in the receipt.
+    const fixture = new OpeningFixture();
+    fixture.opens = [{ pid: 42, window_id: 2, bounds: beside }];
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const computerSessionId = crypto.randomUUID();
+      const controllerGeneration = "controller-fixture";
+      const controller = new ComputerInteractionController({
+        computerSessionId,
+        controllerGeneration,
+        driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+      });
+      const target = (await backend.targets())[0]!;
+      const observation = await controller.observe(target.id);
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        operationId: crypto.randomUUID(),
+        computerSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        action: {
+          type: "semantic",
+          locator: {
+            kind: "ref",
+            ref:
+              observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "",
+          },
+          action: "invoke",
+        },
+      });
+      expect(receipt.state).toBe("completed");
+      expect(receipt.targetId).toBe(target.id);
+      expect(receipt.observation?.target.id).toBe("cua:window:42:2");
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("apps launch in the background by each platform's own app name", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

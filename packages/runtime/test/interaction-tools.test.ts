@@ -2949,6 +2949,68 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("stops a Computer batch at an action that opened another window and shows that window", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const opened = computerObservation({ ...target, id: "window-opened" });
+    const requests: ComputerActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, requests.length < 2 ? observation : opened);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const run = async (count: number) =>
+      await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "tab" },
+              { type: "keyboard", action: "press", value: "cmd+n" },
+              { type: "keyboard", action: "type", value: "hello" },
+              { type: "keyboard", action: "press", value: "return" },
+            ].slice(0, count),
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+    const result = await run(4);
+
+    expect(requests).toHaveLength(2);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "completed" }],
+      observation: { target: { id: "window-opened" } },
+      observationPrecedesStop: false,
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.split("\n").slice(0, 4)).toEqual([
+      `Batch stopped on ${target.id} at action 2 of 4: action 2 completed (operation ${requests[1]!.operationId}) and opened another window.`,
+      "Action 1 completed.",
+      "Actions 3 to 4 were not run.",
+      "Action 2 opened window-opened; act on that target with the observation below.",
+    ]);
+
+    // The last action opening a window completes the batch.
+    requests.length = 0;
+    const last = await run(2);
+    expect(requests).toHaveLength(2);
+    expect((last.content[0] as { text: string }).text.split("\n").slice(0, 2)).toEqual([
+      `Batch completed on ${target.id}: 2 actions.`,
+      "Action 2 opened window-opened; act on that target with the observation below.",
+    ]);
+  });
+
   test("reports the actions a Computer batch ran when it cannot read the window or reach the controller later", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
