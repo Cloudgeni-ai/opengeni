@@ -217,8 +217,11 @@ export class CuaComputerBackend implements ComputerBackend {
         // the launched app's window, so the caller can act on it directly,
         // or the action's own target when no window of the app is found.
         try {
-          const windowTarget = await this.launchedWindow(launched);
-          return await this.observeTarget(windowTarget ?? command.targetId);
+          for (const windowTarget of await this.launchedWindows(launched)) {
+            const reading = await this.observeTarget(windowTarget).catch(() => null);
+            if (reading) return reading;
+          }
+          return await this.observeTarget(command.targetId);
         } catch {
           return null;
         }
@@ -246,12 +249,11 @@ export class CuaComputerBackend implements ComputerBackend {
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
       const acted = await this.target(command.targetId);
-      let openedWindow = false;
+      const known = new Set(this.targetsById.keys());
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
         try {
-          const { result } = await callDesktop(this.runtime, operation.name, operation.args, true);
-          if (result.text.includes(OPENED_WINDOW_REPORT)) openedWindow = true;
+          await callDesktop(this.runtime, operation.name, operation.args, true);
         } catch (error) {
           if (index > 0)
             throw new ComputerBackendError(
@@ -280,12 +282,26 @@ export class CuaComputerBackend implements ComputerBackend {
       // Post-action observation failure cannot turn a delivered action into a
       // pre-dispatch rejection. The controller retains its completed receipt.
       try {
-        const opened = openedWindow ? await this.openedWindow(acted).catch(() => null) : null;
-        if (opened) {
-          const reading = await this.observeTarget(opened).catch(() => null);
-          if (reading) return reading;
+        const openedReading = async () => {
+          const opened = await this.openedWindow(acted, known).catch(() => null);
+          return opened ? await this.observeTarget(opened).catch(() => null) : null;
+        };
+        const opened = await openedReading();
+        if (opened) return opened;
+        try {
+          return await this.observeTarget(command.targetId);
+        } catch (error) {
+          // The acted window closed or can no longer be read, as an Open
+          // panel does when its app makes a new document: the window the
+          // action opened can appear a moment after the action returns.
+          const deadline = Date.now() + OPENED_WINDOW_WAIT_MS;
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, OPENED_WINDOW_POLL_MS));
+            const reading = await openedReading();
+            if (reading) return reading;
+          }
+          throw error;
         }
-        return await this.observeTarget(command.targetId);
       } catch {
         return null;
       }
@@ -401,13 +417,14 @@ export class CuaComputerBackend implements ComputerBackend {
     return { pid: target.pid, window_id: target.windowId, session: this.session };
   }
 
-  /** The window an action opened, such as a new document or a dialog, once
-   * CUA reported that it opened one: the one window of the acted window's
-   * app not listed before. A window lying within another window of its app
-   * is a sheet or part of a panel, read through that window, so it never
-   * counts. Two candidates are never guessed between. */
-  private async openedWindow(acted: Target): Promise<string | null> {
-    const known = new Set(this.targetsById.keys());
+  /** The window an action opened, such as a new document or a dialog: the
+   * one window of the acted window's app not listed before the action. CUA's
+   * own report of new windows misses some, such as a key equivalent it ran as
+   * a menu command, so the windows are listed after every action. A window
+   * lying within another window of its app is a sheet or part of a panel,
+   * read through that window, so it never counts. Two candidates are never
+   * guessed between. */
+  private async openedWindow(acted: Target, known: ReadonlySet<string>): Promise<string | null> {
     const opened = (await this.discover()).filter(
       (target) =>
         !known.has(target.id) &&
@@ -972,13 +989,15 @@ export class CuaComputerBackend implements ComputerBackend {
     };
   }
 
-  /** The target of the launched app's window: one the launch reported, else
-   * the first listed window of its process. On Linux the app may run as a
-   * child of the launcher process CUA reports, so a window of a descendant
-   * counts too. A window that cannot be tied to the launch is never guessed.
-   * It can appear a moment after the process starts, so discovery is retried
-   * briefly. */
-  private async launchedWindow(launched: LaunchedApp): Promise<string | null> {
+  /** The targets of the launched app's windows, best first: the windows the
+   * launch reported, then the listed windows of its process. On Linux the app
+   * may run as a child of the launcher process CUA reports, so a window of a
+   * descendant counts too. A window that cannot be tied to the launch is never
+   * guessed. A window lying within another of the app's windows (part of a
+   * panel, such as an Open panel's accessory view) comes after the windows it
+   * lies in. The first window can appear a moment after the process starts,
+   * so discovery is retried briefly. */
+  private async launchedWindows(launched: LaunchedApp): Promise<string[]> {
     const ownsWindow = (processId: number | null): boolean => {
       if (processId === null) return false;
       if (processId === launched.pid || processId === launched.launcherPid) return true;
@@ -993,13 +1012,18 @@ export class CuaComputerBackend implements ComputerBackend {
     };
     for (let attempt = 0; ; attempt++) {
       const targets = await this.discover();
-      for (const window of launched.windows) {
-        const id = `cua:window:${window.pid}:${window.window_id}`;
-        if (this.targetsById.has(id)) return id;
+      const reported = launched.windows
+        .map((window) => `cua:window:${window.pid}:${window.window_id}`)
+        .filter((id) => this.targetsById.has(id));
+      const owned = targets
+        .filter((target) => ownsWindow(target.processId))
+        .map((target) => target.id);
+      const candidates = [...new Set([...reported, ...owned])];
+      if (candidates.length) {
+        const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
+        return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
       }
-      const owned = targets.find((target) => ownsWindow(target.processId));
-      if (owned) return owned.id;
-      if (attempt >= LAUNCH_WINDOW_RETRIES) return null;
+      if (attempt >= LAUNCH_WINDOW_RETRIES) return [];
       await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
     }
   }
@@ -1095,9 +1119,10 @@ function procParentPid(pid: number): number | null {
 const LAUNCH_WINDOW_RETRIES = 4;
 const LAUNCH_WINDOW_RETRY_MS = 250;
 
-/** What CUA appends to an action's result text when it saw the action open
- * new windows. It names them only by app and title. */
-const OPENED_WINDOW_REPORT = "Action opened new window(s):";
+/** How long an action whose window can no longer be read waits for the
+ * window it opened. */
+const OPENED_WINDOW_WAIT_MS = 1_000;
+const OPENED_WINDOW_POLL_MS = 150;
 
 /** A launched app's processes and the windows launch_app reported, which
  * have list_windows' shape. */
