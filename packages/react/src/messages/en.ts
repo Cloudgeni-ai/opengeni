@@ -2524,6 +2524,12 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
+  "realtime.realtimeControl.voiceLanguage": "Language",
+  "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
+  "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",
+  "realtime.realtimeControl.voiceLanguageAutomaticValue": "Automatic · {language}",
+  "realtime.realtimeControl.voiceLanguageDescription":
+    "The voice listens and replies in this language.",
   "realtime.realtimeControl.voiceModel": "Voice model",
   "realtime.realtimeControl.voiceModelLabel": "Voice model: {label}",
   "realtime.realtimeControl.voiceModelUnavailable": "Voice model unavailable",

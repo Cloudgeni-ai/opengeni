@@ -1345,6 +1345,7 @@ function SessionsIndexRouteContent({
                   workspaceId,
                   sessionId,
                   model: realtimeModel,
+                  language: voiceSelection.languageFor(realtimeModel),
                 })
               : null;
             try {

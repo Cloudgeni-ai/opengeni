@@ -845,13 +845,14 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       createdBySubjectId: value.subjectId,
     });
 
+    const connectOperationId = crypto.randomUUID();
     const response = await app.request(`${base}/websocket`, {
       method: "POST",
       headers: value.headers,
       // The refused attempt durably failed epoch 1, so the client rotates.
       body: JSON.stringify({
         ...request,
-        operationId: crypto.randomUUID(),
+        operationId: connectOperationId,
         expectedConnectionEpoch: 1,
         rotate: true,
       }),
@@ -902,6 +903,60 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
         max_duration_seconds: 3600,
       },
     });
+
+    // ElevenLabs does not detect the spoken language: the person's language
+    // becomes the conversation language, mapped to ElevenLabs' code.
+    let live = connected as unknown as {
+      connectionId: string;
+      connectionEpoch: number;
+      modeVersion: number;
+    };
+    let operationId = connectOperationId;
+    let expectedConnectionEpoch = 1;
+    for (const [language, transcription] of [
+      ["nb-NO", { language: "no" }],
+      ["pt-BR", { language: "pt-br" }],
+      // A language ElevenLabs does not support keeps its default.
+      ["eo", {}],
+    ] as const) {
+      const activated = await app.request(
+        `${base}/${started.mode.id}/connections/${live.connectionId}/activate`,
+        {
+          method: "POST",
+          headers: value.headers,
+          body: JSON.stringify({
+            browserInstanceId: proof.browserInstanceId,
+            ownerKey: proof.ownerKey,
+            operationId,
+            expectedVersion: live.modeVersion,
+            expectedConnectionEpoch,
+            connectionEpoch: live.connectionEpoch,
+          }),
+        },
+      );
+      expect(activated.status).toBe(200);
+      const activeMode = ((await activated.json()) as { mode: { version: number } }).mode;
+      operationId = crypto.randomUUID();
+      expectedConnectionEpoch = live.connectionEpoch;
+      const rotated = await app.request(`${base}/websocket`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          ...request,
+          operationId,
+          expectedVersion: activeMode.version,
+          expectedConnectionEpoch,
+          rotate: true,
+          language,
+        }),
+      });
+      expect(rotated.status).toBe(200);
+      live = (await rotated.json()) as typeof live;
+      const rotatedMint = elevenLabsMints.at(-1)!.body as {
+        session: { audio: { input: { transcription: unknown } } };
+      };
+      expect(rotatedMint.session.audio.input.transcription).toEqual(transcription);
+    }
   });
 
   test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {

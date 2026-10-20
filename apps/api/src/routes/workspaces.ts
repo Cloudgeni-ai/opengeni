@@ -155,6 +155,7 @@ import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
+  ELEVENLABS_REALTIME_LANGUAGES,
   ELEVENLABS_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
   SUPERGROK_REALTIME_MODEL_ID,
@@ -1320,6 +1321,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         description: model.description,
         ...availability(elevenLabsConnected, "Connect a workspace ElevenLabs key"),
         recommended: false,
+        languages: [...ELEVENLABS_REALTIME_LANGUAGES],
       })),
       ...gatewayModels.map((model) => ({
         id: model.workspaceModelId,

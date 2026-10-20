@@ -123,6 +123,12 @@ export type SessionRealtimeWebsocketRequest = {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /**
+   * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+   * Providers that need a fixed conversation language use it; the others
+   * detect the spoken language themselves.
+   */
+  language?: string | undefined;
 };
 /** @deprecated Use SessionRealtimeWebsocketRequest. */
 export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
@@ -392,6 +398,11 @@ export type WorkspaceRealtimeModelCatalogItem = {
   /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
   unavailableCode?: string | null | undefined;
   recommended: boolean;
+  /**
+   * Languages a conversation with this model can be set to, as the provider's
+   * language codes. Absent when the model detects the spoken language itself.
+   */
+  languages?: string[] | undefined;
 };
 
 export type WorkspaceRealtimeModelCatalogResponse = {
