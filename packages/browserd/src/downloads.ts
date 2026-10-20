@@ -76,16 +76,16 @@ type FileIdentity = string;
  * file was replaced or shared, so its bytes cannot be attributed. */
 type Observation = {
   sequence: number;
-  /** The download's suggested name and the name Chromium saved it under. */
-  names: string[];
   identity: FileIdentity | null;
   conflict: boolean;
 };
 
 /** A completed download whose bytes are kept but not yet settled. Chromium
- * renames a same-name download over the earlier file, so until every
- * same-name download that could have done that before the bytes were kept
- * has settled without a conflict, they may be another download's. */
+ * renames a later download over an earlier file of the same name, and file
+ * systems differ in which names are the same. So until every download that
+ * could have done that before the bytes were kept has settled without a
+ * conflict, or shown it was still receiving data, they may be another
+ * download's. */
 type HeldCompletion = {
   fileName: string | null;
   sizeBytes: number;
@@ -345,6 +345,10 @@ export class BrowserDownloadStore {
           )
           .run(receivedBytes, totalBytes, guid);
       }
+      if (totalBytes !== null && receivedBytes < totalBytes) {
+        this.clearStillReceiving(guid);
+        await this.resolveHeld();
+      }
       return { cancelReason: null };
     });
   }
@@ -573,10 +577,15 @@ export class BrowserDownloadStore {
         await rm(stored, { force: true });
       }
     }
+    // A file system may list a kept file under another spelling of its name,
+    // so a file a completed download keeps is retained by identity too.
+    const kept = await this.keptIdentities();
     for (const entry of await readdir(this.filesDirectory)) {
-      // A file system may list a kept name with other case or normalization.
-      if (![...retainedFiles].some((name) => sameEntryName(name, entry)))
-        await rm(join(this.filesDirectory, entry), { recursive: true, force: true });
+      const path = join(this.filesDirectory, entry);
+      if (retainedFiles.has(entry)) continue;
+      const identity = await fileIdentity(path);
+      if (identity !== null && kept.has(identity)) continue;
+      await rm(path, { recursive: true, force: true });
     }
     for (const entry of await readdir(this.storedDirectory)) {
       if (!retainedStored.has(entry))
@@ -603,7 +612,7 @@ export class BrowserDownloadStore {
       // Keep these bytes before a later download with the same name can
       // replace the file Chromium saved.
       await exactRegularFile(saved);
-      observation = this.observe(row, await keepFile(saved, path), false, fileName);
+      observation = this.observe(row, await keepFile(saved, path), false);
       const sizeBytes = (await exactRegularFile(path)).size;
       if (
         sizeBytes > this.maxFileBytes ||
@@ -668,7 +677,7 @@ export class BrowserDownloadStore {
       }
     } catch {
       if (observation) observation.conflict = true;
-      else this.observe(row, null, true, fileName);
+      else this.observe(row, null, true);
       await this.discardCompletion(row.guid, fileName);
       this.settle(
         row.guid,
@@ -689,14 +698,12 @@ export class BrowserDownloadStore {
     row: Pick<DownloadRow, "guid" | "filename">,
     identity: FileIdentity | null,
     conflict: boolean,
-    savedName: string | null = null,
   ): Observation {
     const existing = this.observations.get(row.guid);
     if (existing) return existing;
     this.unconfirmed.delete(row.guid);
     const observation: Observation = {
       sequence: ++this.observationSequence,
-      names: savedName === null ? [row.filename] : [row.filename, savedName],
       identity,
       conflict,
     };
@@ -725,8 +732,8 @@ export class BrowserDownloadStore {
     const facts = await lstat(join(this.filesDirectory, fileName), { bigint: true }).catch(
       () => null,
     );
-    if (!facts?.isFile()) this.observe(row, null, true, fileName);
-    else this.observe(row, `${facts.dev}:${facts.ino}`, false, fileName);
+    if (!facts?.isFile()) this.observe(row, null, true);
+    else this.observe(row, `${facts.dev}:${facts.ino}`, false);
   }
 
   /** After the event barrier: wait for the same-name downloads that were
@@ -739,31 +746,29 @@ export class BrowserDownloadStore {
     if (!completion || !own) return;
     if (!ordered) own.conflict = true;
     const waitFor = new Set<string>();
-    // Downloads that may still rename a file: running ones not yet observed,
-    // and rejected ones whose cancellation Chromium did not confirm.
-    const writers = this.database
-      .query<{ guid: string; filename: string }, [string]>(
-        `SELECT guid, filename FROM browser_downloads
-          WHERE guid <> ? AND status = 'in_progress'`,
+    // Any download may be saved as the same file: file systems differ in
+    // which names they treat as one, so names prove nothing. Wait for every
+    // download that may still rename a file (running and not yet observed,
+    // or rejected without a confirmed cancellation) and for every one
+    // observed after this one.
+    for (const { guid: peer } of this.database
+      .query<{ guid: string }, [string]>(
+        "SELECT guid FROM browser_downloads WHERE guid <> ? AND status = 'in_progress'",
       )
-      .all(guid)
-      .filter(({ guid: peer }) => !this.observations.has(peer));
-    for (const peer of this.unconfirmed) {
-      const row = peer === guid ? null : this.rowByGuid(peer);
-      if (row) writers.push({ guid: peer, filename: row.filename });
-    }
-    for (const writer of writers)
-      if (own.names.some((name) => mayAlias(name, writer.filename))) waitFor.add(writer.guid);
-    for (const [peer, observation] of this.observations) {
-      if (
-        peer !== guid &&
-        observation.sequence > own.sequence &&
-        own.names.some((name) => observation.names.some((other) => mayAlias(name, other)))
-      )
-        waitFor.add(peer);
-    }
+      .all(guid))
+      if (!this.observations.has(peer)) waitFor.add(peer);
+    for (const peer of this.unconfirmed) if (peer !== guid) waitFor.add(peer);
+    for (const [peer, observation] of this.observations)
+      if (peer !== guid && observation.sequence > own.sequence) waitFor.add(peer);
     completion.waitFor = waitFor;
     await this.resolveHeld();
+  }
+
+  /** A download Chromium reports still receiving data after this one's
+   * event barrier had not renamed its file when this one's was kept: it
+   * renames only once all its data is saved. */
+  private clearStillReceiving(guid: string): void {
+    for (const completion of this.held.values()) completion.waitFor?.delete(guid);
   }
 
   /** Settle held completions whose peers have settled. A conflict in a
@@ -815,30 +820,13 @@ export class BrowserDownloadStore {
         changed = true;
       }
     }
-    // Observations matter only while a download that may share a file with
-    // them may still write one or is held.
-    const writers = [
-      ...this.database
-        .query<{ filename: string }, []>(
-          "SELECT filename FROM browser_downloads WHERE status = 'in_progress'",
-        )
-        .all()
-        .map((row) => row.filename),
-      ...[...this.unconfirmed].flatMap((peer) => this.rowByGuid(peer)?.filename ?? []),
-      ...[...this.held.keys()].flatMap((guid) => this.observations.get(guid)?.names ?? []),
-    ];
-    const referenced = new Set<string>();
-    for (const [guid, completion] of this.held) {
-      referenced.add(guid);
-      for (const peer of completion.waitFor ?? []) referenced.add(peer);
-    }
-    for (const [guid, observation] of [...this.observations]) {
-      if (
-        !referenced.has(guid) &&
-        !writers.some((writer) => observation.names.some((name) => mayAlias(name, writer)))
+    // Observations matter only while some download may still write a file.
+    const running = this.database
+      .query<{ guid: string }, []>(
+        "SELECT guid FROM browser_downloads WHERE status = 'in_progress' LIMIT 1",
       )
-        this.observations.delete(guid);
-    }
+      .get();
+    if (!running && this.unconfirmed.size === 0) this.observations.clear();
   }
 
   private settle(
@@ -1004,32 +992,38 @@ export class BrowserDownloadStore {
   }
 
   /** Remove what a download that is no longer wanted left behind. Chromium's
-   * named file is removed only while no other download can own that name,
-   * under any name that may be the same file. */
+   * named file is removed only when it can be nobody else's: no other
+   * download may still be saving a file, and no completed download keeps
+   * this one. Otherwise recovery sweeps it once nothing owns it. */
   private async removeUnownedCompletion(
     row: Pick<DownloadRow, "guid" | "filename">,
     fileName: string | null,
   ): Promise<void> {
     await this.removePhysicalFiles(row.guid);
     if (fileName === null) return;
-    const owner = this.database
-      .query<{ guid: string; filename: string; file_name: string | null }, [string]>(
-        `SELECT guid, filename, file_name FROM browser_downloads
-          WHERE guid <> ? AND (status IN ('in_progress', 'completed'))`,
+    const running = this.database
+      .query<{ guid: string }, [string]>(
+        "SELECT guid FROM browser_downloads WHERE guid <> ? AND status = 'in_progress' LIMIT 1",
       )
-      .all(row.guid)
-      .concat(
-        [...this.unconfirmed].flatMap((peer) => {
-          const other = peer === row.guid ? null : this.rowByGuid(peer);
-          return other ? [other] : [];
-        }),
-      )
-      .some((other) =>
-        [other.filename, other.file_name].some(
-          (name) => name !== null && [row.filename, fileName].some((own) => mayAlias(own, name)),
-        ),
-      );
-    if (!owner) await rm(join(this.filesDirectory, fileName), { force: true });
+      .get(row.guid);
+    if (running || [...this.unconfirmed].some((peer) => peer !== row.guid)) return;
+    const path = join(this.filesDirectory, fileName);
+    const identity = await fileIdentity(path);
+    if (identity === null || (await this.keptIdentities()).has(identity)) return;
+    await rm(path, { force: true });
+  }
+
+  /** The identities of the files completed downloads keep. A kept hard link
+   * is the file Chromium saved, under whatever name it has. */
+  private async keptIdentities(): Promise<Set<FileIdentity>> {
+    const identities = new Set<FileIdentity>();
+    for (const row of this.database
+      .query<{ guid: string }, []>("SELECT guid FROM browser_downloads WHERE status = 'completed'")
+      .all()) {
+      const identity = await fileIdentity(this.filePath(row));
+      if (identity !== null) identities.add(identity);
+    }
+    return identities;
   }
 
   /** Remove a completion that is not accepted. Chromium's file is removed
@@ -1133,28 +1127,6 @@ function requireSha256(value: string): string {
   return value;
 }
 
-/** A deliberately coarse key for names that may end up as one file. File
- * systems may ignore case and Unicode normalization, and Chromium replaces
- * characters a file system refuses, corrects or adds an extension, falls
- * back to a generic name and shortens long names. The key drops all of
- * that: the part before the first dot, letters and digits only, lowercased,
- * decomposed, at most 32 characters. Names with different keys cannot be
- * one file; equal keys may be. A name with an empty key may be any file. */
-function aliasKey(name: string): string {
-  const stem = name.normalize("NFKD").toLowerCase().split(".")[0] ?? "";
-  return [...stem.replace(/[^\p{L}\p{N}]/gu, "")].slice(0, 32).join("");
-}
-
-function mayAlias(left: string, right: string): boolean {
-  const leftKey = aliasKey(left);
-  const rightKey = aliasKey(right);
-  return leftKey === "" || rightKey === "" || leftKey === rightKey;
-}
-
-function sameEntryName(left: string, right: string): boolean {
-  return left.normalize("NFC").toLowerCase() === right.normalize("NFC").toLowerCase();
-}
-
 function safeFilename(value: string): string {
   let bounded = "";
   let bytes = 0;
@@ -1186,6 +1158,12 @@ async function exactRegularFile(path: string): Promise<{ size: number }> {
   const facts = await lstat(path);
   if (!facts.isFile() || facts.isSymbolicLink()) throw new Error("download is not a regular file");
   return { size: nonnegativeSafeInteger(facts.size, "download size") };
+}
+
+/** A regular file's identity, or null when there is none at `path`. */
+async function fileIdentity(path: string): Promise<FileIdentity | null> {
+  const facts = await lstat(path, { bigint: true }).catch(() => null);
+  return facts?.isFile() ? `${facts.dev}:${facts.ino}` : null;
 }
 
 async function pathExists(path: string): Promise<boolean> {

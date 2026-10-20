@@ -358,6 +358,88 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
+  test("names that differ can still be one file on disk", async () => {
+    const { store } = await fixture();
+    // NTFS treats both lowercase sigmas as one name.
+    const path = join(store.filesDirectory, "σ.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "σ.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "ς.txt" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    for (const guid of ["first", "second"]) {
+      await store.progress({
+        guid,
+        state: "completed",
+        receivedBytes: 5,
+        totalBytes: 5,
+        filePath: path,
+      });
+    }
+    for (const id of [firstDownloadId, secondDownloadId]) {
+      expect(await store.get(id)).toMatchObject({
+        status: "failed",
+        failureCode: "download_integrity_failed",
+      });
+    }
+    await store.close();
+  });
+
+  test("a download still receiving data after the barrier does not hold a completion", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "small", targetId: null, suggestedFilename: "small.txt" });
+    await store.begin({ guid: "large", targetId: null, suggestedFilename: "large.bin" });
+    const path = join(store.filesDirectory, "small.txt");
+    await rename(await partial(store, "small", "small"), path);
+    await store.progress({
+      guid: "small",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    // Any running download may be saved as the same file, until Chromium
+    // shows it still receiving data.
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "large",
+      state: "inProgress",
+      receivedBytes: 10,
+      totalBytes: 100,
+    });
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe("small");
+    expect((await store.get(secondDownloadId))?.status).toBe("in_progress");
+    await store.close();
+  });
+
+  test("a completion waits for a running download of another name to settle", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "first.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "second.txt" });
+    const firstPath = join(store.filesDirectory, "first.txt");
+    const secondPath = join(store.filesDirectory, "second.txt");
+    await rename(await partial(store, "first", "first"), firstPath);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: firstPath,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await rename(await partial(store, "second", "second"), secondPath);
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 6,
+      totalBytes: 6,
+      filePath: secondPath,
+    });
+    const read = async (id: string) => await readFile((await store.completedFile(id)).path, "utf8");
+    expect(await read(firstDownloadId)).toBe("first");
+    expect(await read(secondDownloadId)).toBe("second");
+    await store.close();
+  });
+
   test("a held download settles when a same-name peer is cancelled", async () => {
     const { store } = await fixture();
     const path = join(store.filesDirectory, "report.txt");
