@@ -1,3 +1,4 @@
+import { isAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 import {
   agentToolCallOutcome,
   agentToolMetricFamily,
@@ -837,12 +838,6 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
-    // Native Codex/SuperGrok transports report their literal dispatch through
-    // the shared turn context; generic transports use the wire-dispatch clock.
-    eventing.providerDispatchObserver = () => {
-      streamTiming.onProviderDispatch();
-      startIndependentTitleAdmission();
-    };
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -1157,17 +1152,18 @@ export async function runTurnStreamAttempt(
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
-                onModelTransportDispatched: (clock) => {
-                  startIndependentTitleAdmission();
-                  eventing.preparedTools?.startDeferredPreparation?.();
-                  streamTiming.onProviderDispatch();
-                  eventing.initialModelWireDispatch.record(
-                    { provider: streamProvider, dispatchId },
-                    clock,
-                  );
-                },
               }
             : {}),
+          onModelTransportDispatched: (clock) => {
+            if (isAuxiliaryProviderDispatch()) return;
+            startIndependentTitleAdmission();
+            eventing.preparedTools?.startDeferredPreparation?.();
+            streamTiming.onProviderDispatch();
+            eventing.initialModelWireDispatch.record(
+              { provider: streamProvider, dispatchId },
+              clock,
+            );
+          },
           ...(eventing.toolCancellationFenceRef.current
             ? {
                 turnToolCancellationFence: eventing.toolCancellationFenceRef.current,
