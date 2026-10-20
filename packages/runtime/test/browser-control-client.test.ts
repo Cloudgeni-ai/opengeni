@@ -43,6 +43,7 @@ describe("BrowserControlClient", () => {
     "extra",
     "legacy",
     "legacy-foreign",
+    "legacy-lost",
     "unknown",
   ] as const)(
     "metadata-only tab opening validates binding and never replays (%s)",
@@ -56,19 +57,22 @@ describe("BrowserControlClient", () => {
           const route = `${request.method} ${new URL(request.url).pathname}`;
           routes.push(route);
           const sessionPath = `/v1/browser-sessions/${reference.browserSessionId}`;
-          const legacy = scenario === "legacy" || scenario === "legacy-foreign";
-          if (scenario === "legacy" && route === `GET ${sessionPath}/targets`) {
+          const legacy =
+            scenario === "legacy" || scenario === "legacy-foreign" || scenario === "legacy-lost";
+          if (route === `GET ${sessionPath}/targets`) {
             expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
-            return success([target]);
+            return scenario === "legacy"
+              ? success([target])
+              : failure(404, "resource_not_found", "browser session not found");
           }
           expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
           expect(await request.json()).toEqual({ url: "https://new.example.test/" });
           if (legacy && route === `POST ${sessionPath}/targets`)
             return success(
               browserObservation(
-                scenario === "legacy"
-                  ? target
-                  : { ...target, controllerGeneration: "other-controller" },
+                scenario === "legacy-foreign"
+                  ? { ...target, controllerGeneration: "other-controller" }
+                  : target,
               ),
             );
           if (legacy || scenario === "unknown")
@@ -109,7 +113,7 @@ describe("BrowserControlClient", () => {
         const pending = browser.openTargetWithInventory("https://new.example.test/");
         if (scenario === "exact" || scenario === "legacy")
           expect(await pending).toEqual({ ...reference, targets: [target] });
-        else if (scenario === "unknown")
+        else if (scenario === "unknown" || scenario === "legacy-lost")
           await expect(pending).rejects.toMatchObject({
             status: 409,
             error: { code: "outcome_unknown", retryable: false },
@@ -120,7 +124,7 @@ describe("BrowserControlClient", () => {
           `POST ${sessionPath}/targets/open-with-inventory`,
           // An older controller image rejects the route before dispatch, so the
           // original open route runs once; nothing else is ever re-sent.
-          ...(scenario === "legacy"
+          ...(scenario === "legacy" || scenario === "legacy-lost"
             ? [`POST ${sessionPath}/targets`, `GET ${sessionPath}/targets`]
             : scenario === "legacy-foreign"
               ? [`POST ${sessionPath}/targets`]

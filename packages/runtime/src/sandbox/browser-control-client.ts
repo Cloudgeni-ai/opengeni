@@ -1930,10 +1930,23 @@ export class BrowserControlSessionClient {
           "browser controller opened a tab for another session binding",
         );
       }
+      let targets: BrowserTargetValue[];
+      try {
+        targets = await this.listTargets();
+      } catch {
+        // The tab is open. A raw inventory error (for example a missing or
+        // re-tokened session) would let a caller's recovery replay the open.
+        throw new BrowserControlRequestError(409, {
+          code: "outcome_unknown",
+          message:
+            "browser tab was opened, but the tab list could not be read; list tabs before opening it again",
+          retryable: false,
+        });
+      }
       response = {
         browserSessionId: this.reference.browserSessionId,
         controllerGeneration: this.reference.controllerGeneration,
-        targets: await this.listTargets(),
+        targets,
       };
     }
     if (
