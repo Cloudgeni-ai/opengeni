@@ -1,3 +1,4 @@
+export { isConnectedMachineOutcomeUnknownOutput } from "./connected-machine-output";
 export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
   AvailableOpenGeniSlackBots,
