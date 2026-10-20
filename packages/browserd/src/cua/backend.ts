@@ -385,7 +385,9 @@ export class CuaComputerBackend implements ComputerBackend {
         windowId: window.window_id,
         title: window.title,
         appName: window.app_name,
-        onScreen: window.is_on_screen !== false,
+        // Only macOS cannot read a window that is off screen; Windows and
+        // Linux read minimized or covered windows through their trees.
+        onScreen: this.identity.platform !== "macos" || window.is_on_screen !== false,
         native: {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),

@@ -1654,6 +1654,30 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("Windows and Linux still read a window listed off screen", async () => {
+    for (const [platform, fixture] of [
+      ["windows", new WindowsFixture()],
+      ["linux", new LinuxPermissionsFixture()],
+    ] as const) {
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, argumentsJson) => {
+        const response = await original(name, argumentsJson);
+        if (name !== "list_windows") return response;
+        const data = JSON.parse(response.structuredJson!);
+        for (const window of data.windows) window.is_on_screen = false;
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      };
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      try {
+        const target = (await backend.targets())[0]!;
+        expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {
