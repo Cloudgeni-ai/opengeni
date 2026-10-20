@@ -685,6 +685,15 @@ describe("ordinary session Codex realtime control", () => {
         unavailableReason: null,
         recommended: false,
       },
+      {
+        id: "workspace-elevenlabs/eleven_realtime_v1_max",
+        label: "Eleven Realtime v1 max",
+        provider: "Your ElevenLabs",
+        description: "Reasons before replying",
+        available: true,
+        unavailableReason: null,
+        recommended: false,
+      },
     ];
 
     function Harness() {
@@ -711,12 +720,21 @@ describe("ordinary session Codex realtime control", () => {
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).not.toBeNull();
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+    // Each provider has its own row id, even when two share a billing class.
+    expect(
+      [...container.querySelectorAll<HTMLElement>('[data-testid^="realtime-model-provider-"]')].map(
+        (row) => row.dataset.testid,
+      ),
+    ).toEqual([
+      "realtime-model-provider-opengeni",
+      "realtime-model-provider-codex",
+      "realtime-model-provider-gateway",
+      "realtime-model-provider-elevenlabs",
+    ]);
 
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="realtime-model-provider-opengeni_credits"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="realtime-model-provider-opengeni"]')
         ?.click(),
     );
     expect(container.textContent).toContain("GPT Realtime 2.1");
