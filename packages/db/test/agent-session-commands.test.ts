@@ -38,8 +38,10 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
+  withSessionRlsActorContext,
   type SessionCommandActor,
 } from "../src/index";
+import { nestedPostgresSqlState } from "../src/persistence-errors";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -888,6 +890,100 @@ describe("attempt-fenced Agent session commands", () => {
     expect(publicProjection).not.toContain(grant.subjectId);
   });
 
+  test("the owner's internal-update turn spawns witnessed children only for its own human", async () => {
+    const grant = await fixture();
+    const parent = await activeAgent(grant);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `service-turn-child:${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+      lineage: {
+        parentSessionId: parent.session.id,
+        parentTurnId: parent.turn.id,
+        childSessionId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error(`child result was not added: ${update.reason}`);
+    const attemptId = crypto.randomUUID();
+    const serviceClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (serviceClaim.action !== "claimed") throw new Error("internal update was not claimed");
+    expect(serviceClaim.turn.initiator).toMatchObject({
+      kind: "service",
+      subjectId: "internal-update",
+    });
+    expect(serviceClaim.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    const actor: Extract<SessionCommandActor, { type: "agent_attempt" }> = {
+      type: "agent_attempt",
+      sessionId: parent.session.id,
+      turnId: serviceClaim.turn.id,
+      attemptId,
+      executionGeneration: serviceClaim.turn.executionGeneration,
+    };
+    // Production shape: the worker bearer's subject plus the attempt's
+    // verified initiating human, as the API installs them.
+    const spawn = (initiatingHumanSubjectId: string) =>
+      withSessionRlsActorContext(
+        { subjectId: "worker:first-party-mcp", initiatingHumanSubjectId },
+        () =>
+          createSession(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            initialMessage: "service-turn child",
+            resources: [],
+            metadata: {},
+            model: "scripted-model",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
+            sandboxBackend: "none",
+            parentSessionId: parent.session.id,
+            createdByActor: actor,
+            subjectId: "worker:first-party-mcp",
+          }),
+      );
+    const child = await spawn(grant.subjectId);
+    const [witness] = await shared.admin`select agent_creation_attempt_id,created_by_kind,
+      created_by_subject_id from sessions where id=${child.id}`;
+    expect(witness).toMatchObject({
+      agent_creation_attempt_id: attemptId,
+      created_by_kind: "service",
+      created_by_subject_id: "internal-update",
+    });
+    let failure: unknown;
+    try {
+      await spawn(`subject-other-${crypto.randomUUID()}`);
+    } catch (error) {
+      failure = error;
+    }
+    expect(nestedPostgresSqlState(failure)).toBe("42501");
+  });
+
   test("child completion keeps the exact spawning parent-turn authority after the parent moves on", async () => {
     const grant = await fixture();
     const spawningDelegations: McpPersonalConnectionDelegation[] = [
@@ -914,6 +1010,15 @@ describe("attempt-fenced Agent session commands", () => {
       createdByActor: parent.actor,
       personalConnectionDelegations: spawningDelegations,
     });
+    // This internal create carries no request claims at all (no subject and
+    // no agent-attempt RLS actor), so it keeps the ordinary insert path. Its
+    // MCP lineage remains valid, but it has no machine-tree creation witness.
+    // Real agent requests (including the owner's service-initiated turns)
+    // carry the attempt's initiating human and take the atomic seam; see the
+    // service-turn witness test above.
+    const [machineWitness] = await shared.admin`select agent_creation_attempt_id
+      from sessions where id=${child.id}`;
+    expect(machineWitness!.agent_creation_attempt_id).toBeNull();
 
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: parent.session.id,

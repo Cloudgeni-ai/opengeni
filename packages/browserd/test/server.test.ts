@@ -50,7 +50,10 @@ describe("BrowserControlServer", () => {
           body: createBody(reference),
         });
       expect((await create()).status).toBe(503);
-      expect((await json(await update("POST", randomUUID()))).data.idle).toBe(false);
+      expect((await json(await update("POST", randomUUID()))).data).toMatchObject({
+        idle: false,
+        blockers: [{ kind: "controller_previous_update", count: 1 }],
+      });
       expect((await update("DELETE", randomUUID())).status).toBe(409);
       expect((await create()).status).toBe(503);
       expect((await json(await update("DELETE"))).data).toMatchObject({
@@ -116,6 +119,7 @@ describe("BrowserControlServer", () => {
           }),
         );
         expect(proof.data.idle).toBe(false);
+        expect(proof.data.blockers).toContainEqual({ kind: "controller_request", count: 1 });
       } finally {
         finishBody!();
       }

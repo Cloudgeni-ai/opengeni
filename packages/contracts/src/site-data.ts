@@ -10,7 +10,7 @@ export const SiteDataAccessMode = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["shared", "shared_read", "per_viewer", "append_only"])
     .describe(
-      "shared: viewers read and write every record. shared_read: viewers read, only managers write. per_viewer: each viewer reads and writes only their own records. append_only: viewers add records and read only their own.",
+      "shared: viewers read and write every record. shared_read: viewers read, only managers write. per_viewer: each viewer reads and writes only their own records. append_only: viewers add records and read only their own. Managers (workspace members who can publish artifacts) read every record in every mode.",
     ),
 );
 export type SiteDataAccessMode = z.infer<typeof SiteDataAccessMode>;

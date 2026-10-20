@@ -116,7 +116,7 @@ test("signup trial credits pay for dictation like general credits; chat-scoped c
   // Zero credits: the honest out-of-credits path.
   await expect(billing.admit({ accountId, workspaceId, attribution })).rejects.toMatchObject({
     code: "insufficient_credits",
-    message: "Voice input needs Opengeni credits. Add credits to continue.",
+    message: "Voice input needs credits. Add credits to continue.",
   });
   // A chat-model-scoped coupon does not pay for voice.
   await applyCreditLedgerEntry(client!.db, {

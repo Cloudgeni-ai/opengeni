@@ -840,6 +840,26 @@ describe("BrowserSession route discipline", () => {
       expect(browserScreenshotError(error)).toBe(error);
   });
 
+  test("names an open JavaScript dialog as the reason a tab cannot be captured, without page text", async () => {
+    const internal = new BrowserControlRequestError(409, {
+      code: "invalid_action",
+      message: 'A JavaScript confirm dialog is open in this tab: "PRIVATE page text".',
+      retryable: false,
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as HTTPException).status).toBe(409);
+    expect((projected as Error).cause).toBe(internal);
+    expect((projected as Error).message).toContain("handle_dialog");
+    expect((projected as Error).message).not.toContain("PRIVATE");
+    const other = new BrowserControlRequestError(400, {
+      code: "invalid_action",
+      message: "screenshot quality is out of range",
+      retryable: false,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
+  });
+
   test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(source.indexOf("async function withBrowserPlacement"));
@@ -1585,6 +1605,44 @@ describe("BrowserSession route discipline", () => {
     );
     expect(helper).toContain('if (after?.session.lifecycle !== "active") return false;');
     expect(helper).toContain('console.warn("browser.capacity_suspend_failed"');
+    // The waiting create or resume stays dispatched while room is made, so a
+    // slow save does not let the transition reaper settle it as lost.
+    const heartbeat = helper.indexOf("await withInteractionHolderHeartbeat(");
+    expect(heartbeat).toBeGreaterThan(-1);
+    const heartbeatInput = helper.slice(heartbeat, helper.indexOf("async () =>", heartbeat));
+    expect(heartbeatInput).toContain("operationId: full.waiting.operationId");
+    expect(heartbeatInput).toContain("resourceId: full.waiting.browserSessionId");
+    expect(heartbeatInput).toContain("controllerGeneration: full.waiting.controllerGeneration");
+    expect(heartbeatInput).toContain("sandboxGroupId: full.waiting.sandboxGroupId");
+    expect(helper.indexOf("await saveLeastRecentlyUsedBrowser(")).toBeGreaterThan(heartbeat);
+  });
+
+  test("a resume that reaches a full controller saves its least recently used idle browser once, then retries", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Only a capacity error, and only once, turns into a save-and-retry before
+    // the resume is failed; the browser being resumed is never the one saved.
+    expect(resume).toContain("let capacitySuspendAllowed = true;");
+    expect(
+      resume.indexOf("capacitySuspendAllowed && browserControllerCapacityExhausted(error)"),
+    ).toBeLessThan(resume.indexOf("failBrowserSessionResume(deps.db"));
+    expect(resume).toContain("capacitySuspendAllowed = false;");
+    expect(resume).toContain("if (!(error instanceof BrowserControllerFull)) throw error;");
+    const save = resume.indexOf("await suspendLeastRecentlyUsedBrowser(");
+    expect(save).toBeGreaterThan(-1);
+    expect(resume.slice(save, resume.indexOf(");", save))).toContain("browserSessionId");
+    expect(save).toBeLessThan(resume.lastIndexOf("response = await resumeOnPlacement();"));
+    // Its restore download is signed for minutes, so the retry signs it anew
+    // after the save instead of reusing a grant that may have expired.
+    const reprepare = resume.indexOf("await prepareRestore();", save);
+    expect(reprepare).toBeGreaterThan(save);
+    expect(reprepare).toBeLessThan(resume.lastIndexOf("response = await resumeOnPlacement();"));
   });
 
   test("resumes an expired resume only after ending its retained controller generation", async () => {

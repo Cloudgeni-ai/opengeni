@@ -128,6 +128,7 @@ pub async fn serve_git_scoped_with_policy<P: Platform>(
         Vec::new(),
         // Rule C: git carries no caller deadline field; none is imposed.
         None,
+        0,
         || platform.spawn_git_with_policy(&req, resource_policy.as_ref()),
         emit,
         |_exit| Vec::new(),

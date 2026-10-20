@@ -32,7 +32,7 @@ test("skill_remove is lazy, destructive and rejects non-registry identities and 
   });
   expect(tool.modelName).toBe("skill_remove");
   expect(tool.annotations?.destructiveHint).toBe(true);
-  for (const skillId of ["builtin:opengeni-skills", "repository:skills/test", "session:inline"]) {
+  for (const skillId of ["builtin:skill-management", "repository:skills/test", "session:inline"]) {
     expect(SkillRemoveRequest.safeParse({ ...request, skillId }).success).toBe(false);
   }
   expect(SkillRemoveRequest.safeParse({ ...request, actor: { kind: "human" } }).success).toBe(

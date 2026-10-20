@@ -160,7 +160,12 @@ see `docs/connected-machines.md`.
 Connected Machine control replies use a negotiated, process-scoped receipt
 journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
 rebuilds transport, not execution: immutable delivery identities join accepted
-work or replay its reply. Expired deliveries cannot execute after receipt GC;
+work or replay its reply. Private batches of receiver-issued single-use tokens
+are prefetched per authenticated bus and exact process, so warm calls add no
+round trip. A fixed per-call elapsed offset preserves exec and receipt deadlines
+without charging idle prefetch age. Tokens have a suspend-inclusive monotonic lifetime; neither admission nor requester retry budgets depend
+on synchronized wall clocks. Unknown/expired tokens and changed payloads return
+prompt non-retryable errors preserving uncertain outcomes. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
 bounded recovery. The requester listens for the exact process's hello before
@@ -700,6 +705,12 @@ before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result
 retention and consumer-generation acknowledgments remain engine-owned.
+The same admission proof produces bounded category/count update-blocker
+snapshots. Private controller/session identities never cross into enrollment-wide
+diagnostics. Exact-operation/process-fenced progress persists the snapshot on the
+enrollment, clears it on advancement or process replacement, and projects its
+age and elapsed hold into Machines/fleet. This is evidence, not cancellation or
+permission to relax admission; older generic busy receipts remain unspecified.
 Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
@@ -727,6 +738,11 @@ Unbound `selfhosted` creates leave no queued shell.
 
 Omitted child placement inherits parent machine/root and shared home/group,
 including attached `backend:none`; selfhosted-only children require a machine.
+Personal machine tree consent uses protected exact-attempt creation witnesses,
+immutable parent/turn links, same-owner causal
+humans and the original revocable grant at claim and dispatch (0851); it neither
+copies grants nor expands other personal resources. Every ancestor machine
+snapshot must remain current. See [Connected Machines](connected-machines.md).
 
 Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
 machine pointer and verifies managed compute via viewer/lease authority;
@@ -782,6 +798,24 @@ verified checkpoint, else continues empty, warning every member; never replays.
 See migrations 0495/0526/0548, [run lifecycle](run-lifecycle.md).
 Operator reauthorization supersedes verified public recovery;
 [provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
+Current portable archives are revalidated on a new attempt even after a prior
+non-retryable restore verdict; cold replacement election adopts the accepted
+backend without rewriting archive provenance. Human recovery uses the same
+session recovery endpoint for exact-archive retry or deliberate empty-workspace
+continuation. Empty continuation preserves group identity, requires control of
+every quiescent member (or operator authority), retains archives and records a
+permanent notice/warning for every member. The supported operator entry point is
+`scripts/operator/sandbox-recovery.ts`; see
+[current workspace recovery](run-lifecycle.md#current-workspace-retry-and-deliberate-empty-continuation).
+
+Opengeni compute (`compute`) is a managed sandbox whose provider session is the
+machine agent: leases, groups, setup and usage follow the managed path, while
+transport (op-stream, relay PTY/desktop, agent error grammar) follows the
+Connected Machine path via `usesAgentTransport`. Its agent is reached through
+the API's agent gateway over its host's link, never by dialing Opengeni.
+Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
+(chat/workspace deletion) drains them and the reaper deletes the sandbox and
+revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -959,6 +993,12 @@ Org admins set budgets; workspace admins split members. Counters permit
 overshoot, not reservations; shares may oversubscribe. Default-off
 `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
+
+Read-only authorization and counter projections do not mint write capabilities:
+see [`read-only database paths`](design/read-only-database-paths.md). Private
+counter SELECT policies remain owner-only and tenant/schema bounded; mutation
+capabilities and live authorization checks are unchanged. API-key last use is
+coalesced telemetry, never an authorization cache.
 
 ### 3.13 Task usage limits stop admission, not running work
 
@@ -1431,10 +1471,19 @@ For turns using deferred MCP disclosure, the worker starts non-eager preparation
 at main provider dispatch or earlier real tool/recovery demand. The runtime also
 starts it on a substantive provider response when no dispatch hook is available.
 One completion fence owns tool readiness and cleanup; closing before start does
-not create unused connections. Embedded callers keep immediate background
+not create unused connections. Explicit provider-dispatch preparation also
+defers catalog construction and persistence when every server already joined
+the required/eager connection barrier. Those connected servers keep their
+frozen first-request schemas; an unfinished catalog alone does not imply an
+unknown server catalog or expose an extra conditional search router.
+Embedded callers keep immediate background
 preparation by default. Factory-created attempt catalogs are detached immutable
 snapshots whose exact identity can reuse verification; deserialized catalogs
-still receive full checks. See [startup decisions and measurements](design/typing-turn-preparation.md).
+still receive full structure and digest checks. Gateway input/output validators
+compile together on the first call to a tool, before authorization or execution,
+against its preparation-time schema snapshot. Unused tools do not compile;
+schema compilation failures are retained for that tool, not argument-repair
+errors or a failure of every catalog entry. See [startup decisions and measurements](design/typing-turn-preparation.md).
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -1467,7 +1516,7 @@ Repository descriptors use sandbox-bound `repository_skill_read`, not managed
 Skills: `.agents/skills`; runtime bundles:
 `packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
 client assets/docs from `.agents/skills/opengeni-client`; drift-tested.
-Tools/host-gated `opengeni-schedules`; shortcut sends only request/time zone.
+Tools/host-gated `schedules`; shortcut sends only request/time zone.
 
 Reading/management/host selection: [Skill design](design/skills-system.md).
 
@@ -1582,8 +1631,11 @@ the aggregate fallback), `compaction` or `session-title`. Older events have none
 Streamed main calls also carry worker-measured `timing` (whole milliseconds: pre-dispatch
 work, first dispatch to first token and first text, first dispatch to terminal response)
 on the event and on `model_call_facts`. A call that needed several requests (a transport
-retry or a provider continuation) is measured from its first dispatch. The first
-measurement wins on replay and repair, and absent or malformed values stay null. Output
+retry or a provider continuation) is measured from its first dispatch. The
+pre-dispatch clock starts only at SDK model entry, never at a transport admission
+recheck: native providers can recheck after dispatch. Older measurements could
+therefore include the preceding response and tool work; they are not corrected on replay.
+The first measurement wins on replay and repair, and absent or malformed values stay null. Output
 tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.
@@ -1838,7 +1890,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:projects`.
 
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
@@ -2304,6 +2356,16 @@ confirmed handoff through existing PKCE and `ThisComputer.connect`. The agent's
 offer/event contract is unchanged. See [embedding](embedding.md#computer-connection-offers)
 and [desktop app](design/desktop-app.md#deep-links).
 
+Desktop setup preserves existing standalone agents as service-backed runners.
+`packages/agent-host/src/this-computer.ts` never removes their service, bundle,
+symlink or privacy grants, and never starts them as desktop children. Explicit
+signed-in setup reuses their live-reloaded connection store; native
+`service status --json` is the versioned read-only lifecycle seam. Pause/resume
+persists in the service manager across logins. Quitting the desktop leaves the
+service alone. Permission status comes from the current account's Machines
+view, preserving the service's own macOS responsible-process identity. New
+app-hosted installations retain the existing child-supervision model.
+
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
 opening another stream or maintaining a second draft. Hosts with persistent
@@ -2599,11 +2661,13 @@ The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
 Node for official Sigstore/TUF cryptography; package builds and packing stay on
 Bun. Signed split-source bundles survive failures as separate, hash-linked public
 provenance evidence. Diagnostic categories do not settle unknown registry writes.
-Canary packages prepack the complete cohort, retain write acknowledgements, then
-perform bounded strict read-only verification before producing Site pins.
-Post-write verification selects current tags and one immutable version manifest;
-each actual GET shares the original request quota, deadline and custody limits,
-including final complete-cohort qualification. Pre-write discovery is unchanged.
+Canary packages prepack the complete cohort and retain write acknowledgements in
+the credentialed `publish` job. npm accepts writes with 202 and processes them
+asynchronously, so a separate credential-free `confirm` job waits for every
+version with time-based backoff, rereads the complete cohort strictly, and only
+then produces Site pins. Re-running a failed `confirm` job resumes waiting without
+publishing. Verification selects current tags and one immutable version manifest;
+pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 For a completely acknowledged failed canary, the protected
 `reconcile-canary-publication.yml` controller can independently verify retained
@@ -2736,7 +2800,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
-| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
+| Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
@@ -2779,6 +2843,26 @@ Filtered session page ownership and its maintenance boundary: [session paginatio
 Session content blobs, legacy compaction and the idle-session archive: [session storage lifecycle](session-storage-lifecycle.md).
 
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
+
+Background maintenance must work with a `NOSUPERUSER NOBYPASSRLS` migration
+owner. Migrations 0848–0849 keep the fourteen registered due checks read-only:
+predicate-only, owner-private scheduling projections are maintained in the source
+transaction by triggers; probes never acquire write capabilities or trust caller
+scope settings. Source tables retain FORCE RLS. The due checks are conservative
+work hints, not authorization or claim receipts. Fixed global claim/reaper bodies
+still recheck the source rows and their original locks, lease identities and
+fences. Where those bodies previously relied on owner RLS bypass, an
+operation-specific, backend/transaction-bound private capability now admits only
+the required table commands while the body runs. Each invocation removes its own
+token, including error paths; deferred checkpoint validators attest their source
+relation and borrow separate read-only authority for their invocation. Runtime
+roles cannot read/write the projections or token ledger, call inner helpers, or
+attach the validators to other tables. `runtime-posture.ts` checks ownership,
+table/column ACLs and pinned helper search paths; maintenance tests migrate as the
+strict owner by default. These migrations require a maintenance rollout because
+older runtime-posture inventories reject the newly private helper functions.
+Pause old runtimes, migrate and provision roles, then start the matching image;
+do not restart the previous image against the new helper/grant contract.
 
 ### In-conversation connection setup
 
@@ -2842,3 +2926,25 @@ organization or explicit user authority independently of the current browser
 user. Execution rechecks that frozen authority, live owner authority and the exact
 serving account generation before every physical request. See the native Claude
 section in model-providers.md and the maintenance activation in deployment.md.
+
+### Slack connection and schedule authority
+
+Slack bot availability is independent of incoming channel routing. The Slack
+capability page exposes the same authorized installation inventory from each
+workspace; detail requests retain the installation home scope and normal grants.
+Organization sharing may cover all or selected same-organization workspaces.
+Schedules and interactive turns use the same selected bot tools; a saved legacy
+destination is a default, never a grant to add excluded tools. Bot preparation and
+physical delivery retain exact attempt, connection/version, workspace and sharing
+generation checks. Personal Slack Add and Reconnect use distinct creation and
+exact-identity replacement semantics. See [Slack](slack-bot.md).
+
+Workspace `defaultExecutionTarget` selects the placement of new root chats.
+Explicit session placement and child inheritance take precedence. Schedules
+opt into following it through `agentConfig.executionTarget: workspace_default`;
+each accepted occurrence freezes its resolved machine in the execution snapshot.
+Recovery never resolves a different default, and reusable/existing chats retain
+their established placement. Removed targets fail without choosing another
+computer. Workspace defaults may name only shared or organization machines;
+ordinary live machine authority still applies. See
+[Connected Machines](connected-machines.md).

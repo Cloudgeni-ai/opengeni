@@ -1275,7 +1275,7 @@ describe("resumable transcription billing", () => {
       admit: async () => {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
-          message: "Voice input needs Opengeni credits.",
+          message: "Voice input needs credits.",
         });
       },
       transcribe: async () => {

@@ -238,6 +238,11 @@ export function ThisComputerCard({
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>
+        {!complete && status?.management === "service" ? (
+          <p className="og-session-capability-copy">
+            {catalogText("thisComputer.existingService")}
+          </p>
+        ) : null}
         {!computer && !complete && (downloads?.length || openAppUrl) ? (
           <div className="og-tc-card-foot og-tc-card-downloads">
             {downloads?.map((download) => (

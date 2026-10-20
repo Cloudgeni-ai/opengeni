@@ -1331,12 +1331,12 @@ describe("runtime database posture evaluator", () => {
     table.rlsForced = true;
     posture.privateRoutines.at(-1)!.configuration = ["search_path=public"];
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
     );
     posture.privateRoutines.at(-1)!.configuration = ["search_path=pg_catalog, public, pg_temp"];
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
     );
   });
 
@@ -2440,7 +2440,10 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
-        routine.name.includes("personal_machine") ||
+        (routine.name.includes("personal_machine") &&
+          !(runtimePosture.RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES as readonly string[]).includes(
+            routine.name,
+          )) ||
         routine.name.startsWith("get_session_attempt_machine(") ||
         routine.name.startsWith("get_session_machine_access(") ||
         routine.name.includes("connected_machine_audience") ||

@@ -11,6 +11,7 @@ import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { ModelsView } from "@/lib/models-route";
+import { useConsoleSharedQueries } from "@/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -587,6 +588,7 @@ let organizationList = false;
 let workspaceSettingsAdmin: boolean | undefined;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
+  useConsoleSharedQueries(client);
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
     organizationList ? {} : { workspace: "workspace-a" },
   );
@@ -748,7 +750,7 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit shows the last accounts and live usage at once while re-reading", async () => {
+  test("a fresh revisit renders retained accounts and live usage without reads; Refresh re-reads", async () => {
     // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
     const { retainSharedQueries } = await import("@/lib/shared-query");
     const release = retainSharedQueries(client);
@@ -767,6 +769,7 @@ describe("Codex rows", () => {
         }),
     );
     const overviewReads = client.codexOverview.mock.calls.length;
+    const accountReads = client.listCodexAccounts.mock.calls.length;
     const second = await render();
     try {
       // Back on Models: the account and its last LIVE reading render at once
@@ -774,7 +777,12 @@ describe("Codex rows", () => {
       expect(second.container.textContent).toContain("Team plan");
       expect(second.container.textContent).toContain("75% left");
       expect(second.container.textContent).not.toContain("10% left");
+      expect(client.codexOverview.mock.calls.length).toBe(overviewReads);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads);
+      expect(second.container.textContent).toContain("Updated just now");
+      await act(async () => button(second.container, "Refresh")!.click());
       expect(client.codexOverview.mock.calls.length).toBe(overviewReads + 1);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads + 1);
       await act(async () => resolve(overviewFor("acct-1", 40)));
       await flush();
       expect(second.container.textContent).toContain("40% left");
@@ -784,7 +792,50 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit whose live read fails says Usage unavailable, not the older reading", async () => {
+  test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
+    const { useCodexSubscriptions } = await import("@/components/codex-connection");
+    const { retainSharedQueries, peekSharedQuery } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    let remaining = 1;
+    client.codexOverview.mockImplementation(async () => {
+      const value = overviewFor("acct-1", remaining ? 0 : 100);
+      value.accounts["acct-1"]!.resetCredits.availableCount = remaining;
+      return value;
+    });
+    let afterRedemption!: () => Promise<void>;
+    function Reader() {
+      const codex = useCodexSubscriptions({
+        client: client as never,
+        workspaceId: "workspace-a",
+        canManage: true,
+      });
+      afterRedemption = codex.refreshUsage;
+      return <span>{codex.overviewMap["acct-1"]?.resetCredits.availableCount ?? "loading"}</span>;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("1");
+      await act(async () => root.render(null));
+      // The provider's redemption settles only after the account page was left.
+      remaining = 0;
+      await act(async () => afterRedemption());
+      expect(
+        peekSharedQuery(client, ["model-settings", "codex-overview", "workspace-a"]),
+      ).toBeNull();
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("0");
+      expect(client.codexOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      release();
+    }
+  });
+
+  test("an explicit live refresh failure says Usage unavailable, not the older reading", async () => {
     const { retainSharedQueries } = await import("@/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
@@ -804,6 +855,7 @@ describe("Codex rows", () => {
     try {
       // While this visit's read runs, the last live reading stands in.
       expect(second.container.textContent).toContain("75% left");
+      await act(async () => button(second.container, "Refresh")!.click());
       await act(async () => reject(new Error("Provider unavailable")));
       await flush();
       // The read failed: the row no longer presents the old reading as current.
@@ -828,10 +880,31 @@ describe("Codex rows", () => {
     expect(peekSharedQuery(client, ["codex-accounts", "workspace-a"])).toBeNull();
     const second = await render();
     try {
-      // A cold read on mount, then the usual re-read after the live usage read.
-      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 2);
+      // Only the invalidated account list is cold; the live overview is still fresh.
+      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 1);
     } finally {
       await cleanup(second);
+      release();
+    }
+  });
+
+  test("a retained live overview older than five minutes revalidates on revisit", async () => {
+    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    const first = await render();
+    await cleanup(first);
+    const reads = client.codexOverview.mock.calls.length;
+    const originalNow = Date.now;
+    const later = originalNow() + 5 * 60_000 + 1;
+    Date.now = () => later;
+    let second: Awaited<ReturnType<typeof render>> | undefined;
+    try {
+      second = await render();
+      expect(client.codexOverview.mock.calls.length).toBe(reads + 1);
+      expect(second.container.textContent).toContain("75% left");
+    } finally {
+      Date.now = originalNow;
+      if (second) await cleanup(second);
       release();
     }
   });
@@ -2694,6 +2767,9 @@ describe("One Models page for the organization and the workspace", () => {
       }
       // While the rows still read their access, no "can't start" that a kept
       // copy might contradict.
+      // This is a cold-load scenario, unlike a normal retained revisit.
+      const { clearSharedQueries } = await import("@/lib/shared-query");
+      clearSharedQueries(client);
       const held: (() => void)[] = [];
       const keptAccess = client.getModelConnectionAccess.getMockImplementation()!;
       client.getModelConnectionAccess.mockImplementation(
@@ -3285,9 +3361,8 @@ describe("One Models page for the organization and the workspace", () => {
         return {};
       });
       let resolveAccess: (value: unknown) => void = () => undefined;
-      client.getModelConnectionAccess.mockImplementation(
-        () => new Promise((resolve) => (resolveAccess = resolve)),
-      );
+      const pendingAccess = new Promise((resolve) => (resolveAccess = resolve));
+      client.getModelConnectionAccess.mockImplementation(() => pendingAccess);
       const view = await render();
       try {
         await flush();

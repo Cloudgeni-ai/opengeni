@@ -45,8 +45,23 @@ export type {
 export type BundledSkillId =
   | "builtin:opengeni-help"
   | "builtin:opengeni-client"
-  | "builtin:opengeni-visualize"
+  | "builtin:visualize"
   | "builtin:document-parsing"
+  | "builtin:skill-management"
+  | "builtin:projects"
+  | "builtin:schedules"
+  | "builtin:documents"
+  | "builtin:spreadsheets"
+  | "builtin:presentations"
+  | "builtin:sites"
+  | "builtin:video-generation"
+  | "builtin:secrets"
+  | LegacyBundledSkillId;
+/**
+ * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.
+ */
+export type LegacyBundledSkillId =
+  | "builtin:opengeni-visualize"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
   | "builtin:opengeni-schedules"
@@ -416,7 +431,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (13 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
 export type SandboxBackend =
@@ -431,7 +446,8 @@ export type SandboxBackend =
   | "cloudflare"
   | "vercel"
   | "selfhosted"
-  | "opensandbox";
+  | "opensandbox"
+  | "compute";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -1084,8 +1100,15 @@ export type AvailableOpenGeniSlackBots = {
   connections: ConnectionMetadata[];
   organizationSharedConnectionIds: string[];
 };
-export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
-export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
+export type UpdateOpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  workspaceIds?: string[] | null;
+};
+export type OpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  generation: number;
+  workspaceIds?: string[] | null;
+};
 
 export type FikenInstallRequest = {
   apiToken: string;
@@ -2397,6 +2420,7 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "sandbox.recovery.selected",
   "session.command.backgrounded",
   "session.command.finished",
   "session.wait.started",
@@ -2955,12 +2979,18 @@ export type FsReadResponse = {
   revision: number;
 };
 export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
-export type PublishSandboxFileArtifactRequest = { path: string };
+export type PublishSandboxFileArtifactRequest = {
+  path: string;
+  /** Who can open the file. Omitted: the chat's own audience. */
+  visibility?: "private" | "workspace";
+};
 export type SandboxFileArtifactReceipt = {
   type: "sandbox_file";
   sandboxPath: string;
   filename: string;
   artifact: RetainedArtifactReference;
+  /** Who can open the file; absent from receipts made before files had audiences. */
+  access?: FileAccess | undefined;
 };
 export type FsWriteRequest = {
   path: string;
@@ -3372,6 +3402,8 @@ export type ScheduledTaskAgentConfig = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
@@ -5826,6 +5858,10 @@ export type Workspace = {
   updatedAt: string;
 };
 
+export type WorkspaceDefaultExecutionTarget =
+  | { kind: "managed" }
+  | { kind: "machine"; targetSandboxId: string };
+
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
   modelCompactionThresholds?: unknown;
@@ -5838,6 +5874,8 @@ export type WorkspaceSettings = {
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -5956,6 +5994,8 @@ export type UpdateWorkspaceSettingsRequest = {
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   /** Agent defaults for new sessions; null clears. Requires the admission switch. */
   sessionAgentDefaults?: WorkspaceAgentDefaults | null | undefined;
   /**
@@ -6893,12 +6933,29 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+export type SandboxRecoveryTarget = {
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number | null;
+  revision: string | null;
+  restoreStatus: string;
+  restoreCompletedAt: string | null;
+};
 export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  target?: SandboxRecoveryTarget;
+  retryAvailable?: boolean;
+  freshWorkspaceAvailable?: boolean;
+  groupSessionCount?: number;
   automaticAvailable?: boolean;
   /** What an automatic Retry does: restore `checkpoint`, or continue on a new
    * empty workspace because no usable checkpoint survived the sandbox loss. */
@@ -6907,11 +6964,19 @@ export type SandboxRecoveryProjection = {
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;
 };
-export type SandboxRecoveryRequest = {
-  operationId: string;
-  acceptHistoricalCheckpoint: true;
-  selection: SandboxRecoverySelection;
-};
+export type SandboxRecoveryRequest =
+  | {
+      operationId: string;
+      acceptHistoricalCheckpoint: true;
+      selection: SandboxRecoverySelection;
+    }
+  | { operationId: string; action: "retry"; target: SandboxRecoveryTarget }
+  | {
+      operationId: string;
+      action: "continue_fresh";
+      acceptEmptyWorkspace: true;
+      target: SandboxRecoveryTarget;
+    };
 export type SandboxRecoveryResponse = {
   outcome: "accepted" | "replayed";
   operationId: string;
@@ -7087,6 +7152,8 @@ export type ScheduledTaskAgentConfigInput = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
@@ -7580,8 +7647,20 @@ export type FileListRequest = {
 };
 export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
 
+/**
+ * Who can open a file: only its owner ("private", Only me) or everyone in the
+ * workspace, with one plain sentence saying so.
+ */
+export type FileAccess = {
+  visibility: "private" | "workspace";
+  whoCanOpen: string;
+};
+
 export type FileAsset = {
+  /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
+  /** The person who alone can share the file or limit it to themselves. */
+  ownerSubjectId?: string | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -7594,7 +7673,12 @@ export type FileAsset = {
   objectKey: string;
   createdAt: string;
   updatedAt: string;
+  /** Present on upload, publish and sharing results: who can open the file. */
+  access?: FileAccess | undefined;
 };
+
+export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
+export type UpdateFileVisibilityResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
@@ -7625,7 +7709,9 @@ export type RetainedOutputUnavailableReason =
   | "quota_exceeded"
   | "invalid_content"
   | "oversized"
-  | "unsupported";
+  | "unsupported"
+  /** The file exists but is Only me for someone else. */
+  | "private";
 
 export type RetainedArtifactReference = {
   available: true;
@@ -7860,6 +7946,8 @@ export type CreateFileUploadResponse = {
   requiredHeaders: Record<string, string>;
   expiresAt: string;
   maxSizeBytes: number;
+  /** Who will be able to open the file once uploaded. */
+  access?: FileAccess | undefined;
 };
 
 export type CompleteFileUploadResponse = {
@@ -9756,7 +9844,8 @@ export type MachineKind =
   | "cloudflare"
   | "vercel"
   | "selfhosted"
-  | "opensandbox";
+  | "opensandbox"
+  | "compute";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";
@@ -9809,6 +9898,7 @@ export type MachineUpdateState = {
   targetVersion: string;
   expectedBinarySha256: string | null;
   errorCode: string | null;
+  blockers?: Array<{ kind: string; count: number }> | undefined;
   retryable: boolean;
   rolledBack: boolean;
   requestedAt: string;

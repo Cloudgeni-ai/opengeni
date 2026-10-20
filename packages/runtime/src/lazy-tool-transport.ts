@@ -231,6 +231,7 @@ export class LazyToolRuntime {
     private readonly conditionalRouter = false,
     routerInHistory = false,
     private readonly startToolPreparation?: () => void,
+    private readonly pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -268,7 +269,7 @@ export class LazyToolRuntime {
     this.routerWasExposed ||=
       !this.conditionalRouter ||
       this.searchableToolNames.size > 0 ||
-      (this.hasPendingPreparation() && this.deferredMcpServerIds.size > 0);
+      (this.hasPendingPreparation() && this.pendingMcpServerIds.size > 0);
     return this.routerWasExposed ? this.controlTools : [];
   }
 
@@ -701,6 +702,7 @@ export function installLazyToolRuntime(
   conditionalRouter = false,
   routerInHistory = false,
   startToolPreparation?: () => void,
+  pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -712,6 +714,7 @@ export function installLazyToolRuntime(
     conditionalRouter,
     routerInHistory,
     startToolPreparation,
+    pendingMcpServerIds,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -867,7 +870,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
     const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
     if (SEARCH_MARKER_KEY in providerData) {
-      throw new Error("Provider function call collided with Opengeni lazy-search metadata");
+      throw new Error("Provider function call collided with lazy-search metadata");
     }
     return [
       {
@@ -894,7 +897,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (DISPATCH_MARKER_KEY in providerData) {
-    throw new Error("Provider function call collided with Opengeni lazy-dispatch metadata");
+    throw new Error("Provider function call collided with lazy-dispatch metadata");
   }
   return [
     {

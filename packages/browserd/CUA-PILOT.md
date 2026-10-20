@@ -1,14 +1,21 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db`: upstream `cua-driver-rs-v0.36.0`
-(`6d6c734c`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
-fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`), including its non-invalidating
-preview capture and cursor support. `@trycua/cua-driver` 0.36.0 supplies the private-worker
-transport; the source-built executable performs desktop operations. Windows uses
-the published SDK's native runtime in process. CUA is the default on macOS, on
-Windows and for explicitly selected isolated Linux desktops. Linux host desktops
-retain the native default.
+`51dd11773e5567d99a05c0c3b9e2ccef8455f454`: upstream `cua-driver-rs-v0.37.0`
+(`2d2f9922`, including its non-invalidating preview capture and cursor support)
+plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
+cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
+step reports that keep the windows each step opened, and a `run_steps` option
+(`refind_stale:false`) that stops a batch at a stale element token instead of
+acting on a lookalike found again by role and label, or re-sending a refused
+menu-bar token click as `invoke_menu`. `@trycua/cua-driver` 0.37.0
+supplies the private-worker transport; the source-built executable performs
+desktop operations. Windows uses the published SDK's native runtime in process.
+A `computer_act` batch runs as one `run_steps` call only where the worker offers
+`refind_stale`, so every step stays bound to the observation the batch was
+checked against; on Windows a batch's actions are sent one at a time. CUA is the
+default on macOS, on Windows and for explicitly selected isolated Linux
+desktops. Linux host desktops retain the native default.
 
 `ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
 continues to handle Opengeni sessions, operation receipts and frame streaming.
@@ -108,13 +115,13 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/51dd11773e5567d99a05c0c3b9e2ccef8455f454/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
-[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.36: only
+[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
-decorations rebuild element bounds from Window coordinates. Plain 0.36 still
-misplaces GTK4 controls after a window move, which the isolated Linux end-to-end
-tests catch.
+decorations rebuild element bounds from Window coordinates. Upstream 0.37 does
+not include them; without them GTK4 controls are misplaced after a window move,
+which the isolated Linux end-to-end tests catch.
 
 ## Native agent interface
 
@@ -139,6 +146,14 @@ No tool-enable UI or separate permission system is added.
 final observation diff; `run_script` runs upstream's sandboxed script engine, whose
 only API is the same CUA session, with no filesystem, network or process access;
 `get_window_state` retains compact Markdown, query limits and diff reads.
+
+A `computer_act` batch (semantic and keyboard actions on one window) is one
+operation on CUA: the adapter checks every action against the observation the
+batch names, sends them as one `run_steps` call, which paces all but the last
+step for a batch, and observes the window once at the end, or the window CUA
+reports the last action opened. A batch CUA stops part way records how many
+actions completed in its receipt's error details. A keyboard action after the
+first carries no element token, since earlier actions may have moved the focus.
 MCP content, structured results and images survive the journal. Responses larger
 than 12 MiB carry an explicit bounded projection, retained operation status and
 no-replay guidance; the original stays in the controller journal. Failed

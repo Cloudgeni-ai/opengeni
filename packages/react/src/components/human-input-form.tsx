@@ -580,7 +580,7 @@ function HumanInputRequestForm({
                   <p key={option.id}>
                     <span className="font-medium text-og-fg">{option.label}</span>
                     {" · "}
-                    {option.description}
+                    {linkifyText(option.description)}
                   </p>
                 ) : null,
               )}
@@ -1019,7 +1019,7 @@ function QuestionControls({
                   <span className="block text-og-sm font-medium">{option.label}</span>
                   {option.description ? (
                     <span className="mt-0.5 block text-og-xs text-og-fg-muted">
-                      {option.description}
+                      {linkifyText(option.description)}
                     </span>
                   ) : null}
                 </span>

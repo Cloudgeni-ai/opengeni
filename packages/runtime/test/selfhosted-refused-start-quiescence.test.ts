@@ -13,6 +13,7 @@ import {
 import { runWithToolCallCorrelation } from "../src/sandbox/op-correlation";
 import { SelfhostedControlError } from "../src/sandbox/selfhosted/control-rpc";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import { OpTombstonedError } from "../src/sandbox/selfhosted/op-stream";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 
@@ -268,6 +269,79 @@ test.each([
   },
 );
 
+test.each([
+  ["a tombstone", { nextSeq: "0" }, true],
+  // Negative controls: a cancelled record that has stored a frame is not a
+  // tombstone, and neither is another op's tombstone or one with no identity,
+  // so the start refusal alone proves nothing about the requested op.
+  ["a cancelled record with frames", { nextSeq: "1" }, false],
+  ["another op's tombstone", { nextSeq: "0", opId: "another:0" }, false],
+  ["a tombstone with no op id", { nextSeq: "0", opId: "" }, false],
+] as const)(
+  "a start refused with %s releases custody only on the tombstone's own proof",
+  async (_name, override, tombstone) => {
+    const requests: ControlRequest[] = [];
+    const released: string[] = [];
+    const session = new SelfhostedSession({
+      workspaceId: "workspace",
+      workspaceRoot: "/project",
+      agentId: "agent",
+      connectionInstanceId: "connection",
+      relay: { host: "relay.test" },
+      timeoutMs: 100,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      opStream: { transport: new InMemoryOpStreamTransport() },
+      controlRpc: {
+        request: async (_subject, request) => {
+          requests.push(request);
+          const cancelled = OpStatus.fromPartial({
+            opId: "proof:0",
+            state: OpState.OP_STATE_COMPLETE,
+            exit: { cancelled: true, exitCode: -1 },
+            ...override,
+          });
+          if (request.op?.$case === "opStart") {
+            return {
+              requestId: request.requestId,
+              error: undefined,
+              result: { $case: "opStart", opStart: { accepted: false, status: cancelled } },
+            };
+          }
+          return {
+            requestId: request.requestId,
+            error: undefined,
+            result: {
+              $case: "opStatus",
+              opStatus: OpStatus.fromPartial({ opId: "proof:0", state: OpState.OP_STATE_RUNNING }),
+            },
+          };
+        },
+      },
+    });
+    let caught: unknown;
+    await runWithToolCallCorrelation(
+      "proof",
+      async () => {
+        try {
+          await session.execCommand({ cmd: "cancelled" });
+        } catch (error) {
+          caught = error;
+        }
+      },
+      { onRemoteOperationNotDispatched: (opId) => released.push(opId) },
+    );
+    expect((caught as Error).message).toBe(
+      "The command was cancelled before the machine admitted it.",
+    );
+    expect(caught instanceof OpTombstonedError).toBe(tombstone);
+    expect(requests.map((r) => r.op?.$case)).toEqual(
+      tombstone ? ["opStart"] : ["opStart", "opQuery"],
+    );
+    expect(released).toEqual(tombstone ? ["proof:0"] : []);
+    expect(custodySizes(session)).toEqual(tombstone ? [0, 0] : [1, 1]);
+  },
+);
+
 test.each(["unsupported", "offline", "never sent", "reconnecting"] as const)(
   "failed-start proof preserves %s handling",
   async (kind) => {
@@ -315,10 +389,16 @@ test.each(["unsupported", "offline", "never sent", "reconnecting"] as const)(
       },
       { onRemoteOperationNotDispatched: (opId) => released.push(opId) },
     );
-    if (kind === "unsupported") {
+    if (kind === "never sent") {
+      // No OpStart reached any agent: nothing ran, so custody is released
+      // without asking a runner that never saw the op.
+      expect(caught).toBe(original);
+      expect(requests.every((r) => r.op?.$case === "opStart")).toBe(true);
+      expect(custodySizes(session)).toEqual([0, 0]);
+    } else if (kind === "unsupported") {
       expect(caught).toBeInstanceOf(SelfhostedControlError);
       expect((caught as Error).message).toBe(
-        "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started.",
+        "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the machine's agent. The command was not started.",
       );
       expect(requests.map((r) => r.op?.$case)).toEqual(["opStart", "opQuery"]);
       expect(released).toEqual(["proof:0"]);

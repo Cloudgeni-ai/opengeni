@@ -53,6 +53,8 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
       spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
       spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+      // No explicit workspace recovery adds a discontinuity notice here.
+      spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false),

@@ -146,8 +146,9 @@ export function classifyProviderFailure(
     "Claude credentials expired or were revoked. Replace the key or setup token in Models."
   )
     return CREDENTIALS;
-  // Opengeni's own credit exhaustion has a dedicated billing remedy upstream.
-  if (text.includes("opengeni credits")) return null;
+  // Platform credit exhaustion ("workspace credits"; older history says
+  // "Opengeni credits") has a dedicated billing remedy upstream.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
@@ -303,7 +304,7 @@ export function failedSessionCopy(
     !failure.structuralSandboxFailure &&
     !unavailableModel &&
     (!code || code === "pre_claim_failure") &&
-    !/opengeni credits/i.test(recorded ?? "")
+    !/(?:workspace|opengeni) credits/i.test(recorded ?? "")
   ) {
     const detail = diagnostic;
     return {

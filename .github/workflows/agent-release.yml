@@ -416,7 +416,7 @@ jobs:
           cargo install --locked apple-codesign
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime "${{ matrix.asset }}"
+            --code-signature-flags runtime --binary-identifier ai.opengeni.agent "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
           # Apple's notary service accepts distribution containers, not a raw
           # Mach-O. Submit a temporary ZIP containing the exact signed binary;
@@ -763,13 +763,15 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: agent-v${{ needs.guard.outputs.version }}
+          # Manual dispatch may publish after main advances; tag the built commit.
+          target_commitish: ${{ github.sha }}
           name: opengeni-agent v${{ needs.guard.outputs.version }}
           body: |
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
 
             Install (read the script first — it is short, POSIX, contains no secrets):
-              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
-              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+              Linux/macOS: `curl -fsSL https://app.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://app.opengeni.ai/install.ps1 | iex`
 
             Every binary is minisign-signed (verify against the pinned key) + sha256'd.
             macOS/Windows OS-native code-signing is a creds-drop-in (see release notes

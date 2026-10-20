@@ -272,6 +272,14 @@ mod tests {
             .to_string()
             .contains("complete signed app"));
         assert!(pending.apply_running_at(&executable).is_err());
+        let alias = dir.path().join("agent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        assert!(pending.apply_to(&alias).is_err());
+        assert!(pending.apply_running_at(&alias).is_err());
+        assert!(fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_to_string(executable).unwrap(), "original");
     }
 
@@ -326,13 +334,21 @@ mod tests {
         )
         .unwrap();
         let version = plist(&source, "CFBundleVersion").unwrap();
+        let alias = dir.join("opengeni-agent");
+        std::os::unix::fs::symlink(app.join(EXECUTABLE), &alias).unwrap();
+        let resolved = fs::canonicalize(&alias).unwrap();
         let before = verify_candidate(&app, &verify_signature(&app).unwrap(), &version).unwrap();
-        let hash = apply(&app.join(EXECUTABLE), &zip, &version, |hash| {
+        let hash = apply(&resolved, &zip, &version, |hash| {
             assert_eq!(hash, before);
             Ok(())
         })
         .unwrap();
         assert_eq!(hash, before);
+        assert!(fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::canonicalize(&alias).unwrap(), resolved);
         assert!(apply(&app.join(EXECUTABLE), &zip, "99.0.0", |_| panic!(
             "must not commit"
         ))

@@ -25,6 +25,7 @@ import {
   createEnrollment,
   createSandbox,
   createScheduledTask,
+  createSandboxEnrollment,
   createSession,
   getEnrollment,
   initializeSessionStartAtomically,
@@ -46,7 +47,7 @@ import {
   handleHelloPayload,
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
-import { machineUpdateBlockedReason } from "../src/sandbox/machines";
+import { agentVersionState, machineUpdateBlockedReason } from "../src/sandbox/machines";
 import { createAutomaticAgentUpdater } from "../src/sandbox/agent-update";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
@@ -119,7 +120,10 @@ function busWithAgent(opts: {
         op?.$case === "ping"
           ? {
               requestId: req.requestId,
-              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+              result: {
+                $case: "ping",
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
+              },
             }
           : op?.$case === "agentUpdateApply"
             ? {
@@ -650,6 +654,52 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         isSessionGroup: false,
       }),
     );
+  }, 60_000);
+
+  test("a compute session lists its compute group and never its sandbox enrollment", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "compute",
+    });
+    await createSandboxEnrollment(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      enrollmentId: crypto.randomUUID(),
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    const app = appFor(bus, {
+      settings: testSettings({
+        ...settings,
+        sandboxBackend: "compute",
+        computeApiUrl: "http://control.test",
+        computeApiKey: "control-key",
+        computeLinkUrl: "wss://link.test",
+      }),
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
+    for (const query of [`?sessionId=${session.id}`, ""]) {
+      const response = await app.request(`/v1/workspaces/${workspaceId}/machines${query}`, {
+        headers: { authorization: auth },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        machines: Array<{ sandboxId: string; kind: string; isSessionGroup: boolean }>;
+      };
+      expect(body.machines).toEqual(
+        query
+          ? [
+              expect.objectContaining({
+                sandboxId: session.sandboxGroupId,
+                kind: "compute",
+                isSessionGroup: true,
+              }),
+              expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" }),
+            ]
+          : [expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" })],
+      );
+    }
   }, 60_000);
 
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {
@@ -1230,6 +1280,7 @@ describe("Connected Machine signed self-update orchestration", () => {
           event: {
             $case: "agentUpdateProgress",
             agentUpdateProgress: {
+              blockers: [],
               operationId,
               targetVersion: "0.1.16",
               expectedBinarySha256: targetDigest,
@@ -1377,6 +1428,44 @@ describe("Connected Machine signed self-update orchestration", () => {
       "accepted",
     );
 
+    const privateSessionId = crypto.randomUUID();
+    await bus.emitAgentEvent(
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              operationId: body.operationId,
+              targetVersion: "0.1.16",
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE,
+              errorCode: "update_busy_interactions",
+              blockers: [
+                { kind: "browser_action", resourceId: privateSessionId, count: 2 },
+                { kind: "browser_action", resourceId: crypto.randomUUID(), count: 1 },
+                ...Array.from({ length: 100 }, (_, index) => ({
+                  kind: `future_${index}`,
+                  count: 1,
+                })),
+                { kind: "invalid path /private", count: 1 },
+              ],
+            },
+          },
+        }),
+      ).finish(),
+    );
+    const waiting = await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (value) => value?.status === "waiting_for_idle",
+      `waiting update ${body.operationId}`,
+    );
+    expect(waiting?.blockers?.length).toBeLessThanOrEqual(33);
+    expect(waiting?.blockers).toContainEqual({ kind: "browser_action", count: 3 });
+    expect(waiting?.blockers?.reduce((sum, blocker) => sum + blocker.count, 0)).toBe(103);
+    expect(JSON.stringify(waiting)).not.toContain(privateSessionId);
+    expect(JSON.stringify(waiting)).not.toContain("resourceId");
+
     await bus.emitAgentEvent(
       `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
       AgentEvent.encode({
@@ -1384,6 +1473,7 @@ describe("Connected Machine signed self-update orchestration", () => {
         event: {
           $case: "agentUpdateProgress",
           agentUpdateProgress: {
+            blockers: [],
             operationId: body.operationId,
             targetVersion: "0.1.16",
             expectedBinarySha256: targetDigest,
@@ -1444,6 +1534,84 @@ describe("Connected Machine signed self-update orchestration", () => {
     expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
       "succeeded",
     );
+  }, 90_000);
+
+  test("a successor without an updater receipt settles the old request and reports the installed version", async () => {
+    if (!available) return;
+    for (const [installedVersion, state] of [
+      ["0.1.16", "current"],
+      ["0.1.17", "ahead"],
+      ["0.1.15", "update_failed"],
+    ] as const) {
+      const { accountId, workspaceId, enrollment } = await seed();
+      const live = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      const operationId = crypto.randomUUID();
+      await beginEnrollmentAgentUpdate(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
+        connectionGeneration: live.connectionGeneration,
+        operationId,
+        targetVersion: "0.1.16",
+      });
+      const hello = (instance: string, version: string) =>
+        handleHelloPayload(
+          db,
+          undefined,
+          Hello.encode(
+            Hello.fromPartial({
+              agentId: enrollment.id,
+              workspaceId,
+              agentVersion: version,
+              binarySha256: "ab".repeat(32),
+              updateChannel: "stable",
+              // An installer/restart has no managed-update operation receipt.
+            }),
+          ).finish(),
+          `agent.${workspaceId}.${enrollment.id}.connection.${instance}.hello`,
+        );
+      // A reconnect of the accepting process must not terminate its own update.
+      await hello(CONNECTION_INSTANCE_ID, "0.1.15");
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await admin`update enrollments set connection_lease_expires_at = now() - interval '1 second'
+        where id = ${enrollment.id}`;
+      const successor = crypto.randomUUID();
+      expect(
+        (
+          await claimEnrollmentConnection(db, {
+            workspaceId,
+            enrollmentId: enrollment.id,
+            credentialGeneration: enrollment.credentialGeneration,
+            connectionInstanceId: successor,
+            leaseMs: 20_000,
+          })
+        ).claimed,
+      ).toBe(true);
+      // Late Hello from the old instance cannot settle anything.
+      await hello(CONNECTION_INSTANCE_ID, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await hello(successor, installedVersion);
+      const updated = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      expect(updated.agentUpdate).toMatchObject({
+        operationId,
+        status: "failed",
+        errorCode: "accepting_process_replaced",
+        retryable: true,
+        completedAt: expect.any(String),
+      });
+      expect(updated.agentVersion).toBe(installedVersion);
+      expect(agentVersionState(updated.agentVersion, "0.1.16", updated.agentUpdate)).toBe(state);
+      // Repeated Hello does not churn the settled operation or invent success.
+      await hello(successor, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toEqual(
+        updated.agentUpdate,
+      );
+    }
   }, 90_000);
 
   test("redelivers one unconfirmed operation id instead of reserving a second update", async () => {
@@ -1651,6 +1819,7 @@ describe("Connected Machine signed self-update orchestration", () => {
           event: {
             $case: "agentUpdateProgress",
             agentUpdateProgress: {
+              blockers: [],
               operationId: first!.operationId,
               stage: AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED,
               errorCode: "update_busy_work",

@@ -3,6 +3,8 @@ import type { ThisComputerHost, ThisComputerStatus } from "@opengeni/sdk/this-co
 import { useThisComputer } from "../src/components/this-computer/use-this-computer";
 import { actRun, flush, registerDom, renderHook, renderComponent } from "./render-hook";
 import { ThisComputerCard } from "../src/components/this-computer/this-computer-card";
+import { ThisComputerSetup } from "../src/components/this-computer/this-computer-setup";
+import type { UseThisComputerResult } from "../src/components/this-computer/use-this-computer";
 
 registerDom();
 
@@ -30,6 +32,58 @@ const connected: ThisComputerStatus = {
   error: null,
   machineName: "studio",
 };
+
+test("service permission setup never treats a reconnect's missing report as a grant", async () => {
+  let ready = 0;
+  const noop = async () => undefined;
+  const render = (status: ThisComputerStatus) => {
+    const computer: UseThisComputerResult = {
+      status,
+      acting: false,
+      actionError: null,
+      canDisconnect: true,
+      refresh: () => undefined,
+      connect: async () => status,
+      pause: noop,
+      resume: noop,
+      disconnect: noop,
+      requestPermission: noop,
+    };
+    return (
+      <ThisComputerSetup
+        open
+        onOpenChange={() => undefined}
+        computer={computer}
+        platform="macos"
+        productName="Desktop App"
+        container={document.body}
+        onReady={() => ready++}
+      />
+    );
+  };
+  const initial: ThisComputerStatus = {
+    ...connected,
+    management: "service",
+    permissionAppName: "Opengeni Agent",
+    permissions: [
+      { id: "screenRecording", granted: true },
+      { id: "accessibility", granted: false },
+    ],
+  };
+  const view = await renderComponent(render(initial));
+  try {
+    expect(document.body.textContent).toContain("Let Opengeni Agent click and type");
+    await view.rerender(render({ ...connected, management: "service", reconnecting: true }));
+    expect(document.body.textContent).not.toContain("Step 1 of 0");
+    expect(document.body.textContent).not.toContain("Allowed");
+    expect(ready).toBe(0);
+    await view.rerender(render(initial));
+    expect(document.body.textContent).toContain("Let Opengeni Agent click and type");
+    expect(ready).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("a product-owned connect flow needs no app install and reports callback failure without false readiness", async () => {
   let calls = 0;

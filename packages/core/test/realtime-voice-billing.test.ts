@@ -106,7 +106,7 @@ test("promotional chat-only credits are named, not reported as no credits", () =
     "Promotional credits don't cover live voice. Add credits to use it.",
   );
   expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
-    "Voice input needs Opengeni credits. Add credits to continue.",
+    "Voice input needs credits. Add credits to continue.",
   );
 });
 

@@ -24,8 +24,8 @@ import {
 } from "@opengeni/db/retained-provider-commands";
 import {
   testSettings,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
@@ -145,7 +145,7 @@ const MODAL_PROVIDER_BINDING = {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -587,7 +587,10 @@ async function settlementProjection(fixture: ProcessFixture) {
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-retained-process-reconciliation");
+  shared = await acquireRestrictedRuntimeTestDatabase(
+    "worker-retained-process-reconciliation",
+    "public",
+  );
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable");
@@ -2768,6 +2771,8 @@ describe("retained-process terminal-owner reconciliation", () => {
     const restricted = postgres(shared!.appUrl, { max: 1, prepare: false });
     try {
       const result = await restricted.begin(async (tx) => {
+        // A raw driver must advertise the same supported schema protocol as createDb.
+        await tx`set local application_name = 'opengeni-lossless-v1-session-variable-sets-v1'`;
         await tx`set local search_path = pg_temp, public, opengeni_private, pg_catalog`;
         const [identity] = await tx<
           {

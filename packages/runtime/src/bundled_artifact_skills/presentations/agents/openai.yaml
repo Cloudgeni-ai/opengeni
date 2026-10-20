@@ -1,0 +1,4 @@
+interface:
+  display_name: "Presentations"
+  short_description: "Create and edit verified presentation decks"
+  default_prompt: "Use $presentations to create a polished, editable presentation."

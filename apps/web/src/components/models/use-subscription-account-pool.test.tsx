@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
@@ -7,7 +7,7 @@ import type {
   SubscriptionAccountPoolOperations,
   SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
-import { peekSharedQuery, retainSharedQueries } from "@/lib/shared-query";
+import { peekSharedQuery, retainSharedQueries, sharedQueryWriter } from "@/lib/shared-query";
 
 let createRoot: typeof import("react-dom/client").createRoot;
 let usePool: typeof import("./use-subscription-account-pool").useSubscriptionAccountPool;
@@ -279,4 +279,35 @@ test("an account change that settles after the page is left still invalidates re
   expect(labels.at(-1)).toBe("After");
   expect(reads).toBe(2);
   retained();
+});
+
+test("pool reads remain fresh for five minutes and mutations invalidate Models metadata", async () => {
+  const retained = retainSharedQueries(client);
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  let reads = 0;
+  const ops = operations(async () => {
+    reads++;
+    return data("account-a");
+  });
+  try {
+    await render("scope-a", ops);
+    await act(async () => root.render(createElement("div")));
+    now += 5 * 60_000 - 1;
+    await render("scope-a", ops);
+    expect(reads).toBe(1);
+    await act(async () => root.render(createElement("div")));
+    now++;
+    await render("scope-a", ops);
+    expect(reads).toBe(2);
+    sharedQueryWriter(client)(["model-settings", "fixture"], { connected: true });
+    await act(async () => result.rename(result.accounts[0]!, "Changed"));
+    expect(reads).toBe(3);
+    expect(peekSharedQuery(client, ["model-settings", "fixture"])).toBeNull();
+    await act(async () => result.refresh());
+    expect(reads).toBe(4);
+  } finally {
+    clock.mockRestore();
+    retained();
+  }
 });

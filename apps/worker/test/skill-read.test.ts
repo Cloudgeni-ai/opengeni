@@ -141,10 +141,10 @@ describe("skill_read gateway definition", () => {
   for (const [name, directory] of [
     ["opengeni-help", "bundled_default_skills"],
     ["opengeni-client", "bundled_default_skills"],
-    ["opengeni-projects", "bundled_project_skills"],
-    ["opengeni-visualize", "bundled_default_skills"],
+    ["projects", "bundled_project_skills"],
+    ["visualize", "bundled_default_skills"],
     ["document-parsing", "bundled_default_skills"],
-    ["opengeni-sites", "bundled_site_skills"],
+    ["sites", "bundled_site_skills"],
   ] as const)
     test(`selected ${name} reads exact packaged guidance without sandbox access; host [] excludes it`, async () => {
       const markdown = await Bun.file(
@@ -152,8 +152,7 @@ describe("skill_read gateway definition", () => {
       ).text();
       for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
         const selected = loadConfiguredBundledSkills({
-          firstPartyTools:
-            name === "opengeni-sites" ? ["artifacts_create", "artifacts_publish"] : [],
+          firstPartyTools: name === "sites" ? ["artifacts_create", "artifacts_publish"] : [],
           videoGenerationEnabled: false,
           bundledSkillIds,
           get sandboxBackend(): never {
@@ -189,7 +188,7 @@ describe("skill_read gateway definition", () => {
             expect(result.structuredContent).toEqual({
               files: [{ path: "SKILL.md", content: markdown }],
             });
-            if (name === "opengeni-sites") {
+            if (name === "sites") {
               // Assert the actual model-facing tool text, not only the source file.
               const text = result.content.find((part) => part.type === "text");
               if (text?.type !== "text") throw new Error("missing Skill text");
@@ -596,7 +595,7 @@ describe("skill_read gateway definition", () => {
     await expect(
       environment.callModel({
         modelName: "skill_read",
-        arguments: { skill: "opengeni-skills" },
+        arguments: { skill: "skill-management" },
         subjectId: "agent:test",
       }),
     ).rejects.toThrow("excluded by source selection");
@@ -620,7 +619,7 @@ describe("skill_read gateway definition", () => {
     await expect(
       environment.callModel({
         modelName: "skill_read",
-        arguments: { skill: "opengeni-skills" },
+        arguments: { skill: "skill-management" },
         subjectId: "agent:test",
       }),
     ).rejects.toThrow("attempt no longer active");

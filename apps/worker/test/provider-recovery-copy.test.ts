@@ -111,7 +111,7 @@ test("exhaustion names the model, the provider condition and the remedies", () =
   );
   expect(failure).toMatchObject({
     error:
-      "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock). Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
+      "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock). Retried 5 times without success. Try again in a few minutes, or switch to another model.",
     code: "provider_unavailable",
     providerCondition: "overloaded",
     modelLabel: "Claude Opus 5.5",
@@ -132,7 +132,7 @@ test("exhaustion copy degrades gracefully without labels and for non-model depen
       providerRecoveryCount: 5,
     }),
   ).toBe(
-    "The model is temporarily unavailable at the provider. Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
+    "The model is temporarily unavailable at the provider. Retried 5 times without success. Try again in a few minutes, or switch to another model.",
   );
   expect(
     providerRecoveryExhaustedMessage({
@@ -142,7 +142,7 @@ test("exhaustion copy degrades gracefully without labels and for non-model depen
       providerRecoveryCount: 5,
     }),
   ).toBe(
-    "GPT-5.6 is rate limited at the provider (Azure OpenAI). Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
+    "GPT-5.6 is rate limited at the provider (Azure OpenAI). Retried 5 times without success. Try again in a few minutes, or switch to another model.",
   );
   expect(
     providerRecoveryExhaustedFailure(
@@ -153,6 +153,6 @@ test("exhaustion copy degrades gracefully without labels and for non-model depen
       exhausted(),
     ).error,
   ).toBe(
-    "A required MCP server is unreachable. Opengeni retried 5 times without success. Try again in a few minutes.",
+    "A required MCP server is unreachable. Retried 5 times without success. Try again in a few minutes.",
   );
 });

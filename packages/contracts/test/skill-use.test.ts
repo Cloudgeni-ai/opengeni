@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { SKILL_USE_META_KEY, SkillUse, skillUseFromToolOutput } from "../src";
 
 const use = {
-  id: "builtin:opengeni-documents",
+  id: "builtin:documents",
   source: "builtin",
   contentSha256: "0".repeat(64),
   kind: "full",

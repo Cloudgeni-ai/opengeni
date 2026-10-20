@@ -82,8 +82,21 @@ describe("artifact spreadsheet retained canvas", () => {
   for (const [, engineName, engine] of engines) {
     test(`${engineName}: spreadsheet boundaries, live resize, committed inputs, and canonical rename`, async () => {
       const browser = await engine.launch({ headless: true });
+      let releaseFonts = () => {};
       try {
         const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+        // Paint real fallback glyphs before allowing the hosted font to load.
+        // A fonts.ready repaint must evict those tiles even though the CSS
+        // font-family and workbook revision have not changed.
+        let fontRequests = 0;
+        const fontsReleased = new Promise<void>((resolve) => {
+          releaseFonts = resolve;
+        });
+        await page.route(/\.woff2(?:\?|$)/u, async (route) => {
+          fontRequests++;
+          await fontsReleased;
+          await route.continue();
+        });
         await page.goto(`${baseUrl}/artifact-spreadsheet-test.html`);
         await page.evaluate(async () => {
           await import(/* @vite-ignore */ "/styles.css");
@@ -100,6 +113,8 @@ describe("artifact spreadsheet retained canvas", () => {
         await page.waitForFunction(
           () => document.querySelector('[data-og-cell="A1"]')?.textContent === "Period",
         );
+        expect(fontRequests).toBeGreaterThan(0);
+        releaseFonts();
         await page.evaluate(() => document.fonts.ready);
         const header = page.getByRole("columnheader").first();
         const handle = page.getByRole("separator", { name: "Resize column A", exact: true });
@@ -214,6 +229,7 @@ describe("artifact spreadsheet retained canvas", () => {
         await name.press("Enter");
         await page.getByRole("tab", { name: "Retry this name", exact: true }).waitFor();
       } finally {
+        releaseFonts();
         await browser.close();
       }
     }, 60_000);

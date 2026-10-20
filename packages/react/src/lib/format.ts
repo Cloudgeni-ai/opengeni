@@ -290,22 +290,25 @@ function isComposerCreditRefusal(error: Error): boolean {
 
 /**
  * Does this failure/completion payload (or raw error string) mean the
- * workspace ran out of Opengeni credits? Matches the engine's
- * "insufficient Opengeni credits" text (case-insensitive, substring — it
- * arrives both bare and wrapped in "Activity task failed: …") and the
+ * workspace ran out of credits? Matches the engine's "insufficient workspace
+ * credits" text, and the older "insufficient Opengeni credits" wording in
+ * existing history (case-insensitive, substring — it arrives both bare and
+ * wrapped in "Activity task failed: …") and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
+const CREDIT_EXHAUSTION_TEXT = /insufficient (?:workspace|opengeni) credits/i;
+
 export function isCreditExhaustion(
   input: { error?: string | null; detail?: string | null; segmentLimit?: string | null } | string,
 ): boolean {
   if (typeof input === "string") {
-    return input.toLowerCase().includes("insufficient opengeni credits");
+    return CREDIT_EXHAUSTION_TEXT.test(input);
   }
   if (input.segmentLimit === "budget_exhausted") {
     return true;
   }
   for (const text of [input.error, input.detail]) {
-    if (typeof text === "string" && text.toLowerCase().includes("insufficient opengeni credits")) {
+    if (typeof text === "string" && CREDIT_EXHAUSTION_TEXT.test(text)) {
       return true;
     }
   }

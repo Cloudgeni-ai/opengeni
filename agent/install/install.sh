@@ -4,7 +4,7 @@
 # Opengeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
-#   curl -fsSL https://get.opengeni.ai/install.sh | sh
+#   curl -fsSL https://app.opengeni.ai/install.sh | sh
 #
 # READ THIS BEFORE PIPING IT TO A SHELL. This script downloads the
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
@@ -21,7 +21,7 @@
 #
 # Environment overrides (all optional):
 #   OPENGENI_INSTALL_BASE_URL  Release asset base URL. Default:
-#                              https://get.opengeni.ai. Point this at a local
+#                              https://app.opengeni.ai. Point this at a local
 #                              mock release dir (file:// or http://localhost)
 #                              to test the verify flow offline.
 #   OPENGENI_AGENT_VERSION     Pin a version (e.g. 1.2.3). Default: "latest",
@@ -105,7 +105,7 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 # standalone install. The OPENGENI_INSTALL_BASE_URL env override always wins.
 # Keep this line's shape stable: apps/api/src/routes/install.ts rewrites it by
 # exact match (DEFAULT_BASE_REWRITES).
-OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
+OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
 # Default connection origin. A deployed control plane rewrites this marker next

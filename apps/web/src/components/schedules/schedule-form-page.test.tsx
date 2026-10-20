@@ -67,6 +67,9 @@ const context = {
     workspaceGrants: [{ workspaceId, permissions: ["connections:read"] }],
   },
 };
+mock.module("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
+}));
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
@@ -286,6 +289,16 @@ test("an existing-chat schedule shows no account picker and saves no pins when r
   task.agentConfig.tools = [];
   const { container, root } = await render();
   expect(container.querySelector('[aria-label="retained accounts"]')).toBeNull();
+  const inherited = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.includes("Uses this chat’s settings"),
+  )!;
+  expect(inherited.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => {
+    inherited.click();
+    await flush();
+  });
+  expect(container.textContent).toContain("Changes apply to the chat and its scheduled runs.");
+  expect(container.textContent).toContain("Open chat settings");
   const destination = [...container.querySelectorAll("select")].find(
     (select) => select.value === "source-chat",
   )!;

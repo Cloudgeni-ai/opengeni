@@ -70,6 +70,7 @@ impl Op {
         match self {
             Op::Ping => PreparedOp::Control(Box::new(ReqOp::Ping(v1::PingRequest {
                 nonce: REQUEST_SEQ.load(Ordering::Relaxed),
+                ..Default::default()
             }))),
             Op::ExecEcho => PreparedOp::Exec {
                 request: v1::ExecRequest {
@@ -104,16 +105,21 @@ impl Op {
                 deadline_after_ms: 0,
             },
             Op::FsStat { path } => {
-                PreparedOp::Control(Box::new(ReqOp::FsStat(v1::FsStatRequest { path })))
+                PreparedOp::Control(Box::new(ReqOp::FsStat(v1::FsStatRequest {
+                    run_as: String::new(),
+                    path,
+                })))
             }
             Op::FsList { path } => {
                 PreparedOp::Control(Box::new(ReqOp::FsList(v1::FsListRequest {
+                    run_as: String::new(),
                     path,
                     recursive: false,
                 })))
             }
             Op::FsRead { path } => {
                 PreparedOp::Control(Box::new(ReqOp::FsRead(v1::FsReadRequest {
+                    run_as: String::new(),
                     path,
                     offset: 0,
                     length: 0,
@@ -121,6 +127,7 @@ impl Op {
             }
             Op::FsWrite { path, bytes } => {
                 PreparedOp::Control(Box::new(ReqOp::FsWrite(v1::FsWriteRequest {
+                    run_as: String::new(),
                     path,
                     content: Bytes::from(vec![b'a'; usize::try_from(bytes).unwrap_or(usize::MAX)]),
                     create_parents: true,
@@ -448,6 +455,7 @@ fn error_code_label(code: i32) -> String {
         Ok(ErrorCode::AgentOffline) => "AGENT_OFFLINE",
         Ok(ErrorCode::Fenced) => "FENCED",
         Ok(ErrorCode::PayloadTooLarge) => "PAYLOAD_TOO_LARGE",
+        Ok(ErrorCode::RunAsUnknownUser) => "RUN_AS_UNKNOWN_USER",
         Ok(ErrorCode::Unspecified) => "UNSPECIFIED",
         Err(_) => "UNKNOWN",
     };
@@ -516,10 +524,15 @@ impl HeartbeatCollector {
                         guard.offline.entry(event.agent_id).or_default().push(now);
                     }
                     // This collector owns liveness assertions only. Update
-                    // progress and operation completions travel on the same
-                    // exact-instance event stream but are asserted by their
-                    // own harness scenarios.
-                    Some(Event::AgentUpdateProgress(_) | Event::OperationCompleted(_)) | None => {}
+                    // progress, operation completions and operation inventories
+                    // travel on the same exact-instance event stream but are
+                    // asserted by their own harness scenarios.
+                    Some(
+                        Event::AgentUpdateProgress(_)
+                        | Event::OperationCompleted(_)
+                        | Event::OperationInventory(_),
+                    )
+                    | None => {}
                 }
             }
         });

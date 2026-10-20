@@ -97,7 +97,7 @@ test("workflow selects pinned native Node, retains Bun builds and preserves sign
   expect(publisher).toContain("signCanarySource(pkg.manifest, pkg.packed, provenanceDirectory)");
 });
 
-test("native Node publishes and confirms a synthetic cohort using default timers", () => {
+test("native Node publishes a synthetic cohort and hands it to confirmation", () => {
   const directory = mkdtempSync(join(repoRoot, ".release-canary-node-test-"));
   try {
     const outfile = join(directory, "cohort.mjs");
@@ -121,9 +121,7 @@ test("native Node publishes and confirms a synthetic cohort using default timers
       timeout: 30_000,
     });
     expect(run.status, `${run.error ?? ""}\n${run.stderr}`).toBe(0);
-    expect(run.stdout).toContain(
-      "native Node publication and confirmation passed with default timers",
-    );
+    expect(run.stdout).toContain("native Node publication and cohort handoff passed");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

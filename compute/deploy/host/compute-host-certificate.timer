@@ -1,0 +1,12 @@
+# Renews the compute host's certificate when fewer than four of its seven
+# days are left. Installed by install.sh.
+[Unit]
+Description=Renew the compute host's certificate daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

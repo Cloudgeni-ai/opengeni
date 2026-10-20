@@ -12,6 +12,7 @@ import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import { toolDisplayName } from "../timeline/tool-display-name";
+import { builtInToolStep } from "../timeline/tool-steps";
 import {
   ToolActionReviewCard,
   ToolActionReviewDetails,
@@ -41,8 +42,8 @@ export const defaultApprovalSurfaceMessages = (t: OpenGeniText): ApprovalSurface
   approving: t("approvalSurface.approving"),
   rejecting: t("approvalSurface.declining"),
   formatToolName: (name) =>
-    name.includes("__") || /^[a-f0-9]{64}$/.test(name)
-      ? toolDisplayName(t, name)
+    name.includes("__") || /^[a-f0-9]{64}$/.test(name) || builtInToolStep(name)
+      ? toolDisplayName(t, name, undefined, "running")
       : humanToolName(name.replaceAll("_", " ").replaceAll(".", " › ")),
   showDetails: t("approvalSurface.viewFullDetails"),
   hideDetails: t("approvalSurface.backToReview"),

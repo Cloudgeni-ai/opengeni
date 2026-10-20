@@ -61,9 +61,16 @@ describe("migration 0196 rig provider images", () => {
         where conname = 'rig_versions_provider_images_object_chk'`;
       expect(constraint?.validated).toBe(true);
       expect(constraint?.definition).toContain("jsonb_typeof(provider_images) = 'object'::text");
-      const [gcFunction] = await sql<Array<{ definition: string }>>`
+      const [gcAdmission] = await sql<Array<{ definition: string }>>`
         select pg_get_functiondef(
           'opengeni_private.claim_sandbox_checkpoint_artifacts(uuid,integer,bigint)'::regprocedure
+        ) as definition`;
+      expect(gcAdmission?.definition).toContain("maintenance_claim_checkpoint_gc_inner");
+      // 0849 adds the strict-owner capability boundary; the original reference
+      // checks remain in its owner-only implementation, not in the wrapper.
+      const [gcFunction] = await sql<Array<{ definition: string }>>`
+        select pg_get_functiondef(
+          'opengeni_private.maintenance_claim_checkpoint_gc_inner(uuid,integer,bigint)'::regprocedure
         ) as definition`;
       expect(gcFunction?.definition).toContain("rig_versions version");
       expect(gcFunction?.definition).toContain("provider_image.value ->> 'artifactId'");

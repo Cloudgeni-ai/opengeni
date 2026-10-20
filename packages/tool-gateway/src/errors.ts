@@ -66,6 +66,15 @@ export class ToolGatewayPathCollisionError extends Error {
   }
 }
 
+export class ToolGatewaySchemaCompilationError extends Error {
+  readonly code = "tool_schema_invalid";
+
+  constructor(cause: unknown) {
+    super("Tool is unavailable because its input or output schema is invalid", { cause });
+    this.name = "ToolGatewaySchemaCompilationError";
+  }
+}
+
 export class ToolGatewayInputValidationError extends Error {
   readonly code = "invalid_tool_arguments";
   /** Value-free problems, capped at `TOOL_GATEWAY_INPUT_ISSUES_MAX`. */

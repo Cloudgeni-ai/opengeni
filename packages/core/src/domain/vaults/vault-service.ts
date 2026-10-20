@@ -545,7 +545,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         ) {
           throw new VaultError(
             "provider_conflict",
-            `${source.name} changed in ${sourceVault.name} since Opengeni last synced it, so its fields here may be out of date. Nothing was moved: sync ${sourceVault.name}, then move it again.`,
+            `${source.name} changed in ${sourceVault.name} since it was last synced, so its fields here may be out of date. Nothing was moved: sync ${sourceVault.name}, then move it again.`,
             {
               itemId: source.id,
               vaultId: sourceVault.id,

@@ -515,6 +515,10 @@ origin and absent Site artifact. Only complete positive acknowledged cohorts are
 eligible; unknown writes never replay. Distinct linked receipts and Site pins are
 nonpromotable and require explicit manual staging consumer authority. Do not relax
 the canonical receipt verifier's source equality, production or scheduled release guards.
+Canary publication is two jobs: `publish` writes with credentials and hands the
+acknowledged cohort to the credential-free `confirm` job, which waits for npm's
+asynchronous processing and uploads the Site pins. When npm is slow, re-run the
+failed `confirm` job; reconciliation is only for a failed `publish` job.
 Exact-source canary publication may select a normally merged protected-main ancestor
 with successful exact-source CI through `scripts/canary-source-admission.ts`.
 The trusted current-main controller stays checked out separately, and supplied
@@ -664,7 +668,7 @@ waiting turn can re-arm the live box. A timeout alone or an ambiguous teardown
 failure must never release that ownership. See `docs/run-lifecycle.md` for
 capture ownership and recovery.
 
-Sandbox execution is pluggable. `OPENGENI_SANDBOX_BACKEND` selects one of the backends defined by the `SandboxBackend` enum in `packages/contracts/src/index.ts` (the canonical list): `docker`, `modal`, `local`, `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`, `selfhosted`, and `opensandbox`. `docker` is the default and the usual local-dev choice; `modal`, `opensandbox`, and the other cloud backends are provisioned, swappable boxes. OpenSandbox is optional and Kubernetes-native: exact attach is by persisted ID, workspace recovery uses Opengeni portable tar archives in object storage (required; never silent jsonb stuffing), provider TTL is renewable, and a desktop-class image reports ttyd PTY plus desktop/recording over signed URI-mode ingress when `OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (unsigned keeps the lifecycle proxy); native snapshots and `runAs` stay unavailable. When you change the set of backends, update the enum first and treat it as the source of truth — this file and the README follow it.
+Sandbox execution is pluggable. `OPENGENI_SANDBOX_BACKEND` selects one of the backends defined by the `SandboxBackend` enum in `packages/contracts/src/index.ts` (the canonical list): `docker`, `modal`, `local`, `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`, `selfhosted`, `opensandbox`, and `compute`. `docker` is the default and the usual local-dev choice; `modal`, `opensandbox`, and the other cloud backends are provisioned, swappable boxes. OpenSandbox is optional and Kubernetes-native: exact attach is by persisted ID, workspace recovery uses Opengeni portable tar archives in object storage (required; never silent jsonb stuffing), provider TTL is renewable, and a desktop-class image reports ttyd PTY plus desktop/recording over signed URI-mode ingress when `OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (unsigned keeps the lifecycle proxy); native snapshots and `runAs` stay unavailable. `compute` is Opengeni compute, its own Firecracker microVM sandboxes (opt-in, never a default): a managed sandbox whose provider session is the machine agent reached through its host's link to the API's agent gateway. Leases and provisioning treat it as managed; transport points use `usesAgentTransport`. Its lease is never drained for being idle (compute sleeps it), only on rotation, capture or group end, and nothing may message its agent on a timer. See `docs/compute-backend.md`. When you change the set of backends, update the enum first and treat it as the source of truth — this file and the README follow it.
 
 Docker lease drain is creation-free. Its capture-only attachment validates the
 current scoped lease/epoch/capture claim and a protected SDK-owned workspace

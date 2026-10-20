@@ -1,10 +1,9 @@
-import type {
-  CodexAccount,
-  CodexAccountOverview,
-  ModelConnectionAccessResponse,
-} from "@opengeni/sdk";
+import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
+import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
+import { invalidateSharedQueries } from "@/lib/shared-query";
 
 import {
   CodexDeviceCodePanel,
@@ -230,12 +229,14 @@ function OrgCodexAccountDetail({
               }
             />
             {/* A workspace's account can't be the organization primary; shown once known. */}
-            {codex.accounts.length > 1 && access.data && !access.data.managedByWorkspaceId ? (
+            {codex.accounts.length > 1 && !access.data?.managedByWorkspaceId ? (
               <SettingRow
                 label="Primary account"
                 description="Used for new work when sharing is off."
                 control={
-                  account.id === codex.activeAccountId ? (
+                  !access.data ? (
+                    <ModelSettingsPlaceholder />
+                  ) : account.id === codex.activeAccountId ? (
                     <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
                       <CheckIcon aria-hidden="true" className="size-4 text-status-idle" />
                       Primary
@@ -315,46 +316,48 @@ function OrgCodexResets({
   onRedeemed: () => void;
 }) {
   const { client, organizationId } = codex;
-  const [overview, setOverview] = useState<CodexAccountOverview | undefined>(undefined);
-  const generation = useRef(0);
-  const load = useCallback(async () => {
-    const current = ++generation.current;
-    try {
-      const result = await client.requestJson<CodexAccountOverview>(
-        "GET",
-        `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(account.id)}/overview`,
-      );
-      if (generation.current === current) setOverview(result);
-    } catch {
-      // Usage above already says when the account can't be read; resets stay hidden.
-      if (generation.current === current) setOverview(undefined);
-    }
-  }, [client, organizationId, account.id]);
-  useEffect(() => {
-    setOverview(undefined);
-    if (account.status === "active") void load();
-    return () => {
-      generation.current += 1;
-    };
-  }, [load, account.status]);
+  const query = useOrganizationCodexOverview(client, organizationId, account);
+  const overview = query.data ?? undefined;
   const afterRedemption = useCallback(async () => {
-    await load();
+    await invalidateSharedQueries(client, ["model-settings"]);
     onRedeemed();
-  }, [load, onRedeemed]);
+  }, [client, onRedeemed]);
   const resets = useCodexResetRedemption("organization", organizationId, afterRedemption);
   const attempts = resets.redemptionAttempts(account.id, overview);
-  if (!overview || !hasResetInventory(overview, attempts)) return null;
-  const count = overview.resetCredits.availableCount ?? 0;
+  const count = overview?.resetCredits.availableCount ?? 0;
   return (
     <DetailSection title={count > 0 ? `Usage limit resets (${count})` : "Usage limit resets"}>
-      <ResetCreditInventory
-        organization
-        overview={overview}
-        busy={busy || resets.preparingReset != null}
-        recoveryAttempts={attempts}
-        onRedeem={(credit, recovery) => void resets.beginRedemption(account.id, credit, recovery)}
-        onReconnectSameAccount={onReconnect}
-      />
+      {!overview ? (
+        <SettingRow
+          label={
+            query.error ? (
+              "Couldn't check usage limit resets."
+            ) : query.loading ? (
+              <ModelSettingsPlaceholder />
+            ) : (
+              "Sign in to check usage limit resets."
+            )
+          }
+          control={
+            query.error ? (
+              <RowButton variant="ghost" onClick={() => void query.refresh()}>
+                Try again
+              </RowButton>
+            ) : null
+          }
+        />
+      ) : !hasResetInventory(overview, attempts) ? (
+        <SettingRow label="No usage limit resets available" />
+      ) : (
+        <ResetCreditInventory
+          organization
+          overview={overview}
+          busy={busy || resets.preparingReset != null}
+          recoveryAttempts={attempts}
+          onRedeem={(credit, recovery) => void resets.beginRedemption(account.id, credit, recovery)}
+          onReconnectSameAccount={onReconnect}
+        />
+      )}
       <CodexRedemptionDialog
         codex={{
           redemption: resets.redemption,

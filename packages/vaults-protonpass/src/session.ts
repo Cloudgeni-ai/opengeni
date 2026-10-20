@@ -388,7 +388,7 @@ export class ProtonCliSession {
         throw unavailable("The pass-cli path must be absolute");
       }
       const found = configured ?? findOnPath("pass-cli", this.hostEnv.PATH);
-      if (!found) throw unavailable("pass-cli is not installed on this Opengeni server");
+      if (!found) throw unavailable("pass-cli is not installed on this server");
       let path: string;
       try {
         path = realpathSync(found);
@@ -422,7 +422,7 @@ export class ProtonCliSession {
       }
       if (version !== expected) {
         throw unavailable(
-          `pass-cli ${version} is not supported; install pass-cli ${expected} for this Opengeni release`,
+          `pass-cli ${version} is not supported; install pass-cli ${expected} for this release`,
         );
       }
       return path;
@@ -562,7 +562,7 @@ export class ProtonCliSession {
     if (result.stdoutOverflow) {
       throw new VaultProviderError(
         command.overflowCode ?? "provider_unavailable",
-        `Proton Pass returned more data than Opengeni reads at once (${command.subject})`,
+        `Proton Pass returned more data than can be read at once (${command.subject})`,
       );
     }
     throw mapProtonFailure(result, command.subject);

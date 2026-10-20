@@ -1172,7 +1172,7 @@ export class AnthropicMessagesModel implements Model {
         : response.status === 401
           ? "Claude credentials expired or were revoked. Replace the key or setup token in Models."
           : webSearchDisabled
-            ? "Web search is turned off for this Claude organization. An admin can turn it on in the Claude Console, or web search can be turned off in Opengeni."
+            ? "Web search is turned off for this Claude organization. An admin can turn it on in the Claude Console, or web search can be turned off in the workspace's model settings."
             : "Claude request failed (HTTP " + response.status + ")";
       let source: unknown;
       try {

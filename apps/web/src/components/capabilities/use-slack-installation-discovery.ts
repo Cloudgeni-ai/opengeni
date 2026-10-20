@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
-import type { SlackInstallationBinding } from "@/types";
+import type { ConnectionMetadata, SlackInstallationBinding } from "@/types";
 
 /** Metadata discovery only. Each read still passes the destination API's access checks. */
 export function useSlackInstallationDiscovery(workspaceId: string, enabled: boolean) {
@@ -29,6 +29,7 @@ export function useSlackInstallationDiscovery(workspaceId: string, enabled: bool
     key: string;
     bindings: SlackInstallationBinding[];
     verifiedIds: string[];
+    connections: ConnectionMetadata[];
     failed: boolean;
   } | null>(null);
   useEffect(() => {
@@ -38,6 +39,7 @@ export function useSlackInstallationDiscovery(workspaceId: string, enabled: bool
     void (async () => {
       const bindings: SlackInstallationBinding[] = [];
       const verifiedIds: string[] = [];
+      const discovered: ConnectionMetadata[] = [];
       let failed = false;
       // Keep fan-out bounded even for people administering many workspaces.
       for (let offset = 0; offset < candidates.length; offset += 3) {
@@ -54,6 +56,7 @@ export function useSlackInstallationDiscovery(workspaceId: string, enabled: bool
             failed = true;
             return;
           }
+          discovered.push(...entry.value.connections);
           const source = candidates[offset + index];
           for (const binding of entry.value.rows.filter(
             (candidate) => candidate.accountId === accountId && candidate.workspaceId === source,
@@ -77,7 +80,7 @@ export function useSlackInstallationDiscovery(workspaceId: string, enabled: bool
           }
         });
       }
-      if (!cancelled) setResult({ key, bindings, verifiedIds, failed });
+      if (!cancelled) setResult({ key, bindings, verifiedIds, connections: discovered, failed });
     })();
     return () => {
       cancelled = true;
@@ -91,6 +94,7 @@ export function useSlackInstallationDiscovery(workspaceId: string, enabled: bool
     failed: current?.failed ?? false,
     bindings: current?.bindings ?? [],
     verifiedIds: current?.verifiedIds ?? [],
+    connections: current?.connections ?? [],
     retry: () => setRevision((value) => value + 1),
   };
 }

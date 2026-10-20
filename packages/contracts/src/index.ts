@@ -15,6 +15,8 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./file-access";
+import { FileAccess } from "./file-access";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -144,6 +146,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./desktop-app";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
@@ -153,6 +156,7 @@ export * from "./secret-totp";
 
 export {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -285,12 +289,13 @@ export {
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
 
-// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 13 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
 // enrolled as a first-class sandbox), then `opensandbox` (an optional
-// Kubernetes-native provisioned sandbox provider).
+// Kubernetes-native provisioned sandbox provider), then `compute` (Opengeni's
+// own microVM sandboxes; every box runs the Connected Machine agent).
 export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "docker",
@@ -305,6 +310,7 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
@@ -332,6 +338,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
   opensandbox: ["sandboxId"],
+  compute: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -767,6 +774,42 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     nativeBucketMount: false,
     persistable: true,
     supportsRunAs: false,
+  },
+  // Opengeni compute: a managed microVM sandbox run by Opengeni itself.
+  // Every sandbox runs the Connected Machine agent, reached through its host's
+  // link to Opengeni's agent gateway, so the transport is the agent's (PTY,
+  // desktop frames, browser control and on-demand ports over the relay). The
+  // lifetime is a managed sandbox's: compute sleeps an idle sandbox itself
+  // and keeps its memory and disk across sleep, moves and host loss, so there
+  // is no hard lifetime and no idle killer, and a message to a sleeping
+  // sandbox wakes it. A portable tar is only the fallback that moves a
+  // workspace to another backend.
+  compute: {
+    backend: "compute",
+    backendId: "compute",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "relay-pty", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: true,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    // The box agent runs as root on Linux; each request still gates on the
+    // live agent's Hello `run_as` capability.
+    supportsRunAs: true,
   },
 };
 
@@ -2908,6 +2951,28 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** Placement inherited by new top-level chats and schedules that follow the workspace. */
+export const WorkspaceDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("managed") }).strict(),
+    z.object({ kind: z.literal("machine"), targetSandboxId: z.string().uuid() }).strict(),
+  ]),
+);
+export type WorkspaceDefaultExecutionTarget = z.infer<typeof WorkspaceDefaultExecutionTarget>;
+
+/** Invalid configured placement fails closed; it must never select another computer. */
+export function resolveWorkspaceDefaultExecutionTarget(
+  settings: unknown,
+): WorkspaceDefaultExecutionTarget | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { defaultExecutionTarget?: unknown }).defaultExecutionTarget
+      : undefined;
+  return value === undefined || value === null
+    ? null
+    : WorkspaceDefaultExecutionTarget.parse(value);
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -2949,6 +3014,7 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
       // null uses the deployment image.
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent configuration defaults for new sessions ("Defaults for new
       // sessions"). Validated leniently here and resolved by
       // resolveWorkspaceAgentDefaults, so a value written by a newer release can
@@ -3154,6 +3220,7 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
       slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent defaults for new sessions; null clears them.
       sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
       // False blocks every model billed in Opengeni credits in this workspace.
@@ -6357,7 +6424,13 @@ export type FileUploadStatus = z.infer<typeof FileUploadStatus>;
 
 export const FileAsset = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** "personal" is Only me: only its owner can open it. */
     scope: z.enum(["workspace", "personal"]).optional(),
+    /**
+     * The person the file belongs to, who alone can share it or limit it to
+     * themselves. Null for older shared files and output made without a person.
+     */
+    ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
     status: FileStatus,
@@ -6370,6 +6443,8 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     objectKey: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /** Present on upload, publish and sharing results: who can open the file. */
+    access: FileAccess.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6394,6 +6469,11 @@ export type FileListResponse = z.infer<typeof FileListResponse>;
 
 export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /**
+     * Who can open the file: "personal" (Only me) or "workspace". Omitted, a
+     * person's upload is shared with the workspace and an agent's upload
+     * follows its chat (Only me in an Only me chat).
+     */
     scope: z.enum(["workspace", "personal"]).optional(),
     filename: z.string().min(1),
     contentType: z.string().min(1),
@@ -6411,6 +6491,8 @@ export const CreateFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
     requiredHeaders: z.record(z.string(), z.string()),
     expiresAt: z.string(),
     maxSizeBytes: z.number().int().positive(),
+    /** Who will be able to open the file once it is uploaded. */
+    access: FileAccess.optional(),
   }),
 );
 export type CreateFileUploadResponse = z.infer<typeof CreateFileUploadResponse>;
@@ -6421,6 +6503,13 @@ export const CompleteFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CompleteFileUploadResponse = z.infer<typeof CompleteFileUploadResponse>;
+
+export const UpdateFileVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
+export type UpdateFileVisibilityResponse = z.infer<typeof UpdateFileVisibilityResponse>;
 
 export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -11692,6 +11781,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
+    // Resolve once when a new run chat is accepted; recovery keeps that exact target.
+    executionTarget: z.literal("workspace_default").optional(),
     // Connected Machines are a concrete execution target, not a generic
     // sandbox backend. Persist the exact machine + optional cwd so every
     // generated session can seed its active route before its first turn.
@@ -11801,6 +11892,13 @@ export function knowledgeSourceAgentConfig(
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
+    if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["executionTarget"],
+        message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
+      });
+    }
     if (value.machineTarget && value.sandboxBackend !== undefined) {
       context.addIssue({
         code: "custom",
@@ -12119,6 +12217,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       turnExecutionPolicy: z.unknown().optional(),
       resolvedSandboxBackend: SandboxBackend,
       resolvedSandboxOs: SandboxOs,
+      // Absent is a historical receipt: recover its task's explicit target.
+      // Null is an accepted managed placement, never a request to resolve again.
+      resolvedMachineTarget: z
+        .object({
+          targetSandboxId: z.string().uuid(),
+          workingDir: z.string().min(1).optional(),
+        })
+        .strict()
+        .nullable()
+        .optional(),
       resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
       resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
       resolvedFirstPartyMcpPermissions: z.array(Permission),
@@ -12659,6 +12767,13 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       message: "agentConfig.goal cannot be used with an existing-session target",
     });
   }
+  if (value.runMode === "existing_session" && value.agentConfig.executionTarget) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "executionTarget"],
+      message: "executionTarget cannot be used with an existing-session target",
+    });
+  }
   if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
     context.addIssue({
       code: "custom",
@@ -12871,6 +12986,16 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["agentConfig", "goal"],
         message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+    if (
+      value.agentConfig?.executionTarget &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "executionTarget"],
+        message: "executionTarget cannot be used with an existing-session target",
       });
     }
     if (
@@ -13831,7 +13956,12 @@ export const AvailableOpenGeniSlackBots = /* @__PURE__ */ defineSchema(() =>
 );
 export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
 export const UpdateOpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
-  z.object({ enabled: z.boolean() }).strict(),
+  z
+    .object({
+      enabled: z.boolean(),
+      workspaceIds: z.array(z.string().uuid()).max(1000).nullable().optional(),
+    })
+    .strict(),
 );
 export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
   typeof UpdateOpenGeniSlackBotOrganizationAccess
@@ -13839,6 +13969,7 @@ export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
 export const OpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     enabled: z.boolean(),
+    workspaceIds: z.array(z.string().uuid()).nullable().optional(),
     generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }),
 );
@@ -16053,6 +16184,7 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "sandbox.operation.started",
     "sandbox.operation.completed",
     "sandbox.operation.failed",
+    "sandbox.recovery.selected",
     "session.command.backgrounded",
     "session.command.finished",
     "session.wait.started",
@@ -20561,6 +20693,7 @@ export const MachineKind = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type MachineKind = z.infer<typeof MachineKind>;
@@ -20619,6 +20752,14 @@ export const MachineUpdateStatus = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
 
+export const MachineUpdateBlocker = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    count: z.number().int().nonnegative().max(0xffff_ffff),
+  }),
+);
+export type MachineUpdateBlocker = z.infer<typeof MachineUpdateBlocker>;
+
 export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
   z.object({
     operationId: z.string().uuid(),
@@ -20629,6 +20770,7 @@ export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
       .regex(/^[0-9a-f]{64}$/)
       .nullable(),
     errorCode: z.string().nullable(),
+    blockers: z.array(MachineUpdateBlocker).optional(),
     retryable: z.boolean(),
     rolledBack: z.boolean(),
     requestedAt: z.string(),

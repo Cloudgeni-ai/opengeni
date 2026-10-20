@@ -1309,26 +1309,56 @@ export type Finding = {
   message: string;
 };
 
-/** Decides whether a field's move from one named schema to another keeps callers working. */
-type RefCompatibility = (
-  oldRef: string,
-  newRef: string,
-  ios: readonly SchemaIo[],
-  seen?: Set<string>,
-) => boolean;
+/** One node of a flattened shape, located by its path. */
+type ShapeAt = { shape: Shape; path: string };
+
+/**
+ * Decides whether the value at `old` (before) and the value at `next` (after)
+ * accept and produce the same wire data, so a change in how the node is
+ * written down (inline vs named schema, renamed schema) keeps callers working.
+ */
+type NodeCompatibility = (old: ShapeAt, next: ShapeAt, ios: readonly SchemaIo[]) => boolean;
 
 const REF_TYPE = /^ref\((.+)\)$/;
+
+/** True when `path` lies strictly below `prefix` in a flattened shape. */
+function isDescendant(path: string, prefix: string): boolean {
+  return path.startsWith(prefix) && /^[.[{|]/.test(path.slice(prefix.length));
+}
+
+/**
+ * The inline subtree at `path`, re-rooted at `$`. Requiredness and
+ * nullability belong to the field holding the value, which the caller
+ * compares, not to the value itself.
+ */
+function subtreeShape(shape: Shape, path: string): Shape {
+  const rooted: Shape = {};
+  for (const [candidate, node] of Object.entries(shape)) {
+    if (candidate === path) {
+      const { req: _req, nullable: _nullable, ...value } = node;
+      rooted.$ = value;
+    } else if (isDescendant(candidate, path)) {
+      rooted[`$${candidate.slice(path.length)}`] = node;
+    }
+  }
+  return rooted;
+}
 
 function shapeFindings(
   name: string,
   ios: readonly SchemaIo[],
   before: Shape,
   after: Shape,
-  refCompatible: RefCompatibility = () => false,
+  compatible: NodeCompatibility = () => false,
 ): Finding[] {
   const findings: Finding[] = [];
   const input = ios.includes("input");
   const output = ios.includes("output");
+  // Nodes whose value was compared as a whole; their children are not
+  // diffed path by path because they moved (into a named schema, or under a
+  // union variant).
+  const comparedBefore: string[] = [];
+  const comparedAfter: string[] = [];
   const push = (path: string, breaking: boolean, message: string) =>
     findings.push({
       id: `schema:${name}:${path}`,
@@ -1336,6 +1366,7 @@ function shapeFindings(
       message: `${name} ${path}: ${message}`,
     });
   for (const [path, old] of Object.entries(before)) {
+    if (comparedBefore.some((prefix) => isDescendant(path, prefix))) continue;
     const next = after[path];
     if (!next) {
       // A removed union variant is reported by its union node's value diff.
@@ -1362,20 +1393,47 @@ function shapeFindings(
       [...literalTypes].every(
         (type) => type === "string" || type === "number" || type === "boolean",
       );
+    let compareEnum = true;
     if (old.t !== next.t && !sameScalarEnum) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
-      const oldRef = REF_TYPE.exec(old.t)?.[1];
-      const newRef = REF_TYPE.exec(next.t)?.[1];
-      // A field that now points at a differently named schema is only a break
-      // when that schema's shape breaks callers (e.g. a request union widened
+      const oldAt = { shape: before, path };
+      // A field that became a union still accepts and produces its previous
+      // value when one variant has that value's shape. The other variants are
+      // additions, which the union's own label diff reports.
+      const becameUnion = next.t === "union" && old.t !== "union";
+      const keptVariant = becameUnion
+        ? (next.enum ?? [])
+            .map((label) => `${path}|${label}`)
+            .find(
+              (variant) =>
+                after[variant] !== undefined &&
+                compatible(oldAt, { shape: after, path: variant }, ios),
+            )
+        : undefined;
+      // A field that now points at a differently named schema, or whose
+      // inline value moved into (or out of) a named schema, is only a break
+      // when the value's shape breaks callers (e.g. a request union widened
       // into a new named superset is additive).
-      if (oldRef && newRef && refCompatible(oldRef, newRef, ios)) {
+      const moved =
+        !becameUnion &&
+        (REF_TYPE.test(old.t) || REF_TYPE.test(next.t)) &&
+        compatible(oldAt, { shape: after, path }, ios);
+      if (moved) {
+        comparedBefore.push(path);
+        comparedAfter.push(path);
+        compareEnum = false;
         push(path, false, `type changed ${old.t} -> ${next.t} (compatible shape)`);
-      } else if (!widenedInput && !narrowedOutput) {
-        push(path, true, `type changed ${old.t} -> ${next.t}`);
+      } else if (keptVariant) {
+        comparedBefore.push(path);
+        comparedAfter.push(keptVariant);
+        push(path, false, `type changed ${old.t} -> ${next.t} (still accepts ${old.t})`);
+      } else {
+        if (!widenedInput && !narrowedOutput) {
+          push(path, true, `type changed ${old.t} -> ${next.t}`);
+        }
+        continue;
       }
-      continue;
     }
     if (old.req !== undefined && next.req !== undefined && old.req !== next.req) {
       if (input && !old.req && next.req) push(path, true, "became required in a request");
@@ -1388,7 +1446,7 @@ function shapeFindings(
         push(path, true, "may now be null in a response");
       else push(path, false, `nullable ${Boolean(old.nullable)} -> ${Boolean(next.nullable)}`);
     }
-    if (old.enum || next.enum) {
+    if (compareEnum && (old.enum || next.enum)) {
       const removed = (old.enum ?? []).filter((value) => !(next.enum ?? []).includes(value));
       const added = (next.enum ?? []).filter((value) => !(old.enum ?? []).includes(value));
       // Union variants behave like enum values: a removed request variant
@@ -1399,6 +1457,7 @@ function shapeFindings(
   }
   for (const [path, next] of Object.entries(after)) {
     if (before[path]) continue;
+    if (comparedAfter.some((prefix) => path === prefix || isDescendant(path, prefix))) continue;
     const parent = path.replace(/(\.[^.|[\]{}]+|\[\]|\{\}|\|[^.|[\]{}]+)$/, "");
     const parentExisted = parent === path || Boolean(before[parent]);
     if (input && next.req && parentExisted) push(path, true, "new required request field");
@@ -1475,19 +1534,35 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
-  const refCompatible: RefCompatibility = (oldRef, newRef, ios, seen = new Set<string>()) => {
-    const key = `${oldRef}->${newRef}`;
-    const oldSchema = before.schemas[oldRef];
-    const newSchema = after.schemas[newRef];
-    if (!oldSchema || !newSchema || seen.has(key)) return false;
-    seen.add(key);
-    return !shapeFindings(
-      newRef,
-      ios,
-      decodeShape(oldSchema.shape),
-      decodeShape(newSchema.shape),
-      (a, b, nested) => refCompatible(a, b, nested, seen),
-    ).some((finding) => finding.breaking);
+  // The value at a node: the named schema it points at, or its inline subtree.
+  const valueShape = (side: Snapshot, at: ShapeAt): Shape | undefined => {
+    const node = at.shape[at.path];
+    if (!node) return undefined;
+    const ref = REF_TYPE.exec(node.t)?.[1];
+    if (!ref) return subtreeShape(at.shape, at.path);
+    const schema = side.schemas[ref];
+    return schema ? decodeShape(schema.shape) : undefined;
+  };
+  // Named-schema pairs already under comparison. Meeting one again means a
+  // recursive schema reached itself; any real difference is reported at a
+  // non-recursive position, so the repeat is assumed compatible.
+  const inProgress = new Set<string>();
+  const compatible: NodeCompatibility = (old, next, ios) => {
+    const oldRef = REF_TYPE.exec(old.shape[old.path]?.t ?? "")?.[1];
+    const newRef = REF_TYPE.exec(next.shape[next.path]?.t ?? "")?.[1];
+    const key = oldRef && newRef ? `${oldRef}->${newRef}` : null;
+    if (key && inProgress.has(key)) return true;
+    const oldShape = valueShape(before, old);
+    const newShape = valueShape(after, next);
+    if (!oldShape || !newShape) return false;
+    if (key) inProgress.add(key);
+    try {
+      return !shapeFindings(newRef ?? "value", ios, oldShape, newShape, compatible).some(
+        (finding) => finding.breaking,
+      );
+    } finally {
+      if (key) inProgress.delete(key);
+    }
   };
   for (const [name, schema] of Object.entries(before.schemas)) {
     const next = after.schemas[name];
@@ -1505,13 +1580,7 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
     }
     const ios = [...new Set([...schema.io, ...next.io])] as SchemaIo[];
     findings.push(
-      ...shapeFindings(
-        name,
-        ios,
-        decodeShape(schema.shape),
-        decodeShape(next.shape),
-        refCompatible,
-      ),
+      ...shapeFindings(name, ios, decodeShape(schema.shape), decodeShape(next.shape), compatible),
     );
   }
   for (const [entry, names] of Object.entries(before.exports)) {

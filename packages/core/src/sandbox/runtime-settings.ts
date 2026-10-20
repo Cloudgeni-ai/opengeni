@@ -58,6 +58,7 @@ const SESSION_GROUP_MACHINE_NAMES: Record<ManagedSessionGroupBackend, string> = 
   cloudflare: "Cloudflare",
   vercel: "Vercel",
   opensandbox: "OpenSandbox",
+  compute: "Opengeni compute",
 };
 
 /** Display name and kind for the session's own managed box. The kind is the

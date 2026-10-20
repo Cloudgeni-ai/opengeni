@@ -1,36 +1,57 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
+import {
+  acquireLease,
   bootstrapWorkspace,
+  commitWarmingToWarm,
   createDb,
   createEnrollment,
+  createSandboxEnrollment,
   createSession,
+  recordAbandonedDirectConnectedMachineCommand,
   sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
 } from "@opengeni/db";
-import { ErrorCode, ExecRequest, OpAck } from "@opengeni/agent-proto";
+import {
+  ControlRequest,
+  ControlResponse,
+  ErrorCode,
+  ExecRequest,
+  OpAck,
+} from "@opengeni/agent-proto";
+import { agentConnectionCurrent } from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import {
   recordConnectedCommandOutputConsumption,
+  recordConnectedCommandOutputRelease,
   claimConnectedCommandOutputReleases,
+  requestSessionBackgroundCommandCancellation,
   settleConnectedCommandOutputReleaseClaim,
 } from "@opengeni/db/session-background-commands";
 import type { OpStreamConnection } from "@opengeni/events";
 import {
+  AGENT_UNANSWERED_HEADER,
   FakeOpRunner,
   InMemoryOpStreamTransport,
+  NO_WAKE_HEADER,
+  NatsControlRpc,
   SelfhostedControlError,
   subjectFor,
+  wakeComputeSandboxOnNoResponders,
   type ControlRpc,
+  type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
   reconcileConnectedMachineBackgroundCommands as reconcile,
   reconcileConnectedCommandOutputReleases as releaseOutput,
 } from "../src/activities/sandbox-lease";
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
-  const db = await acquireSharedTestDatabase("connected-command-cleanup");
+  const db = await acquireRestrictedRuntimeTestDatabase("connected-command-cleanup", "public");
   if (!db) throw new Error("PostgreSQL required");
   shared = db;
   client = createDb(db.appUrl);
@@ -40,7 +61,9 @@ afterAll(async () => {
   await shared?.release();
 }, 60000);
 
-async function seed(count = 25) {
+/** `count` running commands on one runner "launch": a Connected Machine, or
+ * a warm compute sandbox's agent. */
+async function seed(count = 25, kind: "machine" | "sandbox" = "machine") {
   const id = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -61,13 +84,39 @@ async function seed(count = 25) {
     model: "scripted-model",
     reasoningEffort: "medium",
     latencyMode: "standard",
-    sandboxBackend: "none",
+    sandboxBackend: kind === "sandbox" ? "compute" : "none",
   });
-  const enrollment = await createEnrollment(client.db, {
-    accountId,
-    workspaceId: workspaceId!,
-    pubkey: `ed25519:${id}`,
-  });
+  let enrollment: { id: string };
+  if (kind === "sandbox") {
+    const group = { accountId, workspaceId: workspaceId!, sandboxGroupId: session.sandboxGroupId };
+    await acquireLease(client.db, {
+      ...group,
+      kind: "turn",
+      holderId: `turn-${id}`,
+      backend: "compute",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(client.db, {
+      ...group,
+      expectedEpoch: 0,
+      instanceId: `box-${id}`,
+      leaseTtlMs: 45_000,
+    });
+    enrollment = await createSandboxEnrollment(client.db, {
+      accountId,
+      workspaceId: workspaceId!,
+      enrollmentId: crypto.randomUUID(),
+      sandboxGroupId: session.sandboxGroupId,
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+  } else {
+    enrollment = await createEnrollment(client.db, {
+      accountId,
+      workspaceId: workspaceId!,
+      pubkey: `ed25519:${id}`,
+    });
+  }
   await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
   // The sweep freezes a JavaScript millisecond due frontier. The database's
   // clock_timestamp() default is evaluated per row at finer precision, so a
@@ -239,8 +288,10 @@ test("offline commands remain tracked while one sweep shares failed connection o
   expect(row!.max_attempts).toBe(1);
 });
 
-async function terminalOutputFixture() {
-  const sessionId = await seed(1);
+async function terminalOutputFixture(
+  fixtureOptions: { cancelledBeforeStart?: boolean; kind?: "machine" | "sandbox" } = {},
+) {
+  const sessionId = await seed(1, fixtureOptions.kind);
   const [row] =
     await shared.admin`select * from session_background_commands where session_id=${sessionId}`;
   const identity = {
@@ -256,7 +307,7 @@ async function terminalOutputFixture() {
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
     ...identity,
     outcome: "exited",
-    exitCode: 0,
+    exitCode: fixtureOptions.cancelledBeforeStart ? -1 : 0,
     reason: "op_exit",
   });
   const transport = new InMemoryOpStreamTransport();
@@ -274,6 +325,18 @@ async function terminalOutputFixture() {
     identity.enrollmentId,
     identity.connectionInstanceId,
   );
+  // The stop reached the runner first: it refuses the start and keeps a tombstone.
+  if (fixtureOptions.cancelledBeforeStart) {
+    await runner.request(
+      subject,
+      {
+        requestId: `cancel-${identity.opId}`,
+        epoch: 0,
+        op: { $case: "opCancel", opCancel: { opId: identity.opId } },
+      },
+      { timeoutMs: 1000 },
+    );
+  }
   await runner.request(
     subject,
     {
@@ -310,7 +373,17 @@ async function terminalOutputFixture() {
       await shared.admin`select * from session_background_commands where id=${identity.commandId}`
     )[0]!;
   await due();
-  return { identity, transport, runner, operations, rpc, connection, outputBus, due, stored };
+  return {
+    identity,
+    transport,
+    runner,
+    operations,
+    rpc,
+    connection,
+    outputBus,
+    due,
+    stored,
+  };
 }
 
 test("output capture and ACK retry survive publisher failure and a fresh reconciler without model observation", async () => {
@@ -321,8 +394,10 @@ test("output capture and ACK retry survive publisher failure and a fresh reconci
     if (fail && OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
     publish(subject, payload);
   };
-  // A current enrollment route is not the adopted operation's address.
-  await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+  // A current enrollment route is not the adopted operation's address, and a
+  // successor process's OpRelease capability is not the adopted runner's.
+  await shared.admin`update enrollments set connection_instance_id='successor',
+    agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
   await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
   const captured = await fixture.stored();
   expect(captured.output_exit_seq).toBe("2");
@@ -351,6 +426,7 @@ test("output capture and ACK retry survive publisher failure and a fresh reconci
   expect(events!.n).toBe(1);
   expect(updates!.n).toBe(1);
   expect(fixture.operations.filter((op) => op === "opStart" || op === "opCancel")).toEqual([]);
+  expect(fixture.operations).not.toContain("opRelease");
   expect(fixture.runner.runs.get(fixture.identity.opId)!.startCount).toBe(1);
 });
 
@@ -394,6 +470,8 @@ test("a published but undelivered final ACK remains pending for a fresh reconcil
   const row = await fixture.stored();
   expect(row.output_release_observed_at).toBeInstanceOf(Date);
   expect(row.completion_observed_at).toBeNull();
+  // A runner without OpRelease keeps the attach, final ACK and later look.
+  expect(fixture.operations).not.toContain("opRelease");
 });
 
 test("PostgreSQL capture rollback cannot authorize ACK and a later full replay remains idempotent", async () => {
@@ -466,6 +544,24 @@ test("pre-capture native loss records unavailable output without manufacturing c
   expect(row.completion_observed_at).toBeNull();
   expect(fixture.operations).toEqual(["opQuery"]);
   expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+});
+
+test("a command cancelled before its runner began settles its output once, without consumption or ACK", async () => {
+  const fixture = await terminalOutputFixture({ cancelledBeforeStart: true });
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  const row = await fixture.stored();
+  expect(row.state).toBe("exited");
+  expect(row.exit_code).toBe(-1);
+  expect(row.output_unavailable_at).toBeInstanceOf(Date);
+  expect(row.output_consumed_at).toBeNull();
+  expect(row.output_release_observed_at).toBeNull();
+  expect(row.last_reconcile_outcome).toBe("output_unavailable");
+  expect(fixture.operations).toEqual(["opQuery"]);
+  expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+  // Settled: a later pass has nothing left to do for it.
+  await fixture.due();
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  expect(fixture.operations).toEqual(["opQuery"]);
 });
 
 test("custody and release claims reject locator drift, divergent receipts and stale claims", async () => {
@@ -711,4 +807,544 @@ test("offline output is neither due nor claimed until reconnect, without changin
     expect(await due()).toBe(false);
     await parkSession(fixture.identity.sessionId);
   }
+});
+
+test("Stop on a compute sandbox's command delivers the cancel once and settles it", async () => {
+  // A running command on a compute sandbox is never polled (each message would
+  // wake the sandbox); a Stop is the one thing that must still reach its agent.
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Compute stop",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Compute stop",
+    subjectId: `subject-${id}`,
+  });
+  const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    initialMessage: "Compute stop",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "compute",
+  });
+  const enrollment = await createSandboxEnrollment(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    enrollmentId: crypto.randomUUID(),
+    sandboxGroupId: session.sandboxGroupId,
+    hasDisplay: false,
+    workspaceRoot: "/workspace",
+  });
+  await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
+  const commandId = crypto.randomUUID();
+  const opId = `op-${commandId}`;
+  await shared.admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+    values (${commandId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${enrollment.id},'launch',${opId},'2000-01-01T00:00:00Z'::timestamptz)`;
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    workspaceId: workspaceId!,
+    agentId: enrollment.id,
+    connectionInstanceId: "launch",
+    transport,
+  });
+  runner.script(opId, { frames: [], live: true, holdUntilCancel: true });
+  const subject = subjectFor(workspaceId!, enrollment.id, "launch");
+  await runner.request(
+    subject,
+    {
+      requestId: opId,
+      epoch: 0,
+      op: {
+        $case: "opStart",
+        opStart: {
+          op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["sleep", "900"] }) },
+          windowBytes: "65536",
+          deadlineMs: "0",
+          originId: session.id,
+        },
+      },
+    },
+    { timeoutMs: 1000 },
+  );
+  const operations: string[] = [];
+  const rpc: ControlRpc = {
+    request: async (target, request, options) => {
+      if (target !== subject) return await noRunnerRpc().request(target, request, options);
+      operations.push(request.op?.$case ?? "none");
+      return await runner.request(target, request, options);
+    },
+  };
+  const stopBus = {
+    ...bus,
+    getOpStreamConnection: () => opStreamConnectionFor(transport),
+  } as Parameters<typeof reconcile>[3];
+  const stored = async () =>
+    (await shared.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+
+  // Running: no message reaches the sandbox.
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations).toEqual([]);
+  expect((await stored()).reconcile_attempts).toBe(0);
+
+  const stop = await requestSessionBackgroundCommandCancellation(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    sessionId: session.id,
+    commandId,
+    subjectId: `subject-${id}`,
+  });
+  expect(stop.accepted).toBe(true);
+  expect(await sandboxMaintenanceDue(client.db, { checkpointArtifactClaimTtlMs: 900000 })).toBe(
+    true,
+  );
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations[0]).toBe("opCancel");
+  expect(operations).not.toContain("opStart");
+  expect(operations).not.toContain("opQuery");
+  const settled = await stored();
+  expect(settled.state).not.toBe("running");
+  expect(settled.state).not.toBe("stopping");
+  expect(settled.reconcile_attempts).toBe(1);
+
+  // Settled: later sweeps send nothing more.
+  const sent = operations.length;
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations.length).toBe(sent);
+  await parkSession(session.id);
+});
+
+/** A workspace and chat with one command a request abandoned on `kind`'s
+ * runner "launch" when its agent restarted: it is recorded with a stop request
+ * bound to that exact connection and operation. */
+async function abandonedCommandFixture(kind: "machine" | "sandbox") {
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Abandoned",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Abandoned",
+    subjectId: `subject-${id}`,
+  });
+  const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    initialMessage: "Abandoned",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: kind === "sandbox" ? "compute" : "none",
+  });
+  const enrollment =
+    kind === "sandbox"
+      ? await createSandboxEnrollment(client.db, {
+          accountId,
+          workspaceId: workspaceId!,
+          enrollmentId: crypto.randomUUID(),
+          sandboxGroupId: session.sandboxGroupId,
+          hasDisplay: false,
+          workspaceRoot: "/workspace",
+        })
+      : await createEnrollment(client.db, {
+          accountId,
+          workspaceId: workspaceId!,
+          pubkey: `ed25519:${id}`,
+        });
+  await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
+  const commandId = crypto.randomUUID();
+  const opId = `op-${commandId}`;
+  const recorded = await recordAbandonedDirectConnectedMachineCommand(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    sessionId: session.id,
+    commandId,
+    controlWorkspaceId: workspaceId!,
+    enrollmentId: enrollment.id,
+    connectionInstanceId: "launch",
+    opId,
+    command: "sleep 900",
+  });
+  expect(recorded.state).toBe("stopping");
+  const stored = async () =>
+    (await shared.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+  const due = async () =>
+    shared.admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z'::timestamptz,reconcile_claim_id=null,reconcile_claimed_at=null where id=${commandId}`;
+  return {
+    accountId,
+    workspaceId: workspaceId!,
+    session,
+    enrollment,
+    commandId,
+    opId,
+    stored,
+    due,
+  };
+}
+
+test("a command abandoned when its compute sandbox's VM restarted settles through the reconciler without a wake", async () => {
+  const fixture = await abandonedCommandFixture("sandbox");
+  // The VM crashed and booted fresh on its disk: a new agent process holds
+  // the sandbox's connection, and the old one, with its operation, is gone.
+  await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.enrollment.id}`;
+  const rpc = noRunnerRpc();
+  await fixture.due();
+  await reconcile(client.db, settings, observability, bus, rpc);
+  const settled = await fixture.stored();
+  expect(settled.state).toBe("lost");
+  expect(settled.settlement_reason).toBe("op_connection_replaced");
+  expect(settled.exit_code).toBeNull();
+  // Nothing was sent: no message woke the sandbox for it.
+  expect(rpc.requests()).toBe(0);
+  await parkSession(fixture.session.id);
+});
+
+test("a command abandoned while its runner was unreachable is stopped when that exact runner answers again", async () => {
+  const fixture = await abandonedCommandFixture("machine");
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    workspaceId: fixture.workspaceId,
+    agentId: fixture.enrollment.id,
+    connectionInstanceId: "launch",
+    transport,
+  });
+  runner.script(fixture.opId, { frames: [], live: true, holdUntilCancel: true });
+  const subject = subjectFor(fixture.workspaceId, fixture.enrollment.id, "launch");
+  await runner.request(
+    subject,
+    {
+      requestId: fixture.opId,
+      epoch: 0,
+      op: {
+        $case: "opStart",
+        opStart: {
+          op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["sleep", "900"] }) },
+          windowBytes: "65536",
+          deadlineMs: "0",
+          originId: fixture.session.id,
+        },
+      },
+    },
+    { timeoutMs: 1000 },
+  );
+  // Old -> new -> old: while another process held the connection, the old
+  // runner kept its operation. While it does not answer, the stop waits.
+  let answering = false;
+  const delivered: string[] = [];
+  const rpc: ControlRpc = {
+    request: async (target, request, options) => {
+      if (!answering || target !== subject) {
+        throw new SelfhostedControlError({
+          message: "timed out",
+          code: ErrorCode.ERROR_CODE_TIMEOUT,
+          reason: "timeout",
+          retryable: true,
+        });
+      }
+      delivered.push(request.op?.$case ?? "none");
+      return await runner.request(target, request, options);
+    },
+  };
+  const stopBus = {
+    ...bus,
+    getOpStreamConnection: () => opStreamConnectionFor(transport),
+  } as Parameters<typeof reconcile>[3];
+  await fixture.due();
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect((await fixture.stored()).state).toBe("stopping");
+  expect(delivered).toEqual([]);
+  // The old runner holds the connection again and answers: the stop reaches it.
+  answering = true;
+  await fixture.due();
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(delivered[0]).toBe("opCancel");
+  expect(delivered).not.toContain("opStart");
+  const settled = await fixture.stored();
+  expect(settled.state).not.toBe("running");
+  expect(settled.state).not.toBe("stopping");
+  await parkSession(fixture.session.id);
+});
+
+test("a request to a replaced connection ends without a wake when another process records the new one", async () => {
+  // Two processes share only the database: this one holds a request for the
+  // sandbox's old agent connection, and another (the gateway pod where the
+  // new agent's session opened) records the new connection over its own
+  // database connection.
+  const fixture = await abandonedCommandFixture("sandbox");
+  try {
+    const oldSubject = subjectFor(fixture.workspaceId, fixture.enrollment.id, "launch");
+    const wakes: string[] = [];
+    const connectionCurrent = agentConnectionCurrent(client.db);
+    let held = 0;
+    const connection: NatsRequestConnection = {
+      supportsHeaders: true,
+      async request(subject, payload, opts) {
+        const request = ControlRequest.decode(payload);
+        if (request.op?.$case === "ping") {
+          return {
+            data: ControlResponse.encode(
+              ControlResponse.fromPartial({
+                requestId: request.requestId,
+                result: { $case: "ping", ping: { nonce: request.op.ping.nonce } },
+              }),
+            ).finish(),
+            headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+          };
+        }
+        if ((await connectionCurrent(subject.split(".replay.")[0]!)) === false) {
+          throw Object.assign(new Error("503"), { code: "503" });
+        }
+        // The host holds a request for an agent that no longer answers.
+        held += 1;
+        await Bun.sleep(Math.min(opts.timeout, 4_000));
+        throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+      },
+    };
+    const rpc = new NatsControlRpc(async () => connection, {
+      connectionCurrent,
+      onNoResponders: wakeComputeSandboxOnNoResponders({
+        control: {
+          wake: async (sandboxId) => {
+            wakes.push(sandboxId);
+            return {} as never;
+          },
+        },
+        sandboxOf: async () => "box-1",
+        connectionCurrent,
+      }),
+    });
+    const request = () =>
+      rpc.request(
+        oldSubject,
+        ControlRequest.fromPartial({
+          requestId: crypto.randomUUID(),
+          op: { $case: "opCancel", opCancel: { opId: fixture.opId } },
+        }),
+        { timeoutMs: 30_000 },
+      );
+    const startedAt = Date.now();
+    const inFlight = request();
+    await Bun.sleep(300);
+    await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.enrollment.id}`;
+    const answer = await inFlight;
+    expect(held).toBe(1);
+    expect(answer.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    // Within about a second of the new connection, not the 30 s timeout.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    // A later request to the old connection reaches no responder and ends at
+    // once; neither woke the idle sandbox.
+    const again = await request();
+    expect(again.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(held).toBe(1);
+    expect(wakes).toEqual([]);
+  } finally {
+    await parkSession(fixture.session.id);
+  }
+}, 20_000);
+
+test("recovery is always sent without waking, and a runner whose kind cannot be read is skipped with nothing recorded", async () => {
+  // Whatever the runner, recovering a running command never wakes: the
+  // transport does not depend on what the database says about the runner.
+  // When that read fails, the command waits for a later pass.
+  for (const kind of ["sandbox", "machine"] as const) {
+    const sessionId = await seed(2, kind);
+    try {
+      // A compute command is claimed only once its runner reported it.
+      if (kind === "sandbox")
+        await shared.admin`update session_background_commands set completion_notified_at=now() where session_id=${sessionId}`;
+      const sent: (string | undefined)[] = [];
+      const woken: string[] = [];
+      const connection: NatsRequestConnection = {
+        supportsHeaders: true,
+        async request(_subject, _payload, options) {
+          const noWake = options.headers?.[NO_WAKE_HEADER];
+          sent.push(noWake);
+          // The host answers a no-wake request for a sleeping sandbox itself.
+          if (noWake)
+            return {
+              data: new Uint8Array(0),
+              headers: {
+                get: (name: string) => (name === AGENT_UNANSWERED_HEADER ? "asleep" : ""),
+              },
+            };
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        },
+      };
+      const rpc = new NatsControlRpc(async () => connection, {
+        recoveryMs: 1_000,
+        onNoResponders: async (target) => {
+          woken.push(target);
+          return false;
+        },
+      });
+      let lookups = 0;
+      await reconcile(client.db, settings, observability, bus, rpc, async () => {
+        lookups++;
+        throw new Error("enrollment read failed");
+      });
+      expect(lookups).toBe(1);
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.filter((value) => value !== "1")).toEqual([]);
+      expect(woken).toEqual([]);
+      const rows = await shared.admin<
+        { last_reconcile_outcome: string | null; completion_notified_at: Date | null }[]
+      >`select last_reconcile_outcome, completion_notified_at from session_background_commands where session_id=${sessionId}`;
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        // Still only claimed: no outcome was recorded for it.
+        expect(row.last_reconcile_outcome).toBe("claimed");
+        expect(row.completion_notified_at === null).toBe(kind === "machine");
+      }
+    } finally {
+      await parkSession(sessionId);
+    }
+  }
+});
+
+test("the reaper sends nothing to a runner that reports its own inventory, in any pass", async () => {
+  // Every compute sandbox agent reports its inventory, and so does a
+  // Connected Machine whose live connection advertised op_release. Whatever
+  // the output's custody, the reaper rechecks the obligation in the database
+  // alone; the runner's own report, answered while it talks, collects and
+  // releases it. So no pass can reach a sleeping sandbox.
+  for (const [kind, captured] of [
+    ["sandbox", false],
+    ["sandbox", true],
+    ["machine", false],
+    ["machine", true],
+  ] as const) {
+    const fixture = await terminalOutputFixture({ kind });
+    try {
+      if (kind === "machine")
+        await shared.admin`update enrollments set agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
+      if (captured)
+        await recordConnectedCommandOutputConsumption(client.db, {
+          ...fixture.identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+      const before = await fixture.stored();
+      let attempts = before.reconcile_attempts;
+      for (let pass = 0; pass < 3; pass++) {
+        await fixture.due();
+        await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+        const row = await fixture.stored();
+        expect(row.reconcile_attempts).toBe(attempts + 1);
+        attempts = row.reconcile_attempts;
+        expect(row.last_reconcile_outcome).toBe("output_retry");
+        expect(row.reconcile_claim_id).toBeNull();
+        expect(row.reconcile_after.getTime()).toBeGreaterThan(Date.now());
+      }
+      expect(fixture.operations).toEqual([]);
+      expect(fixture.transport.decodedAcks()).toEqual([]);
+      const row = await fixture.stored();
+      expect(row.output_release_observed_at).toBeNull();
+      expect(row.output_unavailable_at).toBeNull();
+      expect(row.output_consumed_at?.getTime() ?? null).toBe(
+        before.output_consumed_at?.getTime() ?? null,
+      );
+    } finally {
+      await parkSession(fixture.identity.sessionId);
+    }
+  }
+});
+
+test("a retired compute sandbox's output obligation settles once, with no request", async () => {
+  for (const [change, captured] of [
+    ["revoked", false],
+    ["revoked", true],
+    ["replaced", false],
+    ["replaced", true],
+  ] as const) {
+    const fixture = await terminalOutputFixture({ kind: "sandbox" });
+    try {
+      if (captured)
+        await recordConnectedCommandOutputConsumption(client.db, {
+          ...fixture.identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+      if (change === "revoked")
+        await shared.admin`update enrollments set status='revoked',revoked_at=now(),connection_instance_id=null,connection_lease_expires_at=null where id=${fixture.identity.enrollmentId}`;
+      else
+        await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+      await fixture.due();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      const row = await fixture.stored();
+      if (captured) {
+        expect(row.output_release_observed_at).toBeInstanceOf(Date);
+        expect(row.output_unavailable_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_released");
+      } else {
+        expect(row.output_unavailable_at).toBeInstanceOf(Date);
+        expect(row.output_release_observed_at).toBeNull();
+        expect(row.last_reconcile_outcome).toBe("output_unavailable");
+      }
+      await fixture.due();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
+      expect(fixture.operations).toEqual([]);
+    } finally {
+      await parkSession(fixture.identity.sessionId);
+    }
+  }
+});
+
+test("a release recorded where the output was stored ends the obligation, only for its exact frontier", async () => {
+  const fixture = await terminalOutputFixture();
+  await recordConnectedCommandOutputConsumption(client.db, {
+    ...fixture.identity,
+    receipt: { exitSeq: "2", attachGeneration: "1" },
+    exitCode: 0,
+  });
+  await fixture.due();
+  const [claim] = (
+    await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      dueBefore: new Date(),
+      limit: 100,
+      claimTtlMs: 60_000,
+    })
+  ).filter((candidate) => candidate.commandId === fixture.identity.commandId);
+  expect(claim?.receipt).toEqual({ exitSeq: "2", attachGeneration: "1" });
+  // Another terminal frame is not this output: nothing is recorded.
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "3" }),
+  ).toBe(false);
+  expect((await fixture.stored()).output_release_observed_at).toBeNull();
+  // The runner's confirmed release is recorded once; twice changes nothing.
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
+  ).toBe(true);
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
+  ).toBe(false);
+  // A claim taken before the release no longer settles anything.
+  for (const outcome of ["published", "retry", "not_retained"] as const) {
+    expect(
+      await settleConnectedCommandOutputReleaseClaim(client.db, {
+        claim: claim!,
+        outcome,
+        retryAfterMs: 0,
+      }),
+    ).toBe(false);
+  }
+  const row = await fixture.stored();
+  expect(row.output_release_observed_at).toBeInstanceOf(Date);
+  expect(row.last_reconcile_outcome).toBe("output_released");
+  expect(row.reconcile_claim_id).toBeNull();
+  // Nothing is left for a later pass.
+  await fixture.due();
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  expect(fixture.operations).toEqual([]);
 });

@@ -4520,6 +4520,19 @@
       ]
     },
     {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
+      "sdk": [
+        "OpenGeniClient.updateFileVisibility"
+      ],
+      "request": [
+        "UpdateFileVisibilityRequest"
+      ],
+      "response": [
+        "UpdateFileVisibilityResponse"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/files/uploads",
       "sdk": [
@@ -6528,6 +6541,19 @@
         "SiteDataWriteRequest"
       ],
       "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+      "sdk": [
+        "OpenGeniClient.duplicateWorkspaceArtifact"
+      ],
+      "request": [
+        "DuplicateWorkspaceArtifactRequest"
+      ],
+      "response": [
+        "WorkspaceArtifactMutationResponse"
+      ]
     },
     {
       "method": "GET",
@@ -9823,6 +9849,7 @@
       "sandbox.operation.completed",
       "sandbox.operation.failed",
       "sandbox.operation.started",
+      "sandbox.recovery.selected",
       "session.agent.updated",
       "session.command.backgrounded",
       "session.command.finished",
@@ -10652,6 +10679,7 @@
         "$.filename": "string?",
         "$.id": "string!",
         "$.kind": "ref(ArtifactCatalogKind)!",
+        "$.ownedByViewer": "boolean?",
         "$.pinned": "boolean?",
         "$.sizeBytes": "integer?",
         "$.sourceSessionId": "string?",
@@ -12217,7 +12245,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
       }
     },
     "CancelBillingSubscriptionRequest": {
@@ -12736,7 +12764,7 @@
         "$.connectedMachines": "boolean?",
         "$.defaultModel": "string!",
         "$.defaultReasoningEffort": "ref(ReasoningEffort)!",
-        "$.defaultSandboxBackend": "enum!=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]",
+        "$.defaultSandboxBackend": "enum!=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]",
         "$.deploymentRevision": "string!",
         "$.documentationUrl": "string? null",
         "$.fileUploads": "object!",
@@ -13279,49 +13307,27 @@
         "$.updatedAt": "string! null"
       }
     },
-    "ComputerAction": {
+    "ComputerActionBatch": {
       "io": [
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
-        "$|type=semantic": "object",
-        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
-        "$|type=semantic.locator": "ref(ComputerLocator)!",
-        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
-        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
-        "$|type=semantic.value|0": "string",
-        "$|type=semantic.value|1": "number",
-        "$|type=semantic.value|2": "boolean",
-        "$|type=pointer": "object",
-        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
-        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
-        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
-        "$|type=pointer.clickCount|0": "const=[\"1\"]",
-        "$|type=pointer.clickCount|1": "const=[\"2\"]",
-        "$|type=pointer.continuationOfOperationId": "string?",
-        "$|type=pointer.deltaX": "number?",
-        "$|type=pointer.deltaY": "number?",
-        "$|type=pointer.endX": "number?",
-        "$|type=pointer.endY": "number?",
-        "$|type=pointer.frameId": "string!",
-        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
-        "$|type=pointer.x": "number!",
-        "$|type=pointer.y": "number!",
-        "$|type=keyboard": "object",
-        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
-        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
-        "$|type=keyboard.value": "string!",
-        "$|type=clipboard": "object",
-        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
-        "$|type=clipboard.text": "string?",
-        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
-        "$|type=focus": "object",
-        "$|type=focus.targetId": "string!",
-        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
-        "$|type=launch": "object",
-        "$|type=launch.applicationId": "string!",
-        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]"
+        "$": "object",
+        "$.actions": "array!",
+        "$.actions[]": "union=[\"type=keyboard\",\"type=semantic\"]",
+        "$.actions[]|type=semantic": "object",
+        "$.actions[]|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$.actions[]|type=semantic.locator": "ref(ComputerLocator)!",
+        "$.actions[]|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$.actions[]|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$.actions[]|type=semantic.value|0": "string",
+        "$.actions[]|type=semantic.value|1": "number",
+        "$.actions[]|type=semantic.value|2": "boolean",
+        "$.actions[]|type=keyboard": "object",
+        "$.actions[]|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$.actions[]|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$.actions[]|type=keyboard.value": "string!",
+        "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
     "ComputerActionReceipt": {
@@ -13371,12 +13377,58 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "ref(ComputerAction)!",
+        "$.action": "ref(ComputerActionRequestAction)!",
         "$.expectedFrameId": "string! null",
         "$.expectedObservationId": "string! null",
         "$.expectedTargetGeneration": "string!",
         "$.operationId": "string!",
         "$.targetId": "string!"
+      }
+    },
+    "ComputerActionRequestAction": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"type=batch\",\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
+        "$|type=semantic": "object",
+        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$|type=semantic.locator": "ref(ComputerLocator)!",
+        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$|type=semantic.value|0": "string",
+        "$|type=semantic.value|1": "number",
+        "$|type=semantic.value|2": "boolean",
+        "$|type=pointer": "object",
+        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
+        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
+        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
+        "$|type=pointer.clickCount|0": "const=[\"1\"]",
+        "$|type=pointer.clickCount|1": "const=[\"2\"]",
+        "$|type=pointer.continuationOfOperationId": "string?",
+        "$|type=pointer.deltaX": "number?",
+        "$|type=pointer.deltaY": "number?",
+        "$|type=pointer.endX": "number?",
+        "$|type=pointer.endY": "number?",
+        "$|type=pointer.frameId": "string!",
+        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
+        "$|type=pointer.x": "number!",
+        "$|type=pointer.y": "number!",
+        "$|type=keyboard": "object",
+        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$|type=keyboard.value": "string!",
+        "$|type=clipboard": "object",
+        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
+        "$|type=clipboard.text": "string?",
+        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
+        "$|type=focus": "object",
+        "$|type=focus.targetId": "string!",
+        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
+        "$|type=launch": "object",
+        "$|type=launch.applicationId": "string!",
+        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]",
+        "$|type=batch": "ref(ComputerActionBatch)"
       }
     },
     "ComputerClipboard": {
@@ -13591,6 +13643,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.actionBatches": "boolean?",
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
@@ -14322,6 +14375,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.access": "ref(FileAccess)?",
         "$.expiresAt": "string!",
         "$.fileId": "string!",
         "$.maxSizeBytes": "integer!",
@@ -15409,6 +15463,16 @@
         "$.source": "ref(TimelineAnnotationSource)!"
       }
     },
+    "DuplicateWorkspaceArtifactRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.idempotencyKey": "string!",
+        "$.title": "string?"
+      }
+    },
     "EditSessionQueueItemRequest": {
       "io": [
         "input"
@@ -15756,18 +15820,30 @@
         "$.expiresAt": "string!"
       }
     },
+    "FileAccess": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.visibility": "ref(SessionVisibility)!",
+        "$.whoCanOpen": "string!"
+      }
+    },
     "FileAsset": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "object",
+        "$.access": "ref(FileAccess)?",
         "$.bucket": "string!",
         "$.contentType": "string!",
         "$.createdAt": "string!",
         "$.filename": "string!",
         "$.id": "string!",
         "$.objectKey": "string!",
+        "$.ownerSubjectId": "string? null",
         "$.safeFilename": "string!",
         "$.scope": "ref(ConnectionOwnership)?",
         "$.sha256": "string! null",
@@ -19332,7 +19408,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
+        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
     "MachineMacPermissions": {
@@ -19422,12 +19498,24 @@
         "$": "enum=[\"\\\"consent_required\\\"\",\"\\\"display_unavailable\\\"\",\"\\\"enrolling\\\"\",\"\\\"offline\\\"\",\"\\\"online\\\"\",\"\\\"reconnecting\\\"\"]"
       }
     },
+    "MachineUpdateBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.count": "integer!",
+        "$.kind": "string!"
+      }
+    },
     "MachineUpdateState": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "object",
+        "$.blockers": "array?",
+        "$.blockers[]": "ref(MachineUpdateBlocker)",
         "$.completedAt": "string! null",
         "$.errorCode": "string! null",
         "$.expectedBinarySha256": "string! null",
@@ -20582,7 +20670,9 @@
       "shape": {
         "$": "object",
         "$.enabled": "boolean!",
-        "$.generation": "integer!"
+        "$.generation": "integer!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "OpenMachinePrivacySettingsRequest": {
@@ -22363,7 +22453,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.path": "string!"
+        "$.path": "string!",
+        "$.visibility": "ref(SessionVisibility)?"
       }
     },
     "PublishWorkspaceArtifactVersionRequest": {
@@ -23129,7 +23220,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
+        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
     "SandboxFileArtifactReceipt": {
@@ -23138,6 +23229,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.access": "ref(FileAccess)?",
         "$.artifact": "ref(RetainedArtifactReferenceSchema)!",
         "$.filename": "string!",
         "$.sandboxPath": "string!",
@@ -23162,9 +23254,13 @@
         "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
         "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
+        "$.freshWorkspaceAvailable": "boolean?",
+        "$.groupSessionCount": "integer?",
         "$.operationId": "string! null",
         "$.reason": "string! null",
+        "$.retryAvailable": "boolean?",
         "$.status": "enum!=[\"\\\"blocked\\\"\",\"\\\"consent_accepted\\\"\",\"\\\"eligible\\\"\",\"\\\"restored\\\"\",\"\\\"restoring\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.target": "ref(SandboxRecoveryTarget)?",
         "$.version": "const!=[\"1\"]"
       }
     },
@@ -23173,10 +23269,20 @@
         "input"
       ],
       "shape": {
-        "$": "object",
-        "$.acceptHistoricalCheckpoint": "const!=[\"true\"]",
-        "$.operationId": "string!",
-        "$.selection": "ref(SandboxRecoverySelection)!"
+        "$": "union=[\"acceptHistoricalCheckpoint=true\",\"action=continue_fresh\",\"action=retry\"]",
+        "$|acceptHistoricalCheckpoint=true": "object",
+        "$|acceptHistoricalCheckpoint=true.acceptHistoricalCheckpoint": "const!=[\"true\"]",
+        "$|acceptHistoricalCheckpoint=true.operationId": "string!",
+        "$|acceptHistoricalCheckpoint=true.selection": "ref(SandboxRecoverySelection)!",
+        "$|action=retry": "object",
+        "$|action=retry.action": "const!=[\"\\\"retry\\\"\"]",
+        "$|action=retry.operationId": "string!",
+        "$|action=retry.target": "ref(SandboxRecoveryTarget)!",
+        "$|action=continue_fresh": "object",
+        "$|action=continue_fresh.acceptEmptyWorkspace": "const!=[\"true\"]",
+        "$|action=continue_fresh.action": "const!=[\"\\\"continue_fresh\\\"\"]",
+        "$|action=continue_fresh.operationId": "string!",
+        "$|action=continue_fresh.target": "ref(SandboxRecoveryTarget)!"
       }
     },
     "SandboxRecoveryResponse": {
@@ -23208,6 +23314,26 @@
         "$.sandboxGroupId": "string!",
         "$.sessionId": "string!",
         "$.version": "const!=[\"1\"]",
+        "$.workspaceGeneration": "integer!"
+      }
+    },
+    "SandboxRecoveryTarget": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveGeneration": "integer! null",
+        "$.authorityEpoch": "integer!",
+        "$.leaseEpoch": "integer!",
+        "$.leaseId": "string!",
+        "$.restoreCompletedAt": "string! null",
+        "$.restoreStatus": "string!",
+        "$.revision": "string! null",
+        "$.routeEpoch": "integer!",
+        "$.sandboxGroupId": "string!",
+        "$.sessionId": "string!",
         "$.workspaceGeneration": "integer!"
       }
     },
@@ -23427,6 +23553,7 @@
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -23463,6 +23590,7 @@
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -24100,7 +24228,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -27426,6 +27554,24 @@
         "$.subjectId": "string!"
       }
     },
+    "UpdateFileVisibilityRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.visibility": "ref(SessionVisibility)!"
+      }
+    },
+    "UpdateFileVisibilityResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.file": "ref(FileAsset)!"
+      }
+    },
     "UpdateGitHubActionPolicyRequest": {
       "io": [
         "input"
@@ -27507,7 +27653,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.enabled": "boolean!"
+        "$.enabled": "boolean!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "UpdateOrganizationAgentAdminAccessRequest": {
@@ -28079,6 +28227,7 @@
         "$.busySend": "ref(WorkspaceBusySend)?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
+        "$.defaultExecutionTarget": "ref(WorkspaceDefaultExecutionTarget)? null",
         "$.defaultSandboxImage": "string? null",
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
@@ -29227,6 +29376,19 @@
         "$.expiresAt": "string! null",
         "$.operationId": "string!",
         "$.remaining": "integer!"
+      }
+    },
+    "WorkspaceDefaultExecutionTarget": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=machine\",\"kind=managed\"]",
+        "$|kind=managed": "object",
+        "$|kind=managed.kind": "const!=[\"\\\"managed\\\"\"]",
+        "$|kind=machine": "object",
+        "$|kind=machine.kind": "const!=[\"\\\"machine\\\"\"]",
+        "$|kind=machine.targetSandboxId": "string!"
       }
     },
     "WorkspaceGatewayCustomModel": {
@@ -30668,6 +30830,7 @@
       "ComposerDraft": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",
@@ -30829,6 +30992,7 @@
       "DocumentStatus": "type",
       "DocumentVisibility": "type",
       "DraftTimelineAnnotation": "type",
+      "DuplicateWorkspaceArtifactRequest": "type",
       "EditableArtifactListResource": "type",
       "EditableArtifactMaterializationFormat": "type",
       "EditableArtifactMaterializationJobResource": "type",
@@ -30869,6 +31033,7 @@
       "FeedbackSubmissionResponse": "type",
       "FetchLike": "type",
       "FetchResponse": "type",
+      "FileAccess": "type",
       "FileAsset": "type",
       "FileDownloadUrlResponse": "type",
       "FileListRequest": "type",
@@ -31564,6 +31729,7 @@
       "SandboxRecoveryRequest": "type",
       "SandboxRecoveryResponse": "type",
       "SandboxRecoverySelection": "type",
+      "SandboxRecoveryTarget": "type",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "SaveAgentLearningSettingsRequest": "type",
       "SaveComposerDraftRequest": "type",
@@ -31940,6 +32106,8 @@
       "UpdateCompanyProfileRequest": "type",
       "UpdateConnectionRequest": "type",
       "UpdateConnectorToolPermissionsRequest": "type",
+      "UpdateFileVisibilityRequest": "type",
+      "UpdateFileVisibilityResponse": "type",
       "UpdateGitHubActionPolicyRequest": "type",
       "UpdateInboxItemInput": "type",
       "UpdateKnowledgeMemoryRequest": "type",
@@ -32780,6 +32948,7 @@
       "BrowserWorkingCopyRefusal": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",
@@ -33417,6 +33586,7 @@
       "BuiltInTurnSummaryFacetId": "type",
       "CapturedFileUnavailableError": "value",
       "CapturedFileUnavailableReason": "type",
+      "chainLinkRenderers": "value",
       "chainLinkResolvers": "value",
       "ChatComposer": "value",
       "ChatComposerMessages": "type",
@@ -33705,7 +33875,9 @@
       "OpenGeniChatLabels": "type",
       "OpenGeniChatProps": "type",
       "OpenGeniContextValue": "type",
+      "OpenGeniHostLink": "type",
       "OpenGeniLinkProvider": "value",
+      "OpenGeniLinkRenderer": "type",
       "OpenGeniLinkResolution": "type",
       "OpenGeniLinkResolver": "type",
       "OpenGeniLinkTarget": "type",
@@ -33826,6 +33998,7 @@
       "SESSION_EVENT_BROWSER_PENDING_MAX_COUNT": "value",
       "SESSION_STATUS_META": "value",
       "sessionAdmissionBlocked": "value",
+      "SessionAttentionClientLike": "type",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
       "SessionCapabilityAccessPlan": "type",
@@ -33971,6 +34144,7 @@
       "UseNewConversationOptions": "type",
       "useOpenGeni": "value",
       "useOpenGeniClient": "value",
+      "useOpenGeniLinkRenderer": "value",
       "useOpenGeniLinkResolver": "value",
       "useOpenGeniLocale": "value",
       "useOpenGeniText": "value",
@@ -34037,6 +34211,8 @@
       "UseSessionModelAccountOptions": "type",
       "UseSessionModelAccountResult": "type",
       "UseSessionOptions": "type",
+      "useSessionReadAcknowledgement": "value",
+      "UseSessionReadAcknowledgementInput": "type",
       "UseSessionResult": "type",
       "useSessionSecrets": "value",
       "useSlashCommands": "value",
@@ -34932,6 +35108,7 @@
       "readClientConfig": "value",
       "ReasoningItem": "type",
       "SandboxItem": "type",
+      "SessionAttentionClientLike": "type",
       "SessionClientLike": "type",
       "SessionConversationController": "type",
       "SessionEventsConnectionState": "type",
@@ -34983,6 +35160,8 @@
       "UseSessionMcpApprovalPolicyOptions": "type",
       "UseSessionMcpApprovalPolicyResult": "type",
       "UseSessionOptions": "type",
+      "useSessionReadAcknowledgement": "value",
+      "UseSessionReadAcknowledgementInput": "type",
       "UseSessionResult": "type",
       "useTurnQueue": "value",
       "UseTurnQueueOptions": "type",
@@ -34996,6 +35175,7 @@
       "sessionGoalStateLabel": "value"
     },
     "@opengeni/react/session-attention-model": {
+      "readAcknowledgementFrontier": "value",
       "SESSION_ATTENTION_EVENT_TYPES": "value",
       "sessionAttentionReadThroughSequence": "value"
     },
@@ -35065,6 +35245,7 @@
       "ArtifactLabelsProvider": "value",
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
       "BuiltInTurnSummaryFacetId": "type",
+      "chainLinkRenderers": "value",
       "chainLinkResolvers": "value",
       "CreatedConversation": "type",
       "createDefaultToolRegistry": "value",
@@ -35101,7 +35282,9 @@
       "OpenGeniChatCreateOptions": "type",
       "OpenGeniChatLabels": "type",
       "OpenGeniChatProps": "type",
+      "OpenGeniHostLink": "type",
       "OpenGeniLinkProvider": "value",
+      "OpenGeniLinkRenderer": "type",
       "OpenGeniLinkResolution": "type",
       "OpenGeniLinkResolver": "type",
       "OpenGeniLinkTarget": "type",
@@ -35160,6 +35343,7 @@
       "TurnSummaryOptions": "type",
       "useNewConversation": "value",
       "UseNewConversationOptions": "type",
+      "useOpenGeniLinkRenderer": "value",
       "useOpenGeniLinkResolver": "value",
       "UserMessageBody": "value",
       "UserMessageBodyProps": "type",
@@ -35242,9 +35426,13 @@
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
       "askPresentation": "value",
+      "BUILT_IN_TOOL_STEP_NAMES": "value",
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
       "BUILT_IN_TURN_SUMMARY_FACETS": "value",
+      "builtInToolStep": "value",
+      "builtInToolStepLabel": "value",
       "BuiltInTurnSummaryFacetId": "type",
+      "callStepPhase": "value",
       "clusterIsSettled": "value",
       "compactedLandmarkCount": "value",
       "createTurnSummaryContext": "value",
@@ -35283,6 +35471,7 @@
       "parseToolArgs": "value",
       "pathBasename": "value",
       "pathDirname": "value",
+      "plainToolRow": "value",
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
       "QUESTION_NAV_HIDDEN_PX": "value",
@@ -35333,8 +35522,10 @@
       "timelineGroupContainsPresentedImage": "value",
       "timelineGroupIndexAtSequence": "value",
       "timelineGroupSequences": "value",
+      "TOOL_STEP_IDS": "value",
       "ToolBody": "type",
       "ToolChip": "type",
+      "ToolDetails": "type",
       "toolDisplayName": "value",
       "ToolIconKind": "type",
       "ToolIconTone": "type",
@@ -35343,6 +35534,10 @@
       "ToolPreview": "type",
       "toolRowPresentation": "value",
       "ToolRowPresentation": "type",
+      "ToolStepId": "type",
+      "toolStepLabel": "value",
+      "toolStepPhase": "value",
+      "ToolStepPhase": "type",
       "truncatePreview": "value",
       "tryParseJson": "value",
       "TurnGroup": "type",
@@ -35888,6 +36083,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -36366,6 +36562,7 @@
       "updateCompanyProfileAgentPolicy",
       "updateConnection",
       "updateConnectorToolPermissions",
+      "updateFileVisibility",
       "updateGitHubActionPolicy",
       "updateGoal",
       "updateInboxItem",
@@ -36598,6 +36795,7 @@
       "downloadCatalogAsset",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -37069,6 +37267,7 @@
       "updateCompanyProfileAgentPolicy",
       "updateConnection",
       "updateConnectorToolPermissions",
+      "updateFileVisibility",
       "updateGitHubActionPolicy",
       "updateGoal",
       "updateInboxItem",
@@ -37316,6 +37515,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -37815,6 +38015,7 @@
       "updateConnectorToolPermissions",
       "updateExternalIdentityMembership",
       "updateExternalWorkspaceMember",
+      "updateFileVisibility",
       "updateGitHubActionPolicy",
       "updateGoal",
       "updateInboxItem",
@@ -38892,6 +39093,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -40394,6 +40598,9 @@
       "updateExternalWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"UpdateExternalWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/external-identities\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"UpdateExternalWorkspaceMemberResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/external-identities\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateFileVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateGitHubActionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateGitHubActionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitHubActionPolicyActorState\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41319,6 +41526,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42758,6 +42968,9 @@
       "updateConnectorToolPermissions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateConnectorToolPermissionsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"saved\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateFileVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateGitHubActionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateGitHubActionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitHubActionPolicyActorState\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43543,6 +43756,9 @@
       ],
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44921,6 +45137,9 @@
       ],
       "updateConnectorToolPermissions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateConnectorToolPermissionsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"saved\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateFileVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateGitHubActionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateGitHubActionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitHubActionPolicyActorState\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -45916,6 +46135,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47332,6 +47554,9 @@
       ],
       "updateConnectorToolPermissions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateConnectorToolPermissionsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"saved\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateFileVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateGitHubActionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateGitHubActionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitHubActionPolicyActorState\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48109,6 +48334,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49525,6 +49753,9 @@
       ],
       "updateConnectorToolPermissions": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateConnectorToolPermissionsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"saved\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateFileVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateFileVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateGitHubActionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateGitHubActionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitHubActionPolicyActorState\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

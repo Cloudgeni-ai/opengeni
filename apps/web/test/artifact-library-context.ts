@@ -85,6 +85,25 @@ const siteVersion = {
 };
 export const client = {
   tools: { forWorkspace: () => ({}) },
+  // New artifact puts its prompt in the new-chat composer draft; the fixture
+  // records the drafted text.
+  async getNewSessionDraft(_workspaceId: string) {
+    return {
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: null,
+      reasoningEffort: null,
+      latencyMode: null,
+      options: {},
+      revision: fixtureActivity.prompts.length,
+    };
+  },
+  async saveNewSessionDraft(_workspaceId: string, draft: { text: string }) {
+    fixtureActivity.prompts.push(draft.text);
+    return { ...draft, revision: fixtureActivity.prompts.length };
+  },
   async updateArtifactPin(
     _workspaceId: string,
     kind: ArtifactCatalogItem["kind"],

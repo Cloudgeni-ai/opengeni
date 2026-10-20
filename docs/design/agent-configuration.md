@@ -247,8 +247,8 @@ Capability modules (current size in characters):
   read-only copies.
 - **machines** (Connected Machine target): host-native paths and link examples.
 - **artifacts** (artifacts capability and an Opengeni renderer): document artifact
-  delivery via `opengeni-documents`, `artifact:` links and previews, publication,
-  Sites and inline visuals (`opengeni-visualize`, `opengeni-sites`), goal
+  delivery via `documents`, `artifact:` links and previews, publication,
+  Sites and inline visuals (`visualize`, `sites`), goal
   deliverable evidence (~3.5k).
 - **goals**: goal loop from CORE (~0.5k) plus goal-deliverable rules.
 - **subagents**: child creation, `session_wait`, `session_events`, supervision and

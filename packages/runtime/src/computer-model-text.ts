@@ -450,24 +450,115 @@ export function computerOpenText(output: {
   return `${computerSessionLine(output.session)}\n${computerTargetsText(output.targets)}`;
 }
 
-export function computerActionText(receipt: {
-  operationId: string;
-  targetId: string;
-  state: string;
-  error: ({ code: string; message: string; retryable: boolean } & Record<string, unknown>) | null;
-  observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
-}): string {
+type ComputerTextError =
+  | ({ code: string; message: string; retryable: boolean } & Record<string, unknown>)
+  | null;
+
+function computerErrorLine(error: NonNullable<ComputerTextError>): string {
+  const { code, message, retryable, ...details } = error;
+  return `Error ${code}${retryable ? " (retryable)" : ""}: ${message}${
+    Object.keys(details).length ? ` ${JSON.stringify(details)}` : ""
+  }`;
+}
+
+export function computerActionText(
+  receipt:
+    | {
+        type?: undefined;
+        operationId: string;
+        targetId: string;
+        state: string;
+        error: ComputerTextError;
+        observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+      }
+    | {
+        type: "batch";
+        targetId: string;
+        actionCount: number;
+        steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
+        observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+        observationPrecedesStop?: boolean | undefined;
+      },
+): string {
+  if (receipt.type === "batch") return computerBatchText(receipt);
   const lines = [
     `Action ${receipt.state} on ${receipt.targetId} (operation ${receipt.operationId}).`,
   ];
-  if (receipt.error) {
-    const { code, message, retryable, ...details } = receipt.error;
+  if (receipt.error) lines.push(computerErrorLine(receipt.error));
+  if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
-      `Error ${code}${retryable ? " (retryable)" : ""}: ${message}${
-        Object.keys(details).length ? ` ${JSON.stringify(details)}` : ""
-      }`,
+      `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
     );
+  if (receipt.observation) lines.push(computerObservationText(receipt.observation));
+  return lines.join("\n");
+}
+
+function actionRange(first: number, last: number): string {
+  return first === last ? `Action ${first}` : `Actions ${first} to ${last}`;
+}
+
+function computerBatchText(receipt: {
+  targetId: string;
+  actionCount: number;
+  steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
+  observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+  observationPrecedesStop?: boolean | undefined;
+}): string {
+  const last = receipt.steps.at(-1);
+  const lines: string[] = [];
+  const opened =
+    last?.state === "completed" &&
+    receipt.observation &&
+    receipt.observation.target.id !== receipt.targetId
+      ? receipt.observation.target.id
+      : null;
+  if (last && last.state === "completed" && receipt.steps.length === receipt.actionCount) {
+    lines.push(`Batch completed on ${receipt.targetId}: ${plural(receipt.actionCount, "action")}.`);
+  } else if (opened) {
+    const at = receipt.steps.length;
+    lines.push(
+      `Batch stopped on ${receipt.targetId} at action ${at} of ${receipt.actionCount}: action ${at} completed (operation ${last!.operationId}) and opened another window.`,
+    );
+    if (at > 1) lines.push(`${actionRange(1, at - 1)} completed.`);
+    lines.push(
+      `${actionRange(at + 1, receipt.actionCount)} ${
+        at + 1 === receipt.actionCount ? "was" : "were"
+      } not run.`,
+    );
+  } else {
+    const at = receipt.steps.length;
+    lines.push(
+      `Batch stopped on ${receipt.targetId} at action ${at} of ${receipt.actionCount}: action ${at} ${
+        last?.state ?? "did not run"
+      } (operation ${last?.operationId ?? "none"}).`,
+    );
+    if (last?.error) lines.push(computerErrorLine(last.error));
+    if (at > 1) lines.push(`${actionRange(1, at - 1)} completed.`);
+    if (at < receipt.actionCount) {
+      lines.push(
+        `${actionRange(at + 1, receipt.actionCount)} ${
+          at + 1 === receipt.actionCount ? "was" : "were"
+        } not run.`,
+      );
+    }
+    // Only a definite failure is known not to have acted.
+    const uncertain = last !== undefined && last.state !== "failed";
+    if (receipt.observationPrecedesStop) {
+      lines.push(
+        `The state below is from before action ${at}${
+          uncertain ? ", which may have taken effect" : ""
+        }; observe the window again before sending it or later actions.`,
+      );
+    } else if (uncertain) {
+      lines.push(
+        `Action ${at} may have taken effect: check the state below before sending it or later actions again.`,
+      );
+    }
   }
+  if (opened)
+    lines.push(
+      `Action ${receipt.steps.length} opened ${opened}; act on that target with the observation below.`,
+    );
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }

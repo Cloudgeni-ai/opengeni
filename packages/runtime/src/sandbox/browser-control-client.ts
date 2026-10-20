@@ -541,9 +541,20 @@ export class BrowserControlUnsupportedError extends Error {
 function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this Opengeni release`,
+    message: `browser controller does not support ${feature}; update the placement's controller image to match this release`,
     retryable: false,
   });
+}
+
+/** The controller's route table rejected a request before dispatch: its image
+ *  predates this route. Distinct from a missing target or session. */
+function isLegacyRouteMiss(error: unknown): boolean {
+  return (
+    error instanceof BrowserControlRequestError &&
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    error.error.message === "route not found"
+  );
 }
 
 /** Install one placement-stable admin credential and start the pinned controller. */
@@ -1905,17 +1916,38 @@ export class BrowserControlSessionClient {
         }),
       );
     } catch (error) {
-      // An older controller can refuse the new route before dispatch. Never
-      // fall back to another mutation after an uncertain open outcome.
+      // A controller image older than this release has no such route. Its
+      // route table rejects the request before dispatch, so no tab was opened
+      // and the original open route is safe to use instead. Every other
+      // failure, including an uncertain open outcome, is never re-sent.
+      if (!isLegacyRouteMiss(error)) throw error;
+      const opened = await this.openTarget(url);
       if (
-        error instanceof BrowserControlRequestError &&
-        error.status === 404 &&
-        error.error.code === "resource_not_found" &&
-        error.error.message === "route not found"
+        opened.target.browserSessionId !== this.reference.browserSessionId ||
+        opened.target.controllerGeneration !== this.reference.controllerGeneration
       ) {
-        throw browserControllerCompatibilityError("metadata-only tab opening");
+        throw new BrowserControlProtocolError(
+          "browser controller opened a tab for another session binding",
+        );
       }
-      throw error;
+      let targets: BrowserTargetValue[];
+      try {
+        targets = await this.listTargets();
+      } catch {
+        // The tab is open. A raw inventory error (for example a missing or
+        // re-tokened session) would let a caller's recovery replay the open.
+        throw new BrowserControlRequestError(409, {
+          code: "outcome_unknown",
+          message:
+            "browser tab was opened, but the tab list could not be read; list tabs before opening it again",
+          retryable: false,
+        });
+      }
+      response = {
+        browserSessionId: this.reference.browserSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targets,
+      };
     }
     if (
       response.browserSessionId !== this.reference.browserSessionId ||
@@ -2024,12 +2056,7 @@ export class BrowserControlSessionClient {
     } catch (error) {
       // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
       // route response from a missing target/session; neither is safe to retry.
-      if (
-        error instanceof BrowserControlRequestError &&
-        error.status === 404 &&
-        error.error.code === "resource_not_found" &&
-        error.error.message === "route not found"
-      ) {
+      if (isLegacyRouteMiss(error)) {
         throw browserControllerCompatibilityError("focused DOM reads");
       }
       throw error;

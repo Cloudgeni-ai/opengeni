@@ -19,6 +19,9 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use opengeni_agent_engine::registry::LostReason;
+use opengeni_agent_engine::OpId;
+
 use crate::engine::HandedOverOp;
 
 /// `<manifest path>#<nonce>#<descriptor>,...`, set only for the successor
@@ -40,6 +43,61 @@ pub struct HandoverManifest {
     pub connection_instance_id: String,
     /// The live jobs.
     pub ops: Vec<HandedOverOp>,
+    /// Ops that are gone (released, evicted or lost to a restart) whose
+    /// starts Opengeni may still deliver: the successor answers those starts
+    /// instead of running the ops again.
+    #[serde(default)]
+    pub lost_markers: Vec<CarriedMarker>,
+}
+
+/// Why a carried op is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CarriedReason {
+    /// Its stored result was released.
+    Released,
+    /// Retention bounds dropped a result that was never final-acked.
+    Evicted,
+    /// It did not survive an earlier runner restart.
+    RunnerRestarted,
+}
+
+/// One gone op's marker, carried with the time it is still kept for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedMarker {
+    /// The scoped op id.
+    pub op_id: String,
+    /// Why the op is gone.
+    pub reason: CarriedReason,
+    /// How much longer the successor keeps it.
+    pub remaining_ms: u64,
+}
+
+impl From<(OpId, LostReason, u64)> for CarriedMarker {
+    fn from((op_id, reason, remaining_ms): (OpId, LostReason, u64)) -> Self {
+        Self {
+            op_id: op_id.as_str().to_string(),
+            reason: match reason {
+                LostReason::Released => CarriedReason::Released,
+                LostReason::Evicted => CarriedReason::Evicted,
+                LostReason::RunnerRestarted => CarriedReason::RunnerRestarted,
+            },
+            remaining_ms,
+        }
+    }
+}
+
+impl CarriedMarker {
+    /// The marker as the registry keeps it.
+    #[must_use]
+    pub fn into_parts(self) -> (OpId, LostReason, u64) {
+        let reason = match self.reason {
+            CarriedReason::Released => LostReason::Released,
+            CarriedReason::Evicted => LostReason::Evicted,
+            CarriedReason::RunnerRestarted => LostReason::RunnerRestarted,
+        };
+        (OpId::new(self.op_id), reason, self.remaining_ms)
+    }
 }
 
 impl HandoverManifest {
@@ -243,6 +301,11 @@ mod tests {
             from_version: "0.0.0".into(),
             connection_instance_id: "instance".into(),
             ops: Vec::new(),
+            lost_markers: vec![CarriedMarker {
+                op_id: "scope:op-1".into(),
+                reason: CarriedReason::Released,
+                remaining_ms: 1_800_000,
+            }],
         };
         write_manifest(&path, &manifest).unwrap();
         #[cfg(unix)]

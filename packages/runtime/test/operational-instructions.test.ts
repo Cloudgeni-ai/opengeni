@@ -33,7 +33,9 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether Opengeni already provides the capability natively");
+    expect(guidance).toContain(
+      "check whether the workspace already provides the capability natively",
+    );
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );
@@ -165,7 +167,7 @@ describe("provider-neutral operational instructions", () => {
       "give a short summary and the artifact link in chat, not a full restatement",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Read the opengeni-documents Skill and create the native document artifact before authoring",
+      "Read the documents Skill and create the native document artifact before authoring",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "including ones discovered after the goal was created",
@@ -510,12 +512,12 @@ describe("proportional effort", () => {
       videoGeneration: true,
     });
     const descriptions = new Map(index.map((entry) => [entry.name, entry.description]));
-    expect(descriptions.get("opengeni-sites")).toBeDefined();
-    expect(descriptions.get("opengeni-visualize")).toBeDefined();
+    expect(descriptions.get("sites")).toBeDefined();
+    expect(descriptions.get("visualize")).toBeDefined();
     for (const [name, description] of descriptions) {
       expect(description, name).not.toMatch(/proactively|even when the user doesn't name/i);
     }
-    expect(descriptions.get("opengeni-sites")).toContain("Use when the user asks");
-    expect(descriptions.get("opengeni-visualize")).toContain("Use when the user asks");
+    expect(descriptions.get("sites")).toContain("Use when the user asks");
+    expect(descriptions.get("visualize")).toContain("Use when the user asks");
   });
 });

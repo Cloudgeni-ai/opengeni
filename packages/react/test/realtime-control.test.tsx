@@ -1067,7 +1067,7 @@ describe("ordinary session Codex realtime control", () => {
     const failed: SessionRealtimeControllerSnapshot = {
       ...idle,
       status: "error",
-      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+      error: "Voice is temporarily unavailable. Try another voice model.",
     };
     const render = async (snapshot: SessionRealtimeControllerSnapshot) =>
       await act(async () => {
@@ -1094,7 +1094,7 @@ describe("ordinary session Codex realtime control", () => {
       container.querySelector<HTMLButtonElement>('[data-testid="realtime-failure-reason"]');
     // Visible text, not only a tooltip or the model menu.
     expect(reason()?.textContent).toBe(
-      "Opengeni voice is temporarily unavailable. Try another voice model.",
+      "Voice is temporarily unavailable. Try another voice model.",
     );
     const start = container.querySelector<HTMLButtonElement>(
       '[data-testid="realtime-primary-action"]',

@@ -258,7 +258,7 @@ describe("a command that never started inside a tool call", () => {
       },
     });
     expect(String(settled.events[0]!.payload.error)).toBe(
-      "The sandbox isn't ready yet. Opengeni retried 5 times without success. Try again in a few minutes.",
+      "The sandbox isn't ready yet. Retried 5 times without success. Try again in a few minutes.",
     );
   });
 
@@ -297,7 +297,7 @@ describe("a command that never started inside a tool call", () => {
       retryable: false,
       automaticRecovery: "unavailable",
       error:
-        "The sandbox isn't ready yet. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.",
+        "The sandbox isn't ready yet. This turn couldn't be retried automatically. Try again, or send a message to continue.",
     });
     expect(String(settled.events[0]!.payload.error)).not.toContain("will retry");
   });

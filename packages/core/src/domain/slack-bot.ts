@@ -3,7 +3,6 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   OpenGeniSlackBotConnectionMetadata,
-  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   areOpenGeniSlackBotScopesAccepted,
   type AccessGrant,
   type ConnectionMetadata,
@@ -174,15 +173,9 @@ export function isAuthenticatedPersonAuthorization(
   );
 }
 
-/**
- * A scheduled task may post as the Opengeni workspace bot only to the one
- * Slack channel a person chose on the task. Choosing or changing that channel
- * therefore needs a signed-in person with `connections:write`, and the bot's
- * membership is verified at that moment. Keeping or clearing the existing
- * channel needs neither, so an agent editing other task fields cannot redirect
- * posts but also does not have to re-prove the person's choice. Clearing is the
- * safe direction and is never refused, even for a task that continues one chat.
- */
+/** Validate edits to a legacy saved destination. These fields remain a
+ * human-configured default for older clients, not a requirement for bot posting.
+ * Ordinary scheduled bot calls choose a destination using their selected tools. */
 export async function validateScheduledTaskSlackChannel(input: {
   grant: AccessGrant;
   authorization?: AccessGrantAuthorization | undefined;
@@ -208,7 +201,8 @@ export async function validateScheduledTaskSlackChannel(input: {
   }
   if (input.runMode === "existing_session") {
     throw new HTTPException(422, {
-      message: "Slack channel posting needs a task that starts its own chats",
+      message:
+        "Legacy Slack destination fields require a task that starts its own chats; existing chats use the bot tools directly",
     });
   }
   if (
@@ -242,24 +236,13 @@ export async function validateScheduledTaskSlackChannel(input: {
   });
 }
 
-/**
- * Add the bot posting tools to a generated scheduled run when, and only when,
- * a person chose the task's Slack channel. The deployment ceiling still
- * applies: an operator who disallowed these tools keeps them off.
- */
+/** Scheduling preserves the ordinary tool selection and deployment ceiling.
+ * A legacy saved destination is a default, never an additional capability. */
 export function withScheduledSlackBotPostingTools(
   tools: readonly FirstPartyMcpToolName[],
-  agentConfig: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId">,
+  _agentConfig: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId">,
   allowedTools: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
-  const posting = new Set<FirstPartyMcpToolName>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
-  // Ordinary-chat defaults include these tools, but an unattended occurrence
-  // must have its own person-chosen destination before receiving them.
-  const next = tools.filter((tool) => !posting.has(tool));
-  if (!agentConfig.slackBotConnectionId || !agentConfig.slackBotChannelId) return next;
   const allowed = new Set(allowedTools);
-  for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
-    if (allowed.has(tool) && !next.includes(tool)) next.push(tool);
-  }
-  return next;
+  return tools.filter((tool) => allowed.has(tool));
 }

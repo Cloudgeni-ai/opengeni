@@ -308,19 +308,17 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     );
   }, 60_000);
 
-  test("a human/API-created task keeps deployment defaults within the scheduled destination boundary", async () => {
+  test("a human/API-created task keeps the ordinary deployment defaults", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
     const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
     const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
-    const posting = new Set<string>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
-    // Ordinary-chat discovery is not a grant to post from an unattended task.
-    // Every other deployment default remains inherited, in the same order.
-    expect(session.firstPartyMcpTools).toEqual(defaults.filter((tool) => !posting.has(tool)));
-    for (const tool of posting) {
-      expect(defaults).toContain(tool);
-      expect(session.firstPartyMcpTools).not.toContain(tool);
+    // Scheduled work keeps the same capabilities as interactive work: every
+    // deployment default, including the bot posting tools, in the same order.
+    expect(session.firstPartyMcpTools).toEqual(defaults);
+    for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
+      expect(session.firstPartyMcpTools).toContain(tool);
     }
     expect(session.firstPartyMcpPermissions).toEqual([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]);
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
@@ -334,7 +332,7 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
   }, 60_000);
 
   test.each(["omitted", "connection only"] as const)(
-    "even an explicit creator selection cannot post with destination %s",
+    "an explicit creator selection is preserved with destination %s",
     async (destination) => {
       if (!available) return;
       const grant = await workspaceGrant();
@@ -351,19 +349,17 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
         connection ? { slackBotConnectionId: connection.id } : {},
       );
       const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
-      expect(session.firstPartyMcpTools).toEqual(["set_session_title"]);
+      expect(session.firstPartyMcpTools).toEqual(creatorPolicy.firstPartyMcpTools);
       expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
       expect(session.firstPartyMcpPermissions).toEqual(creatorPolicy.firstPartyMcpPermissions);
       expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual(session.firstPartyMcpPermissions);
       expect(accepted?.task.agentConfig.slackBotChannelId).toBeUndefined();
-      for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS)
-        expect(session.firstPartyMcpTools).not.toContain(tool);
     },
     60_000,
   );
 
   test.each(["allowed", "disallowed"] as const)(
-    "a chosen channel adds only destination-bound posting under the deployment ceiling: %s",
+    "a chosen channel never adds tools the creator excluded, whatever the ceiling: posting %s",
     async (posting) => {
       if (!available) return;
       const grant = await workspaceGrant();
@@ -382,7 +378,9 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
       const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
         allowedFirstPartyMcpTools: allowed,
       });
-      expect(session.firstPartyMcpTools).toEqual(allowed);
+      expect(session.firstPartyMcpTools).toEqual(["set_session_title"]);
+      for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS)
+        expect(session.firstPartyMcpTools).not.toContain(tool);
       expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
       expect(session.firstPartyMcpPermissions).toEqual(creatorPolicy.firstPartyMcpPermissions);
       expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual(session.firstPartyMcpPermissions);

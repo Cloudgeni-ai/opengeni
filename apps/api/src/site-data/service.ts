@@ -746,16 +746,21 @@ export function siteDataActor(grant: AccessGrant, subjectId: string | null): str
 const PERSONLESS_MANAGER_KINDS = new Set(["api_key", "configured_key", "service"]);
 
 /**
- * Managers may manage the Site's data, each with `artifacts:publish`: its
- * owner, a workspace admin, an agent acting for one of those people, or a
- * person-less workspace API key, configured key or service credential. A Site
- * without an owner is managed by its creator. An agent without a person (for
- * example a person-less scheduled task) is a viewer, whatever credential
- * started it. A member agent's origin surface does not change this role.
+ * Managers may manage the Site's data and publication, each with
+ * `artifacts:publish`: any person in the workspace who can see the Site (its
+ * owner, a workspace admin or any other member with artifact publishing), an
+ * agent acting for one of those people, or a person-less workspace API key,
+ * configured key or service credential. Sites are shared, versioned work, like
+ * every other artifact, so a teammate can keep a Site someone else started
+ * running. Who can see a Site is still its audience: an "Only me" Site never
+ * reaches anyone but its owner. An agent without a person (for example a
+ * person-less scheduled task) is a viewer, whatever credential started it. A
+ * member agent's origin surface does not change this role, and a Site frame
+ * always gets viewer reach.
  */
 export function siteDataRole(
   grant: AccessGrant,
-  site: Pick<SiteDataSite, "ownerSubjectId" | "createdBySubjectId">,
+  _site: Pick<SiteDataSite, "ownerSubjectId" | "createdBySubjectId">,
   subjectId: string | null,
 ): "manager" | "viewer" {
   if (!hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode)) return "viewer";
@@ -764,8 +769,7 @@ export function siteDataRole(
     return grant.principalKind !== undefined && PERSONLESS_MANAGER_KINDS.has(grant.principalKind)
       ? "manager"
       : "viewer";
-  const owner = site.ownerSubjectId ?? site.createdBySubjectId ?? null;
-  return owner !== null && owner === subjectId ? "manager" : "viewer";
+  return "manager";
 }
 
 export type SiteDataSurface = {

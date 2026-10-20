@@ -132,6 +132,22 @@ within seconds. There is no Queue choice beside Send and no Queue or Steer
 words; a message sent while the workstream is paused waits and shows as a
 waiting message. Add `offerQueue: true` to offer Queue beside Send again.
 
+An open conversation marks itself read for the signed-in person while they can
+see it: its timeline is on screen, the page is visible, the window is focused,
+and it shows the live end of the conversation. Each delivered reply, question
+or failure is acknowledged once (never per streamed token) through
+`updateSessionAttention` with `acknowledgedThroughSequence`, so a late request
+never hides a newer reply. Unread state, and notifications your server derives
+from it (for example a `turn.completed` webhook that skips sessions where
+`session.unread` is false), then leave out replies the person already watched.
+A timeline your layout hides (for example a collapsed bar that keeps only the
+composer), a background tab, or an unfocused window acknowledges nothing. Pass
+`readAcknowledgement={false}` when viewing must not count as reading. Behind
+`createSessionProxyHandler` this uses its `PUT …/attention` route, which
+accepts only `{ unread: false }`. Custom layouts around
+`useSessionConversation` call `useSessionReadAcknowledgement` (from
+`@opengeni/react/session`) with their own `active` signal.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:
@@ -418,15 +434,18 @@ typing; the sync indicator remains pending until server acknowledgement. Failed
 independent edits stay visible, and retry cannot overwrite newer overlapping
 edits. The same component is used in the dock and full-page artifact view;
 dimensions and values remain authoritative in the SDK Worker.
-The console supplies an XLSX Download action in both dock and full-page views.
-Custom hosts can supply `download(signal): Promise<Blob>` on the spreadsheet
-surface, or `downloadSpreadsheet(opened, signal): Promise<Blob>` on
-`EditableArtifactView`. Use the authenticated artifact SDK to pin the saved native
-head, materialize XLSX, poll its job, and download its bytes; never return the
-original imported file. Forward the abort signal through every request. The
-control waits for live sync without pending edits, shows progress and retryable
-errors, and cancels on teardown or revoked access. Omit the callback when the host
-does not support export; other modalities do not gain an unsupported download.
+The console supplies a Download action for every editable artifact in both dock
+and full-page views: documents export DOCX, spreadsheets XLSX, and presentations
+PPTX. Custom hosts can supply `download(signal): Promise<Blob>` on the document,
+spreadsheet, or presentation surface, or `downloadArtifact(opened, signal):
+Promise<Blob>` on `EditableArtifactView` (the older spreadsheet-only
+`downloadSpreadsheet` still works). Use the authenticated artifact SDK to pin the
+saved native head, materialize the modality's Office format, poll its job, and
+download its bytes; never return the original imported file. Forward the abort
+signal through every request. The control waits for live sync with no pending or
+still-submitting edits, shows progress and retryable errors, and cancels on
+teardown or revoked access. Omit the callback when the host does not support
+export.
 Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
 the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
 Validation and failed submissions keep the name editor open. Pending cell edits
@@ -689,6 +708,9 @@ const norwegian: OpenGeniMessages = {
   catalog: export it to your translation tooling as is.
 - Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
   translation must keep the same parameters.
+- Text that names the product uses `{product}`, filled from `productName`
+  (default "Opengeni"). Pass `productName="Acme"` to `OpenGeniProvider` and the
+  components say Acme there; your own translations can use `{product}` too.
 - Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
   `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
   supplies the forms it needs. `_other` is always required. Where the runtime

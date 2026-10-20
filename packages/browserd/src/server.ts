@@ -2,6 +2,7 @@ import { ComputerNativeCommand } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
+import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
@@ -364,16 +365,23 @@ export class BrowserControlServer {
   }
 
   private runtimeIdle(): boolean {
-    return (
-      !this.unsettledProducer &&
-      this.activeRequests <= 1 &&
-      this.server.pendingRequests <= 1 &&
-      this.lifecycleTails.size === 0 &&
-      this.sockets.size === 0 &&
-      this.producers.size === 0 &&
-      this.supervisor.isIdle() &&
-      (this.computerSupervisor?.isIdle() ?? true)
-    );
+    return this.updateBlockers().length === 0;
+  }
+
+  private updateBlockers(): UpdateBlocker[] {
+    const blockers = [
+      ...this.supervisor.updateBlockers(),
+      ...(this.computerSupervisor?.updateBlockers() ?? []),
+    ];
+    if (this.unsettledProducer) blockers.push({ kind: "controller_cleanup", count: 1 });
+    const requests = Math.max(this.activeRequests, this.server.pendingRequests) - 1;
+    if (requests > 0) blockers.push({ kind: "controller_request", count: requests });
+    if (this.lifecycleTails.size)
+      blockers.push({ kind: "controller_lifecycle", count: this.lifecycleTails.size });
+    if (this.sockets.size) blockers.push({ kind: "controller_stream", count: this.sockets.size });
+    if (this.producers.size)
+      blockers.push({ kind: "controller_producer", count: this.producers.size });
+    return blockers;
   }
 
   /** Idle with no browser or computer session at all, retained or not: the
@@ -442,10 +450,19 @@ export class BrowserControlServer {
         return success({ idle: this.runtimeIdle(), operationId, released: true });
       }
       if (this.updateOperation !== null && this.updateOperation !== operationId)
-        return success({ idle: false, operationId });
-      const idle = this.runtimeIdle();
+        return success({
+          idle: false,
+          operationId,
+          blockers: [{ kind: "controller_previous_update", count: 1 }],
+        });
+      const blockers = this.updateBlockers();
+      const idle = blockers.length === 0;
       if (idle) this.updateOperation = operationId;
-      return success({ idle, operationId });
+      return success({
+        idle,
+        operationId,
+        ...(blockers.length ? { blockers: summarizeUpdateBlockers(blockers) } : {}),
+      });
     }
     if (segments[0] === "v1" && segments[1] === "computer-sessions") {
       if (!this.computerSupervisor) {

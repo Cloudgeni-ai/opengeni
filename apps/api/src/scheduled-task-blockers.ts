@@ -43,7 +43,7 @@ const RESUME = "then resume the schedule.";
 const NON_RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
   scheduled_authority_unavailable: `The access it was set up with is no longer valid. Refresh the schedule's access, ${RESUME}`,
   machine_target_unavailable: `The machine it runs on is no longer available. Choose another machine or reconnect this one, ${RESUME}`,
-  machine_enrollment_inactive: `The machine it runs on is disconnected from Opengeni. Reconnect the machine, ${RESUME}`,
+  machine_enrollment_inactive: `The machine it runs on is disconnected. Reconnect the machine, ${RESUME}`,
   variable_set_unavailable: `A variable set it uses no longer exists or can't be used. Edit the schedule, ${RESUME}`,
   rig_version_unavailable: `Its rig has no usable version. Publish a rig version or edit the schedule, ${RESUME}`,
   scheduled_model_unavailable: `Its model is no longer available. Edit the schedule to choose another model, ${RESUME}`,

@@ -101,6 +101,7 @@ import type {
   AgentInstructionReviewListResponse,
 } from "./knowledge";
 import type {
+  DuplicateWorkspaceArtifactRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
@@ -382,6 +383,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   ConnectionMetadata,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubDisconnectRequest,
@@ -872,7 +875,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected Opengeni API does not support ${feature}`);
+  return new Error(`The connected API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -1142,8 +1145,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
             for (const segment of path) {
               target = (target as Record<string, unknown>)[segment];
             }
-            if (typeof target !== "function")
-              throw new TypeError("Opengeni tool path is not callable");
+            if (typeof target !== "function") throw new TypeError("Tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -7580,6 +7582,25 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change who can open a file: everyone in the workspace, or only you (Only
+   * me). Only the file's owner can.
+   */
+  async updateFileVisibility(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileVisibilityResponse> {
+    return await this.requestJson<UpdateFileVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async getFile(
     workspaceId: string,
     fileId: string,
@@ -8397,6 +8418,22 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Copies a Site's current version into a new Site you own, with the same visibility. */
+  async duplicateWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    request: DuplicateWorkspaceArtifactRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/duplicate`,
       request,
       undefined,
       options,
@@ -11556,7 +11593,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "Opengeni is temporarily unavailable — retry.",
+    displayMessage: "The workspace is temporarily unavailable — retry.",
   });
 }
 
@@ -11593,7 +11630,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "The request could not be confirmed — reconcile before retrying.",
   });
 }
 

@@ -1311,6 +1311,7 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
     <div
       role="status"
       aria-label={t("sandboxWorkspace.machineLabel", { label: chip.label })}
+      title={chip.label}
       className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
