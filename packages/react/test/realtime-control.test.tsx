@@ -11,6 +11,7 @@ import {
   RealtimeModelPickerMenu,
   SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,
+  prestartSessionRealtime,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
   useRealtimeModelSelection,
@@ -326,6 +327,145 @@ describe("ordinary session Codex realtime control", () => {
     await act(async () => root.render(<Harness context="second" />));
     expect(factoryCalls).toBe(1);
     expect(capturedContext?.()).toBe("second");
+  });
+
+  test("adopts a call the host started before the view mounted and flushes on turn outcomes", async () => {
+    const calls: string[] = [];
+    let current: SessionRealtimeControllerSnapshot = idle;
+    const listeners = new Set<(snapshot: SessionRealtimeControllerSnapshot) => void>();
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      calls.push(`create:${options.model}`);
+      return {
+        snapshot: () => current,
+        subscribe(listener) {
+          listeners.add(listener);
+          listener(current);
+          return () => listeners.delete(listener);
+        },
+        start: async () => {
+          calls.push("start");
+          current = { ...idle, status: "starting" };
+          for (const listener of listeners) listener(current);
+        },
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => {
+          calls.push("flush");
+        },
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => {
+          calls.push("stop");
+        },
+        close: () => {
+          calls.push("close");
+        },
+      };
+    };
+    const client = { getWorkspaceRealtimeModelCatalog: undefined } as unknown as OpenGeniClient;
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const sessionId = "66666666-6666-4666-8666-666666666666";
+    prestartSessionRealtime({
+      client,
+      workspaceId,
+      sessionId,
+      model: "gpt-live-1-boulder-alpha",
+      controllerFactory: factory,
+    });
+    let consumed = 0;
+    const turnCompleted = {
+      id: "77777777-7777-4777-8777-777777777777",
+      workspaceId,
+      sessionId,
+      sequence: 5,
+      type: "turn.completed",
+      payload: {},
+      occurredAt: "2026-07-29T07:00:05.000Z",
+    } as SessionEvent;
+    const render = (events: SessionEvent[]) =>
+      root.render(
+        <SessionRealtimeControl
+          client={client}
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          sessionStatus="idle"
+          effectiveControl={effectiveControl}
+          events={events}
+          eventsReady={true}
+          codexConnected={true}
+          controllerFactory={factory}
+          realtimeAutostartModel="gpt-live-1-boulder-alpha"
+          onRealtimeAutostartConsumed={() => {
+            consumed += 1;
+          }}
+        />,
+      );
+
+    await act(async () => render([]));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (consumed > 0) break;
+    }
+    // One controller, started once by the host; the view's autostart is consumed.
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start"]);
+    expect(consumed).toBe(1);
+
+    await act(async () => render([turnCompleted]));
+    await act(async () => render([turnCompleted]));
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start", "flush"]);
+
+    await act(async () => root.render(<></>));
+    expect(calls.at(-1)).toBe("close");
+  });
+
+  test("ends an abandoned pre-started call instead of leaving it for a later view", async () => {
+    const calls: string[] = [];
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      calls.push(`create:${options.model}`);
+      return {
+        snapshot: () => idle,
+        subscribe(listener) {
+          listener(idle);
+          return () => undefined;
+        },
+        start: async () => {
+          calls.push("start");
+        },
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => {
+          calls.push("stop");
+        },
+        close: () => {
+          calls.push("close");
+        },
+      };
+    };
+    const input = {
+      client: {} as OpenGeniClient,
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      model: "gpt-live-1-boulder-alpha" as const,
+      controllerFactory: factory,
+    };
+    const abandon = prestartSessionRealtime(input);
+    // A retried handoff for the same model keeps the call that is starting.
+    const abandonRetry = prestartSessionRealtime(input);
+    abandonRetry();
+    abandon();
+    for (let attempt = 0; attempt < 20 && calls.at(-1) !== "close"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start", "stop", "close"]);
   });
 
   test("renders the compact accessible voice action and switches from start to end", async () => {

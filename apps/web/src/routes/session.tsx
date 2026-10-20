@@ -133,8 +133,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { checkVoiceDeployment, isApiErrorStatus, showVoiceUpdatePrompt } from "@/api";
-import { voiceRelaunchUrl, withVoiceDeploymentGuard } from "@/lib/voice-deployment-guard";
+import { isApiErrorStatus, voiceRealtimeClient } from "@/api";
 import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
@@ -1951,12 +1950,7 @@ function SessionChatPane(props: {
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
   const realtimeClient = useMemo(
-    () =>
-      withVoiceDeploymentGuard(context.client, {
-        decide: checkVoiceDeployment,
-        relaunch: (model) => window.location.assign(voiceRelaunchUrl(window.location.href, model)),
-        prompt: showVoiceUpdatePrompt,
-      }),
+    () => voiceRealtimeClient(context.client, () => window.location.href),
     [context.client],
   );
   // Opened on a moment (an inbox item, a notification): when it is older than
