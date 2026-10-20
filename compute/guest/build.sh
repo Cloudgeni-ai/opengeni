@@ -44,7 +44,7 @@ for tool in cargo git curl strip; do
   command -v "$tool" >/dev/null || fail "$tool is not on PATH"
 done
 if command -v rustup >/dev/null &&
-  ! rustup target list --installed | grep -qx x86_64-unknown-linux-musl; then
+  ! rustup target list --installed | grep -x x86_64-unknown-linux-musl >/dev/null; then
   log "adding the x86_64-unknown-linux-musl target"
   rustup target add x86_64-unknown-linux-musl
 fi
