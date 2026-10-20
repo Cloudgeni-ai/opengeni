@@ -90,8 +90,23 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([]);
 
+    // The current provisioner must also converge the previous physical schema,
+    // even though held-back migration receipts already include 0864. Its new
+    // routine revocations are catalog-gated; current posture stays strict.
+    await provisionRoles(owned.adminUrl, roles);
+    const [historicalCapabilities] = await staging`
+      select to_regprocedure('opengeni_private.set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[])') as setter,
+        to_regprocedure('opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid)') as reader`;
+    expect(historicalCapabilities).toEqual({ setter: null, reader: null });
+    expect(
+      previous.evaluateRuntimeDatabasePosture(
+        await previous.inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual([]);
+
     // Migration-only upgrade under the non-superuser, non-BYPASSRLS owner.
-    // No new provisioner runs until the app has actually used the new setter.
+    // No reprovisioning follows the migration until the app has used the new setter.
     const source = await readFile(join(import.meta.dir, "../drizzle", MIGRATION), "utf8");
     await staging.begin((transaction) => transaction.unsafe(source));
     const oldPosture = await previous.inspectRuntimeDatabasePosture(client.db, options);
@@ -205,7 +220,20 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     expect(denied).toBe("42501");
     expect(await readOrganizationSlackBotAccess(client.db, input)).toEqual(reenabled);
 
+    // The capability guard must still reconcile unsafe ACL drift once the
+    // routines exist, without removing the intended application grants.
+    await staging`grant execute on function
+      opengeni_private.set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[]),
+      opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid) to public`;
     await provisionRoles(owned.adminUrl, roles);
+    const [publicAccess] = await staging`
+      select count(*)::int as grants from pg_proc p
+      cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+      where p.oid in (
+        'opengeni_private.set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[])'::regprocedure,
+        'opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid)'::regprocedure
+      ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
+    expect(publicAccess).toEqual({ grants: 0 });
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
     expect(
