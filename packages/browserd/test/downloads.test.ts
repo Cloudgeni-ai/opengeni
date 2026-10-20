@@ -291,6 +291,73 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
+  test("an unconfirmed cancellation keeps a held download waiting for its peer", async () => {
+    const { store } = await fixture({ maxFileBytes: 8, maxSessionBytes: 16 });
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    await expect(
+      store.progress({ guid: "second", state: "inProgress", receivedBytes: 9, totalBytes: 9 }),
+    ).resolves.toEqual({ cancelReason: "download_quota_exceeded" });
+    // Chromium refused the cancellation, so the second download may still
+    // have saved a file.
+    await store.reject("second", "download_quota_exceeded", "uncertain");
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect(await store.get(firstDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    await store.close();
+  });
+
+  test("names that may be one file on disk are treated as the same name", async () => {
+    const { store } = await fixture();
+    // On a case-insensitive file system both names are this one file.
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "REPORT.TXT" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    for (const id of [firstDownloadId, secondDownloadId]) {
+      expect(await store.get(id)).toMatchObject({
+        status: "failed",
+        failureCode: "download_integrity_failed",
+      });
+    }
+    await store.close();
+  });
+
   test("a held download settles when a same-name peer is cancelled", async () => {
     const { store } = await fixture();
     const path = join(store.filesDirectory, "report.txt");
@@ -343,7 +410,7 @@ describe("BrowserDownloadStore", () => {
     const path = join(store.filesDirectory, "report.txt");
     await store.begin({ guid: "rejected", targetId: null, suggestedFilename: "report.txt" });
     await store.begin({ guid: "kept", targetId: null, suggestedFilename: "report.txt" });
-    await store.reject("rejected", "download_quota_exceeded");
+    await store.reject("rejected", "download_quota_exceeded", "confirmed");
     await rename(await partial(store, "kept", "kept bytes"), path);
     await store.progress({
       guid: "rejected",

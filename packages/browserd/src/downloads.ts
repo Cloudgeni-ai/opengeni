@@ -76,7 +76,8 @@ type FileIdentity = string;
  * file was replaced or shared, so its bytes cannot be attributed. */
 type Observation = {
   sequence: number;
-  filename: string;
+  /** The download's suggested name and the name Chromium saved it under. */
+  names: string[];
   identity: FileIdentity | null;
   conflict: boolean;
 };
@@ -133,6 +134,9 @@ export class BrowserDownloadStore {
   private readonly database: Database;
   private readonly held = new Map<string, HeldCompletion>();
   private readonly observations = new Map<string, Observation>();
+  /** Rejected downloads whose cancellation Chromium did not confirm: they
+   * may still finish and rename a file until Chromium reports them. */
+  private readonly unconfirmed = new Set<string>();
   private observationSequence = 0;
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
@@ -345,15 +349,23 @@ export class BrowserDownloadStore {
     });
   }
 
-  reject(guidInput: string, failureCodeInput: string): Promise<void> {
+  /** Settle a download the caller no longer wants. `confirmed` means
+   * Chromium accepted its cancellation, so it ended without saving a file
+   * unless its completion was reported first; otherwise it stays a possible
+   * writer until Chromium reports how it ended. */
+  reject(
+    guidInput: string,
+    failureCodeInput: string,
+    cancellation: "confirmed" | "uncertain" = "uncertain",
+  ): Promise<void> {
     return this.enqueue(async () => {
       const guid = requireGuid(guidInput);
       const failureCode = requireFailureCode(failureCodeInput);
       const row = this.requireRowByGuid(guid);
-      // The caller asked Chromium to cancel first. A completion Chromium
-      // reported before that request was seen already; otherwise the
-      // download ended without saving a file.
-      this.observe(row, null, false);
+      // A completion Chromium reported before accepting the cancellation was
+      // seen already, since its events and replies arrive in order.
+      if (cancellation === "confirmed") this.observe(row, null, false);
+      else if (!this.observations.has(guid)) this.unconfirmed.add(guid);
       this.held.delete(guid);
       await this.removePhysicalFiles(guid);
       if (row.status === "in_progress") {
@@ -373,6 +385,7 @@ export class BrowserDownloadStore {
         .all();
       this.held.clear();
       this.observations.clear();
+      this.unconfirmed.clear();
       for (const row of rows) {
         await this.removePhysicalFiles(row.guid);
         const current = this.requireRowByGuid(row.guid);
@@ -561,7 +574,8 @@ export class BrowserDownloadStore {
       }
     }
     for (const entry of await readdir(this.filesDirectory)) {
-      if (!retainedFiles.has(entry))
+      // A file system may list a kept name with other case or normalization.
+      if (![...retainedFiles].some((name) => sameEntryName(name, entry)))
         await rm(join(this.filesDirectory, entry), { recursive: true, force: true });
     }
     for (const entry of await readdir(this.storedDirectory)) {
@@ -589,7 +603,7 @@ export class BrowserDownloadStore {
       // Keep these bytes before a later download with the same name can
       // replace the file Chromium saved.
       await exactRegularFile(saved);
-      observation = this.observe(row, await keepFile(saved, path), false);
+      observation = this.observe(row, await keepFile(saved, path), false, fileName);
       const sizeBytes = (await exactRegularFile(path)).size;
       if (
         sizeBytes > this.maxFileBytes ||
@@ -654,7 +668,7 @@ export class BrowserDownloadStore {
       }
     } catch {
       if (observation) observation.conflict = true;
-      else this.observe(row, null, true);
+      else this.observe(row, null, true, fileName);
       await this.discardCompletion(row.guid, fileName);
       this.settle(
         row.guid,
@@ -669,24 +683,26 @@ export class BrowserDownloadStore {
 
   /** Record what Chromium's finished download left at its name. The first
    * observation of a download stands; two downloads seeing the same file
-   * conflict, since that file can be only one download's bytes. */
+   * conflict, whatever their names, since that file can be only one
+   * download's bytes. */
   private observe(
     row: Pick<DownloadRow, "guid" | "filename">,
     identity: FileIdentity | null,
     conflict: boolean,
+    savedName: string | null = null,
   ): Observation {
     const existing = this.observations.get(row.guid);
     if (existing) return existing;
+    this.unconfirmed.delete(row.guid);
     const observation: Observation = {
       sequence: ++this.observationSequence,
-      filename: row.filename,
+      names: savedName === null ? [row.filename] : [row.filename, savedName],
       identity,
       conflict,
     };
     if (identity !== null) {
       for (const [guid, other] of this.observations) {
-        if (guid === row.guid || other.filename !== row.filename || other.identity !== identity)
-          continue;
+        if (guid === row.guid || other.identity !== identity) continue;
         other.conflict = true;
         observation.conflict = true;
       }
@@ -709,8 +725,8 @@ export class BrowserDownloadStore {
     const facts = await lstat(join(this.filesDirectory, fileName), { bigint: true }).catch(
       () => null,
     );
-    if (!facts?.isFile()) this.observe(row, null, true);
-    else this.observe(row, `${facts.dev}:${facts.ino}`, false);
+    if (!facts?.isFile()) this.observe(row, null, true, fileName);
+    else this.observe(row, `${facts.dev}:${facts.ino}`, false, fileName);
   }
 
   /** After the event barrier: wait for the same-name downloads that were
@@ -723,20 +739,26 @@ export class BrowserDownloadStore {
     if (!completion || !own) return;
     if (!ordered) own.conflict = true;
     const waitFor = new Set<string>();
-    for (const { guid: peer } of this.database
-      .query<{ guid: string }, [string, string]>(
-        `SELECT guid FROM browser_downloads
-          WHERE guid <> ? AND filename = ? AND status = 'in_progress'`,
+    // Downloads that may still rename a file: running ones not yet observed,
+    // and rejected ones whose cancellation Chromium did not confirm.
+    const writers = this.database
+      .query<{ guid: string; filename: string }, [string]>(
+        `SELECT guid, filename FROM browser_downloads
+          WHERE guid <> ? AND status = 'in_progress'`,
       )
-      .all(guid, own.filename)) {
-      const observation = this.observations.get(peer);
-      if (!observation || observation.sequence > own.sequence) waitFor.add(peer);
+      .all(guid)
+      .filter(({ guid: peer }) => !this.observations.has(peer));
+    for (const peer of this.unconfirmed) {
+      const row = peer === guid ? null : this.rowByGuid(peer);
+      if (row) writers.push({ guid: peer, filename: row.filename });
     }
+    for (const writer of writers)
+      if (own.names.some((name) => mayAlias(name, writer.filename))) waitFor.add(writer.guid);
     for (const [peer, observation] of this.observations) {
       if (
         peer !== guid &&
-        observation.filename === own.filename &&
-        observation.sequence > own.sequence
+        observation.sequence > own.sequence &&
+        own.names.some((name) => observation.names.some((other) => mayAlias(name, other)))
       )
         waitFor.add(peer);
     }
@@ -793,16 +815,29 @@ export class BrowserDownloadStore {
         changed = true;
       }
     }
-    // Observations matter only while a download with that name may still
-    // be running or held.
-    for (const [guid, observation] of [...this.observations]) {
-      const active = this.database
-        .query<{ guid: string }, [string]>(
-          `SELECT guid FROM browser_downloads
-            WHERE filename = ? AND status = 'in_progress' LIMIT 1`,
+    // Observations matter only while a download that may share a file with
+    // them may still write one or is held.
+    const writers = [
+      ...this.database
+        .query<{ filename: string }, []>(
+          "SELECT filename FROM browser_downloads WHERE status = 'in_progress'",
         )
-        .get(observation.filename);
-      if (!active) this.observations.delete(guid);
+        .all()
+        .map((row) => row.filename),
+      ...[...this.unconfirmed].flatMap((peer) => this.rowByGuid(peer)?.filename ?? []),
+      ...[...this.held.keys()].flatMap((guid) => this.observations.get(guid)?.names ?? []),
+    ];
+    const referenced = new Set<string>();
+    for (const [guid, completion] of this.held) {
+      referenced.add(guid);
+      for (const peer of completion.waitFor ?? []) referenced.add(peer);
+    }
+    for (const [guid, observation] of [...this.observations]) {
+      if (
+        !referenced.has(guid) &&
+        !writers.some((writer) => observation.names.some((name) => mayAlias(name, writer)))
+      )
+        this.observations.delete(guid);
     }
   }
 
@@ -969,7 +1004,8 @@ export class BrowserDownloadStore {
   }
 
   /** Remove what a download that is no longer wanted left behind. Chromium's
-   * named file is removed only while no other download can own that name. */
+   * named file is removed only while no other download can own that name,
+   * under any name that may be the same file. */
   private async removeUnownedCompletion(
     row: Pick<DownloadRow, "guid" | "filename">,
     fileName: string | null,
@@ -977,14 +1013,22 @@ export class BrowserDownloadStore {
     await this.removePhysicalFiles(row.guid);
     if (fileName === null) return;
     const owner = this.database
-      .query<{ guid: string }, [string, string, string]>(
-        `SELECT guid FROM browser_downloads
-          WHERE guid <> ?
-            AND ((status = 'in_progress' AND filename = ?)
-              OR (status = 'completed' AND file_name = ?))
-          LIMIT 1`,
+      .query<{ guid: string; filename: string; file_name: string | null }, [string]>(
+        `SELECT guid, filename, file_name FROM browser_downloads
+          WHERE guid <> ? AND (status IN ('in_progress', 'completed'))`,
       )
-      .get(row.guid, row.filename, fileName);
+      .all(row.guid)
+      .concat(
+        [...this.unconfirmed].flatMap((peer) => {
+          const other = peer === row.guid ? null : this.rowByGuid(peer);
+          return other ? [other] : [];
+        }),
+      )
+      .some((other) =>
+        [other.filename, other.file_name].some(
+          (name) => name !== null && [row.filename, fileName].some((own) => mayAlias(own, name)),
+        ),
+      );
     if (!owner) await rm(join(this.filesDirectory, fileName), { force: true });
   }
 
@@ -1087,6 +1131,28 @@ function requireFailureCode(value: string): string {
 function requireSha256(value: string): string {
   if (!/^[0-9a-f]{64}$/u.test(value)) throw new Error("download SHA-256 is invalid");
   return value;
+}
+
+/** A deliberately coarse key for names that may end up as one file. File
+ * systems may ignore case and Unicode normalization, and Chromium replaces
+ * characters a file system refuses, corrects or adds an extension, falls
+ * back to a generic name and shortens long names. The key drops all of
+ * that: the part before the first dot, letters and digits only, lowercased,
+ * decomposed, at most 32 characters. Names with different keys cannot be
+ * one file; equal keys may be. A name with an empty key may be any file. */
+function aliasKey(name: string): string {
+  const stem = name.normalize("NFKD").toLowerCase().split(".")[0] ?? "";
+  return [...stem.replace(/[^\p{L}\p{N}]/gu, "")].slice(0, 32).join("");
+}
+
+function mayAlias(left: string, right: string): boolean {
+  const leftKey = aliasKey(left);
+  const rightKey = aliasKey(right);
+  return leftKey === "" || rightKey === "" || leftKey === rightKey;
+}
+
+function sameEntryName(left: string, right: string): boolean {
+  return left.normalize("NFC").toLowerCase() === right.normalize("NFC").toLowerCase();
 }
 
 function safeFilename(value: string): string {
