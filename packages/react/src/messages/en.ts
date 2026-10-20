@@ -1545,6 +1545,46 @@ export const englishMessages = {
   "machines.machineStatus.updateNow": "Update now",
   "machines.machineStatus.updatesToTargetWhenCurrent":
     "Updates to {target} when current work finishes",
+  "machines.machineStatus.updateHeldDuration": "Update to {target} has been waiting {duration}",
+  "machines.machineStatus.waitingForInteractions":
+    "Waiting for browser or computer-use work to finish. It will not be stopped for the update.",
+  "machines.machineStatus.waitingForUploads":
+    "Waiting for file uploads to finish. They will not be stopped for the update.",
+  "machines.machineStatus.waitingForUnspecifiedWork":
+    "The machine reports unfinished work but does not identify it. Nothing will be stopped for the update.",
+  "machines.machineStatus.reportedBlockers":
+    "Last reported {duration} ago: {details}. Nothing will be stopped for the update.",
+  "machines.machineStatus.offlineUpdateReport":
+    "Machine not connected; showing its last update report",
+  "machines.machineStatus.blockerOtherWork": "Other work",
+  "machines.machineStatus.blockerNativeCounters": "Machine work (overlapping counters)",
+  "machines.machineStatus.blockerPreviousUpdate":
+    "An earlier update still holds the controller fence",
+  "machines.machineStatus.blockerCount": "{label}: {count}",
+  "machines.machineStatus.blockerBrowserAction": "Browser action",
+  "machines.machineStatus.blockerBrowserSession": "Browser session that would close on restart",
+  "machines.machineStatus.blockerBrowserCreation": "Browser opening",
+  "machines.machineStatus.blockerBrowserClosing": "Browser closing",
+  "machines.machineStatus.blockerBrowserRecovery": "Browser recovery",
+  "machines.machineStatus.blockerBrowserAuth": "Browser sign-in",
+  "machines.machineStatus.blockerBrowserTransfer": "Browser state transfer",
+  "machines.machineStatus.blockerComputerAction": "Computer action",
+  "machines.machineStatus.blockerVirtualDesktop": "Open virtual desktop",
+  "machines.machineStatus.blockerComputerSession": "Computer session changing state",
+  "machines.machineStatus.blockerComputerCreation": "Computer session opening",
+  "machines.machineStatus.blockerComputerClosing": "Computer session closing",
+  "machines.machineStatus.blockerSeatTransfer": "Desktop changing owners",
+  "machines.machineStatus.blockerControllerRequest": "Browser or computer request",
+  "machines.machineStatus.blockerControllerLifecycle": "Browser or computer session changing state",
+  "machines.machineStatus.blockerStream": "Open screen stream",
+  "machines.machineStatus.blockerProducer": "Screen-stream work or cleanup",
+  "machines.machineStatus.blockerUpload": "File upload",
+  "machines.machineStatus.blockerNativeRequest": "Machine request",
+  "machines.machineStatus.blockerNativeOperation": "Command or retained result",
+  "machines.machineStatus.blockerQueuedRequest": "Queued machine request",
+  "machines.machineStatus.blockerQueuedOperation": "Queued command",
+  "machines.machineStatus.blockerCleanup": "Cleanup not yet confirmed",
+  "machines.machineStatus.blockerUnknown": "Work not identified by this version",
   "machines.machineStatus.updateToTargetFailed": "Update to {target} failed",
   "machines.machineStatus.updateToTargetPostponedOpen":
     "Update to {target} postponed: open browsers would close",

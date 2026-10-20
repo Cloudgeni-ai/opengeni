@@ -700,7 +700,7 @@ means a verified self-update is draining accepted work; `queue_breaker` and
 detail remains an unspecified admission refusal. The same distinction survives
 retry exhaustion and structured tool-error rendering. A self-update on a busy
 host is accepted and waits for idle: the agent reports `waiting_for_idle` with
-the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
+the current reason (`update_busy_work`, `update_busy_uploads`, `update_busy_interactions` or a transiently
 unreadable controller as `update_state_unavailable`), keeps admitting new work,
 and every few seconds re-attempts a short fenced idle proof, reopening
 admission whenever it is still busy. It never cancels accepted work, stops
@@ -731,14 +731,35 @@ remains in that group. The browsers it launched run in their own sessions and
 are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
-attached browser sessions, browsers without a durable working runtime, and
+busy attached browser sessions, browsers without a durable working runtime, and
 isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
 adopts the same process on its next request, even when the old launcher was
 killed with the stopped service or came from an earlier agent release. A
 session whose browser already ended and a computer session on the machine's
-own physical seat do not keep the host busy either. Older agents still end a
+own physical seat do not keep the host busy either.
+
+The idle proof also carries bounded blocker snapshots: categories and counts,
+not private session IDs, command text, page titles, URLs or filesystem paths.
+Controller scopes can belong to different workspaces on the same host, so
+session identities never leave that boundary in update diagnostics. The
+agent emits a progress event when the reason/categories change and refreshes
+counts at most once per minute. Enrollment
+progress retains it under the existing exact operation/process fence, clears
+it when the update advances or its accepting process is replaced, and exposes
+it through Machines and fleet. Machines highlights a hold after ten minutes and
+shows elapsed time from the original request; this is presentation, not a
+deadline or permission to end work. The snapshot is last-reported evidence,
+not a live ownership query, and the counters can describe overlapping ownership
+layers rather than distinct commands. Older ambiguous `update_busy_work`
+receipts cannot identify a culprit and are labeled accordingly. A settled
+attached-transport error does not itself hold admission: the uncertain action
+remains journaled without retaining a running queue or replaying the action.
+These diagnostics do not establish the cause of an earlier hold whose admission
+snapshot was not recorded, and do not change the admission decision or cancel work.
+
+Older agents still end a
 busy update with retryable `update_busy_work`. Nobody has to request updates:
 the control plane asks every live machine behind its channel's promoted build
 to update from its heartbeat, and asks an older busy agent again every 10

@@ -11,6 +11,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
+import type { UpdateBlocker } from "./update-admission";
 import {
   ComputerInteractionController,
   InteractionControllerError,
@@ -207,18 +208,29 @@ export class ComputerSupervisor {
    * restart only drops the controller, which the next request recreates. An
    * isolated virtual seat owns its display and apps, so it still blocks. */
   isIdle(): boolean {
-    return (
-      !this.cleanupUncertain &&
-      this.displaceGate === null &&
-      this.creating.size === 0 &&
-      this.ending.size === 0 &&
-      [...this.sessions.values()].every(
-        (runtime) =>
-          runtime.lifecycle === "active" &&
-          runtime.environmentLease.rfbPort === null &&
-          runtime.controller.isIdle(),
-      )
-    );
+    return this.updateBlockers().length === 0;
+  }
+
+  updateBlockers(): UpdateBlocker[] {
+    const blockers: UpdateBlocker[] = [];
+    if (this.cleanupUncertain) blockers.push({ kind: "computer_cleanup", count: 1 });
+    if (this.displaceGate) blockers.push({ kind: "computer_seat_transfer", count: 1 });
+    for (const resourceId of this.creating.keys())
+      blockers.push({ kind: "computer_creation", resourceId, count: 1 });
+    for (const resourceId of this.ending.keys())
+      blockers.push({ kind: "computer_closing", resourceId, count: 1 });
+    for (const runtime of this.sessions.values()) {
+      const kind =
+        runtime.lifecycle !== "active"
+          ? "computer_session"
+          : runtime.environmentLease.rfbPort !== null
+            ? "computer_virtual_seat"
+            : !runtime.controller.isIdle()
+              ? "computer_action"
+              : null;
+      if (kind) blockers.push({ kind, resourceId: runtime.options.computerSessionId, count: 1 });
+    }
+    return blockers;
   }
 
   /** No session of any lifecycle remains and no work is in flight. */

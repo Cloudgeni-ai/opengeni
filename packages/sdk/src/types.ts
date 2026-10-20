@@ -9838,6 +9838,7 @@ export type MachineUpdateState = {
   targetVersion: string;
   expectedBinarySha256: string | null;
   errorCode: string | null;
+  blockers?: Array<{ kind: string; count: number }> | undefined;
   retryable: boolean;
   rolledBack: boolean;
   requestedAt: string;

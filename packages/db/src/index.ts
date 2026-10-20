@@ -60611,6 +60611,7 @@ export type EnrollmentAgentUpdateRecord = {
   targetVersion: string;
   expectedBinarySha256: string | null;
   errorCode: string | null;
+  blockers?: Array<{ kind: string; count: number }>;
   retryable: boolean;
   rolledBack: boolean;
   connectionInstanceId: string;
@@ -60739,6 +60740,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
             targetVersion: row.agentUpdateTargetVersion,
             expectedBinarySha256: row.agentUpdateExpectedBinarySha256 ?? null,
             errorCode: row.agentUpdateErrorCode ?? null,
+            blockers: row.agentUpdateBlockers,
             retryable: row.agentUpdateRetryable,
             rolledBack: row.agentUpdateRolledBack,
             connectionInstanceId: row.agentUpdateConnectionInstanceId,
@@ -62385,6 +62387,10 @@ export async function setEnrollmentAgentRuntime(
             when ${acceptingProcessWasReplaced} then 'accepting_process_replaced'
             else ${schema.enrollments.agentUpdateErrorCode}
           end`,
+          agentUpdateBlockers: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced} then '[]'::jsonb
+            else ${schema.enrollments.agentUpdateBlockers}
+          end`,
           agentUpdateRetryable: sql`case
             when ${successorProvesCompletion} then false
             when ${acceptingProcessWasReplaced} then true
@@ -62466,6 +62472,7 @@ export async function beginEnrollmentAgentUpdate(
           agentUpdateTargetVersion: input.targetVersion,
           agentUpdateExpectedBinarySha256: null,
           agentUpdateErrorCode: null,
+          agentUpdateBlockers: [],
           agentUpdateRetryable: false,
           agentUpdateRolledBack: false,
           agentUpdateConnectionInstanceId: input.connectionInstanceId,
@@ -62524,6 +62531,7 @@ export async function advanceEnrollmentAgentUpdate(
     status: Exclude<AgentUpdateStatus, "requested" | "succeeded">;
     expectedBinarySha256?: string | null;
     errorCode?: string | null;
+    blockers?: Array<{ kind: string; count: number }>;
     retryable?: boolean;
     rolledBack?: boolean;
   },
@@ -62552,6 +62560,7 @@ export async function advanceEnrollmentAgentUpdate(
             ? { agentUpdateExpectedBinarySha256: input.expectedBinarySha256 }
             : {}),
           agentUpdateErrorCode: input.errorCode ?? null,
+          agentUpdateBlockers: input.status === "waiting_for_idle" ? (input.blockers ?? []) : [],
           agentUpdateRetryable: input.retryable ?? false,
           agentUpdateRolledBack: input.rolledBack ?? false,
           agentUpdateUpdatedAt: now,
