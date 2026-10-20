@@ -106,13 +106,13 @@ async function seedSession() {
     });
     return { turnId, attemptId };
   };
-  const card = (turn: Turn, capabilityId: string) =>
+  const card = (turn: Turn, capabilityId: string, executionGeneration = 1) =>
     appendTurnCapabilityCardOnce(
       db,
       workspaceId,
       sessionId,
       turn.turnId,
-      1,
+      executionGeneration,
       turn.attemptId,
       capabilityId,
       {
@@ -204,5 +204,24 @@ describe("appendTurnCapabilityCardOnce", () => {
     expect(secondCard.existingEventId).toBeNull();
     expect(secondCard.events).toHaveLength(1);
     expect(secondCard.events[0]!.id).not.toBe(firstCard.events[0]!.id);
+  });
+
+  test("a replaced attempt never posts a card, and only reuses one that exists", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const turn = await chat.startTurn();
+    // A caller holding an outdated execution generation of this turn.
+    const staleGeneration = 2;
+    const miss = await chat.card(turn, "api:connected-machine", staleGeneration);
+    expect(miss.accepted).toBe(false);
+    expect(miss.existingEventId).toBeNull();
+    expect(miss.events.every((event) => event.type === "turn.event.rejected_late")).toBe(true);
+    expect(await chat.cards(turn.turnId)).toHaveLength(0);
+
+    const live = await chat.card(turn, "api:connected-machine");
+    const reuse = await chat.card(turn, "api:connected-machine", staleGeneration);
+    expect(reuse.events).toHaveLength(0);
+    expect(reuse.existingEventId).toBe(live.events[0]!.id);
+    expect(await chat.cards(turn.turnId)).toHaveLength(1);
   });
 });
