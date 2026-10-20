@@ -15,6 +15,19 @@ export function managedCodemodeClientDigest(client: ManagedCodemodeClient): stri
   return createHash("sha256").update(JSON.stringify(client)).digest("hex");
 }
 
+/** The exact transfer bytes: their SHA-256 is the client digest. */
+export function managedCodemodeClientBytes(client: ManagedCodemodeClient): string {
+  return JSON.stringify(client);
+}
+
+/**
+ * A short-lived signed URL for this release's client bytes, published by the
+ * worker under the client digest. The box fetches the bytes itself, so a fresh
+ * box installs the client in one provider command instead of staging a large
+ * file through several editor round trips.
+ */
+export type ManagedCodemodeClientDownload = { url: string };
+
 export function managedCodemodeClientDirectory(
   client: ManagedCodemodeClient,
   workspaceRoot = "/workspace",
@@ -109,6 +122,7 @@ export async function installManagedCodemodeClient(
   run: (cmd: string) => Promise<unknown>,
   runAs?: string,
   workspaceRoot = "/workspace",
+  download?: ManagedCodemodeClientDownload,
 ): Promise<void> {
   const directory = managedCodemodeClientDirectory(client, workspaceRoot);
   const digest = managedCodemodeClientDigest(client);
@@ -123,7 +137,47 @@ fs.accessSync(root + '/ogtool', fs.constants.X_OK);
 const files = {ogtool: fs.readFileSync(root + '/ogtool', 'utf8'), 'client.mjs': fs.readFileSync(root + '/client.mjs', 'utf8'), 'package.json': fs.readFileSync(root + '/package.json', 'utf8')};
 if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).digest('hex') !== ${JSON.stringify(digest)}) process.exit(1);
 `;
-  if (sandboxCommandExitCode(await run(`node -e ${quote(verify)} 2>/dev/null`)) === 0) return;
+  // The staged transfer file is the first argument, so the same program
+  // installs from a fetched file and from an editor-staged one.
+  const install = `
+const fs = require('node:fs'), crypto = require('node:crypto');
+const raw = fs.readFileSync(process.argv[1], 'utf8').trim();
+if (crypto.createHash('sha256').update(raw).digest('hex') !== ${JSON.stringify(digest)}) throw Error('Codemode client transfer integrity failure');
+const data = JSON.parse(raw), root = ${JSON.stringify(directory)};
+fs.mkdirSync(root, {recursive: true});
+if (!fs.lstatSync(root).isDirectory()) throw Error('Codemode client directory must not be a symlink');
+for (const name of ['package.json', 'ogtool', 'client.mjs']) {
+  const tmp = root + '/' + name + '.' + crypto.randomUUID();
+  fs.writeFileSync(tmp, data.files[name], {mode: 0o755, flag: 'wx'});
+  fs.renameSync(tmp, root + '/' + name);
+}
+`;
+  if (download) {
+    // One command whether the box is warm or fresh: verify, otherwise fetch the
+    // digest-addressed bytes, install, and verify. Any failure (storage,
+    // network, a missing curl) falls back to editor staging below.
+    // A subshell scopes `exit` and the cleanup trap to this program.
+    const fetchInstall = [
+      "(",
+      `if node -e ${quote(verify)} 2>/dev/null; then exit 0; fi`,
+      'stage="$(mktemp "${TMPDIR:-/tmp}/opengeni-codemode-client.XXXXXX")" || exit 1',
+      "trap 'rm -f -- \"$stage\"' EXIT",
+      `curl --fail --location --silent --show-error --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 1 --output "$stage" ${quote(download.url)} || exit 1`,
+      `node -e ${quote(install)} "$stage" && node -e ${quote(verify)}`,
+      ")",
+    ].join("\n");
+    try {
+      if (sandboxCommandExitCode(await run(fetchInstall)) === 0) return;
+    } catch {
+      // Fall through to the editor path, which reports its own failure.
+    }
+    // Bounded diagnostic only: never the signed URL or command output.
+    console.warn("Managed Codemode client download failed; staging the release bytes instead", {
+      digest,
+    });
+  } else if (sandboxCommandExitCode(await run(`node -e ${quote(verify)} 2>/dev/null`)) === 0) {
+    return;
+  }
   const editor = session.createEditor?.(runAs);
   if (!editor)
     throw new Error(
@@ -135,22 +189,11 @@ if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).dige
     await editor.createFile({
       type: "create_file",
       path: stage,
-      diff: `+${JSON.stringify(client)}`,
+      diff: `+${managedCodemodeClientBytes(client)}`,
     });
-    const install = `
-const fs = require('node:fs'), crypto = require('node:crypto');
-const raw = fs.readFileSync(${JSON.stringify(stage)}, 'utf8').trim();
-if (crypto.createHash('sha256').update(raw).digest('hex') !== ${JSON.stringify(digest)}) throw Error('Codemode client transfer integrity failure');
-const data = JSON.parse(raw), root = ${JSON.stringify(directory)};
-fs.mkdirSync(root, {recursive: true});
-if (!fs.lstatSync(root).isDirectory()) throw Error('Codemode client directory must not be a symlink');
-for (const name of ['package.json', 'ogtool', 'client.mjs']) {
-  const tmp = root + '/' + name + '.' + crypto.randomUUID();
-  fs.writeFileSync(tmp, data.files[name], {mode: 0o755, flag: 'wx'});
-  fs.renameSync(tmp, root + '/' + name);
-}
-`;
-    const result = await run(`node -e ${quote(install)} && node -e ${quote(verify)}`);
+    const result = await run(
+      `node -e ${quote(install)} ${quote(stage)} && node -e ${quote(verify)}`,
+    );
     if (sandboxCommandExitCode(result) !== 0) {
       throw new Error(
         "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release",
