@@ -802,6 +802,61 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       ).json(),
     );
     expect(titled.artifact.title).toBe("Second board");
+
+    // The key belongs to this Site's copy: another Site with the same metadata
+    // and key gets its own copy instead of replaying this one.
+    const twin = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Duplicable board",
+            description: "Copied with its source",
+            html: "<!doctype html><h1>Twin</h1>",
+            idempotencyKey: "duplicate-twin",
+          }),
+        })
+      ).json(),
+    );
+    const twinCopyResponse = await requestAsCanonicalLocalHuman(
+      `${base}/${twin.artifact.id}/duplicate`,
+      { method: "POST", body },
+    );
+    expect(twinCopyResponse.status).toBe(201);
+    const twinCopy = WorkspaceArtifactMutationResponse.parse(await twinCopyResponse.json());
+    expect(twinCopy.replayed).toBe(false);
+    expect(twinCopy.artifact.id).not.toBe(copy.artifact.id);
+    // An HTML-only Site's copy stays HTML-only and shares the stored content.
+    expect(twinCopy.version.sourceSha256).toBe(twin.version.sourceSha256);
+    expect(twinCopy.version.sizeBytes).toBe(twin.version.sizeBytes);
+
+    // A committed copy replays even after the original changes.
+    const renamed = await requestAsCanonicalLocalHuman(`${base}/${original.artifact.id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Renamed board",
+        html: "<!doctype html><h1>Changed</h1>",
+        expectedCurrentVersionId: original.version.id,
+        idempotencyKey: "duplicate-original-rename",
+      }),
+    });
+    expect(renamed.status).toBe(200);
+    const afterRename = await requestAsCanonicalLocalHuman(path, { method: "POST", body });
+    expect(afterRename.status).toBe(201);
+    const replayAfterRename = WorkspaceArtifactMutationResponse.parse(await afterRename.json());
+    expect(replayAfterRename.replayed).toBe(true);
+    expect(replayAfterRename.artifact.id).toBe(copy.artifact.id);
+    expect(replayAfterRename.artifact.title).toBe("Duplicable board (copy)");
+
+    // The same key with a different request is a conflict, not a silent replay.
+    expect(
+      (
+        await requestAsCanonicalLocalHuman(path, {
+          method: "POST",
+          body: JSON.stringify({ title: "Other title", idempotencyKey: "duplicate-once" }),
+        })
+      ).status,
+    ).toBe(409);
   }, 60_000);
 
   test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {

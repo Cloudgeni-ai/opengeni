@@ -29,6 +29,7 @@ import {
 } from "@opengeni/core";
 import {
   createWorkspaceArtifact,
+  duplicateWorkspaceArtifact,
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
   listWorkspaceArtifacts,
@@ -533,59 +534,33 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, DuplicateWorkspaceArtifactRequest);
     const sourceId = artifactId(context);
-    if (!deps.objectStorage)
-      throw new HTTPException(503, {
-        message: "Object storage is not configured",
-      });
     try {
       const viewer = await siteViewerForGrant(deps.db, grant);
-      const { artifact: original } = await getWorkspaceArtifact(
-        deps.db,
-        workspaceId,
-        viewer,
-        sourceId,
-      );
-      const ref = await getWorkspaceArtifactContentRef(deps.db, workspaceId, viewer, sourceId);
-      let source: Awaited<ReturnType<typeof readWorkspaceArtifactContent>>;
-      try {
-        source = await readWorkspaceArtifactContent(deps.objectStorage, ref);
-      } catch (error) {
-        throw new HTTPException(503, {
-          message: error instanceof Error ? error.message : "Artifact content is unavailable",
-          cause: error,
-        });
-      }
-      const title = request.title ?? copyTitle(original.title);
-      const id = crypto.randomUUID();
-      const slugBase = normalizeWorkspaceArtifactSlug(title) || "artifact";
-      const audience = await resolveNewSiteAudience({
-        db: deps.db,
-        settings: deps.settings,
-        grant,
-        viewer,
-        requested: original.visibility,
-        sourceSessionId: null,
-      });
-      const content = await prepareContent(deps, grant, {
-        html: source.html,
-        source: source.source,
-        requestedTools: source.requestedTools,
-      });
       return context.json(
         await mutationResponse(
           deps,
           grant,
-          await createWorkspaceArtifact(deps.db, {
-            ...audience,
+          await duplicateWorkspaceArtifact(deps.db, {
             accountId: grant.accountId,
             workspaceId,
-            artifactId: id,
-            slug: `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`,
-            requestedSlug: null,
-            title,
-            description: original.description,
-            ...content,
-            ...provenance(grant.subjectId, request.idempotencyKey),
+            viewer,
+            sourceArtifactId: sourceId,
+            artifactId: crypto.randomUUID(),
+            ...(request.title === undefined ? {} : { title: request.title }),
+            defaultTitle: copyTitle,
+            slugFor: (title, id) =>
+              `${(normalizeWorkspaceArtifactSlug(title) || "artifact").slice(0, 87)}-${id.slice(0, 8)}`,
+            resolveAudience: async (visibility) =>
+              await resolveNewSiteAudience({
+                db: deps.db,
+                settings: deps.settings,
+                grant,
+                viewer,
+                requested: visibility,
+                sourceSessionId: null,
+              }),
+            // Its own operation namespace: the key cannot replay a create or another Site's copy.
+            ...provenance(grant.subjectId, `duplicate:${sourceId}:${request.idempotencyKey}`),
           }),
         ),
         201,
