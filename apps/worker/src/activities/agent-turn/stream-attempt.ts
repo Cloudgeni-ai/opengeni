@@ -19,10 +19,11 @@ import {
   getWorkspace,
   listTurnCodemodeApprovals,
   recordUsageEvent,
+  registerPendingSessionToolCallInTransaction,
   registerPendingSessionToolCall,
-  recordPendingSessionToolCallResult,
+  recordPendingSessionToolCallResultInTransaction,
+  type SessionEventMutation,
   attachOpenSuffixToPendingToolCalls,
-  clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
   hasPendingSteerForTurn,
   nextSessionHistoryPosition,
@@ -1221,9 +1222,20 @@ export async function runTurnStreamAttempt(
       modelCallAdmission.close();
       throw error;
     }
-    eventing.batcher = createRuntimeBatcher(
-      async (events) => {
-        await eventing.publish!(events);
+    eventing.batcher = createRuntimeBatcher<SessionEventMutation>(
+      async (events, mutations = []) => {
+        await eventing.publish!(
+          events,
+          false,
+          mutations.length === 0
+            ? undefined
+            : async (tx, fence) => {
+                for (const mutate of mutations) {
+                  if (!(await mutate(tx, fence))) return false;
+                }
+                return true;
+              },
+        );
       },
       {
         onFlush: ({ events, durationSeconds }) =>
@@ -1427,25 +1439,38 @@ export async function runTurnStreamAttempt(
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
+        let toolCheckpoint: SessionEventMutation | undefined;
         if (pendingToolCall) {
-          const registered = await registerPendingSessionToolCall(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-            modelToolOutputTruncationTokens:
-              eventing.modelRunSettings.modelToolOutputTruncationTokens,
-            callId: pendingToolCall.callId,
-            callType: pendingToolCall.callType,
-            callItem: pendingToolCall.callItem as Record<string, unknown>,
-          });
-          if (!registered.accepted) {
-            throw new TurnAttemptFencedError(
-              "turn attempt ended while recording an in-flight tool call",
+          toolCheckpoint = async (tx, fence) => {
+            if (!fence.allowed) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended while recording an in-flight tool call",
+              );
+            }
+            const registered = await registerPendingSessionToolCallInTransaction(
+              tx,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+                modelToolOutputTruncationTokens:
+                  eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                callId: pendingToolCall.callId,
+                callType: pendingToolCall.callType,
+                callItem: pendingToolCall.callItem as Record<string, unknown>,
+              },
+              fence,
             );
-          }
+            if (!registered.accepted) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended while recording an in-flight tool call",
+              );
+            }
+            return true;
+          };
           currentToolBatchCallIds.add(pendingToolCall.callId);
           if (toolCallProducesRetainableSessionImage(pendingToolCall.callName)) {
             media.retainedSessionImageCallIds.add(pendingToolCall.callId);
@@ -1615,49 +1640,44 @@ export async function runTurnStreamAttempt(
           // non-monotonic while parallel calls complete (a later call may
           // appear before an earlier persisted pair), so reconciling a
           // partial batch through a scalar watermark can create an orphan.
-          const recorded = await recordPendingSessionToolCallResult(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-            callId: completedToolCall.callId,
-            modelToolOutputTruncationTokens:
-              eventing.modelRunSettings.modelToolOutputTruncationTokens,
-            resultItem: durableResultItem as Record<string, unknown>,
-            eventOutput: normalizedToolOutput.output,
-            ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
-              ? {
-                  videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
-                    completedToolCall.callId,
-                  )!,
-                }
-              : {}),
-          });
-          if (!recorded.accepted) {
-            throw new TurnAttemptFencedError(
-              "turn attempt ended while recording a tool-call result",
-            );
-          }
-          if (recorded.recorded) newlyDurableToolCallId = completedToolCall.callId;
-          const videoAcceptance = videoGenerationAcceptancesByCallId.get(completedToolCall.callId);
-          if (videoAcceptance && startVideoGenerationWorkflow) {
-            try {
-              await startVideoGenerationWorkflow({
+          toolCheckpoint = async (tx, fence) => {
+            if (!fence.allowed) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended while recording a tool-call result",
+              );
+            }
+            const recorded = await recordPendingSessionToolCallResultInTransaction(
+              tx,
+              {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
-                operationId: videoAcceptance.operationId,
-              });
-            } catch (error) {
-              // The accepted operation is durable. The recovery sweep starts
-              // the same deterministic workflow ID if this nudge fails.
-              observability.warn("Video generation workflow start deferred", {
-                operationId: videoAcceptance.operationId,
-                errorClass: error instanceof Error ? error.name : "UnknownError",
-              });
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+                callId: completedToolCall.callId,
+                modelToolOutputTruncationTokens:
+                  eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                resultItem: durableResultItem as Record<string, unknown>,
+                eventOutput: normalizedToolOutput.output,
+                ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
+                  ? {
+                      videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
+                        completedToolCall.callId,
+                      )!,
+                    }
+                  : {}),
+              },
+              fence,
+            );
+            if (!recorded.accepted) {
+              throw new TurnAttemptFencedError(
+                "turn attempt ended while recording a tool-call result",
+              );
             }
-          }
+            newlyDurableToolCallId = recorded.recorded ? completedToolCall.callId : null;
+            return true;
+          };
           const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
           if (belongsToCurrentBatch) {
             currentToolBatchCompletedCallIds.add(completedToolCall.callId);
@@ -1669,11 +1689,9 @@ export async function runTurnStreamAttempt(
           const standaloneStableResult =
             !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
           if (currentBatchIsStable || standaloneStableResult) {
-            // Persist the SDK's now-stable complete call/result batch. Keep
-            // the receipts until the normalized tool-output event below is
-            // durably flushed: recovery then covers every crash boundary
-            // without either losing or duplicating the UI projection.
-            await historySink.reconcileConversationTruth({ requireDurable: true });
+            // First commit the exact result with its output event below.
+            // Then persist the SDK's stable complete batch and retire its
+            // proven receipts together, covering both crash boundaries.
             stableToolCallIdsToClear = currentBatchIsStable
               ? [...currentToolBatchCallIds]
               : [completedToolCall.callId];
@@ -1738,18 +1756,62 @@ export async function runTurnStreamAttempt(
             });
           }
           streamTiming.onEvent(event.type);
+          const checkpoint =
+            event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output"
+              ? toolCheckpoint
+              : undefined;
           if (event.type === "agent.toolCall.output") {
             const batcher = eventing.batcher;
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
-              measureMcpPhase("event_persistence", () => batcher.push(event)),
+              measureMcpPhase("event_persistence", () => batcher.push(event, checkpoint)),
             );
           } else {
-            await eventing.batcher.push(event);
+            await eventing.batcher.push(event, checkpoint);
           }
+          if (checkpoint) toolCheckpoint = undefined;
           if (event.type === "agent.message.completed") {
             // Completed messages are structural: push returns once durable.
             latestStreamedAssistantText = (event.payload as { text: string }).text;
             latestAssistantMessageText = latestStreamedAssistantText;
+          }
+        }
+        if (toolCheckpoint && pendingToolCall) {
+          // Internal SDK registration items deliberately have no timeline
+          // projection. Preserve their receipt without inventing a UI event.
+          const registered = await registerPendingSessionToolCall(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: input.attemptId,
+            modelToolOutputTruncationTokens:
+              eventing.modelRunSettings.modelToolOutputTruncationTokens,
+            callId: pendingToolCall.callId,
+            callType: pendingToolCall.callType,
+            callItem: pendingToolCall.callItem as Record<string, unknown>,
+          });
+          if (!registered.accepted)
+            throw new TurnAttemptFencedError(
+              "turn attempt ended while recording an in-flight tool call",
+            );
+        }
+        const videoAcceptance = completedToolCall
+          ? videoGenerationAcceptancesByCallId.get(completedToolCall.callId)
+          : undefined;
+        if (videoAcceptance && startVideoGenerationWorkflow) {
+          try {
+            await startVideoGenerationWorkflow({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              operationId: videoAcceptance.operationId,
+            });
+          } catch (error) {
+            // The accepted operation and its exact output are durable together.
+            observability.warn("Video generation workflow start deferred", {
+              operationId: videoAcceptance.operationId,
+              errorClass: error instanceof Error ? error.name : "UnknownError",
+            });
           }
         }
         // Structural tool-output events await their durable append before
@@ -1758,20 +1820,10 @@ export async function runTurnStreamAttempt(
         // duplicate live SDK marker before a long turn accumulates it.
         releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
         if (stableToolCallIdsToClear) {
-          const cleared = await clearDurablePendingSessionToolCalls(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-            callIds: stableToolCallIdsToClear,
+          await historySink.reconcileConversationTruth({
+            requireDurable: true,
+            completedToolCallIds: stableToolCallIdsToClear,
           });
-          if (!cleared.accepted) {
-            throw new TurnAttemptFencedError(
-              "turn attempt ended while finalizing tool-call results",
-            );
-          }
           if (completedCurrentToolBatch) {
             currentToolBatchCallIds = new Set<string>();
             currentToolBatchCompletedCallIds = new Set<string>();

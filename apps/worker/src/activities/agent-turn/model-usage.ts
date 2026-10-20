@@ -5,6 +5,7 @@ import {
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
   type ModelCallTiming,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -121,6 +122,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
+  mutate?: SessionEventMutation,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
