@@ -10587,76 +10587,127 @@ async function materializeSandboxFileDownloadsUnscoped(
   if (normalizedDownloads.length === 0) {
     return { failures: [] };
   }
-  const failures: SandboxFileDownloadFailure[] = [];
   const workspaceRoot = sandboxSessionWorkspaceRoot(session);
-  for (const download of normalizedDownloads) {
-    const targetRelativePath = sandboxDownloadRelativePath(download);
-    const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
-    const payload = {
-      fileId: download.fileId,
-      path: targetPath,
-      sizeBytes: download.sizeBytes ?? null,
-      expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
-    };
+  // Each download is one sandbox command whose cost is dominated by the
+  // provider's per-command round trip, not by the transfer. Run independent
+  // targets concurrently; downloads that share a target path stay ordered in
+  // their own lane so the last one written is still the last one listed.
+  // Failures are reported in input order regardless of completion order.
+  const failuresByIndex: (SandboxFileDownloadFailure | undefined)[] = [];
+  const lanes = new Map<string, number[]>();
+  normalizedDownloads.forEach((download, index) => {
+    const key = sandboxDownloadRelativePath(download);
+    const lane = lanes.get(key);
+    if (lane) lane.push(index);
+    else lanes.set(key, [index]);
+  });
+  const pending = [...lanes.values()];
+  let cancellation: { error: unknown } | undefined;
+  const runLanes = async (): Promise<void> => {
+    for (let lane = pending.shift(); lane && !cancellation; lane = pending.shift()) {
+      for (const index of lane) {
+        if (cancellation) return;
+        try {
+          failuresByIndex[index] = await materializeOneSandboxFileDownload(
+            session,
+            normalizedDownloads[index]!,
+            workspaceRoot,
+            context,
+          );
+        } catch (error) {
+          cancellation ??= { error };
+          return;
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SANDBOX_FILE_DOWNLOAD_CONCURRENCY, lanes.size) }, runLanes),
+  );
+  if (cancellation) throw cancellation.error;
+  return {
+    failures: failuresByIndex.filter(
+      (failure): failure is SandboxFileDownloadFailure => failure !== undefined,
+    ),
+  };
+}
+
+const SANDBOX_FILE_DOWNLOAD_CONCURRENCY = 6;
+
+/** Download one file into the sandbox. Resolves to its failure (or undefined on
+ * success); rejects only for turn cancellation or a runtime-event publication
+ * failure, either of which aborts the whole batch as it did when sequential. */
+async function materializeOneSandboxFileDownload(
+  session: SandboxSessionLike,
+  download: SandboxFileDownload,
+  workspaceRoot: string,
+  context: SandboxFileDownloadMaterializationContext,
+): Promise<SandboxFileDownloadFailure | undefined> {
+  const targetRelativePath = sandboxDownloadRelativePath(download);
+  const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
+  const payload = {
+    fileId: download.fileId,
+    path: targetPath,
+    sizeBytes: download.sizeBytes ?? null,
+    expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload: { name: "file-resource-download", ...payload },
+  });
+  if (!session.exec && !session.execCommand) {
+    const failure = sandboxFileDownloadFailure(
+      download,
+      targetPath,
+      "Sandbox file download materialization requires command execution support",
+    );
     await context.onRuntimeEvent?.({
-      type: "sandbox.operation.started",
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+      },
+    });
+    return failure;
+  }
+  let result: unknown;
+  try {
+    result = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: sandboxFileDownloadCommand(download, targetRelativePath),
+        workdir: workspaceRoot,
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 20_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
       payload: { name: "file-resource-download", ...payload },
     });
-    if (!session.exec && !session.execCommand) {
-      const failure = sandboxFileDownloadFailure(
-        download,
-        targetPath,
-        "Sandbox file download materialization requires command execution support",
-      );
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-        },
-      });
-      continue;
-    }
-    let result: unknown;
-    try {
-      result = await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
-          workdir: workspaceRoot,
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 20_000,
-        },
-        context.commandRunner,
-      );
-      assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.completed",
-        payload: { name: "file-resource-download", ...payload },
-      });
-    } catch (error) {
-      if (error instanceof TurnSandboxCommandCancelledError) throw error;
-      const failure = explainConnectedMachineRootDownloadFailure(
-        sandboxFileDownloadFailure(download, targetPath, error, result),
-        { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
-      );
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-          ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
-          ...(failure.output ? { output: failure.output } : {}),
-        },
-      });
-    }
+    return undefined;
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    const failure = explainConnectedMachineRootDownloadFailure(
+      sandboxFileDownloadFailure(download, targetPath, error, result),
+      { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
+    );
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+        ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+        ...(failure.output ? { output: failure.output } : {}),
+      },
+    });
+    return failure;
   }
-  return { failures };
 }
 
 function sandboxFileDownloadFailure(

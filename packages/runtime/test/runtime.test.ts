@@ -6079,6 +6079,64 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("downloads independent files concurrently and reports failures in input order", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const releases: Array<() => void> = [];
+    const sameTargetOrder: string[] = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        if (cmd.includes("shared.txt")) sameTargetOrder.push(cmd.includes("?v=1") ? "v1" : "v2");
+        await new Promise<void>((resolve) => releases.push(resolve));
+        inFlight -= 1;
+        const failing = cmd.includes("fail-a") || cmd.includes("fail-b");
+        return { output: failing ? "boom" : "", exitCode: failing ? 1 : 0 };
+      },
+    } as any;
+    const download = (id: string, filename: string, url: string) => ({
+      fileId: id,
+      mountPath: `files/${id}`,
+      filename,
+      url,
+    });
+    const downloads = [
+      download("file-1", "fail-b.txt", "https://storage.example/fail-b"),
+      download("file-2", "ok-1.txt", "https://storage.example/ok-1"),
+      download("file-3", "fail-a.txt", "https://storage.example/fail-a"),
+      download("file-4", "ok-2.txt", "https://storage.example/ok-2"),
+      {
+        ...download("file-5", "shared.txt", "https://storage.example/shared?v=1"),
+        mountPath: "files/shared",
+      },
+      {
+        ...download("file-6", "shared.txt", "https://storage.example/shared?v=2"),
+        mountPath: "files/shared",
+      },
+    ];
+    const pending = materializeSandboxFileDownloads(session, downloads);
+    // Release commands as they arrive, newest first, until every one has run.
+    let released = 0;
+    while (released < downloads.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      const next = releases.pop();
+      if (next) {
+        next();
+        released += 1;
+      }
+    }
+    const result = await pending;
+
+    expect(peak).toBeGreaterThan(1);
+    expect(sameTargetOrder).toEqual(["v1", "v2"]);
+    expect(result.failures.map((failure) => failure.filename)).toEqual([
+      "fail-b.txt",
+      "fail-a.txt",
+    ]);
+  });
+
   test("reports signed file download failures without throwing", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const result = await materializeSandboxFileDownloads(
