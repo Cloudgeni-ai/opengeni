@@ -63,13 +63,24 @@ variable "min_cpu_platform" {
 }
 
 variable "nested" {
-  description = "Hosts are VMs with nested virtualization (memory profile nested, huge pages). False for bare-metal machine types."
+  description = "Hosts are VMs with nested virtualization. False for bare-metal machine types."
   type        = bool
   default     = true
 }
 
+variable "memory_profile" {
+  description = "How hosts back guest memory (compute ADR 5): nested (2 MiB huge pages, which make memory faults under nesting far cheaper, but cannot be compressed or ballooned back, so every awake sandbox is booked at its full size) or bare-metal (4 KiB pages, ballooning and compression, so a sandbox is booked at its request and may use more up to its size). Empty: nested on nested hosts, bare-metal otherwise. bare-metal on a nested host gives sandboxes requests below their size and the Compressed level, at the cost of slower memory faults."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "nested", "bare-metal"], var.memory_profile)
+    error_message = "memory_profile must be empty, nested or bare-metal."
+  }
+}
+
 variable "huge_pages_percent" {
-  description = "Share of a nested host's memory reserved as 2 MiB huge pages for guest memory; the rest is left to the agent, VMMs, pagers and the page cache."
+  description = "Share of a host's memory reserved as 2 MiB huge pages for guest memory on the nested memory profile; the rest is left to the agent, VMMs, pagers and the page cache."
   type        = number
   default     = 85
 

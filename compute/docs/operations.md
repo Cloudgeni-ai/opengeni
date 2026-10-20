@@ -220,6 +220,12 @@ certificate, in Terraform's state; no managed certificate authority), a
 host and a control service account with only what each needs, and the
 firewall rules (the service to hosts on 7443, hosts to the service,
 optional SSH). See its `terraform.tfvars.example`. Each host's startup
+script names the hosts' memory profile (`memory_profile`, ADR 5): by
+default `nested` on nested-virtualization hosts, where huge pages keep
+memory faults cheap but every awake sandbox is booked at its full size,
+and `bare-metal` otherwise. `bare-metal` on a nested host books sandboxes
+at their request, lets them use more up to their size and adds the
+Compressed level, at the cost of slower memory faults. The startup
 script prepares the state volume (local NVMe SSDs, striped, or a
 persistent disk), fetches and checks the bundle the template names, and
 runs `install.sh` with the authority's certificate from the template's

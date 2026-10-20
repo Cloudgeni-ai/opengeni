@@ -225,10 +225,16 @@ struct ServeArgs {
     /// A step concurrency limit such as `restore=32`; repeatable.
     #[arg(long = "limit", value_parser = parse_limit)]
     limits: Vec<(Step, u32)>,
-    /// Push idle sandboxes deeper when available memory drops below this.
+    /// Push idle sandboxes deeper when available memory drops below this,
+    /// then ask sandboxes in use above their request to give memory back.
+    /// Given with `--memory-high-mib` or not at all. Defaults on 4 KiB
+    /// pages to a thirty-second of the host's memory, at least 512 MiB;
+    /// with huge pages there is no relief from pressure unless both are
+    /// given.
     #[arg(long)]
     memory_low_mib: Option<u64>,
-    /// ...until expected available memory reaches this.
+    /// ...until expected available memory reaches this. Defaults to twice
+    /// the low watermark.
     #[arg(long)]
     memory_high_mib: Option<u64>,
     /// Guest memory this host promises its sandboxes at once: a wake beyond
@@ -632,11 +638,13 @@ fn host_policy(
     for &(step, limit) in &args.limits {
         policy.limits = policy.limits.with(step, limit);
     }
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
     let budget = admission_budget(
+        &meminfo,
         memory_profile,
         args.memory_capacity_mib,
         args.memory_headroom_mib,
-    )?;
+    );
     tracing::info!(capacity_mib = budget >> 20, "guest memory capacity");
     policy.admission = Some(Admission {
         budget,
@@ -646,13 +654,18 @@ fn host_policy(
         // samples keeps a sandbox from being pushed deeper to make room.
         busy_grace: args.busy_window + 2 * sample_every,
     });
-    if let (Some(low), Some(high)) = (args.memory_low_mib, args.memory_high_mib) {
-        policy.memory = Some(MemoryPolicy {
-            low_watermark: low << 20,
-            high_watermark: high << 20,
-            compressed_percent: 25,
-            balloon_grace: Duration::from_secs(3),
-        });
+    policy.memory = memory_policy(
+        memory_profile,
+        args.memory_low_mib,
+        args.memory_high_mib,
+        meminfo_field(&meminfo, "MemTotal:") << 10,
+    )?;
+    if let Some(memory) = policy.memory {
+        tracing::info!(
+            low_mib = memory.low_watermark >> 20,
+            high_mib = memory.high_watermark >> 20,
+            "memory pressure relief"
+        );
     }
     policy.disk = Some(disk_policy(
         &args.root,
@@ -922,21 +935,57 @@ fn meminfo_field(meminfo: &str, name: &str) -> u64 {
 /// lives in it (nothing else on the host uses it), else the host's memory
 /// less `headroom_mib` (default a sixteenth, at least 1 GiB).
 fn admission_budget(
+    meminfo: &str,
     profile: MemoryProfile,
     capacity_mib: Option<u64>,
     headroom_mib: Option<u64>,
-) -> anyhow::Result<u64> {
+) -> u64 {
     if let Some(capacity) = capacity_mib {
-        return Ok(capacity << 20);
+        return capacity << 20;
     }
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
     if profile.pages == compute_engine::PageSize::Huge {
-        let pages = meminfo_field(&meminfo, "HugePages_Total:");
-        return Ok(pages * (meminfo_field(&meminfo, "Hugepagesize:") << 10));
+        let pages = meminfo_field(meminfo, "HugePages_Total:");
+        return pages * (meminfo_field(meminfo, "Hugepagesize:") << 10);
     }
-    let total = meminfo_field(&meminfo, "MemTotal:") << 10;
+    let total = meminfo_field(meminfo, "MemTotal:") << 10;
     let headroom = headroom_mib.map_or((total / 16).max(1 << 30), |mib| mib << 20);
-    Ok(total.saturating_sub(headroom))
+    total.saturating_sub(headroom)
+}
+
+/// The least default low watermark on 4 KiB pages.
+const DEFAULT_LOW_WATERMARK_MIN: u64 = 512 << 20;
+
+/// When the host relieves memory pressure (ADR 14): at the watermarks
+/// given, which go together. Without them a host on 4 KiB pages still
+/// relieves it, because its sandboxes may use more than their request and
+/// nothing else keeps that use from running the host out of memory: from
+/// a thirty-second of the host's `total` bytes available (at least
+/// 512 MiB) until twice that is. With huge pages every awake sandbox is
+/// booked whole, so there is relief only when asked for.
+fn memory_policy(
+    profile: MemoryProfile,
+    low_mib: Option<u64>,
+    high_mib: Option<u64>,
+    total: u64,
+) -> anyhow::Result<Option<MemoryPolicy>> {
+    let (low, high) = match (low_mib, high_mib) {
+        (Some(low), Some(high)) => (low << 20, high << 20),
+        (None, None) if profile.pages == compute_engine::PageSize::Base => {
+            let low = (total / 32).max(DEFAULT_LOW_WATERMARK_MIN);
+            (low, 2 * low)
+        }
+        (None, None) => return Ok(None),
+        _ => bail!("--memory-low-mib and --memory-high-mib go together"),
+    };
+    if high < low {
+        bail!("--memory-high-mib must be at least --memory-low-mib");
+    }
+    Ok(Some(MemoryPolicy {
+        low_watermark: low,
+        high_watermark: high,
+        compressed_percent: 25,
+        balloon_grace: Duration::from_secs(3),
+    }))
 }
 
 /// The local disk kept back from saves on the filesystem holding `root`:
@@ -1003,4 +1052,76 @@ fn check_zswap(compress: bool) -> anyhow::Result<()> {
         bail!("compressing paused VMs needs zswap; turn it on or pass --no-compress");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    /// A host on 4 KiB pages relieves memory pressure without being told
+    /// to: its sandboxes may use more than they are guaranteed.
+    #[test]
+    fn four_kib_pages_relieve_pressure_by_default() {
+        let policy = memory_policy(MemoryProfile::bare_metal(), None, None, 32 * GIB)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.low_watermark, GIB);
+        assert_eq!(policy.high_watermark, 2 * GIB);
+        // A small host keeps at least 512 MiB.
+        let small = memory_policy(MemoryProfile::bare_metal(), None, None, 4 * GIB)
+            .unwrap()
+            .unwrap();
+        assert_eq!(small.low_watermark, 512 << 20);
+        assert_eq!(small.high_watermark, GIB);
+    }
+
+    /// Huge pages book every awake sandbox whole: relief only when asked.
+    #[test]
+    fn huge_pages_relieve_pressure_only_when_asked() {
+        assert_eq!(
+            memory_policy(MemoryProfile::nested(), None, None, 32 * GIB).unwrap(),
+            None
+        );
+        let asked = memory_policy(MemoryProfile::nested(), Some(1024), Some(1536), 32 * GIB)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (asked.low_watermark, asked.high_watermark),
+            (GIB, 1536 << 20)
+        );
+    }
+
+    #[test]
+    fn watermarks_go_together_in_order() {
+        let profile = MemoryProfile::bare_metal();
+        assert!(memory_policy(profile, Some(1024), None, 32 * GIB).is_err());
+        assert!(memory_policy(profile, None, Some(1024), 32 * GIB).is_err());
+        assert!(memory_policy(profile, Some(2048), Some(1024), 32 * GIB).is_err());
+        let given = memory_policy(profile, Some(4096), Some(4096), 32 * GIB)
+            .unwrap()
+            .unwrap();
+        assert_eq!(given.low_watermark, given.high_watermark);
+    }
+
+    /// The capacity a host offers: the huge-page pool, or its memory less
+    /// a sixteenth (at least 1 GiB), unless given.
+    #[test]
+    fn capacity_follows_the_profile() {
+        let meminfo =
+            "MemTotal:       33554432 kB\nHugePages_Total:   13000\nHugepagesize:       2048 kB\n";
+        assert_eq!(
+            admission_budget(meminfo, MemoryProfile::bare_metal(), None, None),
+            30 * GIB
+        );
+        assert_eq!(
+            admission_budget(meminfo, MemoryProfile::nested(), None, None),
+            13000 * (2 << 20)
+        );
+        assert_eq!(
+            admission_budget(meminfo, MemoryProfile::bare_metal(), Some(1024), None),
+            GIB
+        );
+    }
 }
