@@ -3362,7 +3362,9 @@ export const ComputerObservation = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerObservation = z.infer<typeof ComputerObservation>;
 
-export const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
+/** Module-private: ComputerAction keeps these variants inline in the public
+ * API surface; the batch reuses them. */
+const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: z.literal("semantic"),
@@ -3394,7 +3396,7 @@ export const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
     }),
 );
 
-export const ComputerKeyboardAction = /* @__PURE__ */ defineSchema(() =>
+const ComputerKeyboardAction = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: z.literal("keyboard"),
@@ -3521,6 +3523,14 @@ export const ComputerActionBatch = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type ComputerActionBatch = z.infer<typeof ComputerActionBatch>;
+
+/** What an action request may carry: any ComputerAction, or a batch. A named
+ * superset of ComputerAction, so adding the batch is an additive request
+ * change. */
+export const ComputerActionRequestAction = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [...ComputerAction.options, ComputerActionBatch]),
+);
+export type ComputerActionRequestAction = z.infer<typeof ComputerActionRequestAction>;
 
 export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
   z
@@ -3727,7 +3737,7 @@ export const ComputerActionRequest = /* @__PURE__ */ defineSchema(() =>
       expectedTargetGeneration: opaqueGeneration,
       expectedObservationId: boundedOpaqueId.nullable(),
       expectedFrameId: opaqueGeneration.nullable(),
-      action: z.union([ComputerAction, ComputerActionBatch]),
+      action: ComputerActionRequestAction,
     })
     .strict()
     .superRefine((request, context) => {
