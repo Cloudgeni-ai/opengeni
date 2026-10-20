@@ -504,9 +504,17 @@ fn a_smaller_budget_admits_no_wake_until_it_fits_and_a_larger_one_lets_held_wake
         matches!(started(&actions)[..], [(2, Step::Restore, _)]),
         "{actions:?}"
     );
-    // Nothing to change without a budget, nor to none.
+    // None left: no wake is admitted, and none is made up.
     rig.send(Input::CpuBudget { millis: 0 });
-    assert_eq!(rig.cpu().budget, 1000);
+    assert_eq!(rig.cpu().budget, 0);
+    assert_eq!(rig.level(1), Level::Running, "an awake sandbox stays awake");
+    rig.add(3, saved(), size(10));
+    let actions = rig.hold(3);
+    assert_eq!(
+        host_full(&actions, 3).map(|(resource, ..)| resource),
+        Some(Resource::Cpu)
+    );
+    // Nothing to change without a budget.
     let mut unbudgeted = Rig::with(HostPolicy::default());
     unbudgeted.send(Input::CpuBudget { millis: 500 });
     assert_eq!(unbudgeted.host.cpu_capacity(), None);

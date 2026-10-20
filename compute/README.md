@@ -266,7 +266,11 @@ it runs (zero while paused, so the kernel takes from idle VMs first; not
 VM down if the host ever runs short beyond everything unprotected), and
 `cpu.weight` from `cpu_request_millis` (all its processors unless set
 lower, rounded up to 10 millicores), so contended processors are shared by
-request and never below it, while `vcpus` stays the ceiling. A running VM is
+request and never below it while what is booked fits the host's capacity,
+while `vcpus` stays the ceiling. When something outside the VMs' group
+takes more of the processors than the host keeps back, the capacity falls
+with it: awake sandboxes stay awake and share in proportion to their
+requests until enough sleep, and no wake is admitted meanwhile. A running VM is
 never compressed or swapped, not even by the
 kernel under memory pressure: `memory.zswap.max` is 0 from launch, on
 adoption and before every resume, and opens only while the agent compresses

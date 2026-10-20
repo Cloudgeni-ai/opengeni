@@ -211,8 +211,15 @@ impl SleepConfig {
 /// The most guest memory a sandbox may have, in MiB.
 pub const MAX_MEMORY_MIB: u32 = 65_536;
 
+/// The least guest memory a sandbox may have, in MiB.
+pub const MIN_MEMORY_MIB: u32 = 128;
+
 /// The most virtual processors a sandbox may have.
 pub const MAX_VCPUS: u8 = 32;
+
+/// The least processor time a sandbox may be guaranteed, in thousandths
+/// of a processor: what one `cpu.weight` step stands for.
+pub const MIN_CPU_REQUEST_MILLIS: u32 = 10;
 
 /// A sandbox image built from an OCI image (ADR 19): the BLAKE3 digest of
 /// its ext4 file, written as 64 lowercase hex digits. The same file always
@@ -388,9 +395,9 @@ impl SandboxConfig {
         if self.vcpus == 0 || self.vcpus > MAX_VCPUS {
             return Err(format!("vcpus must be between 1 and {MAX_VCPUS}"));
         }
-        if !(128..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
+        if !(MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
             return Err(format!(
-                "memory_mib must be between 128 and {MAX_MEMORY_MIB}"
+                "memory_mib must be between {MIN_MEMORY_MIB} and {MAX_MEMORY_MIB}"
             ));
         }
         if let Some(request) = self.memory_request_mib
@@ -399,9 +406,11 @@ impl SandboxConfig {
             return Err("memory_request_mib must be between 64 and memory_mib".into());
         }
         if let Some(millis) = self.cpu_request_millis
-            && !(10..=u32::from(self.vcpus) * 1000).contains(&millis)
+            && !(MIN_CPU_REQUEST_MILLIS..=u32::from(self.vcpus) * 1000).contains(&millis)
         {
-            return Err("cpu_request_millis must be between 10 and vcpus * 1000".into());
+            return Err(format!(
+                "cpu_request_millis must be between {MIN_CPU_REQUEST_MILLIS} and vcpus * 1000"
+            ));
         }
         self.sleep_policy()
     }

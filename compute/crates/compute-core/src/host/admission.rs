@@ -273,7 +273,7 @@ impl Host {
 
     /// Takes in [`crate::Input::CpuBudget`].
     pub(super) fn set_cpu_budget(&mut self, millis: u64) {
-        if self.policy.cpu_budget.is_some() && millis > 0 {
+        if self.policy.cpu_budget.is_some() {
             self.policy.cpu_budget = Some(millis);
         }
     }

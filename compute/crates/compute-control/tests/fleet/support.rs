@@ -396,6 +396,7 @@ impl Fleet {
 pub fn roomy() -> Capacity {
     Capacity {
         memory_free_mib: 64 * 1024,
+        cpu_millis: None,
         cpu_free_millis: None,
         disk_free_mib: 1 << 20,
         ready: Vec::new(),

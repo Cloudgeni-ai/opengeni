@@ -99,6 +99,16 @@ fn intern<T: Copy>(table: &mut HashMap<String, T>, key: &str, make: impl Fn(u16)
     value
 }
 
+/// The processor time a host guarantees its sandboxes now, in
+/// millicores: what it last reported, or, from an older host that reports
+/// only what it has left, what it registered with; `None` from a host that
+/// does not guarantee it.
+#[must_use]
+pub fn cpu_millis(info: &Described, reported: &Reported) -> Option<u64> {
+    info.cpu_millis
+        .map(|registered| reported.cpu_millis.unwrap_or(registered))
+}
+
 /// What placement reads of a host's report.
 fn capacity(info: &Described, reported: &Reported) -> Capacity {
     Capacity {
@@ -249,7 +259,7 @@ impl View {
                     draining: known.state == HostState::Draining,
                     memory_mib: known.info.memory_mib,
                     free_memory_mib: known.capacity.memory_free_mib,
-                    cpu_millis: known.info.cpu_millis,
+                    cpu_millis: cpu_millis(&known.info, &known.capacity),
                     free_cpu_millis: known.capacity.cpu_free_millis,
                 };
                 (known.target.name.clone(), host)
@@ -267,8 +277,8 @@ pub struct GroupHost {
     pub memory_mib: u64,
     /// Memory in MiB it can still promise.
     pub free_memory_mib: u64,
-    /// Processor time in millicores it guarantees sandboxes; `None` when
-    /// it does not say.
+    /// Processor time in millicores it guarantees sandboxes now; `None`
+    /// when it does not say.
     pub cpu_millis: Option<u64>,
     /// Processor time in millicores it can still promise.
     pub free_cpu_millis: Option<u64>,
@@ -311,5 +321,50 @@ pub async fn follow<S: Store>(view: Arc<View>, store: Arc<S>) {
             }
             Err(error) => tracing::warn!(%error, "reading the hosts failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn described(cpu_millis: Option<u64>) -> Described {
+        Described {
+            name: "h".into(),
+            address: "h:1".into(),
+            zone: "z".into(),
+            profile: "nested".into(),
+            cpu_template: "t".into(),
+            memory_mib: 1,
+            cpu_millis,
+            disk_mib: 1,
+        }
+    }
+
+    /// A host's processor time is what it reports now, which falls while
+    /// what else runs on it takes more of its processors, not what it
+    /// registered with.
+    #[test]
+    fn processor_time_is_what_a_host_reports_now() {
+        let lowered = Reported {
+            cpu_millis: Some(4000),
+            cpu_free_millis: Some(4000),
+            ..Reported::default()
+        };
+        assert_eq!(cpu_millis(&described(Some(7500)), &lowered), Some(4000));
+        let none_left = Reported {
+            cpu_millis: Some(0),
+            cpu_free_millis: Some(0),
+            ..Reported::default()
+        };
+        assert_eq!(cpu_millis(&described(Some(7500)), &none_left), Some(0));
+        // An older host reports only what it has left.
+        let older = Reported {
+            cpu_free_millis: Some(1000),
+            ..Reported::default()
+        };
+        assert_eq!(cpu_millis(&described(Some(7500)), &older), Some(7500));
+        // A host that does not guarantee it.
+        assert_eq!(cpu_millis(&described(None), &lowered), None);
     }
 }

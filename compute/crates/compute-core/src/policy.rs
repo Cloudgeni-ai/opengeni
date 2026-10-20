@@ -448,7 +448,8 @@ pub struct HostPolicy {
     /// does not fit is refused at once with [`crate::Notice::HostFull`].
     /// Nothing frees processor time instantly: it comes back as sandboxes
     /// go to sleep, and a refused wake still held wakes then by itself.
-    /// A sleeping sandbox counts none. `None` counts no processor time.
+    /// A sleeping sandbox counts none. 0 while the host can guarantee
+    /// none: then no wake is admitted. `None` counts no processor time.
     pub cpu_budget: Option<u64>,
     /// How much local disk saves may book; `None` books none.
     pub disk: Option<DiskPolicy>,
@@ -516,9 +517,6 @@ impl HostPolicy {
                 return Err(PolicyError::CompressedPercent);
             }
         }
-        if self.cpu_budget == Some(0) {
-            return Err(PolicyError::NoCpu);
-        }
         Ok(())
     }
 }
@@ -566,8 +564,6 @@ pub enum PolicyError {
     CompressedPercent,
     /// A rule that counts running time is zero, so it would never stop.
     Zero(Rule),
-    /// The processor budget is zero, so no sandbox could ever wake.
-    NoCpu,
 }
 
 impl fmt::Display for PolicyError {
@@ -582,7 +578,6 @@ impl fmt::Display for PolicyError {
             Self::Watermarks => f.write_str("the low memory watermark is above the high one"),
             Self::CompressedPercent => f.write_str("the compressed share is above 100 percent"),
             Self::Zero(rule) => write!(f, "the {rule} rule must be longer than zero"),
-            Self::NoCpu => f.write_str("the processor budget is zero"),
         }
     }
 }

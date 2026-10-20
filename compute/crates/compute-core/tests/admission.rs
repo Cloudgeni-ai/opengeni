@@ -752,6 +752,7 @@ impl Sim {
     }
 
     fn send(&mut self, inputs: Vec<Input>) {
+        let cpu_before = self.host.cpu_capacity().map(|cpu| cpu.reserved);
         let mut out = Vec::new();
         self.host.handle_all(self.now, inputs, &mut out);
         for action in out {
@@ -783,19 +784,25 @@ impl Sim {
             capacity.reserved <= self.budget,
             "requests of awake sandboxes exceed the budget: {capacity:?}"
         );
-        self.check_cpu();
+        self.check_cpu(cpu_before);
         self.check_waits_only_for_instant_relief();
     }
 
     /// The processor time of sandboxes awake or waking, counted from what
-    /// they do, never exceeds the budget, nor does what the host counts.
-    fn check_cpu(&self) {
+    /// they do, never exceeds what the host counts, and that never grows
+    /// beyond the budget: once the budget falls below it, which leaves
+    /// sandboxes awake as they are, no wake is admitted until it fits.
+    fn check_cpu(&self, before: Option<u64>) {
         let Some(budget) = self.cpu_budget else {
             assert_eq!(self.host.cpu_capacity(), None);
             return;
         };
         let cpu = self.host.cpu_capacity().unwrap();
-        assert!(cpu.reserved <= budget, "{cpu:?}");
+        assert_eq!(cpu.budget, budget);
+        assert!(
+            cpu.reserved <= budget || cpu.reserved <= before.unwrap_or(0),
+            "admitted beyond the budget: {cpu:?}, {before:?} before"
+        );
         let awake: u64 = self
             .sizes
             .iter()
@@ -920,6 +927,16 @@ impl Sim {
                     bytes: 0,
                     cpu: 0,
                 }
+            }
+            // What else runs on the host takes more of its processors, or
+            // less, down to none.
+            81..83 if self.cpu_budget.is_some() => {
+                let millis = match self.rng.below(4) {
+                    0 => 0,
+                    _ => 10 * self.rng.below(601),
+                };
+                self.cpu_budget = Some(millis);
+                Input::CpuBudget { millis }
             }
             _ => {
                 let ops: Vec<OpId> = self.running.keys().copied().collect();

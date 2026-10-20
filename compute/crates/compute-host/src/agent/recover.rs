@@ -13,7 +13,9 @@ use futures::StreamExt;
 use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::observe::{Alarm, alarm_event};
-use crate::protocol::{Id, MAX_MEMORY_MIB, MAX_VCPUS, SandboxConfig};
+use crate::protocol::{
+    Id, MAX_MEMORY_MIB, MAX_VCPUS, MIN_CPU_REQUEST_MILLIS, MIN_MEMORY_MIB, SandboxConfig,
+};
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
@@ -36,21 +38,25 @@ fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
 
 /// The size of a sandbox whose record cannot be read whole, from the
 /// parts of it that can (`loose`): its memory, processors and CPU request
-/// where they still tell, and otherwise the most any sandbox may have,
-/// since its VM may still run with it.
+/// where they still tell a value a sandbox may have, and otherwise the
+/// most any sandbox may have, since its VM may still run with it. A value
+/// out of range is as unknown as a missing one: rounding it into range
+/// could count the VM at less than it runs with.
 fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
     let config = loose.and_then(|record| record.get("config"));
     let field = |name: &str| config.and_then(|config| config.get(name)?.as_u64());
-    let memory_mib = field("memory_mib").map_or(MAX_MEMORY_MIB, |mib| {
-        u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
-    });
-    let vcpus = field("vcpus").map_or(MAX_VCPUS, |vcpus| {
-        u8::try_from(vcpus).map_or(MAX_VCPUS, |vcpus| vcpus.clamp(1, MAX_VCPUS))
-    });
+    let memory_mib = field("memory_mib")
+        .and_then(|mib| u32::try_from(mib).ok())
+        .filter(|mib| (MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(mib))
+        .unwrap_or(MAX_MEMORY_MIB);
+    let vcpus = field("vcpus")
+        .and_then(|vcpus| u8::try_from(vcpus).ok())
+        .filter(|vcpus| (1..=MAX_VCPUS).contains(vcpus))
+        .unwrap_or(MAX_VCPUS);
     // Within what its processors allow; all of them when it does not tell.
     let cpu_request_millis = field("cpu_request_millis")
         .and_then(|millis| u32::try_from(millis).ok())
-        .map(|millis| millis.clamp(10, u32::from(vcpus) * 1000));
+        .filter(|millis| (MIN_CPU_REQUEST_MILLIS..=u32::from(vcpus) * 1000).contains(millis));
     SandboxConfig {
         cpu_request_millis,
         ..SandboxConfig::new(vcpus, memory_mib, crate::protocol::SleepConfig::default())
@@ -850,14 +856,39 @@ mod tests {
         assert_eq!(config.vcpus, MAX_VCPUS);
         assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
         assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
-        // Out of range: within it.
+        // Out of range, too high or too low, it is unknown: the most,
+        // never rounded into range, which could count less than the VM
+        // runs with.
         let wild = serde_json::json!({"config": {"vcpus": 900, "cpu_request_millis": 99_999_999}});
         let config = loose_config(Some(&wild));
         assert_eq!(config.vcpus, MAX_VCPUS);
         assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
         assert_eq!(
             loose_config(Some(&serde_json::json!({"config": {"vcpus": 0}}))).vcpus,
-            1
+            MAX_VCPUS
         );
+        let zeros = serde_json::json!({
+            "config": {"vcpus": 4, "memory_mib": 0, "cpu_request_millis": 0},
+        });
+        let config = loose_config(Some(&zeros));
+        assert_eq!(config.vcpus, 4);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), 4000);
+        let small = serde_json::json!({
+            "config": {"vcpus": 2, "memory_mib": 64, "cpu_request_millis": 9},
+        });
+        let config = loose_config(Some(&small));
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), 2000);
+        // Every value it does keep is one a sandbox may have.
+        for config in [
+            loose_config(Some(&told)),
+            loose_config(Some(&wild)),
+            loose_config(Some(&zeros)),
+            loose_config(Some(&small)),
+            loose_config(None),
+        ] {
+            assert!(config.validate().is_ok(), "{config:?}");
+        }
     }
 }

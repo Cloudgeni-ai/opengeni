@@ -78,8 +78,9 @@ pub struct HostInfo {
     pub cpu_template: String,
     /// Memory it gives sandboxes, in MiB.
     pub memory_mib: u64,
-    /// Processor time it guarantees sandboxes at once, in millicores;
-    /// `None` from a host that does not guarantee it.
+    /// Processor time it guarantees sandboxes at once, in millicores, as
+    /// it started; `None` from a host that does not guarantee it. What it
+    /// guarantees now is [`Capacity::cpu_millis`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_millis: Option<u64>,
     /// Disk it gives sandboxes, in MiB.
@@ -105,6 +106,13 @@ pub struct ReadyClones {
 pub struct Capacity {
     /// Memory free for sandboxes above the host's buffer, in MiB.
     pub memory_free_mib: u64,
+    /// Processor time it guarantees sandboxes at once now, in
+    /// millicores: less than [`HostInfo::cpu_millis`] while what else runs
+    /// on the host takes more of its processors than it keeps back.
+    /// `None` from a host that does not guarantee it, and from an older
+    /// host, whose [`HostInfo::cpu_millis`] then stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u64>,
     /// Processor time a wake can still reserve, in millicores; `None`
     /// from a host that does not guarantee it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

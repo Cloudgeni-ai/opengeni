@@ -26,6 +26,7 @@ fn random() -> u64 {
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
+        cpu_millis: None,
         cpu_free_millis: None,
         disk_free_mib: 1024,
         ready: Vec::new(),

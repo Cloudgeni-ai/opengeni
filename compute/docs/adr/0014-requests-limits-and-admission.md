@@ -79,20 +79,30 @@ pick a VM.
   agent leaves alone, and any `cpu.max` on the way), and the host
   guarantees no more than that: when no weight covers the capacity, as
   under a nested group or beside a heavy one, the capacity is lowered to
-  what the group gets, and the agent warns. Groups beside it come and go,
+  what the group gets, rounded down to 10 millicores and 0 when it gets
+  less than that (nothing wakes then; no minimum is made up), and the
+  agent warns. Groups beside it come and go,
   so the agent reads the hierarchy again every five seconds, sets the
   weight anew and, when what the group gets changes, the capacity with
   it: sandboxes awake stay awake, and while more is booked than the
   capacity no wake is admitted until enough sleep, as on an overdrawn
   capacity. Contended time goes to busy groups by weight, so when every
   processor is busy each awake VM still gets at least its request, VMM
-  threads and its pager included, which run in its group. The agent's own
+  threads and its pager included, which run in its group, as long as
+  what is booked fits the capacity. Between the capacity falling below
+  what is booked and enough sandboxes sleeping, awake VMs share what the
+  group gets in proportion to their requests, each getting less than its
+  request by the same fraction: keeping them awake is preferred to
+  stopping work the host promised, and the shortfall lasts only while
+  something outside the VMs' group takes more than the host keeps back.
+  The agent's own
   work beyond the headroom (archiving, mostly) waits for idle processors.
   A capacity the operator gives outright is kept as given, even above
   what the group gets: above the processors it overcommits them on
   purpose, requests then hold only in proportion, and the agent warns.
   Hosts
-  report their capacity and what is free; placement skips a host without
+  report their capacity as it is now and what is free; placement skips a
+  host without
   room for a sandbox's request, and a host group grows for whichever of
   memory and processor time runs short first, or when its hosts have too
   few rooms for the largest sandbox (its memory and processor time on one

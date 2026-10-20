@@ -41,8 +41,10 @@ pub struct Share {
     pub weight: u16,
     /// Millicores the host guarantees its sandboxes at once: its budget,
     /// or what the VMs' group gets with every group beside it and above
-    /// it busy, when that is less, a multiple of 10 and at least 10. A
-    /// budget given outright ([`ProcessorShare::stated`]) is kept.
+    /// it busy, when that is less, rounded down to a multiple of 10: 0
+    /// when it gets less than the 10 the smallest request is, and then
+    /// no wake is admitted. A budget given outright
+    /// ([`ProcessorShare::stated`]) is kept.
     pub capacity: u64,
     /// Millicores the VMs' group gets with every group beside it and
     /// above it busy.
@@ -237,7 +239,7 @@ fn share(levels: &[Level], processors: u64, budget: u64) -> Option<Share> {
     let gets = capped(part(parent, u64::from(weight), vms.siblings), vms.quota);
     Some(Share {
         weight,
-        capacity: (budget.min(gets) / 10 * 10).max(10),
+        capacity: budget.min(gets) / 10 * 10,
         gets,
         processors,
     })
@@ -360,6 +362,23 @@ mod tests {
             share_of(&[capped_above, level(100, 0)], 8000, 7500).capacity,
             2500
         );
+    }
+
+    /// Less than the smallest request guarantees nothing: no minimum is
+    /// made up.
+    #[test]
+    fn less_than_the_smallest_request_guarantees_none() {
+        let starved = Level {
+            quota: Some(1),
+            ..level(100, 300)
+        };
+        let share = share_of(&[starved], 8000, 7500);
+        assert_eq!((share.gets, share.capacity), (1, 0));
+        let starved = Level {
+            quota: Some(19),
+            ..level(100, 0)
+        };
+        assert_eq!(share_of(&[starved], 8000, 7500).capacity, 10);
     }
 
     #[test]

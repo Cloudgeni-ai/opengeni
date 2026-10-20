@@ -228,7 +228,8 @@ pub enum Input {
     /// keeps back, and more again once that is over. Sandboxes awake stay
     /// awake; while more is reserved than the budget, no wake is admitted
     /// until enough sleep, and a refused wake still held wakes by itself
-    /// once it fits. Ignored without a processor budget, and when 0.
+    /// once it fits. While it is 0 no wake is admitted. Ignored without a
+    /// processor budget.
     CpuBudget {
         /// Millicores.
         millis: u64,

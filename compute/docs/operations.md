@@ -361,6 +361,12 @@ authority alone for agent links.
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
   ```
 
+  Each host shows its memory and disk, and, when it guarantees processor
+  time, `cpu_millis` (what it guarantees at once now) and
+  `cpu_free_millis` (what a wake can still reserve). A `cpu_millis` below
+  what the host was given means something outside the VMs' group takes
+  more of its processors than it keeps back; the agent logs it.
+
 - **Draining a host.** `POST /v1/hosts/<name>/drain` stops new sandboxes
   going there and hands off every sandbox on it that nothing holds awake;
   each is adopted elsewhere on its next wake (ADR 18). The answer counts
@@ -716,7 +722,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   new schema they can only make a copy count as not whole. A host whose
   guest image predates the `sync` request warns and saves without it.
   One exception: hosts that report their processor capacity (`cpu_millis`
-  when they register, `cpu_free_millis` in their capacity) need a control
+  when they register, `cpu_millis` and `cpu_free_millis` in their
+  capacity) need a control
   service that reads it first. The first releases refuse report fields
   they do not know, so upgrade the service from before that release
   first, then the hosts; from that release on, report fields a service
