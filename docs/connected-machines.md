@@ -1422,11 +1422,16 @@ The card also appears without an agent decision. When `sandbox_swap`,
 `personal_machine_permission_required` (the machine's owner started the turn
 but has not allowed this chat yet), the API posts the same card in the calling
 turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
-reads then says the card is shown and that it should tell the person in one
-sentence, without waiting or retrying: choosing the machine sends the message
-that continues the chat. A repeated refusal in the same turn points at that
-turn's existing machine card, since one card lists every machine; cards for
-other capabilities are never affected. `personal_machine_not_permitted` (not
+reads then says the card is posted in this chat in Opengeni, carries the chat
+link (`chatUrl`), and tells the agent to tell the person in one sentence: that
+they can allow it in the chat, or, when they read the chat elsewhere (Slack, a
+worker or a scheduled chat), to open the link. It must not wait or retry:
+choosing the machine sends the message that continues the chat. A repeated
+refusal in the same turn reuses that turn's machine card, since one card lists
+every machine; the lookup and append run atomically under the turn-attempt
+fence (`appendTurnCapabilityCardOnce`), so parallel refusals cannot stack
+copies. Cards for other capabilities, such as Slack and GitHub in the same
+turn, are never limited. `personal_machine_not_permitted` (not
 the owner, or not the owner's turn) and every other failure stay plain
 refusals, and callers without an exact agent attempt get no card. If the card
 cannot be posted, the original refusal is returned unchanged.

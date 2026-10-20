@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MACHINE_PERMISSION_CARD_SHOWN_REASON,
-  connectedMachineCardInTurn,
+  machinePermissionCardShownReason,
+  sessionChatUrl,
   withMachinePermissionCard,
 } from "../src/mcp/machine-permission-card";
 
@@ -13,11 +13,12 @@ const permissionRequired = {
 };
 
 describe("Connected Machine card on a permission refusal", () => {
-  test("shows the card and tells the agent not to wait or retry", async () => {
+  test("posts the card, links the chat, and tells the agent not to wait or retry", async () => {
     let posts = 0;
+    const chatUrl = "https://app.example.test/workspaces/w/sessions/s";
     const result = await withMachinePermissionCard(permissionRequired, async () => {
       posts += 1;
-      return { eventId: "event-1" };
+      return { eventId: "event-1", chatUrl };
     });
     expect(posts).toBe(1);
     expect(result).toMatchObject({
@@ -25,10 +26,24 @@ describe("Connected Machine card on a permission refusal", () => {
       code: "personal_machine_permission_required",
       card: "shown",
       cardEventId: "event-1",
-      reason: MACHINE_PERMISSION_CARD_SHOWN_REASON,
+      chatUrl,
+      reason: machinePermissionCardShownReason(chatUrl),
     });
-    expect(result.reason).toContain("A card is now shown in this chat");
+    // Truthful about where the card is: it is in the Opengeni chat, and a
+    // person reading elsewhere (Slack, a worker or scheduled chat) gets the link.
+    expect(result.reason).toContain("now posted in this chat in Opengeni");
+    expect(result.reason).toContain(`give them this link to allow it: ${chatUrl}`);
     expect(result.reason).toContain("Do not wait for it and do not retry");
+  });
+
+  test("without a web address it points the person to the chat in Opengeni", async () => {
+    const result = await withMachinePermissionCard(permissionRequired, async () => ({
+      eventId: "event-1",
+      chatUrl: null,
+    }));
+    expect(result.card).toBe("shown");
+    expect("chatUrl" in result).toBe(false);
+    expect(result.reason).toContain("tell them to open this chat in Opengeni to allow it");
   });
 
   test("never shows it for someone who is not the owner, or for other failures", async () => {
@@ -41,7 +56,7 @@ describe("Connected Machine card on a permission refusal", () => {
       let posts = 0;
       const result = await withMachinePermissionCard(refused, async () => {
         posts += 1;
-        return { eventId: "event-1" };
+        return { eventId: "event-1", chatUrl: null };
       });
       expect(posts).toBe(0);
       expect(result).toEqual(refused);
@@ -59,27 +74,12 @@ describe("Connected Machine card on a permission refusal", () => {
     ).toEqual(permissionRequired);
   });
 
-  test("reuses this turn's machine card and leaves every other card alone", () => {
-    const card = (id: string, turnId: string, capabilityId: string, turnAssociation?: string) => ({
-      id,
-      type: "tool.auth_needed" as const,
-      turnId,
-      turnAssociation: (turnAssociation ?? "current") as "current",
-      payload: { capability: { id: capabilityId } },
-    });
-    const events = [
-      card("slack", "turn-1", "mcp:slack"),
-      card("github", "turn-1", "api:github-app"),
-      card("earlier-machine", "turn-0", "api:connected-machine"),
-      card("late-machine", "turn-1", "api:connected-machine", "late_rejected"),
-    ];
-    // Slack and GitHub cards in the same turn do not count as a machine card.
-    expect(connectedMachineCardInTurn(events, "turn-1")).toBeNull();
-    expect(
-      connectedMachineCardInTurn(
-        [...events, card("machine", "turn-1", "api:connected-machine")],
-        "turn-1",
-      ),
-    ).toBe("machine");
+  test("builds a safe chat link only from an http(s) base", () => {
+    expect(sessionChatUrl("https://app.example.test/", "w 1", "s")).toBe(
+      "https://app.example.test/workspaces/w%201/sessions/s",
+    );
+    expect(sessionChatUrl(null, "w", "s")).toBeNull();
+    expect(sessionChatUrl("javascript:alert(1)", "w", "s")).toBeNull();
+    expect(sessionChatUrl("https://user:pw@app.example.test", "w", "s")).toBeNull();
   });
 });

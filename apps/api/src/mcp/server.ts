@@ -18,7 +18,7 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
-  connectedMachineCardInTurn,
+  sessionChatUrl,
   withMachinePermissionCard,
   type MachinePermissionCardPost,
 } from "./machine-permission-card";
@@ -116,7 +116,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
-  listSessionEvents,
+  appendTurnCapabilityCardOnce,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -4303,33 +4303,50 @@ function registerFleetTools(
     };
   };
 
-  // A refusal that only the owner's permission can resolve shows the Connected
+  // A refusal that only the owner's permission can resolve posts the Connected
   // Machine card right away, in the agent's own turn, so the person can allow
   // the machine without the agent having to find and call the card tool. Only
-  // exact agent attempts post it; one machine card per turn is enough because
-  // it lists every machine. Cards for other capabilities are unaffected.
+  // exact agent attempts post it. A repeated machine refusal in the same turn
+  // reuses that turn's machine card (it lists every machine); the lookup and
+  // append run atomically under the attempt fence so parallel refusals cannot
+  // stack copies. Cards for every other capability are never limited.
   const machinePermissionCard =
     (toolName: string): MachinePermissionCardPost =>
     async () => {
       if (!exactAgentAttemptClaims(grant)) return null;
       const claims = exactAgentCommandContext(grant, sessionId);
-      const recent = await listSessionEvents(deps.db, grant.workspaceId, sessionId, {
-        direction: "before",
-        includeTypes: ["tool.auth_needed"],
-        limit: 50,
-      });
-      const existing = connectedMachineCardInTurn(recent, claims.callerTurnId);
-      if (existing) return { eventId: existing };
       const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
         (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
       )!;
-      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
-        item,
-        action: "connect",
-        rationale: "Allow this chat to use your computer.",
-        toolName,
-      });
-      return { eventId };
+      const appended = await appendTurnCapabilityCardOnce(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        item.id,
+        {
+          type: "tool.auth_needed",
+          payload: capabilityCardPayload(item, {
+            action: "connect",
+            rationale: "Allow this chat to use your computer.",
+            toolName,
+          }),
+        },
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the machine card committed.");
+      }
+      return {
+        eventId: appended.existingEventId ?? appended.events[0]?.id ?? null,
+        chatUrl: sessionChatUrl(
+          deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+          grant.workspaceId,
+          sessionId,
+        ),
+      };
     };
 
   server.registerTool(
@@ -7158,21 +7175,7 @@ async function appendCapabilityCardEvent(
 ): Promise<string | null> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
-  const payload = ToolAuthNeededPayload.parse({
-    serverId: item.runtime.mcpServerId ?? "opengeni",
-    toolName: input.toolName ?? "capability_authorization_request",
-    providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
-    capability: {
-      id: item.id,
-      name: item.name,
-      kind: item.kind,
-      source: item.source,
-      action: input.action,
-      rationale: input.rationale,
-      requiredVariables: capabilityRequiredVariables(item),
-    },
-  });
+  const payload = capabilityCardPayload(item, input);
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -7187,6 +7190,32 @@ async function appendCapabilityCardEvent(
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
   return appended.events[0]?.id ?? null;
+}
+
+/** The `tool.auth_needed` payload that renders a capability card in the chat. */
+function capabilityCardPayload(
+  item: CapabilityCatalogItem,
+  input: {
+    action: "connect" | "add_credentials" | "enable";
+    rationale: string;
+    toolName?: string;
+  },
+): ToolAuthNeededPayload {
+  return ToolAuthNeededPayload.parse({
+    serverId: item.runtime.mcpServerId ?? "opengeni",
+    toolName: input.toolName ?? "capability_authorization_request",
+    providerDomain: capabilityProviderDomain(item),
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: input.action,
+      rationale: input.rationale,
+      requiredVariables: capabilityRequiredVariables(item),
+    },
+  });
 }
 
 function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {
