@@ -67,6 +67,9 @@ export async function acquirePreKnowledgeTestDatabase(
     // that the withheld 0501/0738 migrations shape differently here. Their
     // standalone routines are installed after the replay below.
     await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql'), ('0769_private_visibility_never_blocks.sql')`;
+    // 0873 patches the account-binding fence as rewritten by the withheld 0501;
+    // this historical runtime keeps the earlier fence, so it stays recorded.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0873_mcp_binding_delegation_revocation.sql')`;
     await migrate(blank.databaseUrl);
     // The current visibility transition reads the routines 0768 and 0769 add,
     // so install everything before their exact-text rewrite blocks.

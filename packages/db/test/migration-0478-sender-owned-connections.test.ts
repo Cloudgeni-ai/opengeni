@@ -121,6 +121,8 @@ const withheldMigrations = [
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
   "0846_independent_session_titles.sql",
+  // Patches the account-binding fence withheld 0494 installs.
+  "0873_mcp_binding_delegation_revocation.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

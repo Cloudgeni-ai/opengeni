@@ -107,6 +107,37 @@ export function nestedPostgresSqlState(error: unknown): string | null {
   return fallback;
 }
 
+/**
+ * The message PostgreSQL raised with the SQLSTATE, even under nested causes.
+ * Fences raise fixed, data-free reasons; callers use this to say which one
+ * refused instead of collapsing every refusal into one generic answer.
+ */
+export function nestedPostgresMessage(error: unknown): string | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    const carriesSqlState = SQLSTATE_KEYS.some((key) => {
+      const value = current[key];
+      return (
+        typeof value === "string" &&
+        /^[0-9A-Z]{5}$/i.test(value) &&
+        !RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase())
+      );
+    });
+    if (carriesSqlState && typeof current.message === "string" && current.message.length > 0)
+      return current.message;
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
 export function databaseFailureCode(sqlState: string | null): DatabaseFailureCode {
   if (sqlState === "40P01") return "db_deadlock";
   if (sqlState === "40001") return "db_serialization_failure";

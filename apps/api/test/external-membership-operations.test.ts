@@ -17,6 +17,7 @@ import {
   createWorkspace,
   createSession,
   createScheduledTask,
+  transitionSessionVisibility,
   withSessionRlsActorContext,
   createOrganizationApiKey,
   updateOrganizationApiKey,
@@ -27,6 +28,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { rawRows } from "../../../packages/db/src/database";
+import { McpConnectionAccountBindings } from "@opengeni/contracts";
+import { personalDelegationsForAccountBindings } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
@@ -720,6 +723,149 @@ test("keyed cancellation tears down private, child, live and scheduled work only
   const [wake] =
     await shared.admin`select count(*)::int as n from session_workflow_wake_outbox where session_id = ${target.sessionId}`;
   expect(wake!.n).toBeGreaterThan(0);
+});
+
+async function sessionWithOwnMcpAccount(
+  f: Awaited<ReturnType<typeof fixture>>,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
+) {
+  const connectionId = crypto.randomUUID();
+  const personal = McpConnectionAccountBindings.parse([
+    {
+      serverId: `account-${"c".repeat(64)}`,
+      canonicalServerId: "mail",
+      connectionId,
+      originWorkspaceId: f.workspace.id,
+      subjectScope: "subject",
+      ownerSubjectId: f.identity.subjectId,
+      accountLabel: "Personal mail",
+      providerDomain: "mail.test",
+      kind: "oauth2",
+      connectionRef: {
+        connectionId,
+        subjectScope: "subject",
+        providerDomain: "mail.test",
+        kind: "oauth2",
+      },
+    },
+  ]);
+  const session = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Read my mail",
+      resources: [],
+      metadata: {},
+      visibility,
+      createdBy: { kind: "subject", subjectId: f.identity.subjectId },
+      subjectId: f.identity.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      mcpAccountBindings: personal,
+      personalConnectionDelegations: personalDelegationsForAccountBindings(personal),
+    }),
+  );
+  await shared.admin`update sessions set owner_organization_membership_id = ${f.identity.organizationMembershipId}
+    where id = ${session.id}`;
+  const revoked = async () => {
+    const [row] = await shared.admin`select authority_epoch::int as epoch,
+        initial_personal_connection_delegations as delegations,
+        initial_mcp_account_bindings as bindings, visibility
+      from sessions where id = ${session.id}`;
+    return row!;
+  };
+  return { session, revoked };
+}
+
+test("keyed cancellation removes a member whose sessions selected their own MCP account", async () => {
+  const f = await fixture();
+  await f.add();
+  const { session, revoked } = await sessionWithOwnMcpAccount(f);
+  // Outside the native lifecycle command the delegation stays immutable.
+  const directClear = (advanceEpoch: boolean) =>
+    shared.admin
+      .begin(async (tx) => {
+        await tx`set local lock_timeout = '5s'`;
+        await tx`update sessions set initial_personal_connection_delegations = '[]'::jsonb,
+          authority_epoch = authority_epoch + ${advanceEpoch ? 1 : 0} where id = ${session.id}`;
+      })
+      .then(
+        () => "updated",
+        (error: unknown) => String(error),
+      );
+  // Without the lifecycle capability the binding fence refuses the clear
+  // before the immutability fence sees it, with or without an epoch advance.
+  expect(await directClear(false)).toContain("MCP account binding requires exact sender delegation");
+  expect(await directClear(true)).toContain("MCP account binding requires exact sender delegation");
+
+  await f.revoke();
+
+  expect((await f.members()).some((member) => member.subjectId === f.identity.subjectId)).toBe(
+    false,
+  );
+  // Authority is revoked, and the session's selection is cleared with it, as
+  // privatization does, so no binding outlives its delegation.
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("a regranted member can share a private session revoked while they were away", async () => {
+  const f = await fixture();
+  await f.add();
+  const { session, revoked } = await sessionWithOwnMcpAccount(f, "user_private");
+
+  await f.revoke();
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "user_private",
+  });
+
+  await f.add({ ...f.grant, operationId: crypto.randomUUID() });
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    actorSubjectId: f.identity.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: `regrant-share-${crypto.randomUUID()}`,
+  });
+
+  expect(await revoked()).toEqual({
+    epoch: 3,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("organization offboarding revokes sessions that selected the member's own MCP account", async () => {
+  const f = await fixture();
+  await f.add();
+  const { revoked } = await sessionWithOwnMcpAccount(f);
+
+  await f.service.updateExternalIdentityMembership(
+    f.accountId,
+    f.identity.organizationMembershipId,
+    { kind: "offboard", expectedAuthorizationRevision: 1, operationId: crypto.randomUUID() },
+  );
+
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    membershipStatus: "revoked",
+  });
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
 });
 
 test("keyed permission updates widen, narrow, and replay without teardown", async () => {
