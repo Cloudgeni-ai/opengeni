@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-test("shows weekly utilization and weighted details, with only currently blocking five-hour limits", async () => {
+test("shows weekly utilization and one weighted total bar without an account breakdown", async () => {
   await act(async () =>
     root.render(
       <SubscriptionUsagePoolView
@@ -44,9 +44,17 @@ test("shows weekly utilization and weighted details, with only currently blockin
     "At this pace you'll use about 50% of this week's included usage.",
   );
   expect(container.textContent).toContain("Last 7 days, adjusted to this week's pace.");
-  expect(container.textContent).toContain("Design workspace · Plus is at its 5-hour limit until");
-  expect(container.textContent).not.toContain("Shared engineering · Pro is at its 5-hour limit");
-  expect(container.innerHTML).toContain("width: 10%");
+  expect(container.textContent).toContain("Team Plus is at its 5-hour limit until");
+  expect(container.textContent).not.toContain("Team Pro 1");
+  expect(container.textContent).not.toContain("Team Pro 2");
+  expect(container.querySelectorAll('[role="meter"]')).toHaveLength(1);
+  expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("65.61");
+  expect(container.querySelector('[aria-label="Account limits"]')).toBeNull();
+  expect(container.querySelectorAll("li")).toHaveLength(0);
+  expect(container.textContent).toContain("Total remaining");
+  expect(container.textContent).toContain("66% left");
+  expect(container.textContent).toContain("Read 3 min ago");
+  expect(container.textContent).not.toContain("Bar sizes");
   expect(container.textContent).not.toMatch(/\$|dollars|cost|tokens/i);
   expect(container.querySelectorAll("button")).toHaveLength(0);
   expect(container.textContent).not.toContain("of the pool left");
@@ -73,9 +81,13 @@ test("workspace scope and sparse/unknown readings remain truthful", async () => 
   await act(async () =>
     root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
   );
-  expect(container.textContent).not.toContain("Operations");
+  expect(container.textContent).not.toContain("Team Pro 2");
   expect(container.textContent).toContain("Some account limits aren't available yet");
   expect(container.textContent).toContain("Not reported");
+  expect(container.querySelectorAll('[role="meter"]')).toHaveLength(0);
+  expect(
+    container.querySelector('[data-slot="usage-meter"]')?.getAttribute("aria-valuenow"),
+  ).toBeNull();
 });
 
 test("limited history remains visible without a fabricated utilization number", async () => {
@@ -91,7 +103,7 @@ test("limited history remains visible without a fabricated utilization number", 
   expect(container.textContent).not.toContain("you'll use about");
 });
 
-test("workspace preview combines shared and owned accounts in one pool without splitting their usage", async () => {
+test("workspace preview combines shared and owned accounts in one total without splitting their usage", async () => {
   const pool = pooledLimitsFixture("workspace");
   const organization = pooledLimitsFixture("organization");
   for (const account of pool.windows[0]!.accounts) {
@@ -102,10 +114,26 @@ test("workspace preview combines shared and owned accounts in one pool without s
   await act(async () =>
     root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
   );
-  expect(container.textContent).toContain("Shared engineering · Pro");
-  expect(container.textContent).toContain("Design workspace · Plus");
-  expect(container.textContent).not.toContain("Operations");
+  expect(container.textContent).not.toContain("Team Pro 1");
+  expect(container.textContent).not.toContain("Team Pro 2");
+  expect(container.querySelectorAll('[role="meter"]')).toHaveLength(1);
+  expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("61.82");
+  expect(container.querySelectorAll("li")).toHaveLength(0);
   expect(container.textContent!.match(/this week's included usage/g)).toHaveLength(1);
+});
+
+test("empty and full reported totals retain a single bounded meter", async () => {
+  for (const percent of [0, 100]) {
+    const pool = pooledLimitsFixture("organization");
+    pool.windows[0]!.remainingPercent = percent;
+    await act(async () =>
+      root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+    );
+    expect(container.querySelectorAll('[role="meter"]')).toHaveLength(1);
+    expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe(
+      String(percent),
+    );
+  }
 });
 
 test("expired five-hour blockers disappear and a workspace with no available accounts shows nothing", async () => {

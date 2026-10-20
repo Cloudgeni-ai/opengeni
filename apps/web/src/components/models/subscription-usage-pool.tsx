@@ -1,6 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { RelativeTime, formatShortTime, useMinuteNow } from "@/components/ui/relative-time";
+import { UsageMeter } from "@/components/ui/usage-meter";
 import { useSharedQuery } from "@/lib/shared-query";
 
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;
@@ -60,7 +61,6 @@ export function SubscriptionUsagePoolView({
   const now = fixedNow ?? minuteNow;
   const window = pool.windows.find((item) => item.id === "weekly");
   if (!window || window.accounts.length === 0) return null;
-  const maxWeight = Math.max(...window.accounts.map((account) => account.weight));
   const blocked =
     pool.windows
       .find((item) => item.id === "five_hour")
@@ -86,68 +86,26 @@ export function SubscriptionUsagePoolView({
         </p>
         <p className="m-0 text-xs leading-4 text-fg-muted">{forecastBasis(window.forecast)}</p>
       </div>
-      {blocked.map((account) => (
-        <p key={account.id} className="m-0 text-xs leading-4 text-fg-muted">
-          {account.label} is at its 5-hour limit until {formatShortTime(account.resetsAt!, { now })}
+      <UsageMeter label="Total remaining" percent={window.remainingPercent} />
+      {blocked.length > 0 ? (
+        <p className="m-0 text-xs leading-4 text-fg-muted">
+          {blocked
+            .map(
+              (account) =>
+                `${account.label} is at its 5-hour limit until ${formatShortTime(account.resetsAt!, { now })}`,
+            )
+            .join("; ")}
           .
         </p>
-      ))}
-      <ul className="m-0 flex list-none flex-col gap-3 p-0" aria-label="Account limits">
-        {window.accounts.map((account) => (
-          <li key={account.id} className="flex min-w-0 flex-col gap-1.5">
-            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs leading-4">
-              <span className="min-w-0 truncate text-fg">{account.label}</span>
-              <span className="text-fg-muted">
-                {account.remainingPercent === null
-                  ? "Not reported"
-                  : `${Math.round(account.remainingPercent)}% left`}
-                {account.resetsAt
-                  ? ` · Resets ${formatShortTime(account.resetsAt, { now })}`
-                  : " · Reset not reported"}
-              </span>
-            </div>
-            <div
-              style={{ width: `${(account.weight / maxWeight) * 100}%` }}
-              title={`Relative limit size: ${account.weightBasis === "observed" ? "estimated from usage" : "plan estimate"}`}
-            >
-              <div
-                className="h-1 overflow-hidden rounded-full bg-surface-3"
-                role={account.remainingPercent === null ? "group" : "meter"}
-                aria-label={`${account.label} remaining`}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={account.remainingPercent ?? undefined}
-                aria-valuetext={
-                  account.remainingPercent === null
-                    ? "Not reported"
-                    : `${Math.round(account.remainingPercent)}% left`
-                }
-              >
-                <div
-                  className={
-                    account.remainingPercent !== null && account.remainingPercent < 10
-                      ? "h-full bg-danger"
-                      : "h-full bg-brand"
-                  }
-                  style={{ width: `${account.remainingPercent ?? 0}%` }}
-                />
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
+      ) : null}
       <p className="m-0 text-xs leading-4 text-fg-subtle">
-        Bar sizes are estimates
-        {window.accounts.some((account) => account.weightBasis === "plan_estimate")
-          ? "; plan defaults where history is limited"
-          : " from observed usage"}
-        .
         {pool.observedAt ? (
           <>
-            {" "}
             Read <RelativeTime date={pool.observedAt} now={now} />.
           </>
-        ) : null}
+        ) : (
+          "Not read yet."
+        )}
       </p>
     </section>
   );

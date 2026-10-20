@@ -14,7 +14,7 @@ export function pooledLimitsFixture(
   const accounts = [
     {
       id: "11111111-1111-4111-8111-111111111111",
-      label: "Shared engineering · Pro",
+      label: "Team Pro 1",
       remainingPercent: 60,
       resetsAt: at(79),
       weight: 10,
@@ -23,7 +23,7 @@ export function pooledLimitsFixture(
     },
     {
       id: "22222222-2222-4222-8222-222222222222",
-      label: "Operations · Pro",
+      label: "Team Pro 2",
       remainingPercent: 70,
       resetsAt: at(90),
       weight: 9.5,
@@ -32,7 +32,7 @@ export function pooledLimitsFixture(
     },
     {
       id: "33333333-3333-4333-8333-333333333333",
-      label: "Design workspace · Plus",
+      label: "Team Plus",
       remainingPercent: 80,
       resetsAt: at(76),
       weight: 1,
@@ -40,8 +40,8 @@ export function pooledLimitsFixture(
       observedAt: at(-0.05),
     },
   ];
-  // The filtered workspace can use the shared engineering account and its own
-  // design account. Operations is available only to a different workspace.
+  // The filtered workspace can use the shared Pro 1 account and its own
+  // Plus account. Pro 2 is available only to a different workspace.
   // Percentages and pace remain account-wide, including other workspaces' use.
   const selected = scope === "organization" ? accounts : [accounts[0]!, accounts[2]!];
   return {

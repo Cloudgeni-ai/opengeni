@@ -22,8 +22,9 @@ accounts, across available inference sources. The owner's personal accounts join
 only in their own Personal workspace through the existing owner-only reader.
 A workspace with no available accounts shows no pool. Limits belong to provider
 accounts: forecasts use total account usage, including other workspaces, not a
-workspace-attributed fraction. The headline forecasts this week's included utilization, with weekly
-account remaining percentages, reset times and capacity-sized bars beneath it.
+workspace-attributed fraction. The headline forecasts this week's included utilization, with one
+plan-size-weighted total remaining bar beneath it. Account rows and their individual
+usage remain in the account list, not repeated in the pool card.
 Five-hour limits appear only as a muted line when currently blocking an account;
 there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.
 SuperGrok is omitted because its current adapter reports only a billing window.
