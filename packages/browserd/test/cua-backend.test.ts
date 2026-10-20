@@ -1170,22 +1170,28 @@ describe("CUA desktop boundary", () => {
       }
     }
 
-    // A cold app can take seconds to show its first window; the launch waits
-    // for it instead of observing the action's own target.
-    {
+    // A window already there is observed at once, and a cold app's window,
+    // seconds late on macOS, is waited for instead of observing the action's
+    // own target. Neither waits out the whole window wait.
+    for (const [listingsBeforeWindow, atLeast, below] of [
+      [0, 0, 250],
+      [7, 1_000, 4_000],
+    ] as const) {
       const fixture = new LaunchFixture();
-      fixture.listingsBeforeWindow = 7;
+      fixture.listingsBeforeWindow = listingsBeforeWindow;
       const backend = await CuaComputerBackend.open(fixture);
       try {
         const target = (await backend.targets())[0]!;
         const observation = await backend.observe(target.id);
-        const started = Date.now();
+        const started = performance.now();
         const launched = await backend.dispatch({
           ...command(observation),
           action: { type: "launch", applicationId: "com.apple.TextEdit" },
         });
-        expect(Date.now() - started).toBeGreaterThan(1_000);
+        const elapsed = performance.now() - started;
         expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(elapsed).toBeGreaterThanOrEqual(atLeast);
+        expect(elapsed).toBeLessThan(below);
       } finally {
         await backend.close();
       }
@@ -1247,7 +1253,24 @@ describe("CUA desktop boundary", () => {
     } finally {
       await backend.close();
     }
-  });
+
+    // The wait does not hold the queue: previews and observations run between
+    // window searches, and closing ends the wait.
+    const waiting = await CuaComputerBackend.open(fixture);
+    const target = (await waiting.targets())[0]!;
+    const before = await waiting.observe(target.id);
+    const started = performance.now();
+    const launching = waiting.dispatch({
+      ...command(before),
+      action: { type: "launch", applicationId: "Menu Bar Helper" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waiting.observe(target.id);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    await waiting.close();
+    await launching;
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 20_000);
 
   test("a launch observes the app's own window before a window lying within it", async () => {
     // A document app launching to its Open panel reports the panel's
