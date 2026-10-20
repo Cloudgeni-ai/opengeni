@@ -1933,12 +1933,23 @@ export interface GpuSample {
 export interface PingRequest {
   /** Echoed back so the caller can correlate / measure RTT. */
   nonce: string;
+  /**
+   * Optional receiver-issued control delivery batch, measured on the agent's
+   * suspend-inclusive monotonic clock. Zero is an ordinary liveness-only ping.
+   */
+  controlReplayWindowMs: string;
 }
 
 export interface PingResponse {
   nonce: string;
   /** The agent's monotonic clock, for skew estimation. */
   agentMonotonicMs: string;
+  /**
+   * Opaque, single-delivery identities for background replenishment. Empty on
+   * older agents or ordinary pings. Each token is used for only one call;
+   * retries retain its exact subject (including timing) and request bytes.
+   */
+  controlReplayTokens: string[];
 }
 
 /**
@@ -2191,7 +2202,8 @@ export interface OpStart {
   /**
    * Absolute runner-enforced deadline, unix-epoch ms (0 = none). Runner-side
    * enforcement is authoritative (process-tree kill + Exit{timed_out}); the
-   * server wall-clock is advisory.
+   * server wall-clock is advisory. Legacy one-shot delivery uses this field;
+   * replay v2 uses ExecRequest.timeout_ms from the token's fixed call offset instead.
    */
   deadlineMs: string;
   /** The originating session id, for per-origin fair admission. */
@@ -11574,13 +11586,16 @@ export const GpuSample: MessageFns<GpuSample> = {
 };
 
 function createBasePingRequest(): PingRequest {
-  return { nonce: "0" };
+  return { nonce: "0", controlReplayWindowMs: "0" };
 }
 
 export const PingRequest: MessageFns<PingRequest> = {
   encode(message: PingRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.nonce !== "0") {
       writer.uint32(8).uint64(message.nonce);
+    }
+    if (message.controlReplayWindowMs !== "0") {
+      writer.uint32(16).uint64(message.controlReplayWindowMs);
     }
     return writer;
   },
@@ -11600,6 +11615,14 @@ export const PingRequest: MessageFns<PingRequest> = {
           message.nonce = reader.uint64().toString();
           continue;
         }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.controlReplayWindowMs = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11610,13 +11633,23 @@ export const PingRequest: MessageFns<PingRequest> = {
   },
 
   fromJSON(object: any): PingRequest {
-    return { nonce: isSet(object.nonce) ? globalThis.String(object.nonce) : "0" };
+    return {
+      nonce: isSet(object.nonce) ? globalThis.String(object.nonce) : "0",
+      controlReplayWindowMs: isSet(object.controlReplayWindowMs)
+        ? globalThis.String(object.controlReplayWindowMs)
+        : isSet(object.control_replay_window_ms)
+        ? globalThis.String(object.control_replay_window_ms)
+        : "0",
+    };
   },
 
   toJSON(message: PingRequest): unknown {
     const obj: any = {};
     if (message.nonce !== "0") {
       obj.nonce = message.nonce;
+    }
+    if (message.controlReplayWindowMs !== "0") {
+      obj.controlReplayWindowMs = message.controlReplayWindowMs;
     }
     return obj;
   },
@@ -11627,12 +11660,13 @@ export const PingRequest: MessageFns<PingRequest> = {
   fromPartial<I extends Exact<DeepPartial<PingRequest>, I>>(object: I): PingRequest {
     const message = createBasePingRequest();
     message.nonce = object.nonce ?? "0";
+    message.controlReplayWindowMs = object.controlReplayWindowMs ?? "0";
     return message;
   },
 };
 
 function createBasePingResponse(): PingResponse {
-  return { nonce: "0", agentMonotonicMs: "0" };
+  return { nonce: "0", agentMonotonicMs: "0", controlReplayTokens: [] };
 }
 
 export const PingResponse: MessageFns<PingResponse> = {
@@ -11642,6 +11676,9 @@ export const PingResponse: MessageFns<PingResponse> = {
     }
     if (message.agentMonotonicMs !== "0") {
       writer.uint32(16).uint64(message.agentMonotonicMs);
+    }
+    for (const v of message.controlReplayTokens) {
+      writer.uint32(26).string(v!);
     }
     return writer;
   },
@@ -11669,6 +11706,14 @@ export const PingResponse: MessageFns<PingResponse> = {
           message.agentMonotonicMs = reader.uint64().toString();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.controlReplayTokens.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11686,6 +11731,11 @@ export const PingResponse: MessageFns<PingResponse> = {
         : isSet(object.agent_monotonic_ms)
         ? globalThis.String(object.agent_monotonic_ms)
         : "0",
+      controlReplayTokens: globalThis.Array.isArray(object?.controlReplayTokens)
+        ? object.controlReplayTokens.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.control_replay_tokens)
+        ? object.control_replay_tokens.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -11697,6 +11747,9 @@ export const PingResponse: MessageFns<PingResponse> = {
     if (message.agentMonotonicMs !== "0") {
       obj.agentMonotonicMs = message.agentMonotonicMs;
     }
+    if (message.controlReplayTokens?.length) {
+      obj.controlReplayTokens = message.controlReplayTokens;
+    }
     return obj;
   },
 
@@ -11707,6 +11760,7 @@ export const PingResponse: MessageFns<PingResponse> = {
     const message = createBasePingResponse();
     message.nonce = object.nonce ?? "0";
     message.agentMonotonicMs = object.agentMonotonicMs ?? "0";
+    message.controlReplayTokens = object.controlReplayTokens?.map((e) => e) || [];
     return message;
   },
 };

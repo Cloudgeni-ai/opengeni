@@ -30,6 +30,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
+  "Win32_System_SystemInformation",
   "Win32_System_JobObjects",
   "Win32_Graphics_Gdi",
   "Win32_System_Registry",

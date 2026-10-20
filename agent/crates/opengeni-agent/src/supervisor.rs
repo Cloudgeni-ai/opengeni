@@ -1675,10 +1675,21 @@ impl<P: Platform + 'static> Supervisor<P> {
                     receipt.deliver(&client, reply).await;
                 });
             }
-            crate::rpc_replay::Admission::Rejected => {
-                // No execution and no fabricated tool result. The caller retains
-                // its existing timeout/unknown-outcome semantics.
-                warn!("rejected expired or conflicting control delivery");
+            crate::rpc_replay::Admission::Rejected(reason) => {
+                // Refusing this delivery does not prove that an earlier attempt
+                // never executed. Return that uncertainty promptly, not silence.
+                warn!(?reason, "rejected control delivery");
+                let request_id = ControlRequest::decode(message.payload.as_ref())
+                    .map(|request| request.request_id)
+                    .unwrap_or_default();
+                publish_response(
+                    client,
+                    reply,
+                    reason.response(request_id),
+                    "control_replay",
+                    client.server_info().max_payload,
+                )
+                .await;
             }
         }
     }
@@ -1799,6 +1810,33 @@ impl<P: Platform + 'static> Supervisor<P> {
         match route {
             Route::Liveness => {
                 debug!(request_id = %request_id, op = label, "serving liveness rpc outside admission");
+                if let Some(v1::control_request::Op::Ping(ping)) = &request.op {
+                    if ping.control_replay_window_ms != 0 {
+                        let issued = link
+                            .replies
+                            .lock()
+                            .expect("control receipts")
+                            .issue_batch(Duration::from_millis(ping.control_replay_window_ms));
+                        let response = match issued {
+                            Ok(token) => v1::ControlResponse {
+                                request_id,
+                                error: None,
+                                result: Some(v1::control_response::Result::Ping(
+                                    v1::PingResponse {
+                                        nonce: ping.nonce,
+                                        agent_monotonic_ms: self
+                                            .ctx(link, max_payload)
+                                            .monotonic_ms(),
+                                        control_replay_tokens: token,
+                                    },
+                                )),
+                            },
+                            Err(reason) => reason.response(request_id),
+                        };
+                        publish_response(client, reply, response, label, max_payload).await;
+                        return;
+                    }
+                }
                 serve_request(
                     client,
                     reply,
@@ -3063,7 +3101,7 @@ async fn publish_response(
         }
     } else {
         let mut headers = async_nats::HeaderMap::new();
-        headers.insert("Opengeni-Control-Replay", "1");
+        headers.insert("Opengeni-Control-Replay", "2");
         if let Err(publish_error) = client
             .publish_with_headers(reply, headers, payload.into())
             .await
@@ -4904,7 +4942,10 @@ mod tests {
         };
         // Liveness never enters admission.
         assert!(matches!(
-            classify(&request(Op::Ping(v1::PingRequest { nonce: 1 }))),
+            classify(&request(Op::Ping(v1::PingRequest {
+                nonce: 1,
+                ..Default::default()
+            }))),
             Route::Liveness
         ));
         // Git runs as an engine job through its adapter; fs ops are light.
@@ -5579,7 +5620,10 @@ mod tests {
             request_id: "still-live".to_string(),
             epoch: 0,
             resource_policy: None,
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 42 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 42,
+                ..Default::default()
+            })),
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(5),
@@ -5724,7 +5768,10 @@ mod tests {
             link.rpc_subject(),
             request(
                 "after-reconnect",
-                v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 }),
+                v1::control_request::Op::Ping(v1::PingRequest {
+                    nonce: 7,
+                    ..Default::default()
+                }),
             ),
         )
         .await;
@@ -5984,7 +6031,10 @@ mod tests {
                 request_id: "after-refusal".to_string(),
                 epoch: 0,
                 resource_policy: None,
-                op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 9 })),
+                op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                    nonce: 9,
+                    ..Default::default()
+                })),
             },
         )
         .await;
@@ -6412,7 +6462,10 @@ mod tests {
             request_id: "example-other-workspace".into(),
             epoch: 0,
             resource_policy: None,
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 7,
+                ..Default::default()
+            })),
         };
         let response = client
             .request(second_link.rpc_subject(), ping.encode_to_vec().into())
@@ -6696,7 +6749,15 @@ mod tests {
             }
             async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
                 let number = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
-                std::fs::write(self.root.join(format!("execution-{number}")), b"once").unwrap();
+                let wall_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                std::fs::write(
+                    self.root.join(format!("execution-{number}")),
+                    wall_ms.to_string(),
+                )
+                .unwrap();
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 Ok(())
             }
@@ -6712,6 +6773,9 @@ mod tests {
             root: root.clone(),
         });
         let mut credentials = it::test_credentials(&url);
+        if let Ok(bearer) = std::env::var("OPENGENI_ROTATION_PROBE_BEARER") {
+            credentials.nats_bearer = bearer;
+        }
         credentials.consented_screen_control = true;
         let definition = SupervisorLink::new(
             "rotation-probe",
@@ -6807,7 +6871,10 @@ mod tests {
 
         let ping = ControlRequest {
             request_id: "probe".into(),
-            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 0 })),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 120_000,
+            })),
             ..Default::default()
         };
         let probe = client
@@ -6817,21 +6884,24 @@ mod tests {
         assert_eq!(
             probe
                 .headers
+                .as_ref()
                 .unwrap()
                 .get("Opengeni-Control-Replay")
                 .unwrap()
                 .as_str(),
-            "1"
+            "2"
         );
-        let expires = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            + 120_000;
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(probe.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
         let delivery = format!(
-            "{}.replay.{expires}.{}",
+            "{}.replay.{}",
             link.rpc_subject(),
-            uuid::Uuid::new_v4()
+            lease.control_replay_tokens[0]
         );
         let request = ControlRequest {
             request_id: "move-once".into(),
@@ -6860,10 +6930,82 @@ mod tests {
         .await
         .expect("the original request executed");
 
+        // Refusals must reply, not leave a machine looking online while every
+        // caller waits for its transport timeout. None licenses fresh execution.
+        let mut short_ping = ping.clone();
+        let Some(v1::control_request::Op::Ping(short)) = &mut short_ping.op else {
+            unreachable!()
+        };
+        short.control_replay_window_ms = 1;
+        let short_reply = client
+            .request(link.rpc_subject(), short_ping.encode_to_vec().into())
+            .await
+            .unwrap();
+        let Some(v1::control_response::Result::Ping(short_lease)) =
+            ControlResponse::decode(short_reply.payload).unwrap().result
+        else {
+            panic!("short lease response")
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut changed = request.clone();
+        changed.request_id = "changed-request".into();
+        for (target, payload, failure) in [
+            (
+                format!(
+                    "{}.replay.{}",
+                    link.rpc_subject(),
+                    short_lease.control_replay_tokens[0]
+                ),
+                request.encode_to_vec(),
+                "control_delivery_expired",
+            ),
+            (
+                format!(
+                    "{}.replay.9999999999999.{}",
+                    link.rpc_subject(),
+                    uuid::Uuid::new_v4()
+                ),
+                request.encode_to_vec(),
+                "control_delivery_expired",
+            ),
+            (
+                delivery.clone(),
+                changed.encode_to_vec(),
+                "control_delivery_conflict",
+            ),
+        ] {
+            let refusal = tokio::time::timeout(
+                Duration::from_secs(1),
+                client.request(target, payload.into()),
+            )
+            .await
+            .expect("rejection must reply promptly")
+            .unwrap();
+            let error = ControlResponse::decode(refusal.payload)
+                .unwrap()
+                .error
+                .unwrap();
+            assert_eq!(error.code, v1::ErrorCode::Protocol as i32);
+            assert!(!error.retryable);
+            assert_eq!(error.detail["failure_code"], failure);
+            assert_eq!(error.detail["outcome_unknown"], "true");
+        }
+
+        let probe = client
+            .request(link.rpc_subject(), ping.encode_to_vec().into())
+            .await
+            .unwrap();
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(probe.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
         let input_delivery = format!(
-            "{}.replay.{expires}.{}",
+            "{}.replay.{}",
             link.rpc_subject(),
-            uuid::Uuid::new_v4()
+            lease.control_replay_tokens[0]
         );
         let input_request = ControlRequest {
             request_id: "input-once".into(),
