@@ -356,8 +356,8 @@ describe("established-session composer drafts", () => {
       initialMessage: "initial",
       resources: [],
       metadata: {},
-      model: "gpt-5.6-sol",
-      reasoningEffort: "medium",
+      model: "previous-model",
+      reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
     });
@@ -431,6 +431,9 @@ describe("established-session composer drafts", () => {
       receipt: { operationKey: clientEventId },
       turn: { resources: [hostRepository] },
     });
+    const [stored] = await shared!.admin`
+      select model, reasoning_effort as "reasoningEffort" from sessions where id = ${session.id}`;
+    expect(stored).toEqual({ model: saved.model, reasoningEffort: saved.reasoningEffort });
 
     const replay = await submitComposerDraftForRequest(
       deps,
