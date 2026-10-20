@@ -1944,7 +1944,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
           ...this.contextScope(),
-          behavior: "allowAndName",
+          // Chromium names each file as in any downloads folder, so its
+          // Downloads page shows the real name and opens it by type.
+          behavior: "allow",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
         });
@@ -2025,6 +2027,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
           const totalBytes = event.params.totalBytes;
+          const filePath =
+            state === "completed" && typeof event.params.filePath === "string"
+              ? event.params.filePath
+              : null;
           if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
           if (
             totalBytes !== undefined &&
@@ -2038,6 +2044,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state,
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
+              filePath,
             })
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);

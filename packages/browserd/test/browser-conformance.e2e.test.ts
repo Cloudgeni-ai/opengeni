@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   BrowserAction,
   BrowserActionCommand,
@@ -371,6 +371,10 @@ e2e(
           receivedBytes: expectedDownloadBytes.byteLength,
           sha256: createHash("sha256").update(expectedDownloadBytes).digest("hex"),
         });
+        // Chromium saved it under its own name, as in any downloads folder.
+        expect(basename((await downloadStore.completedFile(completedDownload.id)).path)).toBe(
+          "fixture-download.txt",
+        );
         let publishedBytes = Buffer.alloc(0);
         const publicationServer = Bun.serve({
           port: 0,
