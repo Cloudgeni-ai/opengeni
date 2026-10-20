@@ -234,6 +234,14 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         'opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid)'::regprocedure
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
+    // The current binary's posture is checked after the rest of the upgrade:
+    // later migrations add routines it requires, so apply them and provision
+    // again, as a deployment does before starting the current runtime.
+    const later = heldBack.filter((name) => name > MIGRATION);
+    if (later.length > 0)
+      await staging`delete from schema_migrations where name in ${staging(later)}`;
+    await migrate(owned.ownerUrl, DATA_SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
+    await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
     expect(
