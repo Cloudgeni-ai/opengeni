@@ -272,13 +272,19 @@ describe("run_on Connected Machine exec receipts", () => {
     expect(runner.executions).toBe(2);
   });
 
-  test.each([0, 1, 25])(
-    "configured exec deadline carries the budget left after %dms admission, not the control timeout",
-    async (admissionMs) => {
+  test.each([
+    [0, 0],
+    [1, 0],
+    [0, 25],
+    [1, 25],
+  ])(
+    "configured exec deadline deducts %dms initial admission and %dms before-send revalidation",
+    async (admissionMs, revalidationMs) => {
       const runner = new InMemoryMachineRunner({
         build: { durationMs: 31_000, exitCode: 0, stdout: "built\n" },
       });
       let now = 1_000_000;
+      let admissions = 0;
       const clock = spyOn(Date, "now").mockImplementation(() => now);
       try {
         const exec = await executeRunOnSelfhostedMachine(
@@ -293,7 +299,8 @@ describe("run_on Connected Machine exec receipts", () => {
             controlTimeoutMs: 30_000,
             execTimeoutMs: 120_000,
             resolveOperationAdmission: async () => {
-              now += admissionMs;
+              // Admission and the final route check share one absolute deadline.
+              now += admissions++ === 0 ? admissionMs : revalidationMs;
               return {
                 connectionInstanceId: CONNECTION_INSTANCE,
                 workspaceRoot: "/home/user/project",
@@ -313,13 +320,16 @@ describe("run_on Connected Machine exec receipts", () => {
           { kind: "exec", cmd: "build" },
         );
         expect(exec.deadlineMs).toBe(120_000);
+        expect(admissions).toBe(2);
         expect(exec).toMatchObject({ ok: true, exitCode: 0, stdout: "built\n" });
         const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
         if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
         if (execRequest.req.op.opStart.op?.$case !== "exec") {
           throw new Error("expected op-stream exec request");
         }
-        expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(120_000 - admissionMs);
+        expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(
+          120_000 - admissionMs - revalidationMs,
+        );
         expect(execRequest.wireTimeoutMs).toBe(30_000);
 
         const read = await run(runner, { kind: "read", path: "/tmp/result" });
