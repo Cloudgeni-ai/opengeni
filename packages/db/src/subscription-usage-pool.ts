@@ -5,7 +5,7 @@ import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
   readSubscriptionCoreOrganizationPool,
-  readSubscriptionCoreWorkspaceView,
+  readSubscriptionCoreWorkspaceOwnedConnections,
   type SubscriptionCoreConnectionRow,
 } from "./subscription-core/administration";
 import { projectSubscriptionCoreAccountUsage } from "./subscription-core/account-usage-presentation";
@@ -73,16 +73,10 @@ export async function readSubscriptionUsagePool(
         if (!pool) throw new Error("Organization subscription pool is not visible");
         rows = pool.rows;
       } else {
-        const { pool, personal } = await readSubscriptionCoreWorkspaceView(tx, provider, {
+        rows = await readSubscriptionCoreWorkspaceOwnedConnections(tx, provider, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          viewerSubjectId: input.subjectId,
         });
-        rows = [
-          ...new Map(
-            [...pool.connections.map(({ row }) => row), ...personal].map((row) => [row.id, row]),
-          ).values(),
-        ];
       }
       const ids = rows.map((row) => row.id);
       const [data] =

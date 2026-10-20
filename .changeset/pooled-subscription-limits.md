@@ -6,4 +6,4 @@
 "@opengeni/db": minor
 ---
 
-Add account-scoped pooled subscription limits, estimated plan-size weighting and usage forecasts. Retain observed limit history and expose limits-only workspace and organization reads.
+Add pooled weekly subscription utilization, estimated plan-size weighting and reset-aware forecasts. Retain observed limit history; organization pools cover organization accounts and workspace pools cover only workspace-owned accounts. Show five-hour limits only when blocking an account.

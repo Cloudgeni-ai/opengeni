@@ -112,6 +112,15 @@ test.skipIf(!real)(
       );
     const organization = await read(null);
     expect(organization.windows[0]!.accounts.map((a) => a.id).sort()).toEqual([...ids].sort());
+    // Assignment is not ownership: a workspace using organization accounts has no pool.
+    expect((await read(workspace.id)).windows.every((window) => window.accounts.length === 0)).toBe(
+      true,
+    );
+    await shared!.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true), set_config('opengeni.subject_id', ${subjectId}, true)`;
+      await tx`update subscription_connections set managed_by_workspace_id=${workspace.id}::uuid where id=${ids[0]!}::uuid`;
+      await tx`update subscription_connections set scope_kind='organization' where id=${ids[1]!}::uuid`;
+    });
     const scoped = await read(workspace.id);
     expect(scoped.windows[0]!.accounts.map((a) => a.id)).toEqual([ids[0]!]);
     await expect(
@@ -334,10 +343,8 @@ test.skipIf(!real)(
           provider: "codex",
         }),
       );
-      expect(
-        personalPool.windows[0]!.accounts.find((a) => a.id === personalConnection)
-          ?.remainingPercent,
-      ).toBe(65);
+      // A user's personal subscription is not a workspace-owned subscription.
+      expect(personalPool.windows.every((window) => window.accounts.length === 0)).toBe(true);
       const orgPool = await withSessionRlsActorContext({ subjectId }, () =>
         readSubscriptionUsagePool(runtime!.db, {
           accountId,

@@ -27,6 +27,7 @@ export const SubscriptionUsagePool = /* @__PURE__ */ defineSchema(() =>
           runsOutAt: z.string().datetime().nullable(),
           nextResetAt: z.string().datetime().nullable(),
           unusedPercent: z.number().min(0).max(100).nullable(),
+          utilizationPercent: z.number().min(0).max(100).nullable().optional(),
           lowestPercent: z.number().min(0).max(100).nullable(),
           historyDays: z.number().nonnegative(),
         }),

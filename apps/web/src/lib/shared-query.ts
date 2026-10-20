@@ -41,13 +41,16 @@ export {
  * SuperGrok switcher list. For changes that can alter which accounts a
  * workspace sees, such as an "Available in" save.
  */
-export function invalidateSubscriptionAccountQueries(client: object): Promise<void> {
+export function invalidateSubscriptionAccountQueries(
+  client: object,
+  includeUsagePools = true,
+): Promise<void> {
   return Promise.all(
     [
       ["codex-accounts"],
       ["subscription-pool"],
       ["supergrok-accounts"],
-      ["subscription-usage-pools"],
+      ...(includeUsagePools ? [["subscription-usage-pools"]] : []),
     ].map((prefix) => invalidateSharedQueries(client, prefix)),
   ).then(() => undefined);
 }

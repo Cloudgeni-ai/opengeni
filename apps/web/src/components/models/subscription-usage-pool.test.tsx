@@ -7,7 +7,11 @@ import {
   ConnectedSubscriptionUsagePool,
 } from "./subscription-usage-pool";
 import { pooledLimitsFixture, POOL_PREVIEW_NOW } from "@/dev/ui-kit/pages/models/pooled-limits";
-import { retainSharedQueries, invalidateSharedQueries } from "@/lib/shared-query";
+import {
+  retainSharedQueries,
+  invalidateSharedQueries,
+  invalidateSubscriptionAccountQueries,
+} from "@/lib/shared-query";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 let root: Root;
@@ -27,7 +31,7 @@ afterEach(async () => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-test("shows weighted account bars, runout basis and both windows without financial units", async () => {
+test("shows weekly utilization and weighted details, with only currently blocking five-hour limits", async () => {
   await act(async () =>
     root.render(
       <SubscriptionUsagePoolView
@@ -36,16 +40,30 @@ test("shows weighted account bars, runout basis and both windows without financi
       />,
     ),
   );
-  expect(container.textContent).toContain("48% of the pool left");
-  expect(container.textContent).toContain("Runs out about");
-  expect(container.textContent).toContain("1h 30m before the next reset");
-  expect(container.textContent).toContain("last 7 days");
+  expect(container.textContent).toContain(
+    "At this pace you'll use about 50% of this week's included usage.",
+  );
+  expect(container.textContent).toContain("Last 7 days, adjusted to this week's pace.");
+  expect(container.textContent).toContain("Design · Plus is at its 5-hour limit until");
+  expect(container.textContent).not.toContain("Engineering · Pro is at its 5-hour limit");
   expect(container.innerHTML).toContain("width: 10%");
   expect(container.textContent).not.toMatch(/\$|dollars|cost|tokens/i);
-  const button = [...container.querySelectorAll("button")].find((b) => b.textContent === "5-hour")!;
-  await act(async () => button.click());
-  expect(container.textContent).toContain("72% of the pool left");
-  expect(container.textContent).toContain("Won't run out; about 30% will go unused (lowest 28%)");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+  expect(container.textContent).not.toContain("of the pool left");
+  expect(container.textContent).not.toContain("will go unused");
+});
+
+test("run-out headline names the time and gap to the next reset", async () => {
+  await act(async () =>
+    root.render(
+      <SubscriptionUsagePoolView
+        pool={pooledLimitsFixture("organization", false, true)}
+        now={POOL_PREVIEW_NOW}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("At this pace you'll run out");
+  expect(container.textContent).toContain("1 day before the next reset.");
 });
 
 test("workspace scope and sparse/unknown readings remain truthful", async () => {
@@ -56,9 +74,38 @@ test("workspace scope and sparse/unknown readings remain truthful", async () => 
     root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
   );
   expect(container.textContent).not.toContain("Operations");
-  expect(container.textContent).toContain("Forecast unavailable");
-  expect(container.textContent).toContain("Pool usage incomplete");
+  expect(container.textContent).toContain("Some account limits aren't available yet");
   expect(container.textContent).toContain("Not reported");
+});
+
+test("limited history remains visible without a fabricated utilization number", async () => {
+  await act(async () =>
+    root.render(
+      <SubscriptionUsagePoolView
+        pool={pooledLimitsFixture("organization", true)}
+        now={POOL_PREVIEW_NOW}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Not enough history to forecast");
+  expect(container.textContent).not.toContain("you'll use about");
+});
+
+test("expired five-hour blockers disappear and a workspace with no owned accounts shows nothing", async () => {
+  const pool = pooledLimitsFixture("workspace");
+  for (const account of pool.windows.find((window) => window.id === "five_hour")!.accounts)
+    account.resetsAt = new Date(POOL_PREVIEW_NOW - 1).toISOString();
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).not.toContain("5-hour");
+  pool.windows.forEach((window) => {
+    window.accounts = [];
+  });
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).toBe("");
 });
 
 test("all providers share one client-scoped request and refresh invalidation", async () => {
@@ -84,12 +131,14 @@ test("all providers share one client-scoped request and refresh invalidation", a
     ),
   );
   expect(reads).toBe(1);
+  await act(async () => invalidateSubscriptionAccountQueries(client, false));
+  expect(reads).toBe(1);
   await act(async () => invalidateSharedQueries(client, ["subscription-usage-pools"]));
   expect(reads).toBe(2);
   release();
 });
 
-test("loading and failure states do not invent a pool percentage", async () => {
+test("workspace loading and failure show no pool until owned accounts are established", async () => {
   let reject!: (reason: Error) => void;
   const pending = new Promise<never>((_resolve, fail) => {
     reject = fail;
@@ -104,8 +153,7 @@ test("loading and failure states do not invent a pool percentage", async () => {
       </ul>,
     ),
   );
-  expect(container.textContent).toContain("Loading Codex pool");
+  expect(container.textContent).toBe("");
   await act(async () => reject(new Error("unavailable")));
-  expect(container.textContent).toContain("Couldn't update Codex pool");
-  expect(container.textContent).not.toContain("% of the pool left");
+  expect(container.textContent).toBe("");
 });

@@ -16,11 +16,13 @@ The point-in-time decision record and evidence are in
 ## Pooled subscription limits
 
 Settings → Models shows one limits pool per provider: organization administrators
-see the organization's shared accounts; a workspace sees its effective accounts,
-including the owner's personal accounts only in their own Personal workspace.
-Limits belong to provider accounts, not workspaces. Each pool has weekly and
-5-hour views, capacity-sized account bars, reported remaining percentages and
-reset times. No monetary or absolute usage unit is returned by the pooled API.
+see all the organization's shared accounts; a workspace sees only shared accounts
+managed by that workspace, not merely assigned organization accounts or personal
+subscriptions. A workspace with none shows no pool. Limits belong to provider
+accounts. The headline forecasts this week's included utilization, with weekly
+account remaining percentages, reset times and capacity-sized bars beneath it.
+Five-hour limits appear only as a muted line when currently blocking an account;
+there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.
 SuperGrok is omitted because its current adapter reports only a billing window.
 Claude setup-token accounts without usage access remain visibly unreported.
 
@@ -46,8 +48,11 @@ Simulation walks hourly boundaries and exact account resets through the last
 upcoming reset. Demand is distributed by relative capacity and reassigned from
 depleted accounts; it assumes that work can use other accounts, not that every
 model is entitled everywhere. Run-out reports the first exhaustion and next
-reset; unused is capacity discarded at each account's first reset, with the
-lowest aggregate point measured before refill. Times display in the viewer's
+reset only when the pool empties strictly before relief, not exactly at refill.
+Expected utilization is one minus the sum of each account's weighted capacity
+left at its own first reset, divided by total weight; it includes usage already
+consumed. Each account's first-reset remainder is counted once, never its later
+refilled capacity. Times display in the viewer's
 timezone. Stale, unknown or already-reset observations never imply a full pool.
 
 `subscription_usage_readings` retains original endpoint/header observations in

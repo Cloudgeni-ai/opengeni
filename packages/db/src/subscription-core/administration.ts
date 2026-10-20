@@ -602,6 +602,29 @@ export type SubscriptionCoreWorkspaceView = {
   primaryConnectionId: string | null;
 };
 
+/** Workspace-owned shared accounts only, independent of the selected inference source.
+ * Canonical row RLS still decides visibility; personal and merely assigned accounts are excluded.
+ */
+export async function readSubscriptionCoreWorkspaceOwnedConnections(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string },
+): Promise<SubscriptionCoreConnectionRow[]> {
+  return await rawRows<SubscriptionCoreConnectionRow>(
+    tx,
+    sql`
+    select ${CONNECTION_COLUMNS} from subscription_connections connection
+    left join subscription_connection_quota quota
+      on quota.account_id = connection.account_id and quota.connection_id = connection.id
+    where connection.account_id = ${input.accountId}::uuid
+      and connection.provider = ${subscriptionCoreProviderId(provider)}
+      and connection.kind = ${subscriptionCoreConnectionKind(provider)}
+      and connection.ownership = 'shared' and connection.disconnected_at is null
+      and connection.managed_by_workspace_id = ${input.workspaceId}::uuid
+    order by connection.created_at, connection.id`,
+  );
+}
+
 /**
  * The workspace's pool of this provider for one viewer, under the workspace
  * RLS context. In the viewer's own Personal workspace their personal

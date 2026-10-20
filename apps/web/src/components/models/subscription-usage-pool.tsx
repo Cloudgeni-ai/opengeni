@@ -1,9 +1,6 @@
-import { useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
-import { UsageMeter } from "@/components/ui/usage-meter";
 import { RelativeTime, formatShortTime, useMinuteNow } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useSharedQuery } from "@/lib/shared-query";
 
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;
@@ -14,7 +11,7 @@ export function poolForecastSentence(
   now: number,
 ): string {
   if (forecast.kind === "insufficient_history")
-    return `Forecast unavailable — ${forecast.basis.replace(/\.$/, "")}.`;
+    return "Not enough history to forecast this week's usage yet.";
   if (forecast.kind === "runs_out" && forecast.runsOutAt) {
     const gap = forecast.nextResetAt
       ? Math.max(
@@ -22,13 +19,33 @@ export function poolForecastSentence(
           Math.round((Date.parse(forecast.nextResetAt) - Date.parse(forecast.runsOutAt)) / 60_000),
         )
       : null;
-    const until =
+    const duration =
       gap === null
-        ? ""
-        : ` (${gap >= 60 ? `${Math.floor(gap / 60)}h ${gap % 60}m` : `${gap}m`} before the next reset)`;
-    return `Runs out about ${formatShortTime(forecast.runsOutAt, { now })}${until} — ${forecast.basis}.`;
+        ? null
+        : gap >= 1440
+          ? `${Math.round(gap / 1440)} ${Math.round(gap / 1440) === 1 ? "day" : "days"}`
+          : gap >= 60
+            ? `${Math.floor(gap / 60)}h${gap % 60 ? ` ${gap % 60}m` : ""}`
+            : `${gap}m`;
+    return `At this pace you'll run out ${formatShortTime(forecast.runsOutAt, { now })}${duration === null ? "" : `, ${duration} before the next reset`}.`;
   }
-  return `Won't run out; about ${Math.round(forecast.unusedPercent ?? 0)}% will go unused (lowest ${Math.round(forecast.lowestPercent ?? 0)}%) — ${forecast.basis}.`;
+  const utilization =
+    forecast.utilizationPercent ??
+    (forecast.unusedPercent === null ? null : 100 - forecast.unusedPercent);
+  return utilization === null
+    ? "Not enough history to forecast this week's usage yet."
+    : `At this pace you'll use about ${Math.round(utilization)}% of this week's included usage.`;
+}
+
+function forecastBasis(forecast: SubscriptionUsagePool["windows"][number]["forecast"]): string {
+  if (forecast.kind === "insufficient_history")
+    return "Waiting for current limits and enough usage history.";
+  if (forecast.basis.startsWith("Observed pool exhaustion")) return "Current reported limits.";
+  if (forecast.basis.startsWith("Last-reset"))
+    return "Pace since the last reset · limited history.";
+  return forecast.historyDays >= 7
+    ? "Last 7 days, adjusted to this week's pace."
+    : `Last ${Math.max(1, Math.ceil(forecast.historyDays))} ${forecast.historyDays <= 1 ? "day" : "days"}, adjusted to this week's pace · limited history.`;
 }
 
 /** The same real component is used by the page, tests and UI-kit preview. */
@@ -41,39 +58,40 @@ export function SubscriptionUsagePoolView({
 }) {
   const minuteNow = useMinuteNow();
   const now = fixedNow ?? minuteNow;
-  const [selected, setSelected] = useState<"weekly" | "five_hour">("weekly");
-  const window = pool.windows.find((item) => item.id === selected) ?? pool.windows[0];
+  const window = pool.windows.find((item) => item.id === "weekly");
   if (!window || window.accounts.length === 0) return null;
   const maxWeight = Math.max(...window.accounts.map((account) => account.weight));
+  const blocked =
+    pool.windows
+      .find((item) => item.id === "five_hour")
+      ?.accounts.filter(
+        (account) =>
+          account.remainingPercent === 0 &&
+          account.resetsAt !== null &&
+          Date.parse(account.resetsAt) > now,
+      ) ?? [];
   return (
     <section
       className="flex min-w-0 flex-col gap-4 py-5"
       aria-label={`${PROVIDER_LABELS[pool.provider]} pooled limits`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="m-0 text-sm font-semibold text-fg">{PROVIDER_LABELS[pool.provider]} pool</h3>
-        <SegmentedControl<"weekly" | "five_hour">
-          size="sm"
-          value={window.id}
-          onValueChange={setSelected}
-          options={pool.windows.map((item) => ({
-            value: item.id,
-            label: item.id === "weekly" ? "Weekly" : "5-hour",
-          }))}
-        />
+      <h3 className="m-0 text-sm font-semibold text-fg">
+        {PROVIDER_LABELS[pool.provider]} this week
+      </h3>
+      <div className="space-y-1">
+        <p className="m-0 text-sm leading-5 text-fg">
+          {window.remainingPercent === null
+            ? "Some account limits aren't available yet."
+            : poolForecastSentence(window.forecast, now)}
+        </p>
+        <p className="m-0 text-xs leading-4 text-fg-muted">{forecastBasis(window.forecast)}</p>
       </div>
-      <UsageMeter
-        label={window.id === "weekly" ? "Weekly" : "5-hour"}
-        percent={window.remainingPercent}
-        valueLabel={
-          window.remainingPercent === null
-            ? "Pool usage incomplete"
-            : `${Math.round(window.remainingPercent)}% of the pool left`
-        }
-      />
-      <p className="m-0 text-sm leading-5 text-fg-muted">
-        {poolForecastSentence(window.forecast, now)}
-      </p>
+      {blocked.map((account) => (
+        <p key={account.id} className="m-0 text-xs leading-4 text-fg-muted">
+          {account.label} is at its 5-hour limit until {formatShortTime(account.resetsAt!, { now })}
+          .
+        </p>
+      ))}
       <ul className="m-0 flex list-none flex-col gap-3 p-0" aria-label="Account limits">
         {window.accounts.map((account) => (
           <li key={account.id} className="flex min-w-0 flex-col gap-1.5">
@@ -157,6 +175,8 @@ export function ConnectedSubscriptionUsagePool({
     { staleTimeMs: 60_000 },
   );
   const pool = query.data?.pools.find((item) => item.provider === provider);
+  // No workspace pool is shown until its scoped read establishes owned accounts.
+  if (scope === "workspace" && !pool) return null;
   if (query.loading)
     return (
       <li className="col-span-full list-none py-4 text-sm text-fg-muted" aria-busy="true">

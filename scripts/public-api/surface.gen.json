@@ -26298,6 +26298,7 @@
         "$.windows[].forecast.nextResetAt": "string! null",
         "$.windows[].forecast.runsOutAt": "string! null",
         "$.windows[].forecast.unusedPercent": "number! null",
+        "$.windows[].forecast.utilizationPercent": "number? null",
         "$.windows[].id": "enum!=[\"\\\"five_hour\\\"\",\"\\\"weekly\\\"\"]",
         "$.windows[].remainingPercent": "number! null"
       }

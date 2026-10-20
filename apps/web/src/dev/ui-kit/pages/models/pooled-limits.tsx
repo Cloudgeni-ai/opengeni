@@ -1,7 +1,7 @@
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { SubscriptionUsagePoolView } from "@/components/models/subscription-usage-pool";
 import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Select } from "@/components/ui/select";
 import { useState } from "react";
 
 export const POOL_PREVIEW_NOW = Date.parse("2026-10-20T09:30:00Z");
@@ -9,12 +9,13 @@ const at = (hours: number) => new Date(POOL_PREVIEW_NOW + hours * 3_600_000).toI
 export function pooledLimitsFixture(
   scope: "organization" | "workspace",
   sparse = false,
+  runsOut = false,
 ): SubscriptionUsagePool {
   const accounts = [
     {
       id: "11111111-1111-4111-8111-111111111111",
       label: "Engineering · Pro",
-      remainingPercent: 46,
+      remainingPercent: 60,
       resetsAt: at(79),
       weight: 10,
       weightBasis: "observed" as const,
@@ -23,7 +24,7 @@ export function pooledLimitsFixture(
     {
       id: "22222222-2222-4222-8222-222222222222",
       label: "Operations · Pro",
-      remainingPercent: 52,
+      remainingPercent: 70,
       resetsAt: at(90),
       weight: 9.5,
       weightBasis: "observed" as const,
@@ -32,7 +33,7 @@ export function pooledLimitsFixture(
     {
       id: "33333333-3333-4333-8333-333333333333",
       label: "Design · Plus",
-      remainingPercent: 20,
+      remainingPercent: 80,
       resetsAt: at(76),
       weight: 1,
       weightBasis: "plan_estimate" as const,
@@ -46,15 +47,16 @@ export function pooledLimitsFixture(
     windows: [
       {
         id: "weekly",
-        remainingPercent: scope === "organization" ? 48 : 44,
+        remainingPercent: scope === "organization" ? 65.61 : 61.82,
         accounts: selected,
         forecast: {
-          kind: sparse ? "insufficient_history" : "runs_out",
+          kind: sparse ? "insufficient_history" : runsOut ? "runs_out" : "unused",
           basis: sparse ? "collecting usage readings" : "last 7 days, adjusted to this week's pace",
-          runsOutAt: sparse ? null : at(77.5),
+          runsOutAt: !sparse && runsOut ? at(55) : null,
           nextResetAt: at(79),
-          unusedPercent: null,
-          lowestPercent: sparse ? null : 0,
+          unusedPercent: sparse || runsOut ? null : 50,
+          utilizationPercent: sparse ? null : runsOut ? 100 : 50,
+          lowestPercent: sparse ? null : runsOut ? 0 : 30,
           historyDays: sparse ? 0.3 : 7,
         },
       },
@@ -63,7 +65,7 @@ export function pooledLimitsFixture(
         remainingPercent: 72,
         accounts: selected.map((account, i) => ({
           ...account,
-          remainingPercent: i === 0 ? 74 : 52,
+          remainingPercent: i === selected.length - 1 ? 0 : 74,
           resetsAt: at(i === 0 ? 2 : 3),
         })),
         forecast: {
@@ -81,27 +83,29 @@ export function pooledLimitsFixture(
 }
 
 export function PooledLimitsPreview() {
-  const [scope, setScope] = useState<"organization" | "workspace">("organization");
-  const [state, setState] = useState<"forecast" | "sparse">("forecast");
+  const [scenario, setScenario] = useState<"normal" | "runout" | "sparse" | "workspace" | "empty">(
+    "normal",
+  );
+  const scope = scenario === "workspace" || scenario === "empty" ? "workspace" : "organization";
+  const pool = pooledLimitsFixture(scope, scenario === "sparse", scenario === "runout");
+  if (scenario === "empty")
+    pool.windows.forEach((window) => {
+      window.accounts = [];
+    });
   return (
     <div data-testid="pooled-limits-preview" className="space-y-6">
       <div className="flex flex-wrap gap-4">
-        <SegmentedControl
-          value={scope}
-          onValueChange={setScope}
-          options={[
-            { value: "organization", label: "Organization" },
-            { value: "workspace", label: "Workspace" },
-          ]}
-        />
-        <SegmentedControl
-          value={state}
-          onValueChange={setState}
-          options={[
-            { value: "forecast", label: "Forecast" },
-            { value: "sparse", label: "Limited history" },
-          ]}
-        />
+        <Select
+          aria-label="Preview scenario"
+          value={scenario}
+          onChange={(event) => setScenario(event.target.value as typeof scenario)}
+        >
+          <option value="normal">Organization</option>
+          <option value="runout">Runs out</option>
+          <option value="sparse">Limited history</option>
+          <option value="workspace">Workspace with accounts</option>
+          <option value="empty">Workspace without accounts</option>
+        </Select>
       </div>
       <SectionStack variant="group">
         <Section
@@ -109,10 +113,7 @@ export function PooledLimitsPreview() {
             scope === "organization" ? "Organization · Models" : "Engineering workspace · Models"
           }
         >
-          <SubscriptionUsagePoolView
-            pool={pooledLimitsFixture(scope, state === "sparse")}
-            now={POOL_PREVIEW_NOW}
-          />
+          <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
         </Section>
       </SectionStack>
     </div>

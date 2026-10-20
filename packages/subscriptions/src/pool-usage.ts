@@ -50,6 +50,8 @@ export type SubscriptionUsagePoolForecast = {
   nextResetAt: number | null;
   /** Fraction of original full capacity discarded at each account's FIRST upcoming reset. */
   unusedPercent: number | null;
+  /** Included capacity used by each account's first upcoming reset, including use so far. */
+  utilizationPercent: number | null;
   /** Lowest aggregate remaining percentage, sampled BEFORE reset refills. */
   lowestPercent: number | null;
   historyDays: number;
@@ -242,6 +244,7 @@ export function buildSubscriptionUsagePool(
       runsOutAt: null,
       nextResetAt,
       unusedPercent: null,
+      utilizationPercent: null,
       lowestPercent: null,
       historyDays,
     });
@@ -257,6 +260,7 @@ export function buildSubscriptionUsagePool(
         runsOutAt: input.now,
         nextResetAt,
         unusedPercent: null,
+        utilizationPercent: 100,
         lowestPercent: 0,
         historyDays,
       };
@@ -543,7 +547,9 @@ function simulate(
     const demand = (rate * (end - at)) / HOUR;
     const available = sum(remaining);
     if (rate > 0 && demand >= available && runsOutAt === null) {
-      runsOutAt = at + (available / rate) * HOUR;
+      const exhaustedAt = at + (available / rate) * HOUR;
+      // Empty exactly as a reset refills the pool is not a period without capacity.
+      if (exhaustedAt < nextReset - 0.001) runsOutAt = exhaustedAt;
     }
     consume(remaining, accounts, Math.min(demand, available));
     lowest = Math.min(lowest, sum(remaining));
@@ -563,6 +569,7 @@ function simulate(
     runsOutAt,
     nextResetAt: finite(nextResetAt) ? nextResetAt : null,
     unusedPercent: runsOutAt === null ? clamp((unused / total) * 100, 0, 100) : null,
+    utilizationPercent: clamp(100 - (unused / total) * 100, 0, 100),
     lowestPercent: clamp((lowest / total) * 100, 0, 100),
     historyDays,
   };

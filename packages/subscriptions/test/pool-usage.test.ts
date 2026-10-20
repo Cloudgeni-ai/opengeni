@@ -427,6 +427,72 @@ describe("subscription usage pool forecast", () => {
   });
 });
 
+describe("weekly included utilization", () => {
+  test("sums leftover at each account's own staggered reset rather than at the pool horizon", () => {
+    const data = input();
+    account(data, "a", "weekly", 20, 1.25);
+    account(data, "b", "weekly", 20, 30.5);
+    pace(data, "a", [18, 19, 20], "weekly");
+    pace(data, "b", [18, 19, 20], "weekly");
+    const forecast = result(data, "weekly").forecast;
+    expect(forecast.utilizationPercent).toBeCloseTo(100 - (78.75 + 49.5) / 2);
+    expect(forecast.kind).toBe("unused");
+  });
+
+  test("uses plan size for the weighted reset remainder, including usage already consumed", () => {
+    const data = input();
+    account(data, "large", "weekly", 20, 1, 10);
+    account(data, "small", "weekly", 20, 3, 1);
+    pace(data, "large", [18, 19, 20], "weekly");
+    pace(data, "small", [18, 19, 20], "weekly");
+    expect(result(data, "weekly").forecast.utilizationPercent).toBeCloseTo(
+      100 - (10 * 79 + 77) / 11,
+    );
+  });
+
+  test("all-unused pools have zero utilization only with observed zero movement", () => {
+    const data = input();
+    for (const [id, reset, weight] of [
+      ["a", 3, 10],
+      ["b", 48, 1],
+    ] as const) {
+      account(data, id, "weekly", 0, reset, weight);
+      pace(data, id, [0, 0, 0], "weekly");
+    }
+    expect(result(data, "weekly").forecast).toMatchObject({
+      kind: "unused",
+      utilizationPercent: 0,
+      unusedPercent: 100,
+    });
+    data.readings = [];
+    expect(result(data, "weekly").forecast.utilizationPercent).toBeNull();
+  });
+
+  test("runout precedes relief and still computes each first-reset remainder", () => {
+    const data = input();
+    account(data, "a", "weekly", 99, 0.5);
+    account(data, "b", "weekly", 99, 1);
+    pace(data, "a", [89, 94, 99], "weekly");
+    pace(data, "b", [89, 94, 99], "weekly");
+    const forecast = result(data, "weekly").forecast;
+    expect(forecast.kind).toBe("runs_out");
+    expect(forecast.runsOutAt).toBeCloseTo(NOW + 0.2 * HOUR, 0);
+    expect(forecast.nextResetAt).toBe(NOW + 0.5 * HOUR);
+    expect(forecast.utilizationPercent).toBe(100);
+  });
+
+  test("exhaustion exactly at a replenishing reset is not a runout before relief", () => {
+    const data = input();
+    account(data, "a", "weekly", 98, 2);
+    pace(data, "a", [96, 97, 98], "weekly");
+    expect(result(data, "weekly").forecast).toMatchObject({
+      kind: "unused",
+      runsOutAt: null,
+      utilizationPercent: 100,
+    });
+  });
+});
+
 describe("calendar profiles and bounded trend", () => {
   function calendar(currentRate: number, previousRate: number, hours = 12): Input {
     const data = input();
