@@ -29,6 +29,14 @@
       "sha256": "b31ec5820a83d0e82c39e78541e5163683c660a6ac4d34bde07c4ee372f9a345"
     },
     {
+      "path": ".github/workflows/compute-ci.yml",
+      "sha256": "16ffc44d2ff8b13f639f1618ee2d1ce17a463c591f02de471a53ac5f8bfd01f3"
+    },
+    {
+      "path": ".github/workflows/compute-release.yml",
+      "sha256": "d84efdda9232be114ec0b1a117b5629d8f36a8c22f9c8e2d8b17bb9902c313a0"
+    },
+    {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
       "sha256": "8b901e666887c644b0be477cd3d15e7018353762fc354f3a61500a269169c910"
     },
@@ -926,6 +934,162 @@
       "job": "unit-shards",
       "step": "Install dependencies",
       "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "e2e environment and suite",
+      "sha256": "5f13978a7bff282d3bc0d7be388a5b59d0357f50fc323ef74fff5efa89890d41"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "Helm chart (computeControl)",
+      "sha256": "543a48014150e1b5810c5985f563e66f121a36d590970abd0988f6c8bf2307fd"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "host certificate script",
+      "sha256": "92af6a4b63b454ad64c35314b9dc08534cdc4fb8d446c7a0f0649f775a3f1a15"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "shellcheck",
+      "sha256": "beefde52b8bae1aa2c7d010993b6212c825bf417cffae639a74c6c18a0a8a499"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "Terraform (GCP host fleet)",
+      "sha256": "cff12b37177650c612d1bf7fabe8b3fac4c08b8e709521a41c94ba709b93e36a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "An XFS lab directory, and access to KVM",
+      "sha256": "cb761c3ff64f20eb15ade51d55c4212283d6628554277b1264e1e1d3c891f5f9"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Collect the conformance logs and results",
+      "sha256": "2e66cee0781d1130b081db7a1de0e5b3ee5fa32cf6c2fe5a05904a0cfcca3d1a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Huge pages for the nested profile",
+      "sha256": "95ace5da0c3accf0b6d576b14a4506fa109de0c2eb8739bb1139bbd08be122e3"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Let sandbox traffic through Docker's firewall",
+      "sha256": "5051d376141b7e70aca44d9c1b14a14f3dbeebb0aa862c0142bb13e4257010ba"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Room on the runner",
+      "sha256": "49012d547b62cf07a5a7f4255247aecb52dee7ff91461a623b33f534cb7d4b84"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "The KVM gate",
+      "sha256": "0f605ce130a7a0a2a6c76a757d0550ab06e959b74a23d40b56232df4aaa3d277"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Where the lab's room went",
+      "sha256": "1cdcefa60960582c3abfc26ced0adc8c68c9656fdf26c103b328cdc1bf0765e7"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo arch",
+      "sha256": "7a1bc979d1308bc67ba4e10935cee3be6257c8d861dc42d75f767ef8879e7769"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo clippy (pedantic, warnings are errors)",
+      "sha256": "f5cb547cc89e43791988fa529300a795f18cb9c3ee32b499d1f5aa4ba86e5415"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo fmt --check",
+      "sha256": "2e27c7a50050056bc3abfdc9d6c0a957bf911f574b72155ec9bbdda7b4c0ced8"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "An XFS directory for the checkpoint tests",
+      "sha256": "3536d57583ed03dfdab080533839b5c40282db074d225bf20af102194693bcc3"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "cargo test --workspace",
+      "sha256": "7720250bac9a13e634839d616a7274b06b8d8b0c1870fd8d3cc7bceccf4f34f0"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "Smoke framework tests",
+      "sha256": "738fe76d4eff704d48a722dae727cf2c89aeb01bce648cb8d664993856a51a9c"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "control-image",
+      "step": "Check the pushed image runs",
+      "sha256": "acb9b963deed51022b904165b935d3fb25476646187024e5b70934c455bce865"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "guard",
+      "step": "Resolve the version",
+      "sha256": "3ce1a09c7b1412d30e3ecdb0843dd23f1ef93e271f936f955350833d5d8b8fc6"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Build it again elsewhere; the two must match",
+      "sha256": "fd6daa4fdf3ed764bccd4dcf6cf2854f52371860ac811ab62b7db679a2505081"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Build the bundle",
+      "sha256": "9f2c3305775376b34cda1a5835aafb3887608496e7044de5eae2c8168ee57e85"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Tools",
+      "sha256": "45d8b98b7c13d3b442e7aac0fc3c5f4a57befee48717220731f81e7ec8f58023"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "promote",
+      "step": "Name the candidate",
+      "sha256": "616c553f4387e7347118291a4d02c626bd8b0814eb0322a756ac9b3e26583a18"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "promote",
+      "step": "Wait for Compute CI on this commit",
+      "sha256": "11747eb1eb5164ecd35d50ec176deb75b9c1df1de205905c93bcf95f8b6a20cf"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "publish",
+      "step": "SHA256SUMS",
+      "sha256": "9c5b7317a003c784f2481e26bd0e9431154250b4de16517cbcefa97a5bb81c53"
     },
     {
       "workflow": ".github/workflows/deprecate-pre-1.0.yml",
