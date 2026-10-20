@@ -12,6 +12,7 @@ import {
   RejectPreferenceRegistryProposalRequest,
   SupersedePreferenceRegistryRequest,
   type AccessGrant,
+  type Permission,
   type PreferenceRegistryScope,
 } from "@opengeni/contracts";
 import {
@@ -133,6 +134,11 @@ function isDeploymentKeyOperator(access: AccessGrantAuthorization): boolean {
 export function authorizePreferenceRegistryScopeMutation(
   access: AccessGrantAuthorization,
   scope: PreferenceRegistryScope,
+  // Workspace-scoped content is collaborative for some registries: Skills are
+  // shared team procedures that ordinary Members (documents:manage) may author
+  // and review, just as their agents already can under Agent learning. Generic
+  // preference-registry records keep the administrative default.
+  workspacePermission: Permission = "workspace:admin",
 ): void {
   const { grant } = access;
   requireHumanMutation(access);
@@ -146,8 +152,8 @@ export function authorizePreferenceRegistryScopeMutation(
     }
     return;
   }
-  if (scope === "workspace" && !hasPermission(grant.permissions, "workspace:admin")) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+  if (scope === "workspace" && !hasPermission(grant.permissions, workspacePermission)) {
+    throw new HTTPException(403, { message: `missing permission: ${workspacePermission}` });
   }
   // User scope is always self-only: the route derives the target from the
   // authenticated actor and never accepts a subject selector.

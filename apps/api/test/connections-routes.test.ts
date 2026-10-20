@@ -1682,6 +1682,8 @@ describe("connections routes", () => {
       authorization: await bearer(workspace, "subject-a", [
         "connections:read",
         "connections:write",
+        // Workspace model-provider keys are a settings action.
+        "capabilities:manage",
       ]),
       "content-type": "application/json",
     };
@@ -1697,6 +1699,24 @@ describe("connections routes", () => {
         },
         operationId,
       });
+
+    // A Member can connect their own accounts but not set the workspace's model provider.
+    const memberDenied = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-member", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: body("gateway-member", randomUUID()),
+      },
+    );
+    expect(memberDenied.status).toBe(403);
+    expect(await memberDenied.text()).toContain("capabilities:manage");
 
     const firstOperationId = randomUUID();
     const first = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
@@ -1999,6 +2019,7 @@ describe("connections routes", () => {
       authorization: await bearer(workspace, "subject-a", [
         "connections:read",
         "connections:write",
+        "capabilities:manage",
       ]),
       "content-type": "application/json",
     };

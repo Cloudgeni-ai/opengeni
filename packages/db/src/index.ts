@@ -2179,6 +2179,8 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "enrollments:read",
   "enrollments:manage",
   "rigs:use",
+  // Personal-workspace owners create and maintain their own Sandbox Environments.
+  "rigs:manage",
   "artifacts:read",
   "artifacts:publish",
 ];

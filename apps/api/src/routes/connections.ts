@@ -348,6 +348,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      // Workspace model-provider keys decide what every session runs on: a
+      // settings action, unlike a member's own or shared integration credential.
+      if (subjectId === null && (workspaceProviderKind || directModelKey))
+        requireWorkspaceIntegrationAdministration(grant);
       if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
@@ -469,6 +473,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
+    // Installing the workspace's Slack bot configures the whole workspace.
+    requireWorkspaceIntegrationAdministration(grant);
     const payload = await parseRequestJson(c, OpenGeniSlackBotInstallRequest);
     return c.json(
       await withOrganizationIntegrationAcquisition(
@@ -1028,6 +1034,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
           // not take its row first or change that excluded lane's lock order.
+          if (initial?.subjectId === null && workspaceProviderApiKeyConnectionKind(initial))
+            requireWorkspaceIntegrationAdministration(grant);
           if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {
             await db.execute(
               sql`select id from connections where workspace_id = ${workspaceId}::uuid and id = ${c.req.param("connectionId")}::uuid and (subject_id is null or subject_id = ${grant.subjectId}) for update`,
@@ -1362,6 +1370,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "connection not found" });
     }
     assertNotReservedExternalVaultMetadata(existing.metadata);
+    if (
+      existing.subjectId === null &&
+      (workspaceProviderApiKeyConnectionKind(existing) ||
+        existing.metadata.directModelProvider !== undefined ||
+        isOpenGeniSlackBotConnection(existing))
+    )
+      requireWorkspaceIntegrationAdministration(grant);
     const expectedVersion = c.req.query("expectedVersion");
     if (expectedVersion !== undefined) {
       if (!/^[1-9]\d*$/.test(expectedVersion) || !Number.isSafeInteger(Number(expectedVersion))) {
@@ -2005,6 +2020,20 @@ function assertNotReservedApiIntegrationOAuthMetadata(
       message: "API Integration OAuth metadata is reserved for the dedicated provider flow",
     });
   }
+}
+
+/**
+ * Members hold `connections:write` so they can connect their own accounts and
+ * add shared credentials. What the whole workspace runs on (its model-provider
+ * keys and its Slack bot) stays a settings action, held by workspace admins,
+ * Personal workspace owners and integration-management keys.
+ */
+export function requireWorkspaceIntegrationAdministration(grant: {
+  permissions: Parameters<typeof hasPermission>[0];
+  permissionMode?: Parameters<typeof hasPermission>[2];
+}): void {
+  if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
+    throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
 }
 
 function writableSubjectId(

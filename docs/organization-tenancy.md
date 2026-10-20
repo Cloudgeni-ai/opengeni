@@ -1117,7 +1117,25 @@ current one. Workspace administration, member and API-key management, shared
 connection, GitHub App, and Sandbox Environment administration, Connected
 Machines (`enrollments:read`/`enrollments:manage`, which also gate picking or
 attaching a machine for a session), terminal attach, sandbox file writes, and
-inline MCP servers stay Admin-only. Each such
+inline MCP servers stayed Admin-only after 0555.
+Migration 0864 makes Member a full teammate. It adds `stream:control`,
+`terminal:attach`, `codemode:call`, `files:write` (edit a session's live
+filesystem), `connections:write` (connect one's own Gmail, Slack, GitHub, Drive
+or model subscriptions), `mcp_servers:attach` (session MCP servers),
+`rigs:manage` (create and edit Sandbox Environments, which are versioned) and
+`enrollments:read` (see and pick Connected Machines). A Member also manages any
+Site they can see (Site Data, Site SQL, publication settings, takedown and
+restore) and authors, installs and reviews workspace Skills
+(`documents:manage`). Settings-class powers stay Admin-only:
+`workspace:admin` (workspace settings, instructions, Insights, automations),
+`members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
+App), `variable-sets:manage`, `enrollments:manage` (enrolling and sharing
+machines), `capabilities:manage` (integration and plugin install, workspace
+tool policy) and `secrets:read`. Routes where a newly granted permission would
+otherwise reach workspace-wide configuration check the settings power
+explicitly: workspace-owned model-provider keys and the Slack bot need
+`capabilities:manage`, and the workspace default Sandbox Environment needs
+workspace settings authority. Each such
 rollout normalizes only rows whose permissions exactly equal an older named
 Member set (any JSONB order), through a writer trigger for overlapping old
 binaries plus a batched backfill; custom sets are never rewritten. Since 0555

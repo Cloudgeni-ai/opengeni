@@ -17,6 +17,13 @@ const rollout = [
   "0556_member_collaborator_permissions_backfill_index.sql",
   "0557_member_collaborator_permissions_backfill.sql",
 ] as const;
+// 0864-0866 replace this rollout's preset and writer guard; hold them back so
+// this test keeps observing the 0555 contract it pins.
+const later = [
+  "0864_member_teammate_permissions.sql",
+  "0865_member_teammate_permissions_backfill_index.sql",
+  "0866_member_teammate_permissions_backfill.sql",
+] as const;
 // Everything a Viewer has that the post-0516 Member lacked, plus the caller's
 // own desktop consent and artifact creation/publishing for every member.
 const added = [
@@ -58,7 +65,8 @@ beforeAll(async () => {
     name text primary key,
     applied_at timestamptz not null default now()
   )`;
-  await owner`insert into schema_migrations (name) select unnest(${[...rollout]}::text[])`;
+  await owner`insert into schema_migrations (name)
+    select unnest(${[...rollout, ...later]}::text[])`;
   await migrate(owned.ownerUrl);
 }, 900_000);
 

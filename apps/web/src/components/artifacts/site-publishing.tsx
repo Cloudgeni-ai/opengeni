@@ -288,7 +288,7 @@ export function SitePublishPage(props: SitePublishPageProps) {
   if (!props.canManage || load.state === "forbidden")
     return blocked(
       "You can't publish this Site",
-      "Only its owner and workspace admins can publish it.",
+      "You need permission to publish artifacts in this workspace.",
     );
   if (load.state === "unavailable")
     return blocked(

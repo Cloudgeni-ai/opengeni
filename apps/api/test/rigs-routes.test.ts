@@ -488,11 +488,20 @@ describe("rig route permission matrix", () => {
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
   });
 
-  test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
+  test("workspace default rig setter is a settings action, validates rigId, and clears", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use", "workspace:read"]) };
-    const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage", "workspace:read"]) };
+    // Members create and edit Sandbox Environments, but the workspace default
+    // is a workspace setting.
+    const member = { authorization: await bearer(ws, "user:t", ["rigs:manage", "workspace:read"]) };
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:manage",
+        "workspace:read",
+        "workspace:admin",
+      ]),
+    };
     const base = `/v1/workspaces/${ws.workspaceId}`;
     const created = await app().request(`${base}/rigs`, {
       method: "POST",
@@ -507,6 +516,12 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ rigId: rig.id }),
     });
     expect(denied.status).toBe(403);
+    const memberDenied = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: member,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(memberDenied.status).toBe(403);
 
     const invalid = await app().request(`${base}/default-rig`, {
       method: "PUT",
@@ -554,6 +569,7 @@ describe("rig route permission matrix", () => {
           "rigs:manage",
           "rigs:use",
           "workspace:read",
+          "workspace:admin",
         ]),
       };
       const base = `/v1/workspaces/${target.workspaceId}`;
@@ -574,7 +590,11 @@ describe("rig route permission matrix", () => {
         const otherSubject = `user:${crypto.randomUUID()}`;
         await organizationMember([target], otherSubject);
         const otherHeaders = {
-          authorization: await bearer(target, otherSubject, ["rigs:manage", "rigs:use"]),
+          authorization: await bearer(target, otherSubject, [
+            "rigs:manage",
+            "rigs:use",
+            "workspace:admin",
+          ]),
         };
         expect(
           (await http.request(`${base}/rigs/${rig.id}`, { headers: otherHeaders })).status,
@@ -616,7 +636,12 @@ describe("rig route permission matrix", () => {
     await shared!.admin`
       update rigs set status = 'revoked', revoked_at = now() where id = ${revoked.id}`;
     const headers = {
-      authorization: await bearer(target, subjectId, ["rigs:manage", "rigs:use", "workspace:read"]),
+      authorization: await bearer(target, subjectId, [
+        "rigs:manage",
+        "rigs:use",
+        "workspace:read",
+        "workspace:admin",
+      ]),
     };
     const base = `/v1/workspaces/${target.workspaceId}`;
     const http = app();

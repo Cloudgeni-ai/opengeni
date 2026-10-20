@@ -1462,6 +1462,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
+    // Members may create and edit Sandbox Environments; which one every new
+    // session starts in is a workspace setting.
+    await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, SetWorkspaceDefaultRigRequest);
     if (payload.rigId) {
       const rig = await getRig(deps.db, grant, payload.rigId);

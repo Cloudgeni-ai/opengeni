@@ -834,8 +834,9 @@ export async function requireSitePublicationWriter(
 
 /**
  * Resolve a Site for publication management. The caller must see the Site
- * (its audience); managers are the Site Data managers (owner, workspace admin,
- * an agent acting for one, or a person-less key with artifacts:publish).
+ * (its audience); managers are the Site Data managers (anyone in the workspace
+ * with artifacts:publish, an agent acting for one, or a person-less key with
+ * artifacts:publish).
  * `mutate` callers must also pass `requireSitePublicationWriter`.
  */
 export async function resolveSiteManagement(
@@ -869,7 +870,7 @@ export function requireSiteManager(management: SiteManagement): void {
       403,
       "forbidden",
       "site_manager_required",
-      "Only the Site's owner or a workspace admin can manage its publication",
+      "You need permission to publish artifacts in this workspace to manage this Site's publication",
     );
 }
 

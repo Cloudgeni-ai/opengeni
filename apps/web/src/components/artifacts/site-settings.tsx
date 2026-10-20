@@ -63,15 +63,15 @@ export function useSiteManagement({
   const context = useAppContext();
   const { client, accessContext } = context;
   const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
-  const isAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
-  // Publishing and Site Data are for the people who manage the Site: its owner
-  // and workspace admins. The API decides; an ownerless Site shows them.
-  const manageData = Boolean(
-    canPublish &&
-    artifact &&
-    (isAdmin || !artifact.ownerSubjectId || artifact.ownerSubjectId === accessContext.subjectId),
-  );
+  // Sites are shared work: anyone here who can publish artifacts manages the
+  // Sites they can see (Data and publication), like the owner. The API decides.
+  const manageData = Boolean(canPublish && artifact);
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  // Site administration (limits, outside-visitor agent, extra tools): a
+  // workspace admin, or the owner of a Personal workspace.
+  const isAdmin =
+    hasWorkspacePermission(accessContext, workspaceId, "workspace:admin") ||
+    isPersonalWorkspace(workspace, context.managedSelfContext);
   const workspaceName = workspace?.name ?? "this workspace";
   // A Personal workspace has nobody to share with, so there is no audience.
   const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);

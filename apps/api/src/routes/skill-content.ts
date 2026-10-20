@@ -1,7 +1,12 @@
 import { z } from "zod";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { SkillFile, SKILL_MAX_FILES, type SkillWriteReceipt } from "@opengeni/contracts";
+import {
+  SkillFile,
+  SKILL_MAX_FILES,
+  type PreferenceRegistryScope,
+  type SkillWriteReceipt,
+} from "@opengeni/contracts";
 import { getSessionForSubject, readSkillRemovalScope } from "@opengeni/db";
 import {
   approveSkill,
@@ -14,10 +19,24 @@ import {
   restoreSkill,
   saveSkill,
   validateSkillFiles,
+  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { applySkillFileChanges, buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import { authorizePreferenceRegistryScopeMutation } from "./preference-registry";
+
+/**
+ * Workspace Skills are shared team procedures: any collaborator who can manage
+ * workspace documents (the default Member preset) may author, remove and review
+ * them, matching what their agents can already do under Agent learning.
+ * Organization and personal scopes keep the registry rules unchanged.
+ */
+export function authorizeSkillScopeMutation(
+  access: AccessGrantAuthorization,
+  scope: PreferenceRegistryScope,
+): void {
+  authorizePreferenceRegistryScopeMutation(access, scope, "documents:manage");
+}
 
 const scopeSchema = z.enum(["workspace", "organization", "user"]);
 const saveRequest = z
@@ -135,7 +154,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
     const request = await parseSkillRequest(c, saveRequest);
-    authorizePreferenceRegistryScopeMutation(access, request.scope);
+    authorizeSkillScopeMutation(access, request.scope);
     const context = {
       accountId: access.grant.accountId,
       workspaceId,
@@ -151,7 +170,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
     if (request.expectedRevisionId && !current)
       throw new HTTPException(404, { message: "Skill not found" });
     if (current) {
-      authorizePreferenceRegistryScopeMutation(access, current.scope);
+      authorizeSkillScopeMutation(access, current.scope);
       if (current.scope !== request.scope)
         throw new HTTPException(409, {
           message: "Move Skill scope through the existing scope-management workflow.",
@@ -205,7 +224,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       current?.scope ??
       (await readSkillRemovalScope(deps.db, context, skillId, request.operationId));
     if (!scope) throw new HTTPException(404, { message: "Skill not found" });
-    authorizePreferenceRegistryScopeMutation(access, scope);
+    authorizeSkillScopeMutation(access, scope);
     if (scope === "organization")
       throw new HTTPException(403, { message: "Organization skills cannot be removed here." });
     return c.json(
@@ -246,7 +265,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
             )
           : null);
       if (!scope) throw new HTTPException(404, { message: "Skill not found" });
-      authorizePreferenceRegistryScopeMutation(access, scope);
+      authorizeSkillScopeMutation(access, scope);
       const apply =
         operation === "approve"
           ? approveSkill
