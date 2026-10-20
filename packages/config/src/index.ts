@@ -163,6 +163,32 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
+/** Comma-separated Modal region selectors (for example `eu` or
+ * `us-east-1,us-west-2`). Blank or unset keeps Modal's own placement. */
+const EnvModalRegions = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    return source.split(",").map((entry) => entry.trim().toLowerCase());
+  },
+  z
+    .array(
+      z
+        .string()
+        .regex(
+          /^[a-z][a-z0-9-]{0,62}$/u,
+          "OPENGENI_MODAL_REGIONS entries must be Modal region names such as eu or us-east-1",
+        ),
+    )
+    .min(1)
+    .refine((regions) => new Set(regions).size === regions.length, {
+      message: "OPENGENI_MODAL_REGIONS must not repeat a region",
+    })
+    .readonly()
+    .optional(),
+);
+
 /** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
 const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
   (value) => {
@@ -1195,6 +1221,12 @@ const SettingsSchema = z.object({
   // resume cannot silently change the reservation.
   modalSandboxCpu: z.coerce.number().positive().optional(),
   modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
+  // Optional Modal placement for every new physical box (fresh create and
+  // snapshot restore alike). Every setup step and tool call is a round trip from
+  // the worker to the box, so placing boxes near the workers cuts per-command
+  // latency; Modal bills region selection as a compute multiplier. Existing
+  // boxes keep their placement on resume. Knob: OPENGENI_MODAL_REGIONS.
+  modalRegions: EnvModalRegions,
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -5063,6 +5095,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
     modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
+    modalRegions: optional("OPENGENI_MODAL_REGIONS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),

@@ -311,6 +311,10 @@ registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 image identity for every Sandbox Environment. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
+Optional `OPENGENI_MODAL_REGIONS` (comma-separated, for example `eu`) pins every
+new box, including snapshot restores, to Modal regions near the workers. Every
+setup step and tool call is a worker-to-box round trip, so distance shows up in
+every command; Modal bills region selection as a compute multiplier.
 A verified Sandbox Environment provider image may accelerate physical cold create,
 but never replaces that logical lease identity. Explicit Sandbox Environment image overrides
 are disabled. The registry
