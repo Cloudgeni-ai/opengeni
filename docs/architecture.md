@@ -112,6 +112,14 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+Established-chat composer submissions (web and native) persist the submitted
+model, reasoning and latency as session defaults in the same transaction as
+prompt admission (`packages/db/src/session-queue-commands.ts`). Saving a draft
+alone changes no session setting. The existing `session.model_settings.updated`
+boundary prevents older accepted turns from reverting that choice when they
+start; retries replay without reapplying settings. Accepted turns remain frozen,
+while later schedules and automatic work inherit the chat's saved defaults.
+
 Session activity uses row-stamped transaction IDs rather than a shared workspace
 counter. Incremental discovery uses same-snapshot xmin watermarks for at-least-once
 monitoring; list pagination is a live xid keyset, not a retained historical view.

@@ -337,7 +337,11 @@ exists, `new_session_drafts` owns the next session. Inside a session,
 `composer_drafts` owns the next message for that actor/session; navigation and
 workspace defaults do not copy policy between them. Send/Steer submits one exact
 inside draft revision and the server rotates that row to a blank next revision
-in the same transaction that freezes the queued turn. Every queued turn therefore
+in the same transaction that freezes the queued turn. A human/operator composer
+submission also saves its model, reasoning and latency as the chat's defaults,
+with the existing `session.model_settings.updated` boundary. Autosaving alone
+does not change those defaults; failed submissions and retries cannot reapply
+an older choice. Web and native use this same admission path. Every queued turn therefore
 retains its own text, resources, model, reasoning, and latency. Editing a queued
 turn checks that exact snapshot back into the inside composer atomically, and a
 nonempty composer is replaced only after explicit confirmation. An independent
@@ -347,11 +351,13 @@ does not invent defaults or consult either composer.
 Session detail/list and Insights model labels project the newest turn with a
 durable `turn.started` event. Fresh actor drafts, omitted follow-up fields, voice
 delegations and voice-end handoffs inherit that same model, reasoning and latency
-policy through `packages/db/src/session-execution-policy.ts`. Creation settings
-are used only before any turn starts. Existing drafts and accepted queued turns
+policy through `packages/db/src/session-execution-policy.ts`, unless a newer
+explicit settings/composer-submission boundary selects the stored defaults.
+Turns accepted before that boundary cannot undo it by starting later.
+Existing drafts and accepted queued turns
 keep their explicit settings; a rejected admission never changes inheritance.
-The stored session creation fields are not rewritten. Scheduled generated-session
-recovery validates those stored fields, not the public latest-turn projection. API admission freezes its
+The stored session model settings change on an explicit settings command or
+accepted composer submission, not merely when a turn starts. API admission freezes its
 resolved policy so billing validation and the accepted turn cannot disagree if
 another turn starts before the prompt transaction commits. A removed or blocked
 inherited model requires a new selection, never a silent switch to the original.
