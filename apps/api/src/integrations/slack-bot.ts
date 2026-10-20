@@ -531,17 +531,11 @@ export async function resolveSlackBotConnectionForTool(input: {
   if (boundConnectionId && (!session || !isTrustedScheduledSlackBotSession(session))) {
     throw new Error("Opengeni Slack bot routing metadata is not scheduler-authorized");
   }
-  if (
-    boundConnectionId &&
-    input.requestedConnectionId &&
-    input.requestedConnectionId !== boundConnectionId
-  ) {
-    throw new Error("this scheduled session is bound to a different Opengeni Slack bot connection");
-  }
-  if (!boundConnectionId && !input.grant.permissions.includes("connections:read")) {
+  const usesLegacyDefault = boundConnectionId && !input.requestedConnectionId;
+  if (!usesLegacyDefault && !input.grant.permissions.includes("connections:read")) {
     throw new Error("connections:read is required to select an Opengeni Slack bot connection");
   }
-  let connectionId = boundConnectionId ?? input.requestedConnectionId;
+  let connectionId = input.requestedConnectionId ?? boundConnectionId;
   if (!connectionId) {
     const activeConnections = (
       await availableSlackBotConnectionMetadata(input.db, input.grant)
@@ -656,7 +650,6 @@ export async function resolveScheduledSlackBotPostTarget(input: {
     db: input.db,
     grant: input.grant,
     sessionId: input.sessionId,
-    requestedConnectionId: connectionId,
   });
   return { ...resolved, scheduledTaskId, channelId: channelId! };
 }
@@ -697,8 +690,8 @@ export async function prepareScheduledSlackBotPost(input: {
   };
 }
 
-/** Ordinary chats choose an explicit channel; scheduled roots retain their
- * person-chosen destination and cannot enter this path through a child. */
+/** Every chat uses the same bot capability. Old schedules may retain their
+ * saved destination as a default when no explicit destination is supplied. */
 export async function prepareSlackBotPost(input: {
   db: Database;
   grant: AccessGrant;
@@ -711,11 +704,7 @@ export async function prepareSlackBotPost(input: {
   if (!input.sessionId) throw new Error("Bot posting requires a chat");
   const session = await getSession(input.db, input.grant.workspaceId, input.sessionId);
   if (!session) throw new Error("Bot posting chat is unavailable");
-  if (isTrustedScheduledSlackBotSession(session)) {
-    if (input.channelId || input.connectionId)
-      throw new Error(
-        "A scheduled task uses only the bot and channel chosen by a person on the task",
-      );
+  if (isTrustedScheduledSlackBotSession(session) && !input.channelId && !input.connectionId) {
     return prepareScheduledSlackBotPost(input);
   }
   await authorizeOrdinaryBotPosting(input);
@@ -723,7 +712,7 @@ export async function prepareSlackBotPost(input: {
     throw new Error("connections:read is required to post as the bot");
   if (!input.channelId)
     throw new Error(
-      "Choose the Slack channel for this bot message. For a schedule, choose Post to Slack in the schedule editor.",
+      "Choose the Slack channel for this bot message. Use connectionId to choose between Slack workspaces.",
     );
   const target = await resolveSlackBotConnectionForTool({
     db: input.db,
@@ -826,16 +815,11 @@ async function authorizeOrdinaryBotPosting(input: {
     executionGeneration < 1
   )
     throw new Error("Exact live agent attempt required for bot posting");
-  const policy = await freezeAgentLearningPolicy(input.db, {
+  await freezeAgentLearningPolicy(input.db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
     actor: { kind: "agent", sessionId, turnId, attemptId, executionGeneration },
   });
-  if (typeof policy.scheduledTaskRunId === "string") {
-    throw new Error(
-      "A scheduled occurrence can post as the bot only to its person-chosen Post to Slack destination. Tasks that continue an existing chat cannot post as the bot.",
-    );
-  }
 }
 
 function completedPreparedBotPost(

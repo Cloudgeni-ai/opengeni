@@ -358,6 +358,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
       model: inheritsSessionSettings ? null : (model?.value ?? null),
       reasoningEffort: inheritsSessionSettings ? null : (task.agentConfig.reasoningEffort ?? null),
       sandboxBackend: inheritsSessionSettings ? null : (task.agentConfig.sandboxBackend ?? null),
+      executionTarget: inheritsSessionSettings ? null : (task.agentConfig.executionTarget ?? null),
       hasGoal: task.agentConfig.goal !== undefined,
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,
@@ -475,6 +476,7 @@ function buildScheduledTaskDetailMcp(
           : null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,
@@ -485,6 +487,8 @@ function buildScheduledTaskDetailMcp(
       },
       taskMetadataKeys,
       slackPosting: {
+        configurationKind: "legacy_destination_default",
+        requiredForBotPosting: false,
         identity: task.agentConfig.slackBotConnectionId ? "opengeni_bot" : null,
         connectionId: task.agentConfig.slackBotConnectionId ?? null,
         channelId: task.agentConfig.slackBotChannelId ?? null,
@@ -492,7 +496,7 @@ function buildScheduledTaskDetailMcp(
           task.agentConfig.slackBotConnectionId && task.agentConfig.slackBotChannelId,
         ),
         setup:
-          "A person can choose Post to Slack in the schedule editor. Personal Slack tools send as their connected account; they do not select the Opengeni bot.",
+          "Use the available Opengeni bot tools with the requested Slack workspace and channel. Saved destinations are defaults for older tasks. Personal Slack tools send as the connected person and must not substitute for a requested bot.",
       },
     },
     detailProjection: {
@@ -576,6 +580,7 @@ export function boundScheduledTaskDetailMcp(task: ScheduledTask) {
         model: null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,

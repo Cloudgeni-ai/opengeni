@@ -24,11 +24,13 @@ export function ScheduleAgentCapabilities({
   value,
   onChange,
   disabled = false,
+  bare = false,
 }: {
   workspaceId: string;
   value: AgentCapabilities | undefined;
   onChange: (value: AgentCapabilities | undefined) => void;
   disabled?: boolean;
+  bare?: boolean;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
@@ -47,46 +49,54 @@ export function ScheduleAgentCapabilities({
   const custom = value !== undefined;
   const draft = custom ? draftFromRequest(value) : workspaceDraft;
   const summary = capabilitySummary(draft.values, availability);
+  const content = (
+    <div className="flex min-w-0 flex-col gap-6">
+      <div className="flex min-w-0 flex-col gap-1.5">
+        {/* The disclosure title already names the question. */}
+        <SegmentedControl
+          size="sm"
+          aria-label="Capabilities for this schedule"
+          value={custom ? "custom" : "default"}
+          disabled={disabled}
+          onValueChange={(next) =>
+            onChange(next === "custom" ? requestFromDraft(workspaceDraft, availability) : undefined)
+          }
+          options={[
+            { value: "default", label: "Workspace defaults" },
+            { value: "custom", label: "Choose for this schedule" },
+          ]}
+          className="self-start"
+        />
+        <p className="text-xs leading-4.5 text-fg-muted">
+          {custom
+            ? "Saved with the schedule. Later changes to the workspace's defaults don't change it."
+            : "Each run uses the workspace's agent defaults at the time it runs."}
+        </p>
+      </div>
+      {custom ? (
+        <AgentCapabilityPicker
+          draft={draft}
+          availability={availability}
+          disabled={disabled}
+          onChange={(next) => onChange(requestFromDraft(next, availability))}
+        />
+      ) : null}
+    </div>
+  );
+  if (bare)
+    return (
+      <section aria-label="Capabilities">
+        <p className="mb-2 text-sm font-medium text-fg">Capabilities</p>
+        {content}
+      </section>
+    );
   return (
     <Disclosure
       variant="row"
       title="What the agent can do"
       summary={custom ? `Chosen for this schedule · ${summary}` : `Workspace defaults · ${summary}`}
     >
-      <div className="flex min-w-0 flex-col gap-6">
-        <div className="flex min-w-0 flex-col gap-1.5">
-          {/* The disclosure title already names the question. */}
-          <SegmentedControl
-            size="sm"
-            aria-label="Capabilities for this schedule"
-            value={custom ? "custom" : "default"}
-            disabled={disabled}
-            onValueChange={(next) =>
-              onChange(
-                next === "custom" ? requestFromDraft(workspaceDraft, availability) : undefined,
-              )
-            }
-            options={[
-              { value: "default", label: "Workspace defaults" },
-              { value: "custom", label: "Choose for this schedule" },
-            ]}
-            className="self-start"
-          />
-          <p className="text-xs leading-4.5 text-fg-muted">
-            {custom
-              ? "Saved with the schedule. Later changes to the workspace's defaults don't change it."
-              : "Each run uses the workspace's agent defaults at the time it runs."}
-          </p>
-        </div>
-        {custom ? (
-          <AgentCapabilityPicker
-            draft={draft}
-            availability={availability}
-            disabled={disabled}
-            onChange={(next) => onChange(requestFromDraft(next, availability))}
-          />
-        ) : null}
-      </div>
+      {content}
     </Disclosure>
   );
 }

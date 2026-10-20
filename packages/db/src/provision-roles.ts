@@ -2700,6 +2700,8 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.organization_slack_bot_access FROM PUBLIC;
       REVOKE ALL ON FUNCTION
         opengeni_private.set_organization_slack_bot_access(uuid,uuid,uuid,text,boolean),
+        opengeni_private.set_slack_bot_workspace_access(uuid,uuid,uuid,text,boolean,uuid[]),
+        opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid),
         opengeni_private.read_organization_slack_bot_access(uuid,uuid,uuid),
         opengeni_private.list_organization_slack_bots(uuid,uuid),
         opengeni_private.prepare_organization_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,uuid,bigint,text,text,text),

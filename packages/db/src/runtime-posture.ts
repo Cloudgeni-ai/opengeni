@@ -222,6 +222,8 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
   "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[])",
+  "read_slack_bot_workspace_access(uuid, uuid, uuid)",
   "read_organization_slack_bot_access(uuid, uuid, uuid)",
   "list_organization_slack_bots(uuid, uuid)",
   "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",

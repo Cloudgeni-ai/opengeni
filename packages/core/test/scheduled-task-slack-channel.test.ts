@@ -214,7 +214,7 @@ describe("scheduled task Slack channel", () => {
     expect(isAuthenticatedPersonAuthorization(provenance)).toBe(false);
   });
 
-  test("posting tools are added only with a chosen channel and under the ceiling", () => {
+  test("selected posting tools survive without a destination and respect the ceiling", () => {
     const base = ["goal_set" as const];
     const allowed = [
       "goal_set" as const,
@@ -227,13 +227,13 @@ describe("scheduled task Slack channel", () => {
         { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },
         allowed,
       ),
-    ).toEqual(["goal_set", "slack_bot_prepare_message", "slack_bot_send_prepared_message"]);
+    ).toEqual(["goal_set"]);
     expect(
       withScheduledSlackBotPostingTools(base, { slackBotConnectionId: connectionId }, allowed),
     ).toEqual(["goal_set"]);
     expect(
       withScheduledSlackBotPostingTools(allowed, { slackBotConnectionId: connectionId }, allowed),
-    ).toEqual(["goal_set"]);
+    ).toEqual(allowed);
     expect(
       withScheduledSlackBotPostingTools(
         base,

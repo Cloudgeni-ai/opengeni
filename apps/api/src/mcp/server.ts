@@ -2137,6 +2137,7 @@ export function buildOpenGeniMcpServer(
             db: deps.db,
             grant,
             runMode: task.runMode,
+            reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
             audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
@@ -2554,9 +2555,9 @@ function registerSlackBotTools(
     },
   );
 
-  // Scheduled runs retain their person-chosen channel; ordinary chats supply
-  // an explicit destination. A server-owned prepared message id is the durable
-  // Slack delivery identity in both cases.
+  // All accepted work uses the same selected bot capability. A server-owned
+  // prepared message ID is the durable delivery identity; legacy schedules can
+  // still use their saved destination as a default.
   const authorizeBotPost = async () => {
     if (sessionId === null) {
       throw new Error("Bot posting requires a chat");
@@ -2567,7 +2568,7 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message as the Opengeni bot, never as a personal Slack account. In an ordinary chat supply channelId and, if multiple bots are available, connectionId. Scheduled runs omit both and use only the channel chosen by a person in Post to Slack. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
+        "Prepare a message as the Opengeni bot, never as a personal Slack account. Supply channelId and, if multiple bots are available, connectionId. Scheduled and interactive work use the same capability. Older schedules may omit both to use their saved destination. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4

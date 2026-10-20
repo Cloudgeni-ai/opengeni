@@ -15,13 +15,17 @@ export async function readOrganizationSlackBotAccess(
   scope: { accountId: string; workspaceId: string; connectionId: string },
 ) {
   const rows = await withRlsContext(db, scope, async (tx) =>
-    rawRows<{ enabled: boolean; generation: number }>(
+    rawRows<{ enabled: boolean; generation: number; workspace_ids: string[] | null }>(
       tx,
-      sql`select * from opengeni_private.read_organization_slack_bot_access(${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.connectionId}::uuid)`,
+      sql`select * from opengeni_private.read_slack_bot_workspace_access(${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.connectionId}::uuid)`,
     ),
   );
   if (!rows[0]) throw new Error("Slack bot access is unavailable");
-  return { enabled: rows[0].enabled, generation: Number(rows[0].generation) };
+  return {
+    enabled: rows[0].enabled,
+    generation: Number(rows[0].generation),
+    workspaceIds: rows[0].workspace_ids,
+  };
 }
 
 /** Metadata discovery only. The adapter must first authorize connections:read
@@ -86,9 +90,15 @@ export async function availableSlackBotConnectionMetadata(
  * HTTP adapter. SQL separately rechecks live authority and exact bot identity. */
 export async function setOrganizationSlackBotAccess(
   db: Database,
-  input: { accountId: string; workspaceId: string; connectionId: string; enabled: boolean },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    enabled: boolean;
+    workspaceIds?: string[] | null;
+  },
   authorize: () => Promise<{ accountId: string; subjectId: string }>,
-): Promise<{ enabled: boolean; generation: number }> {
+): Promise<{ enabled: boolean; generation: number; workspaceIds: string[] | null }> {
   const actor = await authorize();
   if (actor.accountId !== input.accountId || !actor.subjectId)
     throw new Error("Organization administrator required");
@@ -98,19 +108,46 @@ export async function setOrganizationSlackBotAccess(
       sql`select current_setting('opengeni.subject_id', true) as subject`,
     );
     await setSubjectRlsContext(tx, actor.subjectId);
-    const rows = await rawRows<{ enabled: boolean; generation: number }>(
+    if (input.workspaceIds === undefined) {
+      // Legacy clients change the on/off setting only. Omission must never
+      // expand a previously selected set to the entire organization.
+      await tx.execute(sql`select * from opengeni_private.set_organization_slack_bot_access(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.connectionId}::uuid,
+        ${actor.subjectId}::text, ${input.enabled}::boolean)`);
+      const result = await readOrganizationSlackBotAccess(tx, input);
+      await tx.execute(
+        sql`select set_config('opengeni.subject_id', ${previous?.subject ?? ""}, true)`,
+      );
+      return result;
+    }
+    const rows = await rawRows<{
+      enabled: boolean;
+      generation: number;
+      workspace_ids: string[] | null;
+    }>(
       tx,
       sql`
-      select * from opengeni_private.set_organization_slack_bot_access(
+      select * from opengeni_private.set_slack_bot_workspace_access(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.connectionId}::uuid,
-        ${actor.subjectId}::text, ${input.enabled}::boolean
+        ${actor.subjectId}::text, ${input.enabled}::boolean, ${
+          input.workspaceIds === null
+            ? sql`null::uuid[]`
+            : sql`ARRAY[${sql.join(
+                input.workspaceIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )}]::uuid[]`
+        }
       )`,
     );
     if (!rows[0]) throw new Error("Slack bot access was not saved");
     await tx.execute(
       sql`select set_config('opengeni.subject_id', ${previous?.subject ?? ""}, true)`,
     );
-    return { enabled: rows[0].enabled, generation: Number(rows[0].generation) };
+    return {
+      enabled: rows[0].enabled,
+      generation: Number(rows[0].generation),
+      workspaceIds: rows[0].workspace_ids,
+    };
   });
 }
 
