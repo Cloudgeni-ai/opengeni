@@ -220,7 +220,11 @@ export function buildSubscriptionUsagePool(
     const complete =
       accounts.length > 0 && accounts.every((account) => account.remainingPercent !== null);
     const remainingPercent = complete
-      ? sum(accounts.map((account) => account.weight * account.remainingPercent!)) / totalWeight
+      ? clamp(
+          sum(accounts.map((account) => account.weight * account.remainingPercent!)) / totalWeight,
+          0,
+          100,
+        )
       : null;
     const earliest = data.reduce(
       (at, row) =>

@@ -135,6 +135,51 @@ describe("subscription usage pool weights", () => {
     expect(result(data, "weekly").accounts.map((row) => row.weight)).toEqual([0.5, 1.5, 1]);
   });
 
+  test("calibrated fractional weights keep aggregate percentages within exact bounds", () => {
+    for (const window of ["five_hour", "weekly"] as const) {
+      const data = input();
+      for (const capacity of [9_000, 31_000, 69_000]) {
+        const id = String(capacity);
+        account(data, id, window, 20, window === "five_hour" ? 1 : 24, 1);
+        calibration(data, id, capacity, window);
+      }
+      // Calibrate against the preceding window, then observe fresh current limits.
+      // This avoids conflicting same-timestamp history and snapshot readings.
+      const duration = window === "five_hour" ? 5 * HOUR : WEEK;
+      for (const row of data.readings) {
+        row.observedAt -= duration;
+        row.resetsAt! -= duration;
+      }
+      for (const call of data.calls) call.at -= duration;
+
+      for (const usedPercent of [0, 62.5, 100]) {
+        for (const row of data.accounts) row.windows[0]!.usedPercent = usedPercent;
+        const pool = result(data, window);
+        expect(pool.accounts.map((row) => row.weightBasis)).toEqual([
+          "observed",
+          "observed",
+          "observed",
+        ]);
+        expect(pool.accounts.map((row) => row.weight)).toEqual([9 / 31, 1, 69 / 31]);
+        if (usedPercent === 0) {
+          const raw =
+            pool.accounts.reduce((total, row) => total + row.weight * row.remainingPercent!, 0) /
+            pool.accounts.reduce((total, row) => total + row.weight, 0);
+          expect(raw).toBeGreaterThan(100); // Reproduces the rejected API percentage.
+          expect(pool.remainingPercent).toBe(100);
+        } else if (usedPercent === 100) {
+          expect(pool.remainingPercent).toBe(0);
+        } else {
+          expect(pool.remainingPercent).toBeCloseTo(37.5);
+        }
+        expect(pool.remainingPercent!).toBeGreaterThanOrEqual(0);
+        expect(pool.remainingPercent!).toBeLessThanOrEqual(100);
+      }
+      data.accounts[0]!.windows[0]!.usedPercent = null;
+      expect(result(data, window).remainingPercent).toBeNull();
+    }
+  });
+
   test("median calibration resists a single extreme internal-call sample", () => {
     const data = input();
     account(data, "a", "weekly", 20, 24, 1);
