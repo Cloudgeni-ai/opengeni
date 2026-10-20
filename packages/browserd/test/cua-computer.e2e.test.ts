@@ -343,12 +343,12 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         // observation, CUA runs the actions in one run_steps call, and a
         // replay does not act again.
         const batchSource = await supervisor.observe(reference, target.id);
-        if (batchSource.semantic?.kind !== "snapshot")
-          throw new Error("Fixture needs a full snapshot");
-        const ref = (name: string) =>
-          (batchSource.semantic as { roots: { name?: string | null; ref: string }[] }).roots.find(
-            (node) => node.name === name,
-          )!.ref;
+        const tree = batchSource.semantic;
+        if (tree?.kind !== "snapshot") throw new Error("Fixture needs a full snapshot");
+        type Node = (typeof tree.roots)[number];
+        const flat = (nodes: Node[]): Node[] =>
+          nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+        const ref = (name: string) => flat(tree.roots).find((node) => node.name === name)!.ref;
         const batch = makeCommand(batchSource, {
           type: "batch",
           actions: [
