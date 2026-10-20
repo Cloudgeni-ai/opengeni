@@ -2459,16 +2459,19 @@ export async function runTurnStreamAttempt(
     runtime.generateSessionTitle &&
     !runtimeCancellationSignal.aborted
   ) {
-    const serviceTier = serviceTierForLatencyMode(
-      turnExecutionPolicy.providerId,
-      turnExecutionPolicy.latencyMode,
-    );
     titleCreditPolicyRevision = creditPolicyRevision;
     const titleRoute = sessionTitleRoute({
       resolvedModel,
       modelName: turnExecutionPolicy.upstreamModelId,
       resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
     });
+    // The title inherits the turn's speed only where its model offers it (a
+    // smaller title model may lack the turn's Ultrafast tier).
+    const serviceTier = titleRoute.resolvedModel?.configured.capabilities.latencyModes.some(
+      (mode) => mode.id === turnExecutionPolicy.latencyMode && mode.runnable,
+    )
+      ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
+      : undefined;
     titleUsageModelId = titleRoute.usageModelId;
     if (
       startSessionTitleWorkflow &&

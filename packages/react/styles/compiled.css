@@ -456,6 +456,7 @@
   --tw-skew-x: initial;
   --tw-skew-y: initial;
   --tw-space-y-reverse: 0;
+  --tw-space-x-reverse: 0;
   --tw-divide-y-reverse: 0;
   --tw-border-style: solid;
   --tw-gradient-position: initial;
@@ -1844,6 +1845,13 @@
   }
 :where(.og-root).gap-x-5,:where(.og-root) .gap-x-5 {
     column-gap: calc(var(--spacing) * 5);
+  }
+:where(.og-root).-space-x-1\.5,:where(.og-root) .-space-x-1\.5 {
+    :where(& > :not(:last-child)) {
+      --tw-space-x-reverse: 0;
+      margin-inline-start: calc(calc(var(--spacing) * -1.5) * var(--tw-space-x-reverse));
+      margin-inline-end: calc(calc(var(--spacing) * -1.5) * calc(1 - var(--tw-space-x-reverse)));
+    }
   }
 :where(.og-root).gap-y-0\.5,:where(.og-root) .gap-y-0\.5 {
     row-gap: calc(var(--spacing) * 0.5);

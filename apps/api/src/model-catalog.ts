@@ -121,12 +121,27 @@ export type WorkspaceModelCatalogDefaults = {
   creditsSelection: DefaultModelSelection | null;
 };
 
+/** The picker offers only speeds some account serving the workspace offers. */
+function withoutUnavailableLatencyModes(selection: WorkspaceModelSelection): ConfiguredModel {
+  const unavailable = selection.unavailableLatencyModes;
+  if (!unavailable?.length) return selection.model;
+  return {
+    ...selection.model,
+    capabilities: {
+      ...selection.model.capabilities,
+      latencyModes: selection.model.capabilities.latencyModes.map((mode) =>
+        unavailable.includes(mode.id) ? { ...mode, runnable: false } : mode,
+      ),
+    },
+  };
+}
+
 export function projectWorkspaceModelCatalog(
   selections: readonly WorkspaceModelSelection[],
   defaults?: WorkspaceModelCatalogDefaults,
 ): WorkspaceModelCatalogResponseType {
   const models = selections.map((selection) => ({
-    ...projectClientModel(selection.model),
+    ...projectClientModel(withoutUnavailableLatencyModes(selection)),
     credentialReadiness: selection.credentialReadiness,
     policyAllowed: selection.policyAllowed,
     availability: selection.availability,

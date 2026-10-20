@@ -2923,7 +2923,7 @@ export const CapabilityStateV1Schema = z
 export type CapabilityStateV1 = z.infer<typeof CapabilityStateV1Schema>;
 
 const ModelModalityV1 = z.enum(["text", "image", "audio"]);
-const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast"]);
+const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast", "ultrafast"]);
 
 export const ModelCapabilitiesV1Schema = z
   .object({
@@ -5818,7 +5818,7 @@ const REASONING_EFFORT_ORDER = new Map(
 );
 const MODALITY_ORDER = new Map(["text", "image", "audio"].map((value, index) => [value, index]));
 const LATENCY_MODE_ORDER = new Map(
-  ["standard", "priority", "fast"].map((value, index) => [value, index]),
+  ["standard", "priority", "fast", "ultrafast"].map((value, index) => [value, index]),
 );
 
 function normalizeRegistryBaseUrl(value: string, providerId: string): string {
@@ -6775,6 +6775,41 @@ export function withOrganizationOpenRouterCredential(
 
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
 const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
+/**
+ * OpenAI Ultrafast is 6× Standard list rates (service_tier ultrafast). Codex
+ * subscriptions count it against included limits at 8×; those limits are
+ * observed from the provider's own usage readings, not priced here.
+ */
+const ULTRAFAST_BILLING_MULTIPLIER_BPS = 60_000;
+/** Upstream slugs OpenAI serves at the Ultrafast tier. */
+const ULTRAFAST_UPSTREAM_SLUGS: readonly string[] = ["gpt-6-astra", "gpt-6.1-sol"];
+
+/**
+ * Ultrafast for a model id (`gpt-6-astra` or `codex/gpt-6-astra`), when OpenAI
+ * serves its slug at that tier. Codex accounts must still advertise the tier:
+ * placement serves an Ultrafast turn only from an account whose live model
+ * list includes it for that model.
+ */
+function ultrafastLatencyModeForModel(modelId: string):
+  | {
+      id: "ultrafast";
+      upstream: "supported";
+      runnable: true;
+      billingMultiplierBps: number;
+    }
+  | undefined {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  return ULTRAFAST_UPSTREAM_SLUGS.includes(slug)
+    ? {
+        id: "ultrafast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: ULTRAFAST_BILLING_MULTIPLIER_BPS,
+      }
+    : undefined;
+}
 
 /**
  * Product display label for catalog/picker UI.
@@ -6871,6 +6906,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     modelId.startsWith("codex/gpt-5.6-") ||
     /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
+    const ultrafast = ultrafastLatencyModeForModel(modelId);
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -6879,6 +6915,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
         runnable: true,
         billingMultiplierBps: GPT56_FAST_BILLING_MULTIPLIER_BPS,
       },
+      ...(ultrafast ? [ultrafast] : []),
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
@@ -6899,8 +6936,11 @@ function reviewedCodexCatalogCapabilities(
   capabilities: ModelCapabilitiesV1,
 ): ModelCapabilitiesV1 {
   if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
-  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
-    (mode) => mode.id === "fast",
+  const builtin = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`);
+  const added = builtin.filter(
+    (mode) =>
+      (mode.id === "fast" || mode.id === "ultrafast") &&
+      !capabilities.latencyModes.some((existing) => existing.id === mode.id),
   );
   return normalizeCapabilities({
     ...capabilities,
@@ -6909,10 +6949,7 @@ function reviewedCodexCatalogCapabilities(
       capabilities.structuredOutput.upstream === "unknown"
         ? { upstream: "supported", runnable: true }
         : capabilities.structuredOutput,
-    latencyModes:
-      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
-        ? [...capabilities.latencyModes, fast]
-        : capabilities.latencyModes,
+    latencyModes: [...capabilities.latencyModes, ...added],
   });
 }
 
@@ -6959,14 +6996,18 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 /**
  * Map Opengeni latency mode to the provider `service_tier` wire value.
  * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
+ * Ultrafast is `ultrafast` wherever a model declares it (OpenAI API and Codex).
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
   providerId: string,
   latencyMode: LatencyMode,
-): "fast" | "priority" | undefined {
+): "fast" | "priority" | "ultrafast" | undefined {
   if (latencyMode === "standard") {
     return undefined;
+  }
+  if (latencyMode === "ultrafast") {
+    return "ultrafast";
   }
   if (
     providerId === "azure" ||
@@ -6985,6 +7026,9 @@ export function responseSatisfiesLatencyMode(
 ): boolean {
   if (requested === "standard") {
     return true;
+  }
+  if (requested === "ultrafast") {
+    return responseServiceTier === "ultrafast";
   }
   return responseServiceTier === "priority" || responseServiceTier === "fast";
 }
@@ -7281,9 +7325,18 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   // Recompute, rather than allowlisting an incident hash: all other current
   // fields must still reproduce the accepted digest. Do not compose this with
   // the older wire-profile compatibility or rewrite the accepted policy.
-  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider, {
-    includeAutoCompactTokenLimit: true,
-  });
+  // Ultrafast was declared later; that historical declaration never had it.
+  return definitionVersionFor(
+    {
+      ...modelWithoutVersion,
+      capabilities: {
+        ...capabilities,
+        latencyModes: capabilities.latencyModes.filter((mode) => mode.id !== "ultrafast"),
+      },
+    },
+    provider,
+    { includeAutoCompactTokenLimit: true },
+  );
 }
 
 function matchesAdditiveCapabilityDefinitionVersion(
@@ -7293,8 +7346,8 @@ function matchesAdditiveCapabilityDefinitionVersion(
 ): boolean {
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   const { latencyModes, inputModalities } = model.capabilities;
-  // V1 has only three unique latency ids and three unique input modalities:
-  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // V1 has four unique latency ids and three unique input modalities:
+  // at most 15 * 7 subset digests retaining the frozen mode. Reconstruct an
   // exact historical declaration; never ignore the digest or alter existing
   // mode support, runnable state, billing multiplier, or request-tier routing.
   // Every other executable field remains in the digest. Do not compose this

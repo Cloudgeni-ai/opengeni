@@ -470,6 +470,17 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             data-testid="model-picker-fast-icon"
           />
         ) : null}
+        {props.latencyMode === "ultrafast" && !needsModel ? (
+          <span
+            role="img"
+            className="flex shrink-0 -space-x-1.5 text-og-fg"
+            aria-label={messages.ultrafast}
+            data-testid="model-picker-ultrafast-icon"
+          >
+            <ZapIcon className="size-3.5 fill-current stroke-current" aria-hidden />
+            <ZapIcon className="size-3.5 fill-current stroke-current" aria-hidden />
+          </span>
+        ) : null}
         <ChevronDownIcon className="og-model-policy-chevron size-3 shrink-0 max-sm:hidden" />
       </button>
 

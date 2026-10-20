@@ -996,7 +996,7 @@ export async function createAndStartSessionWithOutcome(input: {
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
-  latencyMode?: "standard" | "priority" | "fast";
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1912,7 +1912,7 @@ type PostUserMessageTurnInput = {
   composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
-  latencyMode?: "standard" | "priority" | "fast" | null;
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -4209,7 +4209,7 @@ function sessionPromptBoundaryRequestHash(input: {
   composerDraftResources?: ResourceRef[];
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
-  latencyMode: "standard" | "priority" | "fast" | null;
+  latencyMode: "standard" | "priority" | "fast" | "ultrafast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
@@ -4266,7 +4266,7 @@ async function acceptSessionUserMessageInFileScope(
     composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
-    latencyMode?: "standard" | "priority" | "fast" | null;
+    latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];

@@ -221,6 +221,7 @@ async function runningTurn(
     initiator?: { kind: "subject"; subjectId: string } | { kind: "service" };
     personalAuthority?: boolean;
     upstreamModelId?: string;
+    latencyMode?: "standard" | "fast" | "ultrafast";
   },
 ): Promise<TurnFixture> {
   const catalog = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
@@ -283,6 +284,7 @@ async function runningTurn(
               }),
               productModelId: MODEL,
               upstreamModelId: input.upstreamModelId,
+              ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
             },
           }
         : {},
@@ -2202,6 +2204,49 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
         { slugs: [], refreshGeneration: 1, observedAt: Date.now() },
       ),
     ).toBe(false);
+  });
+
+  test("an Ultrafast turn is placed only on an account offering the model at that tier", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const plain = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "tier-plain",
+    });
+    const tiered = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "tier-ultrafast",
+    });
+    const upstream = "tiered-upstream-model";
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const observe = (connectionId: string, slugs: string[]) =>
+      recordSubscriptionCoreCodexModelCatalog(client!.db, scope, connectionId, {
+        slugs,
+        refreshGeneration: 1,
+        observedAt: Date.now(),
+      });
+    expect(await observe(plain, [upstream, `${upstream}@priority`])).toBe(true);
+    expect(await observe(tiered, [upstream, "other-model@ultrafast"])).toBe(true);
+    const ultrafast = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+      latencyMode: "ultrafast",
+    });
+    // Neither account offers this model at the tier: the turn waits.
+    expect(await place(ultrafast)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    expect(await observe(tiered, [upstream, `${upstream}@ultrafast`])).toBe(true);
+    expect(await place(ultrafast)).toMatchObject({ kind: "run", connectionId: tiered });
+    // A Standard turn for the same model may use either account.
+    const standard = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+    });
+    expect(await place(standard)).toMatchObject({ kind: "run" });
   });
 });
 

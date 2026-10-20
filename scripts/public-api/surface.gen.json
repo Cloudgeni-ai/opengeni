@@ -19047,7 +19047,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"fast\\\"\",\"\\\"priority\\\"\",\"\\\"standard\\\"\"]"
+        "$": "enum=[\"\\\"fast\\\"\",\"\\\"priority\\\"\",\"\\\"standard\\\"\",\"\\\"ultrafast\\\"\"]"
       }
     },
     "ListApiIntegrationsResponse": {
@@ -34990,6 +34990,7 @@
       "ModelPickerMenuGroup": "type",
       "modelPickerMenuView": "value",
       "ModelPickerMenuView": "type",
+      "ModelPickerSpeed": "type",
       "ModelPickerThinking": "type",
       "ModelPolicyPickerMessages": "type",
       "SCOPED_BILLING_HINTS": "value"

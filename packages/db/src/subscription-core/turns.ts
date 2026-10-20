@@ -18,6 +18,7 @@ import type { SubscriptionCoreOperationLeaseRef } from "./operations";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
 import {
+  modelServiceTierCatalogEntry,
   readTurnExecutionPolicyV1,
   EMPTY_SUBSCRIPTION_PERSONAL_AUTHORITY_V2,
   SubscriptionPersonalAuthorityV2,
@@ -708,6 +709,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       policy.kind === "valid" && policy.policy.productModelId === productModelId
         ? policy.policy.upstreamModelId
         : null;
+    // An Ultrafast turn needs an account that offers the model at that tier;
+    // an observed list records it next to the slug.
+    const requiredCatalogEntries =
+      upstreamModelId === null
+        ? null
+        : policy.kind === "valid" && policy.policy.latencyMode === "ultrafast"
+          ? [upstreamModelId, modelServiceTierCatalogEntry(upstreamModelId, "ultrafast")]
+          : [upstreamModelId];
     const input: PlacementInput = {
       ...worldInput,
       session: {
@@ -724,10 +733,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       connections: worldInput.connections
         .filter((connection) => connection.provider === providerId)
         .map((connection) =>
-          upstreamModelId !== null && connection.observedModelSlugs != null
+          requiredCatalogEntries !== null && connection.observedModelSlugs != null
             ? {
                 ...connection,
-                entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
+                entitledModelIds: requiredCatalogEntries.every((entry) =>
+                  connection.observedModelSlugs!.includes(entry),
+                )
                   ? [productModelId]
                   : [],
               }
