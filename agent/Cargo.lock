@@ -1989,6 +1989,7 @@ dependencies = [
  "opengeni-agent-proto",
  "opengeni-agent-stream",
  "opengeni-agent-update",
+ "opengeni-agent-windows-ffi",
  "prost",
  "rand 0.8.7",
  "reqwest",

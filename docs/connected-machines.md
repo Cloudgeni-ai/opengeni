@@ -386,6 +386,19 @@ connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
 
+Where the browser finds the native host depends on the platform. On macOS and
+Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
+browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look
+the host up in the per-user registry instead: the agent writes the one manifest
+to `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json` and
+sets the default value of
+`HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
+matching keys for Chromium, Edge and Brave when those browsers are present) to
+that path. Removal deletes only keys that still name this agent's manifest.
+When the extension cannot reach the agent, its popup says why: no agent is set
+up on this computer, the agent is too old for the extension, or it is not
+running.
+
 The bridge generation is an opaque unpadded-base64url token: leading `-` and
 `_` are valid and retained verbatim in inventory and discovery. Rejecting either
 prefix strands a healthy bridge until its next generation. Rolling migration
