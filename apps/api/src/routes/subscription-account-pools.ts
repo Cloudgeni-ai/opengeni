@@ -8,7 +8,7 @@ import {
   SubscriptionRotationSettingsRequest,
 } from "@opengeni/contracts";
 import { requireOrganizationCodexHuman } from "./codex";
-import { requireSameOriginBrowserMutation } from "./subscription-pool-access";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import {
   coreOrganizationAccount,
   coreOrganizationAccounts,

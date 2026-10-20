@@ -20,7 +20,7 @@ import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 const Uuid = z.string().uuid();
 

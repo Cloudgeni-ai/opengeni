@@ -169,8 +169,9 @@ export async function recordModelTransportStarted(): Promise<void> {
   }
 }
 
-/** Synchronous diagnostic at literal fetch entry, after all awaited admission
- * and request-capture setup. Never join the observer or change outcomes. */
+/** Synchronous diagnostic after admission: plain fetch entry, or the send
+ * reported by a Responses transport after its body/connection preparation.
+ * This is not a remote receipt. Never join the observer or change outcomes. */
 export function recordModelTransportDispatched(monotonicTimeMs: number): void {
   const observer = modelTransportStartedObserver.getStore()?.dispatched;
   if (!observer) return;

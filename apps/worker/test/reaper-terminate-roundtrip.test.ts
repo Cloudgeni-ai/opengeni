@@ -437,6 +437,72 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(deleteCalls).toEqual(["sb-published"]);
   });
 
+  test.each([true, false])(
+    "a compute group end deletes the sandbox under the capture fence without capturing (fence holds: %p)",
+    async (fenceHolds) => {
+      const calls: string[] = [];
+      const computeClient = {
+        backendId: "compute",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async resumeExact(state: { sandboxId?: unknown }) {
+          calls.push(`resume:${String(state.sandboxId)}`);
+          return {
+            state: { ...state, workspacePersistence: "tar" },
+            persistWorkspace: async () => {
+              calls.push("capture");
+              return new Uint8Array();
+            },
+          };
+        },
+        async resume(state: { sandboxId?: unknown }) {
+          return await this.resumeExact(state);
+        },
+        async serializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async delete(state: { sandboxId?: unknown }) {
+          calls.push(`delete:${String(state.sandboxId)}`);
+        },
+      };
+      const resumeState = await runtime.serializeEstablishedSandboxEnvelope({
+        client: computeClient,
+        session: {},
+        sessionState: { sandboxId: "sbx-ended", enrollmentId: "agent-1" },
+        instanceId: "sbx-ended",
+        backendId: "compute",
+      } as never);
+      const outcome = await terminateProviderBox(
+        testSettings({ sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-ended",
+          leaseEpoch: 3,
+          backend: "compute",
+          instanceId: "sbx-ended",
+          resumeBackendId: "compute",
+          resumeState,
+        } as never,
+        observability,
+        async (archive: unknown) => {
+          calls.push(`fence:${archive === null ? "check" : "write"}`);
+          return { wrote: fenceHolds };
+        },
+        ((backend: string) => (backend === "compute" ? computeClient : undefined)) as never,
+        undefined,
+        undefined,
+        "discard",
+      );
+      expect(outcome).toEqual({ terminated: fenceHolds, providerMissingBeforeCapture: false });
+      // Never a capture: only the exact fence check, then (if it holds) the delete.
+      expect(calls).toEqual(
+        fenceHolds
+          ? ["resume:sbx-ended", "fence:check", "delete:sbx-ended"]
+          : ["resume:sbx-ended", "fence:check"],
+      );
+    },
+  );
+
   test("late publication rejection is never mistaken for capture rejection", async () => {
     let resolveCapture!: (value: string) => void;
     let resolveFailure!: () => void;

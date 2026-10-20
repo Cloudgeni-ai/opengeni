@@ -99,6 +99,32 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
     }
   }, 180_000);
+  test("null queue behavior preserves the conservative defaults", async () => {
+    const result = await render({
+      ...enabled,
+      worker: {
+        turns: { autoscaling: { enabled: true, queueDemand: { enabled: true }, behavior: null } },
+      },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    const hpa = find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns");
+    expect(hpa.spec.behavior.scaleDown.selectPolicy).toBe("Disabled");
+    expect(hpa.spec.behavior.scaleDown.policies).toEqual([
+      { type: "Pods", value: 1, periodSeconds: 300 },
+    ]);
+  }, 180_000);
+  test("observability retains kube-state-metrics inputs used by rendered queue rules", async () => {
+    const values = Bun.YAML.parse(
+      await Bun.file(resolve(chart, "../../observability/values.yaml")).text(),
+    ) as any;
+    const allowlist = values["kube-prometheus-stack"]["kube-state-metrics"].metricAllowlist;
+    const result = await render(enabled);
+    expect(result.code, result.stderr).toBe(0);
+    const rules = find(result.manifests, "PrometheusRule", "fixture-worker-scaler");
+    const metrics = new Set(JSON.stringify(rules.spec).match(/\bkube_[a-z_]+/g));
+    expect(metrics.size).toBeGreaterThan(0);
+    for (const metric of metrics) expect(allowlist).toContain(metric);
+  }, 180_000);
   test("defaults off, preserves historical policies and only adds real UID identity", async () => {
     const defaults = await render();
     expect(defaults.code).toBe(0);
@@ -128,7 +154,7 @@ describe("queue demand schema v1 actual Helm rendering", () => {
     ).toEqual({ name: "OPENGENI_POD_UID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } });
   }, 180_000);
 
-  test("renders one HPA, six exact metrics, full identity isolation and the frozen recovery gate", async () => {
+  test("renders one HPA, six exact metrics, full identity isolation and configurable recovery policy", async () => {
     const result = await render(enabled);
     expect(result.code, result.stderr).toBe(0);
     const hpas = result.manifests.filter((m) => m.kind === "HorizontalPodAutoscaler");
@@ -219,7 +245,18 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       "fixture-worker-turns",
     ).spec;
     expect([privateHpa.minReplicas, privateHpa.maxReplicas]).toEqual([14, 28]);
-    expect(privateHpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
+    expect(privateHpa.behavior).toEqual({
+      scaleUp: {
+        stabilizationWindowSeconds: 0,
+        selectPolicy: "Max",
+        policies: [{ type: "Pods", value: 4, periodSeconds: 30 }],
+      },
+      scaleDown: {
+        stabilizationWindowSeconds: 600,
+        selectPolicy: "Max",
+        policies: [{ type: "Pods", value: 1, periodSeconds: 300 }],
+      },
+    });
     const legacyAlerts = await render({
       ...enabled,
       worker: { turns: { autoscaling: { enabled: true } } },

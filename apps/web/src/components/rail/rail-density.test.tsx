@@ -70,6 +70,16 @@ describe("rail overflow boundaries", () => {
       /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border"/,
     );
   });
+
+  test("reserves the macOS title row outside scrolling without pinning the workspace picker", () => {
+    expect(railShell).toMatch(
+      /windowControlsInPage \? \([\s\S]*?data-rail-window-controls[\s\S]*?<RailHeader showSwitcher=\{false\} \/>[\s\S]*?data-rail-scroll-viewport/,
+    );
+    expect(railShell).toContain("{!windowControlsInPage ? <RailHeader /> : null}");
+    expect(railShell).toContain(
+      "{rail.collapsed || windowControlsInPage ? <SwitcherBlock /> : null}",
+    );
+  });
 });
 
 afterAll(() => {
@@ -172,7 +182,9 @@ describe("session-first rail density", () => {
       expect(railShell).toMatch(
         /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
       );
-      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock \/> : null\}/);
+      expect(railHeader).toMatch(
+        /\{showSwitcher && !rail\.collapsed \? <SwitcherBlock \/> : null\}/,
+      );
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();

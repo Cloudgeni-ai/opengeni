@@ -158,6 +158,70 @@ e2e(
   60_000,
 );
 
+e2e(
+  "an explicit load wait returns only after slow subresources and load handlers finish",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-load-wait-");
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (new URL(request.url).pathname === "/slow.png") {
+          await Bun.sleep(1_500);
+          return new Response(png, { headers: { "content-type": "image/png" } });
+        }
+        return new Response(
+          `<!doctype html><title>Load wait</title><p id="state">Loading</p>
+          <img src="/slow.png" alt="Slow">
+          <script>addEventListener("load", () => { state.textContent = "Loaded"; });</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `loadwait_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start("about:blank");
+      observation = await driver.dispatch(
+        command(observation, { type: "navigate", url: `http://127.0.0.1:${server.port}/` }),
+      );
+      observation = await driver.dispatch(
+        command(observation, { type: "wait", condition: "load" }),
+      );
+      expect(names(observation)).toContain("Loaded");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 headedE2e(
   "parks an idle windowed browser so its animated page stops rendering, and presents it for the next use",
   async () => {
@@ -1289,8 +1353,7 @@ e2e(
           value: "hello",
         }),
       );
-      expect(values(filled)).not.toContain("hello");
-      expect(names(filled)).not.toContain("hello");
+      expect(values(filled)).toContain("hello");
       const submitted = await driver.dispatch(
         command(filled, {
           type: "press",
@@ -1795,6 +1858,21 @@ function dataUrl(html: string): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
+/** Kills a tab's renderer the way a real crash or kill would. chrome://kill
+ * ends the renderer at once; Page.crash also writes a crash dump first, which
+ * takes Chromium tens of seconds. */
+async function crashTab(cdp: CdpConnection, targetId: string, sessionId: string): Promise<void> {
+  await cdp.send("Target.setDiscoverTargets", { discover: true });
+  const crashed = cdp.waitForEvent("Target.targetCrashed", {
+    timeoutMs: 10_000,
+    predicate: (params) => params.targetId === targetId,
+  });
+  void cdp
+    .send("Page.navigate", { url: "chrome://kill" }, { sessionId, timeoutMs: 10_000 })
+    .catch(() => undefined);
+  await crashed;
+}
+
 function requireNode(observation: BrowserObservation, role: string, name: string) {
   const node = nodes(observation).find(
     (candidate) => candidate.role.toLowerCase() === role && candidate.name === name,
@@ -2185,7 +2263,7 @@ chromiumE2e(
         targetId: initial.target.id,
         flatten: true,
       });
-      await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+      await crashTab(cdp, initial.target.id, attached.sessionId);
 
       // Both the live attachment and a fresh re-attachment report the crash at once.
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -2251,7 +2329,7 @@ for (const mode of ["start", "restore tabs"] as const) {
           targetId: initial.target.id,
           flatten: true,
         });
-        await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+        await crashTab(cdp, initial.target.id, attached.sessionId);
         await first.detach();
 
         // A new controller generation meets the dead restored tab first, as a
@@ -2422,6 +2500,11 @@ chromiumE2e(
         code: "resource_unavailable",
         message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
       });
+      // agent-browser was still preparing the tabs that closed above; its
+      // queued work must not hold the browser's shutdown.
+      const closing = Date.now();
+      await driver.close();
+      expect(Date.now() - closing).toBeLessThan(10_000);
     } finally {
       silent.stop(true);
       await driver.close();

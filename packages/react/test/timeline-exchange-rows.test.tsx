@@ -405,6 +405,50 @@ describe("readable per-turn rows", () => {
     }
   });
 
+  test("finished work that compacted first stays folded", async () => {
+    sequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          event("user.message", { text: "Research this" }, null),
+          event("turn.started", {}),
+          event("turn.startup.phase.started", { phase: "model_preparation" }),
+          event("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 60,
+            expectedTransition: true,
+            failureCategory: "context_compaction",
+            failureStage: "context_compaction",
+            failureCode: "compaction_required",
+            retryable: true,
+          }),
+          event("session.context.compaction.started", { trigger: "auto" }),
+          event("session.context.compacted", { trigger: "auto" }),
+          event("turn.startup.phase.started", { phase: "model_preparation" }),
+          event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 90 }),
+          ...tool("search", "exec_command"),
+          ...tool("read", "exec_command"),
+          event("agent.message.completed", { text: "Here it is.", phase: "final_answer" }),
+          event("turn.completed", {}),
+          event("session.status.changed", { status: "idle" }, null),
+        ]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Here it is.");
+      // An expected compaction wait is not an interruption to reveal.
+      const worked = [...r.container.querySelectorAll("[aria-expanded]")].find((element) =>
+        element.textContent?.startsWith("Worked for"),
+      );
+      expect(worked?.textContent).toContain("compacted");
+      expect(worked?.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("Working continues through final streaming and trailing work, then settles to the full duration", async () => {
     sequence = 0;
     const working = [

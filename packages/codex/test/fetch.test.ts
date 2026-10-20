@@ -2430,6 +2430,50 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
       });
   }
 
+  test("joins each durable reading before returning a response, without replacing a provider response on telemetry failure", async () => {
+    const persisted: number[] = [];
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(200, {
+        "x-codex-primary-used-percent": "55",
+        "x-codex-primary-limit-window-seconds": "18000",
+        "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-limit-window-seconds": "604800",
+      }),
+    );
+    const request = () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      });
+    await codexRequestStorage.run(
+      ctx({
+        persistUsageHeaders: async (snapshot) => {
+          await Promise.resolve();
+          persisted.push(snapshot.primaryUsedPercent);
+        },
+      }),
+      async () => {
+        for (let index = 1; index <= 3; index++) {
+          const response = await request();
+          expect(response.status).toBe(200);
+          expect(persisted).toHaveLength(index);
+        }
+      },
+    );
+    for (const persistUsageHeaders of [
+      async () => {
+        throw new Error("fixture rejected persistence");
+      },
+      () => {
+        throw new Error("fixture synchronous persistence failure");
+      },
+    ]) {
+      await codexRequestStorage.run(ctx({ persistUsageHeaders }), async () => {
+        expect((await request()).status).toBe(200);
+      });
+    }
+  });
+
   test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];
     const fetchImpl = codexSubscriptionFetch(

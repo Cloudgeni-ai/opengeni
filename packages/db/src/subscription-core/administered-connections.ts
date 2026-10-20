@@ -84,6 +84,7 @@ import {
   type SubscriptionCoreProvider,
 } from "./provider";
 import { readSubscriptionProviderCutoverState } from "../subscription-core-repository";
+import { recordSubscriptionUsageReading } from "./usage-reading";
 
 /** Who reads the connection, and in which context. */
 export type SubscriptionCoreAdministeredScope =
@@ -674,7 +675,16 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
       const options = subscriptionCoreUsageMergeOptions(provider.adapter, response);
       const recorded = await scoped
-        .scoped(db, (tx) => scoped.record(tx, quota, options))
+        .scoped(db, async (tx) => {
+          await recordSubscriptionUsageReading(
+            tx,
+            scope.accountId,
+            connectionId,
+            providerId,
+            quota,
+          );
+          return await scoped.record(tx, quota, options);
+        })
         .catch(() => null);
       return {
         kind: "read",

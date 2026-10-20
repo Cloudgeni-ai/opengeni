@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
  * under it. In the macOS app the row holds just the toggle beside the window
  * controls.
  */
-export function RailHeader() {
+export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const collapseToggle = !rail.isMobile ? (
     <Tooltip>
@@ -84,7 +84,7 @@ export function RailHeader() {
       {rail.collapsed && collapseToggle && !windowControlsInRail ? (
         <div className="-mt-1 grid justify-items-center">{collapseToggle}</div>
       ) : null}
-      {!rail.collapsed ? <SwitcherBlock /> : null}
+      {showSwitcher && !rail.collapsed ? <SwitcherBlock /> : null}
     </div>
   );
 }

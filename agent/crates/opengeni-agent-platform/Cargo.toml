@@ -42,7 +42,7 @@ image = { workspace = true }
 # Linux X11 desktop: capture (GetImage) + computer-use input (XTEST) + geometry
 # (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
+nix = { workspace = true, features = ["time"] }
 # Claims the descriptors a running command's handover carried across exec.
 opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 
@@ -66,6 +66,8 @@ opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = tr
 opengeni-agent-files-ffi = { path = "../opengeni-agent-files-ffi" }
 
 [dev-dependencies]
+# The fake relay registrar the run-as PTY test opens a terminal through.
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net", "sync"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }

@@ -12,11 +12,13 @@
  * persisted refresh and fences quota observations.
  */
 import { sql } from "drizzle-orm";
+import { recordSubscriptionUsageReading, withSubscriptionUsageReading } from "./usage-reading";
 import type { SubscriptionCoreOperationLeaseRef } from "./operations";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
 import {
+  modelServiceTierCatalogEntry,
   readTurnExecutionPolicyV1,
   EMPTY_SUBSCRIPTION_PERSONAL_AUTHORITY_V2,
   SubscriptionPersonalAuthorityV2,
@@ -707,6 +709,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       policy.kind === "valid" && policy.policy.productModelId === productModelId
         ? policy.policy.upstreamModelId
         : null;
+    // An Ultrafast turn needs an account that offers the model at that tier;
+    // an observed list records it next to the slug.
+    const requiredCatalogEntries =
+      upstreamModelId === null
+        ? null
+        : policy.kind === "valid" && policy.policy.latencyMode === "ultrafast"
+          ? [upstreamModelId, modelServiceTierCatalogEntry(upstreamModelId, "ultrafast")]
+          : [upstreamModelId];
     const input: PlacementInput = {
       ...worldInput,
       session: {
@@ -723,10 +733,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       connections: worldInput.connections
         .filter((connection) => connection.provider === providerId)
         .map((connection) =>
-          upstreamModelId !== null && connection.observedModelSlugs != null
+          requiredCatalogEntries !== null && connection.observedModelSlugs != null
             ? {
                 ...connection,
-                entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
+                entitledModelIds: requiredCatalogEntries.every((entry) =>
+                  connection.observedModelSlugs!.includes(entry),
+                )
                   ? [productModelId]
                   : [],
               }
@@ -1537,6 +1549,28 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     return (await applySubscriptionCoreQuotaObservation(db, identity, lease, observation)).applied;
   }
 
+  /** Every actual reading is telemetry, independent of the allocator's latest-only merge. */
+  async function recordSubscriptionCoreTurnUsageReading(
+    db: Database,
+    identity: SubscriptionCoreTurnIdentity,
+    lease: SubscriptionCoreLeaseRef,
+    observation: SubscriptionQuota,
+  ): Promise<boolean> {
+    if (observation.source !== "usage_endpoint" && observation.source !== "response_headers")
+      return false;
+    const access = await withLeasedConnection(db, identity, lease, async (tx) => {
+      await recordSubscriptionUsageReading(
+        tx,
+        identity.accountId,
+        lease.connectionId,
+        providerId,
+        observation,
+      );
+      return true;
+    });
+    return access.status === "ok" && access.value;
+  }
+
   /**
    * Same as recordSubscriptionCoreQuotaObservation, and also reports
    * whether the observation ended an exhaustion the store still held: that is
@@ -1556,6 +1590,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           and id = ${lease.connectionId}::uuid`,
       );
       if (!connection) return { applied: false, recovered: false };
+      if (observation.source === "usage_endpoint" || observation.source === "response_headers")
+        await recordSubscriptionUsageReading(
+          tx,
+          identity.accountId,
+          lease.connectionId,
+          providerId,
+          observation,
+        );
       const refreshGeneration = Number(connection.refresh_generation);
       const [row] = await rawRows<{
         quota: unknown;
@@ -1581,7 +1623,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         current !== null &&
         quotaCapacity(current, observedNow).kind === "exhausted" &&
         quotaCapacity(next, observedNow).kind !== "exhausted";
-      const stored = storedQuotaDocument(next);
+      const stored = withSubscriptionUsageReading(storedQuotaDocument(next), observation);
       const observedAt = new Date(next.observedAt ?? Date.now()).toISOString();
       await tx.execute(
         sql`insert into subscription_connection_quota (
@@ -1707,6 +1749,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     loadSubscriptionCoreCredential,
     refreshSubscriptionCoreCredential,
     recordSubscriptionCoreQuotaObservation,
+    recordSubscriptionCoreTurnUsageReading,
     applySubscriptionCoreQuotaObservation,
     recordSubscriptionCoreTurnFailure,
     countSubscriptionCoreTurnRefusals,

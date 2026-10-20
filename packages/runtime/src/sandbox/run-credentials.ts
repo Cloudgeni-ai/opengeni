@@ -11,6 +11,7 @@ import type {
   SandboxSessionLike,
   SandboxSessionState,
 } from "@openai/agents/sandbox";
+import { withSandboxOperationPurpose } from "./operation-purpose";
 
 const MAX_ENVIRONMENT_ENTRIES = 256;
 const MAX_ENVIRONMENT_VALUE_BYTES = 64 * 1024;
@@ -22,6 +23,11 @@ const MAX_AUTH_NEEDED_NOTICES = 32;
 // run-as wrapper, each of which repeats and quotes the command. Keep chunks
 // base64-aligned and bounded without dropping any credential bytes.
 const WRITE_CHUNK_BYTES = 1536;
+// One generation is a sequence of small shell steps. Steps are packed into as
+// few sandbox commands as this bound allows, so an ordinary generation is one
+// round trip instead of several per file. Each step runs in its own subshell,
+// so umask and variables behave exactly as when every step was its own command.
+const COMMAND_STEP_BUDGET_BYTES = 12 * 1024;
 const COMMAND_OK_MARKER = "__OPENGENI_RUN_CREDENTIAL_COMMAND_OK__";
 const AUTH_NEEDED_REASONS = new Set([
   "missing_connection",
@@ -497,40 +503,58 @@ async function runCredentialCommand(
   }
 }
 
-async function writeCredentialFile(
+/** Run ordered steps in as few commands as the bound allows. Every step keeps
+ * its own subshell, so a packed command behaves like the separate commands. */
+async function runCredentialSteps(
   session: RunCredentialCommandSession,
+  steps: readonly string[],
+  commandRunner?: RunCredentialCommandRunner,
+): Promise<void> {
+  let batch: string[] = [];
+  let batchBytes = 0;
+  const flush = async () => {
+    if (batch.length === 0) return;
+    const cmd = batch.map((step) => `(\n${step}\n)`).join("\n");
+    batch = [];
+    batchBytes = 0;
+    await runCredentialCommand(session, cmd, commandRunner);
+  };
+  for (const step of steps) {
+    const stepBytes = byteLength(step) + 5;
+    if (batch.length > 0 && batchBytes + stepBytes > COMMAND_STEP_BUDGET_BYTES) await flush();
+    batch.push(step);
+    batchBytes += stepBytes;
+  }
+  await flush();
+}
+
+function credentialFileWriteSteps(
   directory: string,
   relativePath: string,
   content: string,
-  commandRunner?: RunCredentialCommandRunner,
-): Promise<void> {
-  await runCredentialCommand(
-    session,
+): string[] {
+  const steps = [
     credentialFileCommand(directory, relativePath, ': > "$_opengeni_credential_path"'),
-    commandRunner,
-  );
+  ];
   const encoded = base64(content);
   for (let offset = 0; offset < encoded.length; offset += WRITE_CHUNK_BYTES) {
     const chunk = encoded.slice(offset, offset + WRITE_CHUNK_BYTES);
-    await runCredentialCommand(
-      session,
+    steps.push(
       credentialFileCommand(
         directory,
         relativePath,
         `printf %s ${shellQuote(chunk)} | ${portableBase64DecodeCommand()} >> "$_opengeni_credential_path"`,
       ),
-      commandRunner,
     );
   }
-  await runCredentialCommand(
-    session,
+  steps.push(
     credentialFileCommand(
       directory,
       relativePath,
       `[ "$(wc -c < "$_opengeni_credential_path" | tr -d '[:space:]')" = ${shellQuote(String(byteLength(content)))} ]`,
     ),
-    commandRunner,
   );
+  return steps;
 }
 
 function credentialFileCommand(directory: string, relativePath: string, command: string): string {
@@ -566,6 +590,16 @@ export async function materializeRunCredentials(
   material: NormalizedRunCredentialMaterial,
   options: MaterializeRunCredentialsOptions,
 ): Promise<void> {
+  await withSandboxOperationPurpose("run_credentials", () =>
+    materializeRunCredentialsUnscoped(session, material, options),
+  );
+}
+
+async function materializeRunCredentialsUnscoped(
+  session: RunCredentialCommandSession,
+  material: NormalizedRunCredentialMaterial,
+  options: MaterializeRunCredentialsOptions,
+): Promise<void> {
   const root = runCredentialRoot(options.sessionId);
   const attemptId = assertPathIdentity(options.attemptId, "attemptId");
   if (!Number.isSafeInteger(options.executionGeneration) || options.executionGeneration < 0) {
@@ -582,8 +616,7 @@ export async function materializeRunCredentials(
       throw new RunCredentialValidationError(`run credential file mode is invalid: ${file.path}`);
     }
   }
-  await runCredentialCommand(
-    session,
+  const steps: string[] = [
     [
       "umask 077",
       `mkdir -p -- ${shellQuote(`${root}/versions`)}`,
@@ -591,8 +624,7 @@ export async function materializeRunCredentials(
       `rm -rf -- ${shellQuote(stage)}`,
       `mkdir -p -- ${shellQuote(`${stage}/files`)}`,
     ].join("\n"),
-    options.commandRunner,
-  );
+  ];
 
   const environmentLines = [
     ...Object.entries(material.environment).map(
@@ -602,40 +634,29 @@ export async function materializeRunCredentials(
       ([name, path]) => `export ${name}=${shellQuote(`${version}/files/${path}`)}`,
     ),
   ];
-  await writeCredentialFile(
-    session,
-    stage,
-    "env",
-    environmentLines.length > 0 ? `${environmentLines.join("\n")}\n` : "",
-    options.commandRunner,
-  );
-  await runCredentialCommand(
-    session,
+  steps.push(
+    ...credentialFileWriteSteps(
+      stage,
+      "env",
+      environmentLines.length > 0 ? `${environmentLines.join("\n")}\n` : "",
+    ),
     `chmod -- 0600 ${shellQuote(`${stage}/env`)}`,
-    options.commandRunner,
   );
 
   for (const file of material.files) {
     const directory = `${stage}/files`;
-    await runCredentialCommand(
-      session,
+    steps.push(
       credentialFileCommand(directory, file.path, 'mkdir -p -- "${_opengeni_credential_path%/*}"'),
-      options.commandRunner,
-    );
-    await writeCredentialFile(session, directory, file.path, file.content, options.commandRunner);
-    await runCredentialCommand(
-      session,
+      ...credentialFileWriteSteps(directory, file.path, file.content),
       credentialFileCommand(
         directory,
         file.path,
         `chmod -- ${shellQuote(file.mode ?? "0600")} "$_opengeni_credential_path"`,
       ),
-      options.commandRunner,
     );
   }
 
-  await runCredentialCommand(
-    session,
+  steps.push(
     [
       // Bind validated identifiers once rather than repeatedly expanding long
       // paths through cancellation and SDK run-as shell quoting.
@@ -666,8 +687,8 @@ export async function materializeRunCredentials(
             : []),
       ...pointerLockReleaseCommands(),
     ].join("\n"),
-    options.commandRunner,
   );
+  await runCredentialSteps(session, steps, options.commandRunner);
 }
 
 export async function clearRunCredentials(

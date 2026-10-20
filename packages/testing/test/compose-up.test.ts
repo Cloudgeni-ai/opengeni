@@ -282,6 +282,8 @@ describe("compose-up", () => {
 
       expect(result.timedOut).toBe(false);
       expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain('[acquisition-diagnostic] {"kind":"docker-pull"');
+      expect(result.stderr).toContain('"rejectionPhase":"unavailable"');
       expect(await readDockerCalls(stub.logPath)).toEqual([
         ["rm", "-f", "-v", "opengeni_test_pull_retry-image-pin-0"],
         ["image", "inspect", "--format", "{{.Id}}", "example/postgres:1"],
@@ -321,6 +323,41 @@ describe("compose-up", () => {
           "--pull",
           "never",
         ],
+      ]);
+    } finally {
+      await removeTempDir(stub.tempDir);
+    }
+  });
+
+  test("records unavailable rejection phase without retrying permanent authorization failures", async () => {
+    const stub = await createDockerStub();
+    try {
+      const composeFile = join(stub.tempDir, "compose.yml");
+      await writeFile(composeFile, "services: {}\n");
+      const result = await runCommand(
+        [
+          "bun",
+          "packages/testing/src/compose-up.ts",
+          "opengeni_test_denied",
+          composeFile,
+          JSON.stringify({ postgres: "example/postgres:1" }),
+        ],
+        {
+          cwd: repoRoot,
+          env: {
+            PATH: `${stub.tempDir}:${process.env.PATH ?? ""}`,
+            OPENGENI_COMPOSE_UP_TEST_LOG: stub.logPath,
+            OPENGENI_COMPOSE_UP_FAIL_FIRST_REFERENCE_INSPECT: stub.missingImagePath,
+            OPENGENI_COMPOSE_UP_DENY_PULL: "1",
+          },
+          timeoutMs: 15_000,
+        },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('"rejectionPhase":"unavailable"');
+      expect(result.stderr).toContain('"httpStatus":null');
+      expect((await readDockerCalls(stub.logPath)).filter((args) => args[0] === "pull")).toEqual([
+        ["pull", "example/postgres:1"],
       ]);
     } finally {
       await removeTempDir(stub.tempDir);
@@ -389,6 +426,10 @@ async function createDockerStub(): Promise<{
       'if (!logPath) throw new Error("OPENGENI_COMPOSE_UP_TEST_LOG is required");',
       "const args = Bun.argv.slice(2);",
       "await appendFile(logPath, `${JSON.stringify(args)}\\n`);",
+      'if (args[0] === "pull" && process.env.OPENGENI_COMPOSE_UP_DENY_PULL === "1") {',
+      '  console.error("unauthorized: authentication required");',
+      "  process.exit(1);",
+      "}",
       "const pullFailurePath = process.env.OPENGENI_COMPOSE_UP_FAIL_FIRST_PULL;",
       'if (args[0] === "pull" && pullFailurePath && !(await Bun.file(pullFailurePath).exists())) {',
       '  await Bun.write(pullFailurePath, "failed");',

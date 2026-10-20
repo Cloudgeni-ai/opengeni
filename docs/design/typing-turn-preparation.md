@@ -457,3 +457,113 @@ reliable total-latency win. Production's longer post-claim window may hide more,
 but that remains a canary hypothesis, not a measured saving. Warm catalog hits
 still pay the live scope/serving read, and the hint adds an early read; track
 both hit cost and cold-probe overlap before claiming a general improvement.
+
+## Follow-up: prepare execution catalogs without compiling unused tools
+
+The provider-dispatch preparation lifecycle previously applied only when at
+least one MCP connection was deferred. When all servers were already required
+or eager, it synchronously built and persisted the full execution catalog before
+returning. Connection readiness and execution-catalog readiness are different:
+the first request needs the connected servers' frozen visible schemas, not the
+complete catalog used by later tool execution.
+
+Use the existing lifecycle for explicit `provider-dispatch` preparation even
+when there are no pending connections. Required and eager connections still
+finish before disclosure, failures there still fail before inference, and their
+schemas are frozen before returning. The catalog starts at provider dispatch
+or earlier actual demand, once. Tool execution and cleanup join the same ready
+promise. No extra provider request, speculative work, authority cache or sandbox
+setup is introduced. Blocking approval/recovery preparation and embedded callers
+that did not opt into provider-dispatch timing keep their previous behavior.
+
+A configured agent must distinguish an unknown server catalog from a known,
+empty catalog whose persistence is pending. Only genuinely deferred servers can
+justify exposing the conditional router before their schemas are known. Tests
+compare complete first and post-tool request inputs, instructions and schemas
+for all three disclosure transports; they also cover the empty required-server
+case, failures and cleanup before/after preparation starts.
+
+This is a tool-lifecycle change and requires review even when request bytes are
+equal. A catalog persistence failure can now happen after a text-only request
+has begun; actual tool demand still fails at the existing fence. An immediate
+eager tool call may wait for remaining catalog work, normally overlapped with
+provider latency. Embedders opting into deferred timing should supply their
+host-owned Skill catalog as the worker does: otherwise any descriptors derived
+only from the completed execution catalog are not available at initial agent
+construction. This change does not claim to remove the entire production
+startup gap; paths that already deferred a connection already use this lifecycle.
+
+The dispatch notification must also follow awaited request custody admission.
+For plain HTTP it runs at fetch entry without an asynchronous gap; Responses
+transports report from their existing HTTP/socket-send observer, after body
+reading and handshake/fallback setup. Nested observers compose, so subscription
+transport receipts and worker timing both receive the same fact. The worker uses
+this notification for native subscription and generic routes, excluding auxiliary
+calls. Its earlier starts from subscription admission/audit callbacks are removed.
+The durable audit and custody checks stay before network I/O and are unchanged.
+
+Starting catalog microtasks before those awaited gates lets synchronous catalog
+work delay the request it is supposed to follow. Merely moving them to a later
+event-loop iteration or observing streamed-body EOF does not establish remote
+receipt. Native transport buffering and response handling can still wait on
+catalog CPU. Compare the
+separate mock provider's received timestamp as well as the request audit.
+Catalog-phase telemetry for newly deferred paths changes from `blocking` to
+`background`. This change does not offload or eliminate the catalog's CPU work.
+
+### Remove unused validator compilation
+
+Profiling a 171-entry execution catalog found about 804 ms in cold gateway
+preparation, mostly schema compilation, despite only 15 tools being disclosed
+and no tool being called. The existing process-wide compiled-schema cache
+reduces warm compilation, but every eager preparation still hashes every schema
+for its cache lookup. Moving this CPU work after the audit alone only moves the
+delay: it can block streamed request transmission on the same event loop.
+
+Compile a tool's input and output validators together at its first argument
+validation, using the existing compiler, options and cache. Keep private schema
+copies taken during preparation, the same validator instance for rejection and
+repair, and the same live authorization and execution fences. Both validators
+must compile before execution so an invalid output schema cannot fail after a
+side effect. Retain compilation failures per definition as a typed unavailable
+tool error, keeping the compiler failure as its cause. They are not
+argument-validation failures and do not enter repair. The model sees that the
+tool was not called and that changing its arguments will not fix the schema,
+rather than the generic instruction to retry or raw compiler diagnostics.
+
+This deliberately changes malformed-schema failure timing: an unused invalid
+tool no longer prevents catalog preparation or other tools from working. Calling
+that tool still fails before authorization and execution. The first call to a
+valid tool pays its compilation cost if the existing process cache is cold.
+For approval-gated calls that stop before argument validation, a malformed
+schema may be reported only after approval rather than during preparation.
+Catalog structure, digest and size validation are unchanged; schemas are not
+rewritten. This behavior change also requires review before merge.
+
+### Local measurements and limits
+
+Same local stack, synthetic Responses provider in a separate process, standard
+first-party catalog, no tools called and no sandbox. Each warm cohort has ten
+fresh chats and ten follow-ups; the stack is explicitly restarted for each
+variant and one warm-up pair is excluded. Times below are acceptance to the
+provider's complete request receipt, not the earlier request audit.
+
+| Cohort | Before median / p90 | Candidate median / p90 |
+| --- | ---: | ---: |
+| Fresh chat, warm process | 521.5 / 549 ms | 403.5 / 453 ms |
+| Existing chat, warm process | 473 / 568 ms | 419 / 478 ms |
+
+The single cold-process first request was 1,523 ms before and 912 ms with the
+candidate. Its catalog-build span fell from 680 ms to 70 ms. A deferred-catalog
+variant without lazy validators took 1,710 ms at the receiver despite recording
+its audit at 937 ms; its catalog build still cost 748 ms. Cold samples are
+individual observations, not percentile estimates.
+
+Warm candidate catalog build still costs about 40–42 ms and can delay socket
+progress and response handling. Copying all 171 tools' schemas took 4.65 ms
+median / 6.63 ms p90 over twenty local repetitions; the private snapshot is kept.
+These results are local, not production proof,
+and do not explain or eliminate the full production startup gap. No arbitrary
+timer, request buffering, worker thread or additional background refresh was
+added. Discarded body-EOF/event-loop-yield experiments did not reliably remove
+the receiver delay and are not part of the implementation.

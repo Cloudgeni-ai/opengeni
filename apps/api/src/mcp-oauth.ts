@@ -48,7 +48,7 @@ import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
-import { requireSameOriginBrowserMutation } from "./routes/codex";
+import { requireSameOriginBrowserMutation } from "./http/browser-mutation-origin";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,

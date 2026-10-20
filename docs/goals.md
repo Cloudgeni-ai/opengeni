@@ -34,13 +34,15 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Report delivery
 
-Agents answer in chat by default, including summaries and reports. A native
-document Artifact is the deliverable when the user asks for a document or file,
-or when the result is large (multi-page) or clearly meant to be kept or shared.
+Agents answer in chat by default, including summaries, reports, briefs, letters
+and plans written on request. A native document Artifact is the deliverable when
+the user asks for a document or file (for example a DOCX or PDF), asks to edit an
+existing document, or when the result is too long to read comfortably in chat
+(several pages).
 That can include a secondary output such as an audit produced while organizing
 Knowledge. The chat reply then gives a short summary and the artifact link
 rather than restating the document. Routing lives in the provider-neutral
-operational instructions; the bundled `opengeni-documents` Skill owns the
+operational instructions; the bundled `documents` Skill owns the
 authoring procedure. The artifact is the working document from the start, not a
 published copy of a sandbox Markdown or DOCX report.
 

@@ -462,6 +462,7 @@ function Home() {
                   label={pill.name}
                   detail={pill.effort}
                   fast={latencyMode === "fast"}
+                  ultrafast={latencyMode === "ultrafast"}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();

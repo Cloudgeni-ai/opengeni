@@ -99,7 +99,7 @@ describe("organization bot posting from ordinary chats", () => {
       const body = await response.json();
       expect({ status: response.status, body }).toEqual({
         status: 200,
-        body: { enabled, generation: expect.any(Number) },
+        body: { enabled, generation: expect.any(Number), workspaceIds: null },
       });
       return body as { enabled: boolean; generation: number };
     };
@@ -123,6 +123,44 @@ describe("organization bot posting from ordinary chats", () => {
     };
     return { home, target, connectionId, session, grant, setAccess, server, key, token };
   }
+
+  test("selected workspaces narrow access and old clients cannot widen the selection", async () => {
+    const f = await fixture(fakeSlack());
+    const path = `/v1/workspaces/${f.home.workspaceId}/connections/${f.connectionId}/slack-bot/organization-access`;
+    const put = (body: unknown) =>
+      f.server.request(path, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await put({ enabled: true, workspaceIds: [f.target.workspaceId] })).status).toBe(200);
+    expect(await availableSlackBotConnectionMetadata(client.db, f.target)).toHaveLength(1);
+    const prepared = await prepareSlackBotPost({
+      db: client.db,
+      grant: f.grant,
+      sessionId: f.session.id,
+      channelId: CHANNEL,
+      text: "Selected target",
+    });
+    expect((await put({ enabled: true, workspaceIds: [] })).status).toBe(200);
+    expect(await availableSlackBotConnectionMetadata(client.db, f.target)).toHaveLength(0);
+    for (const enabled of [false, true]) {
+      const response = await put({ enabled });
+      expect(await response.json()).toMatchObject({ enabled, workspaceIds: [] });
+    }
+    expect(await availableSlackBotConnectionMetadata(client.db, f.target)).toHaveLength(0);
+    await expect(
+      sendSlackBotPost({
+        db: client.db,
+        settings,
+        grant: f.grant,
+        sessionId: f.session.id,
+        messageId: prepared.messageId,
+      }),
+    ).rejects.toThrow();
+    const other = await freshWorkspace();
+    expect((await put({ enabled: true, workspaceIds: [other.workspaceId] })).status).toBe(403);
+  });
 
   test("sharing exposes only the verified bot and sends with its home credential, once", async () => {
     if (!available) throw new Error("PostgreSQL required");
@@ -264,92 +302,132 @@ describe("organization bot posting from ordinary chats", () => {
     ).rejects.toThrow("connections:read");
   });
 
-  test("a scheduled occurrence in an ordinary chat cannot choose an arbitrary bot channel", async () => {
-    if (!available) throw new Error("PostgreSQL required");
-    const slack = fakeSlack({ extraMemberChannels: [CHANNEL] });
-    const f = await fixture(slack);
-    await f.setAccess(true);
-    const task = await createScheduledTask(client.db, {
-      ...f.target,
-      name: "Continue a chat",
-      status: "active",
-      schedule: { type: "manual" },
-      temporalScheduleId: `test-${randomUUID()}`,
-      runMode: "existing_session",
-      targetSessionId: f.session.id,
-      overlapPolicy: "skip",
-      agentConfig: { prompt: "Post as the bot", resources: [], tools: [], metadata: {} },
-      metadata: {},
-    });
-    // Seed only the accepted-turn provenance exercised here. Live dispatch
-    // also freezes the complete task execution snapshot.
-    const run = await shared!.admin.begin(async (tx) => {
-      // This disposable fixture tests accepted-turn lineage, independently of
-      // the scheduler's full admission protocol. Restore its trigger atomically.
-      await tx`alter table scheduled_task_runs disable trigger scheduled_agent_run_execution_admission`;
-      const [row] =
-        await tx`insert into scheduled_task_runs(account_id,workspace_id,task_id,trigger_type,status,completed_at)
+  test.each(["existing", "generated", "child"] as const)(
+    "a scheduled %s chat uses the ordinary bot capability",
+    async (kind) => {
+      if (!available) throw new Error("PostgreSQL required");
+      const slack = fakeSlack({ extraMemberChannels: [CHANNEL] });
+      const f = await fixture(slack);
+      await f.setAccess(true);
+      const task = await createScheduledTask(client.db, {
+        ...f.target,
+        name: "Continue a chat",
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `test-${randomUUID()}`,
+        runMode: "existing_session",
+        targetSessionId: f.session.id,
+        overlapPolicy: "skip",
+        agentConfig: { prompt: "Post as the bot", resources: [], tools: [], metadata: {} },
+        metadata: {},
+      });
+      // Seed only the accepted-turn provenance exercised here. Live dispatch
+      // also freezes the complete task execution snapshot.
+      const run = await shared!.admin.begin(async (tx) => {
+        // This disposable fixture tests accepted-turn lineage, independently of
+        // the scheduler's full admission protocol. Restore its trigger atomically.
+        await tx`alter table scheduled_task_runs disable trigger scheduled_agent_run_execution_admission`;
+        const [row] =
+          await tx`insert into scheduled_task_runs(account_id,workspace_id,task_id,trigger_type,status,completed_at)
         values (${f.target.accountId},${f.target.workspaceId},${task.id},'manual','completed',now()) returning id`;
-      await tx`set constraints all immediate`;
-      await tx`alter table scheduled_task_runs enable trigger scheduled_agent_run_execution_admission`;
-      return row!;
-    });
-    const turnId = randomUUID();
-    const attemptId = randomUUID();
-    await shared!.admin.begin(async (tx) => {
-      await tx`select set_config('opengeni.session_inference_claim','1',true)`;
-      // This fixture exercises lineage classification; scheduler admission and
-      // credential copying are covered by scheduled-task routing tests.
-      await tx`alter table session_turns disable trigger accepted_scheduled_turn_connection_authority_capture`;
-      await tx`insert into session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
+        await tx`set constraints all immediate`;
+        await tx`alter table scheduled_task_runs enable trigger scheduled_agent_run_execution_admission`;
+        return row!;
+      });
+      if (kind !== "existing") {
+        const root = await createSession(client.db, {
+          ...f.target,
+          initialMessage: "Scheduled work",
+          resources: [],
+          metadata: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+          createdBy: { kind: "service", subjectId: "scheduler" },
+          createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        });
+        f.session =
+          kind === "generated"
+            ? root
+            : await createSession(client.db, {
+                ...f.target,
+                parentSessionId: root.id,
+                rootSessionId: root.id,
+                initialMessage: "Child summary",
+                resources: [],
+                metadata: {},
+                model: "test-model",
+                reasoningEffort: "medium",
+                latencyMode: "standard",
+                sandboxBackend: "none",
+              });
+      }
+      const turnId = randomUUID();
+      const attemptId = randomUUID();
+      await shared!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim','1',true)`;
+        // This fixture exercises lineage classification; scheduler admission and
+        // credential copying are covered by scheduled-task routing tests.
+        await tx`alter table session_turns disable trigger accepted_scheduled_turn_connection_authority_capture`;
+        await tx`insert into session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
         status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
         initiator_kind,initiator_subject_id,initiator_context,scheduled_task_run_id)
         values (${turnId},${f.target.accountId},${f.target.workspaceId},${f.session.id},${randomUUID()},${`bot-${turnId}`},
           'running','system',1,'Post as the bot','test-model','medium','none',1,'service','scheduler','{}',${run!.id})`;
-      await tx`update sessions set active_turn_id=${turnId},status='running' where id=${f.session.id}`;
-      await tx`update session_turns set active_attempt_id=${attemptId} where id=${turnId}`;
-      await tx`insert into session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+        await tx`update sessions set active_turn_id=${turnId},status='running' where id=${f.session.id}`;
+        await tx`update session_turns set active_attempt_id=${attemptId} where id=${turnId}`;
+        await tx`insert into session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
         temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies)
         values (${attemptId},${f.target.accountId},${f.target.workspaceId},${f.session.id},${turnId},1,'running',${`bot-${turnId}`},
           ${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
-      await tx`set constraints all immediate`;
-      await tx`alter table session_turns enable trigger accepted_scheduled_turn_connection_authority_capture`;
-    });
-    const grant: AccessGrant = {
-      ...f.grant,
-      principalKind: "agent_attempt",
-      subjectId: "worker:first-party-mcp",
-      metadata: { sessionId: f.session.id, turnId, attemptId, executionGeneration: 1 },
-    };
-    await expect(
-      prepareSlackBotPost({
+        await tx`set constraints all immediate`;
+        await tx`alter table session_turns enable trigger accepted_scheduled_turn_connection_authority_capture`;
+      });
+      const grant: AccessGrant = {
+        ...f.grant,
+        principalKind: "agent_attempt",
+        subjectId: "worker:first-party-mcp",
+        metadata: { sessionId: f.session.id, turnId, attemptId, executionGeneration: 1 },
+      };
+      const prepared = await prepareSlackBotPost({
         db: client.db,
         grant,
         sessionId: f.session.id,
         channelId: CHANNEL,
-        text: "Wrong destination",
-      }),
-    ).rejects.toThrow("scheduled occurrence");
-    const legacyGrant = { ...grant };
-    delete legacyGrant.principalKind;
-    await expect(
-      prepareSlackBotPost({
+        text: "Scheduled summary",
+      });
+      await sendSlackBotPost({
         db: client.db,
-        grant: legacyGrant,
+        settings,
+        grant,
         sessionId: f.session.id,
-        channelId: CHANNEL,
-        text: "Legacy wrong destination",
-      }),
-    ).rejects.toThrow("scheduled occurrence");
-    expect(slack.committedPosts).toHaveLength(0);
-  });
+        messageId: prepared.messageId,
+        slackFetch: slack.fetch,
+      });
+      expect(slack.committedPosts).toHaveLength(1);
+      await expect(
+        prepareSlackBotPost({
+          db: client.db,
+          grant: { ...grant, metadata: { ...grant.metadata, executionGeneration: 2 } },
+          sessionId: f.session.id,
+          channelId: CHANNEL,
+          text: "Stale attempt",
+        }),
+      ).rejects.toThrow();
+    },
+  );
 
   test("configured organization sharing can be read and disabled for an unhealthy local bot", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const f = await fixture(fakeSlack());
     const path = `/v1/workspaces/${f.home.workspaceId}/connections/${f.connectionId}/slack-bot/organization-access`;
     const read = () => f.server.request(path, { headers: { authorization: `Bearer ${f.token}` } });
-    expect(await (await read()).json()).toEqual({ enabled: false, generation: 0 });
+    expect(await (await read()).json()).toEqual({
+      enabled: false,
+      generation: 0,
+      workspaceIds: null,
+    });
     await f.setAccess(true);
     const connection = (await getConnectionMetadata(
       client.db,
@@ -363,9 +441,17 @@ describe("organization bot posting from ordinary chats", () => {
       subjectId: null,
     });
     expect(await availableSlackBotConnectionMetadata(client.db, f.target)).toEqual([]);
-    expect(await (await read()).json()).toEqual({ enabled: true, generation: 1 });
+    expect(await (await read()).json()).toEqual({
+      enabled: true,
+      generation: 1,
+      workspaceIds: null,
+    });
     await f.setAccess(false);
-    expect(await (await read()).json()).toEqual({ enabled: false, generation: 2 });
+    expect(await (await read()).json()).toEqual({
+      enabled: false,
+      generation: 2,
+      workspaceIds: null,
+    });
     const wrongHome = await f.server.request(
       `/v1/workspaces/${f.target.workspaceId}/connections/${f.connectionId}/slack-bot/organization-access`,
       { headers: { authorization: `Bearer ${f.token}` } },
@@ -443,7 +529,7 @@ async function freshWorkspace(): Promise<{
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${account!.id}, ${workspace!.id}, ${subjectId}, ${subjectId}, 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
+        ${shared!.admin.json(["connections:read", "connections:write", "capabilities:manage"])}
       )`;
   }
   return { accountId: account!.id, workspaceId: workspace!.id };
@@ -1371,6 +1457,7 @@ async function startBotInstall(
         authorization: await bearer(workspace, subjectId, [
           "connections:read",
           "connections:write",
+          "capabilities:manage",
         ]),
         "content-type": "application/json",
       },
@@ -1548,6 +1635,58 @@ async function withFailingConnectionInsert<T>(
 }
 
 describe("Opengeni Slack bot connection", () => {
+  test("installing the workspace bot is integration administration, not a Member action", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const denied = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("capabilities:manage");
+    expect(slack.calls).toEqual([]);
+  });
+
+  test("a Member cannot install the workspace bot through the shared Connect flow either", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const denied = await app(slack.fetch, { ...settings, integrationsEnabled: true }).request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "workspace:read",
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerId: "slack-bot",
+          ownership: "workspace",
+          returnUrl: "https://host.example/finish",
+          idempotencyKey: randomUUID(),
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("capabilities:manage");
+    expect(slack.calls).toEqual([]);
+  });
+
   test("requires connections:write before starting Slack OAuth", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1584,6 +1723,7 @@ describe("Opengeni Slack bot connection", () => {
           authorization: await bearer(workspace, "subject-a", [
             "connections:read",
             "connections:write",
+            "capabilities:manage",
           ]),
           "content-type": "application/json",
         },
@@ -1661,7 +1801,12 @@ describe("Opengeni Slack bot connection", () => {
       name: "Slack embedding",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["workspace:read", "connections:read", "connections:write"],
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ],
     });
     const headers = {
       authorization: `Bearer ${token}`,
@@ -1794,7 +1939,10 @@ describe("Opengeni Slack bot connection", () => {
       {
         method: "POST",
         headers: {
-          authorization: await bearer(other, "subject-a", ["connections:write"]),
+          authorization: await bearer(other, "subject-a", [
+            "connections:write",
+            "capabilities:manage",
+          ]),
           "content-type": "application/json",
         },
         body: JSON.stringify({ connectionId: body.connection.id }),
@@ -2152,7 +2300,10 @@ describe("Opengeni Slack bot connection", () => {
       {
         method: "POST",
         headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:write",
+            "capabilities:manage",
+          ]),
           "content-type": "application/json",
         },
         body: JSON.stringify({}),
@@ -2198,7 +2349,7 @@ describe("Opengeni Slack bot connection", () => {
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'subject-a', 'subject-a', 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
+        ${shared!.admin.json(["connections:read", "connections:write", "capabilities:manage"])}
       )`;
     const connected = await app(slack.fetch).request(
       `/v1/integrations/slack/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
@@ -2455,7 +2606,10 @@ describe("Opengeni Slack bot connection", () => {
         {
           method: "DELETE",
           headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            authorization: await bearer(workspace, "subject-a", [
+              "connections:write",
+              "capabilities:manage",
+            ]),
           },
         },
       );
@@ -4911,7 +5065,13 @@ describe("Opengeni Slack bot connection", () => {
     const connected = await connectBot(workspace, slack.fetch);
     const connectionId = connected.body.connection.id;
     const endpoint = `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}`;
-    const writeAuthorization = await bearer(workspace, "subject-a", ["connections:write"]);
+    // The workspace bot is workspace configuration: a Member with only
+    // connections:write cannot repoint it, even to their own destination.
+    const memberAuthorization = await bearer(workspace, "subject-a", ["connections:write"]);
+    const writeAuthorization = await bearer(workspace, "subject-a", [
+      "connections:write",
+      "capabilities:manage",
+    ]);
     const before = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,
@@ -4921,6 +5081,16 @@ describe("Opengeni Slack bot connection", () => {
     expect(before).toMatchObject({ version: 1, verifiedInstallVersion: 1 });
     expect(before?.verifiedInstallAt).not.toBeNull();
     if (!before?.verifiedInstallAt) throw new Error("expected verified Slack bot fixture");
+
+    const memberDenied = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: { authorization: memberAuthorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        metadata: { documentDestination: { authorityKind: "personal", collectionId: null } },
+      }),
+    });
+    expect(memberDenied.status).toBe(403);
+    expect(await memberDenied.text()).toContain("capabilities:manage");
 
     const personal = await app(slack.fetch).request(endpoint, {
       method: "PATCH",
@@ -5235,6 +5405,7 @@ describe("scheduled task posting to a fixed Slack channel", () => {
     if (!available) return;
     const slack = fakeSlack({ extraMemberChannels: [TASK_CHANNEL], loseFirstPostResponse: true });
     const { session, grant } = await scheduledPostingFixture(slack);
+    grant.permissions = [];
 
     const prepared = await prepareScheduledSlackBotPost({
       db: client.db,

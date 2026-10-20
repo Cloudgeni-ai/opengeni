@@ -35,7 +35,7 @@ describe("public realtime ownership", () => {
         ],
         [
           "direct realtime controller import",
-          /@opengeni\/sdk\/(?:realtime|codex-realtime-controller|gateway-realtime-transport)/,
+          /@opengeni\/sdk\/(?:realtime|codex-realtime-controller|gateway-realtime-transport|realtime-websocket-transport)/,
         ],
         [
           "direct realtime controller construction",
@@ -43,7 +43,7 @@ describe("public realtime ownership", () => {
         ],
         [
           "app-owned realtime transport selection",
-          /(?:gateway|codex)-realtime-owner|createGatewayRealtimeTransportStarter/,
+          /(?:gateway|codex)-realtime-owner|create(?:Gateway|RealtimeWebsocket)(?:Realtime)?TransportStarter/,
         ],
       ] as const) {
         if (pattern.test(source)) violations.push(`${path}: ${label}`);

@@ -114,6 +114,57 @@ export const MAINTENANCE_WORK_PROBE_ROUTINES = [
   ],
 ] as const;
 
+/** Private predicate projections; never runtime-readable or writable. */
+export const MAINTENANCE_PROBE_SOURCES = [
+  "session_workflow_wake_outbox",
+  "site_auth_connections",
+  "sandbox_leases",
+  "sandbox_lease_holders",
+  "browser_sessions",
+  "session_system_update_outbox",
+  "session_list_snapshots",
+  "session_background_commands",
+  "sandbox_retained_processes",
+  "sandbox_workspace_mutation_admissions",
+  "sandbox_checkpoint_artifacts",
+  "rig_versions",
+  "rig_changes",
+  "enrollments",
+  "sessions",
+  "session_turns",
+] as const;
+export const MAINTENANCE_PROBE_TABLES = MAINTENANCE_PROBE_SOURCES.map(
+  (name) => `maintenance_probe_${name}`,
+);
+export const MAINTENANCE_PRIVATE_TABLES = [
+  ...MAINTENANCE_PROBE_TABLES,
+  "maintenance_claim_capabilities",
+];
+export const MAINTENANCE_PROBE_OWNER_ROUTINES = [
+  ...MAINTENANCE_PROBE_TABLES.map((name) => `${name}_sync()`),
+  "maintenance_probe_output_runner_eligible_v1(uuid, uuid, text)",
+  "maintenance_claim_wakes_inner(integer)",
+  "maintenance_claim_snapshots_inner(integer)",
+  "maintenance_claim_titles_inner(integer)",
+  "maintenance_claim_site_auth_inner(bigint, integer)",
+  "maintenance_claim_updates_inner(integer)",
+  "maintenance_claim_checkpoint_gc_inner(uuid, integer, bigint)",
+  "maintenance_claim_checkpoint_settle_inner(uuid, uuid, boolean, text, bigint)",
+  "maintenance_claim_checkpoint_prune_inner(bigint, integer)",
+  "maintenance_claim_output_release_inner(uuid, integer, bigint, timestamp with time zone)",
+  "maintenance_claim_ended_blockers_inner(integer)",
+  "maintenance_claim_ended_setup_inner(integer)",
+  "maintenance_inventory_retained_inner()",
+  "maintenance_inventory_draining_inner()",
+  "maintenance_workspace_commands_prepare_inner(uuid, uuid)",
+  "maintenance_workspace_commands_prune_inner(uuid, uuid)",
+  "maintenance_schedule_cleanup_claim_inner(uuid, integer, integer)",
+  "maintenance_schedule_cleanup_settle_inner(uuid, uuid, text)",
+  "maintenance_schedule_cleanup_connector_inner(uuid, uuid)",
+  "validate_sandbox_checkpoint_refs()",
+  "validate_sandbox_checkpoint_artifact_refs()",
+];
+
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
     "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
@@ -158,6 +209,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fan
 export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
+  "file_private_to_another(uuid, uuid, uuid)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
 export const ARTIFACT_PIN_RUNTIME_ROUTINES = [
@@ -170,6 +222,8 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
   "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[])",
+  "read_slack_bot_workspace_access(uuid, uuid, uuid)",
   "read_organization_slack_bot_access(uuid, uuid, uuid)",
   "list_organization_slack_bots(uuid, uuid)",
   "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
@@ -201,6 +255,9 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "sync_usage_maintenance_due()",
+  "arm_usage_allowances_for_membership()",
+  ...MAINTENANCE_PROBE_OWNER_ROUTINES,
   "guard_session_title_operation()",
   "subscription_plan_definition(text)",
   "plan_period_usage(plan_credit_periods, timestamp with time zone)",
@@ -224,6 +281,11 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0871: the usage-history capture triggers and the appender they
+  // run as their owner (triggers fire without the writing role holding EXECUTE).
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
   // Migration 0712: owner-only trigger functions of the provider cutover
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
@@ -825,6 +887,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
@@ -905,10 +968,17 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
   "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
   "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
+  "read_subscription_usage_history(uuid, uuid, text, text, uuid[])",
+  "append_subscription_usage_reading(uuid, uuid, text, jsonb)",
+  "prune_subscription_usage_history()",
+  "subscription_usage_history_prune_due()",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */
 export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
   "subscription_core_writer_context(text, uuid, uuid, text)",
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
@@ -1416,6 +1486,7 @@ export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",
@@ -1489,6 +1560,9 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
+  "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+  "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
   "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
   "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
@@ -1520,6 +1594,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
   "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
@@ -3098,16 +3173,16 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
@@ -3142,6 +3217,8 @@ export async function inspectRuntimeDatabasePosture(
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
+              'usage_maintenance_due',
+              'usage_allowance_membership_changes',
               'workspace_usage_allowances',
               'workspace_member_allowances',
               'workspace_allowance_grants',
@@ -3164,7 +3241,11 @@ export async function inspectRuntimeDatabasePosture(
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
               'credit_promotion_policy_revisions',
               'subscription_plan_catalog_revisions',
-              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
+              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE},
+              ${sql.join(
+                MAINTENANCE_PRIVATE_TABLES.map((name) => sql`${name}`),
+                sql`, `,
+              )}
             )
         `),
       ).map((row) => ({
@@ -5408,6 +5489,24 @@ export function evaluateRuntimeDatabasePosture(
   const usageAllowanceCapability = posture.privateTables.find(
     (table) => table.name === "usage_allowance_capabilities",
   );
+  for (const indexName of ["usage_maintenance_due", "usage_allowance_membership_changes"]) {
+    const usageMaintenanceIndex = posture.privateTables.find((table) => table.name === indexName);
+    if (
+      usageMaintenanceIndex &&
+      (usageMaintenanceIndex.owner === expectedRole ||
+        usageMaintenanceIndex.owner !== tableByName.get("workspaces")?.owner ||
+        usageMaintenanceIndex.select ||
+        usageMaintenanceIndex.insert ||
+        usageMaintenanceIndex.update ||
+        usageMaintenanceIndex.delete ||
+        usageMaintenanceIndex.truncate ||
+        usageMaintenanceIndex.references ||
+        usageMaintenanceIndex.trigger)
+    )
+      violations.push(
+        `usage maintenance index ${indexName} has unsafe owner or direct runtime privileges`,
+      );
+  }
   if (!options.protectedTables || usageAllowanceCapability) {
     const authorityOwner = tableByName.get("workspaces")?.owner;
     for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
@@ -5557,6 +5656,19 @@ export function evaluateRuntimeDatabasePosture(
         !createInventory.configuration?.includes("search_path=pg_catalog"))
     ) {
       violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
+    }
+    const enrollmentInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
+    );
+    if (
+      enrollmentInventory &&
+      (!enrollmentInventory.execute ||
+        enrollmentInventory.publicExecute ||
+        !enrollmentInventory.securityDefiner ||
+        enrollmentInventory.owner !== capability.owner ||
+        !enrollmentInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Compute enrollment inventory has unsafe owner, ACL or runtime privileges");
     }
   }
   if (organizationUsageCapability) {
@@ -5727,6 +5839,59 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
     }
   }
+  if (
+    !options.protectedTables ||
+    posture.privateTables.some((table) => MAINTENANCE_PROBE_TABLES.includes(table.name))
+  ) {
+    const owner = tableByName.get("workspaces")?.owner;
+    for (const name of MAINTENANCE_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner !== owner ||
+        table.owner === expectedRole ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`maintenance probe index ${name} is missing or accessible to runtime`);
+      }
+    }
+    for (const name of MAINTENANCE_PROBE_OWNER_ROUTINES) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
+      if (
+        !routine ||
+        routine.owner !== owner ||
+        routine.execute ||
+        routine.publicExecute ||
+        !routine.configuration?.some(
+          (value) => value === "search_path=pg_catalog" || integrationSearchPaths.includes(value),
+        )
+      ) {
+        violations.push(`maintenance probe helper ${name} is missing or unsafe`);
+      }
+    }
+    for (const name of [
+      "maintenance_claim_active(text, text)",
+      "maintenance_title_event_visible(text, uuid)",
+    ]) {
+      const capability = posture.privateRoutines.find((routine) => routine.name === name);
+      if (
+        !capability ||
+        capability.owner !== owner ||
+        !capability.securityDefiner ||
+        !capability.execute ||
+        capability.publicExecute ||
+        !capability.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push(`maintenance claim predicate ${name} is missing or unsafe`);
+      }
+    }
+  }
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
@@ -5802,6 +5967,23 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
+        routine.name,
+      ) &&
+      (routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== tableByName.get("workspaces")?.owner ||
+        !routine.configuration?.some((value) =>
+          [
+            "search_path=pg_catalog, pg_temp",
+            `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+          ].includes(value),
+        ))
+    )
+      violations.push(`usage maintenance helper ${routine.name} has unsafe posture`);
     if (
       ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
         routine.name,

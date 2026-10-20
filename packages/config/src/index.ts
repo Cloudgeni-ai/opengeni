@@ -163,6 +163,32 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
+/** Comma-separated Modal region selectors (for example `eu` or
+ * `us-east-1,us-west-2`). Blank or unset keeps Modal's own placement. */
+const EnvModalRegions = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    return source.split(",").map((entry) => entry.trim().toLowerCase());
+  },
+  z
+    .array(
+      z
+        .string()
+        .regex(
+          /^[a-z][a-z0-9-]{0,62}$/u,
+          "OPENGENI_MODAL_REGIONS entries must be Modal region names such as eu or us-east-1",
+        ),
+    )
+    .min(1)
+    .refine((regions) => new Set(regions).size === regions.length, {
+      message: "OPENGENI_MODAL_REGIONS must not repeat a region",
+    })
+    .readonly()
+    .optional(),
+);
+
 /** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
 const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
   (value) => {
@@ -329,7 +355,7 @@ export const McpOperationRecoverySchema = z
 
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
-  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:554d5b324a580071dd669e7c1190931e498eb1b397412a27c7de84a430ef393a";
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -1122,6 +1148,7 @@ const SettingsSchema = z.object({
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
   // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
+  deploymentAgentInstructions: z.string().optional(),
   // Knowledge retrieval, correction and standing-preference guidance (on by default after the
   // instruction-following A/B; set false to disable).
   experimentKnowledgeRetrievalGuidance: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
@@ -1195,6 +1222,12 @@ const SettingsSchema = z.object({
   // resume cannot silently change the reservation.
   modalSandboxCpu: z.coerce.number().positive().optional(),
   modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
+  // Optional Modal placement for every new physical box (fresh create and
+  // snapshot restore alike). Every setup step and tool call is a round trip from
+  // the worker to the box, so placing boxes near the workers cuts per-command
+  // latency; Modal bills region selection as a compute multiplier. Existing
+  // boxes keep their placement on resume. Knob: OPENGENI_MODAL_REGIONS.
+  modalRegions: EnvModalRegions,
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -1204,7 +1237,7 @@ const SettingsSchema = z.object({
   // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
   // timeout (~minutes) — and a box between turns sits with NO active connection,
   // so that idle clock runs and Modal idle-reaps the box LONG before Opengeni's
-  // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
+  // own reaper waits out sandboxIdleGraceMs to resume+persist+terminate
   // it. The observed failure: every drain logs "drainable box already gone
   // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
   // Modal's idle-reap is a SECOND reaper racing Opengeni's — and it wins. The fix:
@@ -1358,6 +1391,30 @@ const SettingsSchema = z.object({
     .max(63)
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
+  // --- Opengeni compute (optional; Opengeni's own microVM sandboxes) ---
+  // Every compute sandbox runs the Connected Machine agent, reached through
+  // its host's link to this API's agent gateway, so this backend also needs
+  // the relay and the agent op-stream. Nothing here is read unless a session
+  // or the deployment selects `compute`, or the gateway URL is set.
+  computeApiUrl: z.string().url().optional(),
+  computeApiKey: z.string().min(1).max(8192).optional(),
+  // Compute image refs. Omitted, the control service's default image. The desktop image is
+  // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
+  computeImage: z.string().min(1).max(2048).optional(),
+  computeDesktopImage: z.string().min(1).max(2048).optional(),
+  computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
+  computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
+  // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
+  computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
+  computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
+  // and it is the exact audience of their host tokens and sandbox tickets, so
+  // it must equal the URL the control service is configured with for Opengeni's team.
+  // This API serves the gateway at its path.
+  computeLinkUrl: z.string().url().optional(),
+  // How long a create waits for the sandbox's agent to connect, and how long
+  // a request to an unreachable sandbox keeps waking and retrying it.
+  computeAgentReadyTimeoutMs: z.coerce.number().int().min(1_000).max(900_000).default(120_000),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -1492,11 +1549,12 @@ const SettingsSchema = z.object({
   // dial — when the user navigates away the box keeps refcount 0, but it survives
   // this whole window so a "glanced away then came back" re-arms the SAME warm box
   // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
-  // skips a re-armed box). Default 15min so a brief detour never cold-creates a
-  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim.
+  // skips a re-armed box). Default 1min: a box restores from its workspace
+  // snapshot when the next turn comes later, so a long warm tail mostly bills an
+  // idle box. Raise it to trade warm cost for warm resumes after longer pauses.
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
-  sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(60_000),
   // Idle command containment. A legacy retained background command (a dev
   // server, a command whose output is still draining, a stopped command the
   // provider no longer answers for) keeps its box warm through a non-expiring
@@ -1506,8 +1564,8 @@ const SettingsSchema = z.object({
   // request, no held wait_for_input, no other holder or writer, measured from
   // durable turn/holder/admission facts - the reaper checkpoints the workspace,
   // stops the box and settles those commands `lost` with reason
-  // `idle_containment`. Default 30min: twice the default
-  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // `idle_containment`. Default 30min: well above the idle
+  // grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
   // the deadline path has to act. Set 0 to disable new idle enrollments without
@@ -2865,7 +2923,7 @@ export const CapabilityStateV1Schema = z
 export type CapabilityStateV1 = z.infer<typeof CapabilityStateV1Schema>;
 
 const ModelModalityV1 = z.enum(["text", "image", "audio"]);
-const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast"]);
+const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast", "ultrafast"]);
 
 export const ModelCapabilitiesV1Schema = z
   .object({
@@ -3863,6 +3921,8 @@ export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
 export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 export const WORKSPACE_OPPER_CONNECTION_DOMAIN = "api.opper.ai" as const;
 export const WORKSPACE_OPPER_CONNECTION_ROLE = "opper" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN = "api.elevenlabs.io" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_ROLE = "elevenlabs" as const;
 
 /**
  * Opper issues separate management keys (`op-mak-…`) that its inference routes
@@ -3908,6 +3968,36 @@ export const AI_GATEWAY_REALTIME_MODELS = {
     description: "Fast, natural xAI voice",
   },
 } as const;
+
+export const ELEVENLABS_REALTIME_MODEL_ID_PREFIX = "workspace-elevenlabs/" as const;
+
+/**
+ * Eleven Realtime speech-to-speech models, reached with the workspace's own
+ * ElevenLabs key. v1 max comes first: it is far more reliable at handing work
+ * to the session agent.
+ */
+export const ELEVENLABS_REALTIME_MODELS = {
+  v1Max: {
+    upstreamModelId: "eleven_realtime_v1_max",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_max`,
+    label: "Eleven Realtime v1 max",
+    description: "Reasons before replying; best at handing off work",
+  },
+  v1Mini: {
+    upstreamModelId: "eleven_realtime_v1_mini",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_mini`,
+    label: "Eleven Realtime v1 mini",
+    description: "Lowest latency and cost",
+  },
+} as const;
+
+/** The ElevenLabs upstream model of a realtime model id, or null for other providers. */
+export function resolveElevenLabsRealtimeModel(modelId: string): string | null {
+  for (const model of Object.values(ELEVENLABS_REALTIME_MODELS)) {
+    if (model.modelId === modelId) return model.upstreamModelId;
+  }
+  return null;
+}
 
 export type AiGatewayRealtimeModel =
   (typeof AI_GATEWAY_REALTIME_MODELS)[keyof typeof AI_GATEWAY_REALTIME_MODELS];
@@ -4660,6 +4750,11 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
     { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
   ],
+  // compute also needs the gateway and relay; computeSettingsIssues checks them.
+  compute: [
+    { field: "computeApiUrl", env: "OPENGENI_COMPUTE_API_URL" },
+    { field: "computeApiKey", env: "OPENGENI_COMPUTE_API_KEY" },
+  ],
   // selfhosted needs NO per-box credentials: it is the user's own machine reached
   // over the agent's own enrollment. The enrollment-signing + relay-token secrets
   // are deployment-level (a single runtime secret, not per-active-backend creds),
@@ -5009,6 +5104,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
+    deploymentAgentInstructions: optional("OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS"),
     experimentKnowledgeRetrievalGuidance: optional(
       "OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE",
     ),
@@ -5033,6 +5129,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
     modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
+    modalRegions: optional("OPENGENI_MODAL_REGIONS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
@@ -5109,6 +5206,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openSandboxKubernetesInventoryNamespace: optional(
       "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
     ),
+    computeApiUrl: optional("OPENGENI_COMPUTE_API_URL"),
+    computeApiKey: optional("OPENGENI_COMPUTE_API_KEY"),
+    computeImage: optional("OPENGENI_COMPUTE_IMAGE"),
+    computeDesktopImage: optional("OPENGENI_COMPUTE_DESKTOP_IMAGE"),
+    computeVcpus: optional("OPENGENI_COMPUTE_VCPUS"),
+    computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
+    computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
+    computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
+    computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
@@ -5371,7 +5478,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ...parsed,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
@@ -5743,7 +5850,7 @@ const REASONING_EFFORT_ORDER = new Map(
 );
 const MODALITY_ORDER = new Map(["text", "image", "audio"].map((value, index) => [value, index]));
 const LATENCY_MODE_ORDER = new Map(
-  ["standard", "priority", "fast"].map((value, index) => [value, index]),
+  ["standard", "priority", "fast", "ultrafast"].map((value, index) => [value, index]),
 );
 
 function normalizeRegistryBaseUrl(value: string, providerId: string): string {
@@ -6700,6 +6807,41 @@ export function withOrganizationOpenRouterCredential(
 
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
 const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
+/**
+ * OpenAI Ultrafast is 6× Standard list rates (service_tier ultrafast). Codex
+ * subscriptions count it against included limits at 8×; those limits are
+ * observed from the provider's own usage readings, not priced here.
+ */
+const ULTRAFAST_BILLING_MULTIPLIER_BPS = 60_000;
+/** Upstream slugs OpenAI serves at the Ultrafast tier. */
+const ULTRAFAST_UPSTREAM_SLUGS: readonly string[] = ["gpt-6-astra", "gpt-6.1-sol"];
+
+/**
+ * Ultrafast for a model id (`gpt-6-astra` or `codex/gpt-6-astra`), when OpenAI
+ * serves its slug at that tier. Codex accounts must still advertise the tier:
+ * placement serves an Ultrafast turn only from an account whose live model
+ * list includes it for that model.
+ */
+function ultrafastLatencyModeForModel(modelId: string):
+  | {
+      id: "ultrafast";
+      upstream: "supported";
+      runnable: true;
+      billingMultiplierBps: number;
+    }
+  | undefined {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  return ULTRAFAST_UPSTREAM_SLUGS.includes(slug)
+    ? {
+        id: "ultrafast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: ULTRAFAST_BILLING_MULTIPLIER_BPS,
+      }
+    : undefined;
+}
 
 /**
  * Product display label for catalog/picker UI.
@@ -6796,6 +6938,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     modelId.startsWith("codex/gpt-5.6-") ||
     /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
+    const ultrafast = ultrafastLatencyModeForModel(modelId);
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -6804,6 +6947,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
         runnable: true,
         billingMultiplierBps: GPT56_FAST_BILLING_MULTIPLIER_BPS,
       },
+      ...(ultrafast ? [ultrafast] : []),
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
@@ -6824,8 +6968,11 @@ function reviewedCodexCatalogCapabilities(
   capabilities: ModelCapabilitiesV1,
 ): ModelCapabilitiesV1 {
   if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
-  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
-    (mode) => mode.id === "fast",
+  const builtin = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`);
+  const added = builtin.filter(
+    (mode) =>
+      (mode.id === "fast" || mode.id === "ultrafast") &&
+      !capabilities.latencyModes.some((existing) => existing.id === mode.id),
   );
   return normalizeCapabilities({
     ...capabilities,
@@ -6834,10 +6981,7 @@ function reviewedCodexCatalogCapabilities(
       capabilities.structuredOutput.upstream === "unknown"
         ? { upstream: "supported", runnable: true }
         : capabilities.structuredOutput,
-    latencyModes:
-      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
-        ? [...capabilities.latencyModes, fast]
-        : capabilities.latencyModes,
+    latencyModes: [...capabilities.latencyModes, ...added],
   });
 }
 
@@ -6884,14 +7028,18 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 /**
  * Map Opengeni latency mode to the provider `service_tier` wire value.
  * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
+ * Ultrafast is `ultrafast` wherever a model declares it (OpenAI API and Codex).
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
   providerId: string,
   latencyMode: LatencyMode,
-): "fast" | "priority" | undefined {
+): "fast" | "priority" | "ultrafast" | undefined {
   if (latencyMode === "standard") {
     return undefined;
+  }
+  if (latencyMode === "ultrafast") {
+    return "ultrafast";
   }
   if (
     providerId === "azure" ||
@@ -6910,6 +7058,9 @@ export function responseSatisfiesLatencyMode(
 ): boolean {
   if (requested === "standard") {
     return true;
+  }
+  if (requested === "ultrafast") {
+    return responseServiceTier === "ultrafast";
   }
   return responseServiceTier === "priority" || responseServiceTier === "fast";
 }
@@ -7206,9 +7357,18 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   // Recompute, rather than allowlisting an incident hash: all other current
   // fields must still reproduce the accepted digest. Do not compose this with
   // the older wire-profile compatibility or rewrite the accepted policy.
-  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider, {
-    includeAutoCompactTokenLimit: true,
-  });
+  // Ultrafast was declared later; that historical declaration never had it.
+  return definitionVersionFor(
+    {
+      ...modelWithoutVersion,
+      capabilities: {
+        ...capabilities,
+        latencyModes: capabilities.latencyModes.filter((mode) => mode.id !== "ultrafast"),
+      },
+    },
+    provider,
+    { includeAutoCompactTokenLimit: true },
+  );
 }
 
 function matchesAdditiveCapabilityDefinitionVersion(
@@ -7218,8 +7378,8 @@ function matchesAdditiveCapabilityDefinitionVersion(
 ): boolean {
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   const { latencyModes, inputModalities } = model.capabilities;
-  // V1 has only three unique latency ids and three unique input modalities:
-  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // V1 has four unique latency ids and three unique input modalities:
+  // at most 15 * 7 subset digests retaining the frozen mode. Reconstruct an
   // exact historical declaration; never ignore the digest or alter existing
   // mode support, runnable state, billing multiplier, or request-tier routing.
   // Every other executable field remains in the digest. Do not compose this
@@ -10638,6 +10798,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
     );
   }
+  if (settings.sandboxBackend === "compute") {
+    const issues = computeSettingsIssues(settings);
+    if (issues.length > 0) {
+      throw new Error(`OPENGENI_SANDBOX_BACKEND=compute: ${issues.join("; ")}`);
+    }
+  }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(
@@ -11044,6 +11210,61 @@ export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
+/** Whether this deployment serves the compute agent gateway: the control service API
+ * it reads link keys from and the gateway's own URL are both configured. */
+export function computeGatewayConfigured(settings: Settings): boolean {
+  return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);
+}
+
+/** Everything a deployment must configure before a compute sandbox can work,
+ * as human-readable problems; empty when it is ready. Checked at boot when
+ * compute is the deployment backend, and whenever a compute client is built,
+ * so a session that selects compute fails clearly instead of half-creating. */
+export function computeSettingsIssues(settings: Settings): string[] {
+  const issues: string[] = [];
+  if (!settings.computeApiUrl) issues.push("OPENGENI_COMPUTE_API_URL is required");
+  if (!settings.computeApiKey) issues.push("OPENGENI_COMPUTE_API_KEY is required");
+  if (
+    settings.computeApiUrl &&
+    !["local", "test"].includes(settings.environment) &&
+    !settings.computeApiUrl.startsWith("https://")
+  ) {
+    issues.push("OPENGENI_COMPUTE_API_URL must use https outside local/test");
+  }
+  const linkUrl = settings.computeLinkUrl;
+  if (!linkUrl) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL is required");
+  } else if (
+    !linkUrl.startsWith("wss://") &&
+    !(["local", "test"].includes(settings.environment) && linkUrl.startsWith("ws://"))
+  ) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL must be a wss:// URL (ws:// only in local/test)");
+  }
+  if (!settings.selfhostedRelayUrl || !resolveRelayTokenSecret(settings)) {
+    issues.push(
+      "OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required (terminal, desktop and ports)",
+    );
+  }
+  if (settings.agentOpStreamEnabled !== true) {
+    issues.push("OPENGENI_AGENT_OP_STREAM_ENABLED must stay true (agent exec needs op-stream)");
+  }
+  if (
+    settings.computeMemoryRequestMib !== undefined &&
+    settings.computeMemoryRequestMib > settings.computeMemoryMib
+  ) {
+    issues.push("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed OPENGENI_COMPUTE_MEMORY_MIB");
+  }
+  if (
+    settings.computeCpuRequestMillis !== undefined &&
+    settings.computeCpuRequestMillis > settings.computeVcpus * 1000
+  ) {
+    issues.push(
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS must not exceed OPENGENI_COMPUTE_VCPUS * 1000",
+    );
+  }
+  return issues;
+}
+
 /**
  * Resolve the secret the control plane signs the enrollment bearer credential
  * with (the `oge_` envelope the agent presents back — M5). Falls
@@ -11298,6 +11519,14 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: number;
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
+      /**
+       * The model writes its notes for the person between tool calls as
+       * progress-update `thinking` blocks instead of `text` blocks. Requests
+       * use `thinking.display: "updates"` so those blocks, and only those,
+       * carry readable text (Anthropic's documented way to tell them apart
+       * from reasoning).
+       */
+      progressUpdates?: boolean;
     }>
   >
 > = Object.fromEntries([
@@ -11318,6 +11547,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: 128_000,
       prefixBoundThinking:
         id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
+      ...(id === "claude-opus-5-5" || id === "claude-sonnet-5-5" ? { progressUpdates: true } : {}),
       ...(id === "claude-haiku-5-5"
         ? { autoCompactTokenLimit: 95_000 }
         : id === "claude-opus-5-5"

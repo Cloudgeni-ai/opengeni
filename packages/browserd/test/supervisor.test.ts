@@ -11,6 +11,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   BrowserControlServer,
+  CdpTransportError,
   BrowserSupervisor,
   SqliteBrowserOperationJournal,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -650,7 +651,7 @@ describe("BrowserSupervisor", () => {
         await expect(supervisor.createSession({ ...second, headed: false })).rejects.toMatchObject({
           code: "capacity_exhausted",
           retryable: false,
-          message: expect.stringContaining("limit of 1 Opengeni browsers"),
+          message: expect.stringContaining("limit of 1 managed browsers"),
         });
         await supervisor.endSession(first);
         expect(
@@ -826,6 +827,44 @@ describe("BrowserSupervisor", () => {
           async dispatch() {
             dispatched.resolve();
             await gate.promise;
+          },
+        },
+      },
+    );
+  });
+
+  test("a settled attached transport failure does not retain update admission", async () => {
+    const dispatched = deferred();
+    const fail = deferred();
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const created = await supervisor.createSession({
+          ...reference(2),
+          headed: true,
+          transport: {
+            kind: "attached_chrome",
+            deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            connectionGeneration: "chrome-state-1",
+            browserName: "Chrome",
+            browserVersion: "151.0.0.0",
+          },
+        });
+        const action = supervisor.action(command(created.observation));
+        await dispatched.promise;
+        expect(supervisor.isIdle()).toBe(false);
+        fail.resolve();
+        expect((await action).state).toBe("outcome_unknown");
+        // The uncertain action stays in its journal, but no dispatched work
+        // remains. Restart does not replay the action or close the user's tabs.
+        expect(supervisor.isIdle()).toBe(true);
+        expect(supervisor.updateBlockers()).toEqual([]);
+      },
+      {
+        driverHooks: {
+          async dispatch() {
+            dispatched.resolve();
+            await fail.promise;
+            throw new CdpTransportError("attached event stream unavailable");
           },
         },
       },

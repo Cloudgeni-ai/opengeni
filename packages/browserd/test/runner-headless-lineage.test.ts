@@ -11,6 +11,24 @@ import {
 
 const native = process.platform === "linux" || process.platform === "darwin";
 
+async function expectBrowserExited(receipt: OwnedManagedBrowserProcess): Promise<void> {
+  // Exit is owned by shutdown; reaping an orphan belongs to its new parent.
+  // Independently reject every live process state, then require the production
+  // receipt check to prove no successor still owns the same browser profile.
+  if (process.platform === "linux") {
+    let stat: string | null = null;
+    try {
+      stat = await readFile(`/proc/${receipt.pid}/stat`, "utf8");
+    } catch (error) {
+      expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
+    }
+    if (stat !== null) expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("Z");
+  } else {
+    expect(() => process.kill(receipt.pid, 0)).toThrow();
+  }
+  expect(await inspectOwnedManagedBrowserProcess(receipt)).toBe("exited");
+}
+
 async function fixture(fixtureOptions: { daemonRuntimeCopy?: boolean } = {}) {
   const directory = await mkdtemp("/tmp/og-headless-lineage-");
   const profileDirectory = join(directory, "profile");
@@ -204,6 +222,28 @@ test.skipIf(!native)(
 );
 
 test.skipIf(!native)(
+  "a reattached browser that already shut down is retired with its launcher, repeatably",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      const replacement = await f.reattach(receipt);
+      // The controller's own close request ended the browser, and its launcher
+      // reaped it, before cleanup could read the browser's parent.
+      process.kill(f.browserPid, "SIGTERM");
+      expect((await f.browserExited()).exitedBrowserPid).toBe(f.browserPid);
+      await replacement.terminate();
+      await f.daemon.exited;
+      expect(() => process.kill(f.daemon.pid, 0)).toThrow();
+      await replacement.terminate();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
   "a live browser is reattached after an agent update removed its daemon's runtime",
   async () => {
     const f = await fixture({ daemonRuntimeCopy: true });
@@ -345,7 +385,7 @@ test.skipIf(!native)(
       await expect(replacement.terminate(bystander.pid)).rejects.toThrow("lineage");
       expect(() => process.kill(f.browserPid, 0)).not.toThrow();
       await replacement.terminate();
-      expect(() => process.kill(f.browserPid, 0)).toThrow();
+      await expectBrowserExited(receipt);
       expect(() => process.kill(bystander.pid, 0)).not.toThrow();
     } finally {
       await f.close();
@@ -438,6 +478,7 @@ for (const holdReaper of [false, true]) {
           const stat = await readFile(`/proc/${f.browserPid}/stat`, "utf8");
           expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("Z");
           expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+          await expectBrowserExited(receipt);
           f.daemon.kill("SIGCONT");
         }
         expect(await f.browserExited()).toEqual({ exitedBrowserPid: f.browserPid, exitCode: 0 });

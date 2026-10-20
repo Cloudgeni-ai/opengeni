@@ -19,7 +19,8 @@ use std::{
 
 use async_trait::async_trait;
 use opengeni_agent_platform::{
-    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult,
+    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult, UpdateAdmission,
+    UpdateBlocker,
 };
 use opengeni_agent_proto::v1;
 use serde::Deserialize;
@@ -35,6 +36,14 @@ const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
 const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
+/// Helper file names. People see them as process names (Activity Monitor, Task
+/// Manager), so they carry no product name: an app that runs this agent under its
+/// own name shows only that name.
+pub(crate) const BROWSERD_FILE: &str = "browserd";
+pub(crate) const COMPUTER_NATIVE_FILE: &str = "computer-native";
+/// The names installer layouts and earlier releases put beside the agent.
+const LEGACY_BROWSERD_FILE: &str = "opengeni-browserd";
+const LEGACY_COMPUTER_NATIVE_FILE: &str = "opengeni-computer-native";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_READY_LINE_BYTES: usize = 4_096;
 const MAX_STARTUP_DIAGNOSTIC_BYTES: usize = 4_096;
@@ -55,7 +64,9 @@ const EMPTY_CONTROLLER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const EMPTY_CONTROLLER_GRACE: Duration = Duration::from_secs(10 * 60);
 /// browserd opt-in: exit gracefully when the agent's end of stdin closes.
 const PARENT_LIFELINE_ENV: &str = "OPENGENI_BROWSERD_PARENT_LIFELINE";
-const MAX_IDLE_RESPONSE_BYTES: usize = 1_024;
+// The controller summarizes at most 32 kinds plus overflow, without IDs.
+// Keep a byte bound as well as that cardinality bound.
+const MAX_IDLE_RESPONSE_BYTES: usize = 8_192;
 
 #[derive(Debug)]
 struct Sidecar {
@@ -451,19 +462,22 @@ fn take_sidecar_pipes(
 }
 
 fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
-    for (environment, name) in [
-        (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
-        (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
+    for (environment, names) in [
+        (AGENT_BROWSER_BINARY_ENV, &["agent-browser"][..]),
+        (LIGHTPANDA_BINARY_ENV, &["lightpanda"][..]),
         (
             COMPUTER_NATIVE_BINARY_ENV,
-            companion_name("opengeni-computer-native"),
+            &[COMPUTER_NATIVE_FILE, LEGACY_COMPUTER_NATIVE_FILE][..],
         ),
     ] {
         // Explicit operator overrides remain authoritative. Release and local
         // app bundles need no configuration: companions installed beside
         // browserd are forwarded privately to the child.
         if std::env::var_os(environment).is_none() {
-            if let Some(path) = discover_companion_binary(browserd_binary, &name) {
+            if let Some(path) = names
+                .iter()
+                .find_map(|name| discover_companion_binary(browserd_binary, &companion_name(name)))
+            {
                 command.env(environment, path);
             }
         }
@@ -499,7 +513,7 @@ async fn add_allowed_origins(
 
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
-    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
         sidecars_update_admission(self, operation_id, true).await
     }
 
@@ -739,7 +753,7 @@ async fn sidecars_update_admission(
     manager: &BrowserSidecarManager,
     operation_id: &str,
     begin: bool,
-) -> PlatformResult<bool> {
+) -> PlatformResult<UpdateAdmission> {
     tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
         let mut sidecars = manager.sidecars.lock().await;
         manager.retire_exited_sidecars(&mut sidecars)?;
@@ -747,6 +761,14 @@ async fn sidecars_update_admission(
         // A controller that ended uncleanly holds the update back (busy, not
         // failed) until nothing of it remains.
         let mut idle = manager.unclean_exits_settled();
+        let mut blockers = Vec::new();
+        if !idle {
+            blockers.push(UpdateBlocker {
+                kind: "controller_process_cleanup".into(),
+                resource_id: String::new(),
+                count: 1,
+            });
+        }
         let mut failure = None;
         for sidecar in sidecars.values_mut() {
             if let Some(previous) = sidecar.pending_update.clone() {
@@ -770,6 +792,14 @@ async fn sidecars_update_admission(
             match sidecar_runtime_request(&client, sidecar, Some((operation_id, begin))).await {
                 Ok(state) => {
                     idle &= state.idle;
+                    if !state.idle && state.blockers.is_empty() {
+                        blockers.push(UpdateBlocker {
+                            kind: "controller_unknown".into(),
+                            resource_id: String::new(),
+                            count: 1,
+                        });
+                    }
+                    blockers.extend(state.blockers);
                     if !begin {
                         sidecar.pending_update = None;
                     }
@@ -779,7 +809,7 @@ async fn sidecars_update_admission(
         }
         match failure {
             Some(error) => Err(error),
-            None => Ok(idle),
+            None => Ok(UpdateAdmission { idle, blockers }),
         }
     })
     .await
@@ -875,6 +905,8 @@ struct RuntimeIdleResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeIdleState {
     idle: bool,
+    #[serde(default)]
+    blockers: Vec<UpdateBlocker>,
     #[serde(default)]
     empty: Option<bool>,
     #[serde(default)]
@@ -1141,6 +1173,9 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
             message: format!("{message}; {diagnostic}"),
             retryable,
         },
+        PlatformError::RunAsUnknownUser(message) => {
+            PlatformError::RunAsUnknownUser(format!("{message}; {diagnostic}"))
+        }
     }
 }
 
@@ -1165,16 +1200,17 @@ fn discover_browserd_binary() -> PlatformResult<PathBuf> {
         let executable = std::env::current_exe()
             .map_err(|error| PlatformError::from_io("resolve running agent path", &error))?;
         let parent = executable.parent().unwrap_or_else(|| Path::new("."));
-        let name = if cfg!(windows) {
-            "opengeni-browserd.exe"
-        } else {
-            "opengeni-browserd"
-        };
-        vec![
-            parent.join(name),
-            parent.join("../Helpers").join(name),
-            parent.join("../Resources").join(name),
-        ]
+        [BROWSERD_FILE, LEGACY_BROWSERD_FILE]
+            .into_iter()
+            .map(companion_name)
+            .flat_map(|name| {
+                [
+                    parent.join(&name),
+                    parent.join("../Helpers").join(&name),
+                    parent.join("../Resources").join(&name),
+                ]
+            })
+            .collect()
     };
     candidates
         .into_iter()
@@ -1844,7 +1880,7 @@ mod tests {
             .pending_update
             .is_none());
         assert_eq!(drain.reserve_update(&next), UpdateReservation::Started);
-        assert!(manager.begin_update(&next).await.unwrap());
+        assert!(manager.begin_update(&next).await.unwrap().idle);
         manager.release_update(&next).await.unwrap();
         drain.release_update(&next);
         server.await.unwrap();
@@ -1885,7 +1921,7 @@ mod tests {
         // and waits (busy) while anything of the controller remains.
         assert!(drain.snapshot().is_some());
         assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
-        assert!(!manager.begin_update("update").await.unwrap());
+        assert!(!manager.begin_update("update").await.unwrap().idle);
         assert!(!manager.is_idle().await.unwrap());
         manager.release_update("update").await.unwrap();
         drain.release_update("update");
@@ -1899,7 +1935,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(drain.reserve_update("later"), UpdateReservation::Started);
-        assert!(manager.begin_update("later").await.unwrap());
+        assert!(manager.begin_update("later").await.unwrap().idle);
         manager.release_update("later").await.unwrap();
         drain.release_update("later");
         // Ordinary scoped recovery still works afterwards.
@@ -2059,7 +2095,7 @@ mod tests {
         let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
         for (key, name) in [
             (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
-            (COMPUTER_NATIVE_BINARY_ENV, "opengeni-computer-native"),
+            (COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE),
         ] {
             let expected = runtime.join(companion_name(name));
             assert_eq!(
@@ -2264,9 +2300,7 @@ mod tests {
         let environment_capture = temporary.path().join("sidecar-environment");
         let agent_browser = temporary.path().join(companion_name("agent-browser"));
         let lightpanda = temporary.path().join(companion_name("lightpanda"));
-        let computer_native = temporary
-            .path()
-            .join(companion_name("opengeni-computer-native"));
+        let computer_native = temporary.path().join(companion_name(COMPUTER_NATIVE_FILE));
         for companion in [&agent_browser, &lightpanda, &computer_native] {
             std::fs::write(companion, "companion").expect("write sidecar companion");
             std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))

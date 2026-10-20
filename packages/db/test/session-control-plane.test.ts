@@ -3334,6 +3334,70 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
+  test.each([0, 3])(
+    "internal MCP waits preserve the provider budget and clear on model progress (%s)",
+    async (count) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "survive the internal API outage");
+      const firstAttemptId = crypto.randomUUID();
+      const first = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: firstAttemptId },
+      );
+      if (!first) throw new Error("turn was not claimed");
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        await db.execute(
+          sql`update session_turns set metadata = metadata || ${JSON.stringify({
+            providerRecoveryCount: count,
+            ...(count > 0
+              ? {
+                  providerRecoveryReason: "provider_overloaded",
+                  providerRecoveryStartedAt: new Date(Date.now() - 60_000).toISOString(),
+                }
+              : {}),
+          })}::jsonb where id = ${first.id}::uuid`,
+        );
+      });
+      const recovered = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "first_party_mcp_setup_unavailable",
+      });
+      expect(recovered.action).toBe("recovering");
+      const waiting = await getSessionTurn(client.db, grant.workspaceId!, first.id);
+      expect(waiting?.metadata.providerRecoveryCount).toBe(count);
+      expect(typeof waiting?.metadata.internalMcpSetupWaitStartedAt).toBe("string");
+      const nextAttemptId = crypto.randomUUID();
+      const next = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: nextAttemptId },
+      );
+      if (!next) throw new Error("turn was not reclaimed");
+      expect(next.id).toBe(first.id);
+      const completed = await appendSessionEventsForTurnAttempt(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        next.id,
+        next.executionGeneration,
+        nextAttemptId,
+        [{ type: "agent.model.request", payload: { phase: "completed" } }],
+      );
+      expect(completed.accepted).toBe(true);
+      const metadata = (await getSessionTurn(client.db, grant.workspaceId!, first.id))?.metadata;
+      expect(metadata).not.toHaveProperty("providerRecoveryCount");
+      expect(metadata).not.toHaveProperty("internalMcpSetupWaitStartedAt");
+    },
+  );
+
   test("a completed current model request resets only the consecutive provider recovery budget", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "continue through intermittent provider overloads");

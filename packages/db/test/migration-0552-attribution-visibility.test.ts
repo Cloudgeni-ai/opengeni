@@ -451,6 +451,18 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       exhaustedScheduleRead,
       scopedComputeRead,
       scopedComputeLock,
+      // 0849 lets bounded owner-only maintenance see ended turns and inventory.
+      // These predicates are not caller settings: they require a backend/xid
+      // capability minted by the SECURITY DEFINER entry point.
+      ...["ended_epoch", "inventory"].map((operation) => ({
+        relname: "session_turns",
+        polname: `maintenance_${operation}_select`,
+        polcmd: "r",
+        polpermissive: true,
+        roles: "{0}",
+        qual: `( SELECT opengeni_private.maintenance_claim_active((CURRENT_USER)::text, '${operation}'::text) AS maintenance_claim_active)`,
+        check: null,
+      })),
     ]);
     // ...and 0805, which inlines every session_reference_visible() call as
     // the same EXISTS probe of sessions, kept per-row by 0827's OFFSET 0. Let

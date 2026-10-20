@@ -1,4 +1,5 @@
 import type { CodexAccount } from "@opengeni/sdk";
+import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
 import { EnableAccountRow, SubscriptionAccountRow } from "./subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -13,6 +14,7 @@ import {
   codexUsageReadings,
   hasResetInventory,
   planLabel,
+  planReportsNoResets,
   useCodexSubscriptions,
   type CodexSubscriptions,
 } from "@/components/codex-connection";
@@ -449,7 +451,7 @@ function OwnOrganizationCodexRow({
       account={account}
       places={places}
       // No tag until its reach is known: "<workspace> only" may no longer be true.
-      scopeLabel={access.data ? organizationReachLabel(places.scope, access.data) : ""}
+      scopeLabel={organizationReachLabel(places.scope, access.data)}
       onOpen={() => places.openAccount(account.id)}
     />
   );
@@ -556,7 +558,11 @@ function SharedCodexSetAsideRow({
         failed
           ? ["Couldn't check who can use it", planLabel(account.plan, "ChatGPT")]
           : pending
-            ? [planLabel(account.plan, "ChatGPT"), resetsLabel(account.resetCreditAvailableCount)]
+            ? [
+                <ModelSettingsPlaceholder key="reach" />,
+                planLabel(account.plan, "ChatGPT"),
+                resetsLabel(account.resetCreditAvailableCount),
+              ]
             : [
                 organizationReachLabel(places.scope, access.data),
                 // Before the plan, so it stays readable on a phone.
@@ -967,7 +973,7 @@ function CodexRow({
   account: CodexAccount;
   places: CodexPlaces;
   /** Overrides the tag, for an organization account whose "Available in" is known. */
-  scopeLabel?: string | undefined;
+  scopeLabel?: ReactNode;
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
@@ -978,6 +984,13 @@ function CodexRow({
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
   const loadingUsage = codex.refreshingUsage && !live;
   const organizationAccount = account.source === "organization";
+  useConnectionAccess({
+    client: codex.client,
+    workspaceId: codex.workspaceId,
+    kind: "codex",
+    connectionId: account.id,
+    enabled: !organizationAccount && !places.personal && codex.canManage,
+  });
   return (
     <SubscriptionAccountRow
       provider="codex"
@@ -1299,19 +1312,43 @@ function CodexAccountDetail({
             </SettingRowGroup>
           </DetailSection>
         ) : null}
-        {!organizationAccount && hasResetInventory(overview, attempts) ? (
+        {!organizationAccount && !planReportsNoResets(overview, attempts) ? (
           <DetailSection
             title={resetCount > 0 ? `Usage limit resets (${resetCount})` : "Usage limit resets"}
           >
-            <ResetCreditInventory
-              overview={overview}
-              busy={codex.busy || codex.preparingReset != null}
-              recoveryAttempts={attempts}
-              onRedeem={(credit, recovery) =>
-                void codex.beginRedemption(account.id, credit, recovery)
-              }
-              onReconnectSameAccount={places.openConnect}
-            />
+            {!overview ? (
+              <SettingRow
+                label={
+                  codex.usageError ? (
+                    "Couldn't check usage limit resets."
+                  ) : (
+                    <ModelSettingsPlaceholder />
+                  )
+                }
+                control={
+                  codex.usageError ? (
+                    <RowButton
+                      variant="ghost"
+                      onClick={() => void codex.refreshAccountUsage(account.id)}
+                    >
+                      Try again
+                    </RowButton>
+                  ) : null
+                }
+              />
+            ) : !hasResetInventory(overview, attempts) ? (
+              <SettingRow label="No usage limit resets available" />
+            ) : (
+              <ResetCreditInventory
+                overview={overview}
+                busy={codex.busy || codex.preparingReset != null}
+                recoveryAttempts={attempts}
+                onRedeem={(credit, recovery) =>
+                  void codex.beginRedemption(account.id, credit, recovery)
+                }
+                onReconnectSameAccount={places.openConnect}
+              />
+            )}
           </DetailSection>
         ) : null}
       </DetailPageBody>
@@ -1396,7 +1433,7 @@ export function CodexUsage({
         }
         onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
       />
-      <CodexCreditBalance credits={credits} />
+      <CodexCreditBalance credits={credits} loading={codex.refreshingUsage && !live} />
     </>
   );
 }

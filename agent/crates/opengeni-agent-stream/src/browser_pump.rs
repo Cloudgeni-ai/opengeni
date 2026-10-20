@@ -476,8 +476,11 @@ mod tests {
                 port: 20_001,
                 relay_route: None,
             },
-            token: "producer-token".to_string(),
-            relay_url: "wss://relay.invalid/stream".to_string(),
+            credential: crate::RelayCredential::fixed(
+                "wss://relay.invalid/stream",
+                "producer-token",
+            ),
+            activity: crate::ActivityStamp::untracked(),
         };
         let mut channel = RelayChannel::with_transport(config, Box::new(agent_side));
         let (ready_tx, ready_rx) = oneshot::channel();

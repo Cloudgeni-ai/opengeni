@@ -43,6 +43,7 @@ import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
+import { promptCacheCohortKey } from "./codex";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
 import {
   executeCodexImageGeneration,
@@ -54,6 +55,7 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
 
 import {
@@ -653,6 +655,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         sessionId: input.sessionId,
       })
     : false;
+  // Managed boxes fetch the release's Codemode client in one setup command.
+  const codemodeClientDownload =
+    activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+      ? await managedCodemodeClientDownload({
+          settings: eventing.modelRunSettings,
+          objectStorage,
+          activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+        })
+      : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -755,6 +766,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? {
               codemodeTokenSeed: sandboxCodemodeToken,
               codemodeTokenSessionId: input.sessionId,
+              ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
@@ -820,7 +832,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             // is not in the registry, served by the built-in OpenAI/Azure Responses
             // client).
             {
-              promptCacheKey: input.sessionId,
+              promptCacheKey: promptCacheCohortKey(input.accountId),
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,

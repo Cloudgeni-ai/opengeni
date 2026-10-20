@@ -804,6 +804,12 @@ describe("createSessionProxyHandler", () => {
       ],
       [
         "POST",
+        "realtime/websocket",
+        connect,
+        () => browser.negotiateRealtimeWebsocket(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
         "realtime/gateway",
         connect,
         () => browser.negotiateGatewayRealtime(WORKSPACE_ID, SESSION_ID, connect),
@@ -1706,6 +1712,40 @@ describe("createSessionProxyHandler", () => {
     // Reported so stock UIs hide "Archive" instead of failing on click.
     expect((await browser.getClientConfig()).archive).toBe(true);
     expect((await off.browser.getClientConfig()).archive).toBe(false);
+  });
+
+  test("an open conversation can mark itself read, and nothing else about attention", async () => {
+    const { upstream, browser } = setup();
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, {
+      unread: false,
+      acknowledgedThroughSequence: 42,
+    });
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, { unread: false });
+    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+    ]);
+    expect(upstream.requests.map((request) => request.body)).toEqual([
+      { unread: false, acknowledgedThroughSequence: 42 },
+      { unread: false },
+    ]);
+    for (const request of [
+      { unread: true },
+      { activelyWorking: true },
+      { unread: false, activelyWorking: false },
+      { unread: false, expectedVersion: 3 },
+      { unread: false, acknowledgedThroughSequence: -1 },
+      { unread: false, acknowledgedThroughSequence: 1.5 },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, request as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(2);
   });
 
   test("retained media a session produced is served under files, scoped and association-checked", async () => {

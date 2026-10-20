@@ -52,6 +52,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
+import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -90,7 +91,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
+import { codexWorkspaceMetricKey, promptCacheCohortKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -114,7 +115,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
+import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -144,10 +145,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-import {
-  isAuxiliaryProviderDispatch,
-  runAuxiliaryProviderDispatch,
-} from "../auxiliary-provider-dispatch";
+import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -168,6 +166,7 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -485,18 +484,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    // Dispatch starts the already-owned deferred preparation. Timing remains
-    // diagnostic only and can never fence or fail a request.
-    const observeProviderDispatch = () => {
-      // Titles and generated images run these checks too, but are separate calls.
-      if (isAuxiliaryProviderDispatch()) return;
-      eventing.preparedTools?.startDeferredPreparation?.();
-      try {
-        eventing.providerDispatchObserver?.();
-      } catch {
-        // Metrics emission must never affect a model call.
-      }
-    };
     const assertRecoveryWindow = () =>
       assertProviderOverloadRecoveryActive({
         failureCode: attempt.providerRecoveryPolicyCode,
@@ -870,11 +857,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
                     sessionId: input.sessionId,
-                    cacheAffinityKey: codexCacheAffinityKey(
-                      input.workspaceId,
-                      preferenceSnapshotHumanSubjectId(turn),
-                      input.sessionId,
-                    ),
+                    cacheAffinityKey: promptCacheCohortKey(input.accountId),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
@@ -882,6 +865,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       providerTurn.latestCodexUsage = snapshot;
                       creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    persistUsageHeaders: async (snapshot) => {
+                      if (!coreCodex) return;
+                      await recordCoreCodexUsageReading({
+                        db,
+                        core: coreCodex,
+                        lease: leases.codex,
+                        usage: snapshot,
+                        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+                      });
+                    },
                     beforeProviderDispatch: async (request) => {
                       if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
                       await assertCodexDispatchAdmission(
@@ -889,7 +882,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         () => leases.codex.assertCurrentForDispatch(),
                       );
                       if (coreCodex && request) await coreCodex.requests!.reserve(request);
-                      observeProviderDispatch();
                     },
                     ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
@@ -1223,9 +1215,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       }),
                     },
                   ]);
-                  // SuperGrok places bytes on the wire immediately after this
-                  // awaited audit returns.
-                  if (event.phase === "started") observeProviderDispatch();
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
                     attempt.providerRecoveryCount,
                     event.phase,

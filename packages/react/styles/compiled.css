@@ -456,6 +456,7 @@
   --tw-skew-x: initial;
   --tw-skew-y: initial;
   --tw-space-y-reverse: 0;
+  --tw-space-x-reverse: 0;
   --tw-divide-y-reverse: 0;
   --tw-border-style: solid;
   --tw-gradient-position: initial;
@@ -1461,6 +1462,9 @@
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
   }
+:where(.og-root).max-w-\[320px\],:where(.og-root) .max-w-\[320px\] {
+    max-width: 320px;
+  }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
   }
@@ -1844,6 +1848,13 @@
   }
 :where(.og-root).gap-x-5,:where(.og-root) .gap-x-5 {
     column-gap: calc(var(--spacing) * 5);
+  }
+:where(.og-root).-space-x-1\.5,:where(.og-root) .-space-x-1\.5 {
+    :where(& > :not(:last-child)) {
+      --tw-space-x-reverse: 0;
+      margin-inline-start: calc(calc(var(--spacing) * -1.5) * var(--tw-space-x-reverse));
+      margin-inline-end: calc(calc(var(--spacing) * -1.5) * calc(1 - var(--tw-space-x-reverse)));
+    }
   }
 :where(.og-root).gap-y-0\.5,:where(.og-root) .gap-y-0\.5 {
     row-gap: calc(var(--spacing) * 0.5);
@@ -2771,6 +2782,9 @@
   }
 :where(.og-root).object-cover,:where(.og-root) .object-cover {
     object-fit: cover;
+  }
+:where(.og-root).object-top,:where(.og-root) .object-top {
+    object-position: top;
   }
 :where(.og-root).p-0,:where(.og-root) .p-0 {
     padding: calc(var(--spacing) * 0);
@@ -5648,6 +5662,24 @@
         content: var(--tw-content);
         inset: calc(var(--spacing) * -2.5);
       }
+    }
+  }
+:where(.og-root).\[\&_\[role\=status\]\]\:px-0,:where(.og-root) .\[\&_\[role\=status\]\]\:px-0 {
+    & [role=status] {
+      padding-inline: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).\[\&_\[role\=status\]\>span\:last-child\]\:sr-only,:where(.og-root) .\[\&_\[role\=status\]\>span\:last-child\]\:sr-only {
+    & [role=status]>span:last-child {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border-width: 0;
     }
   }
 :where(.og-root).\[\&_strong\]\:text-og-fg-muted,:where(.og-root) .\[\&_strong\]\:text-og-fg-muted {

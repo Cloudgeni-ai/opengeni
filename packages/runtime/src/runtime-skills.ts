@@ -134,7 +134,7 @@ export function loadNativeToolSkillArtifacts(
     return skillDirNames(root).map((name) => {
       const artifact = readSkillLibraryArtifact(join(root, name));
       const files = [...artifact.files];
-      if (name === "opengeni-sites") {
+      if (name === "sites") {
         const generatedPath = "package-versions.json";
         const existing = files.findIndex((entry) => entry.path === generatedPath);
         if (existing !== -1) files.splice(existing, 1);

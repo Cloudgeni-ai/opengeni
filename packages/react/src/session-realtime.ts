@@ -7,6 +7,7 @@ export {
   CODEX_LIVE_MODEL,
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
+  prestartSessionRealtime,
   sessionRealtimeLifecycleIsActive,
   useRealtimeModelSelection,
   useSessionRealtime,

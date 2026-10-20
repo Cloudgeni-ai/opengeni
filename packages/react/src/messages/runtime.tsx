@@ -9,6 +9,8 @@ import { singleSendText } from "./single-send";
  * - Keys are stable, dot-separated identifiers (`composer.send`). `englishMessages` is the
  *   complete default catalog; export it to your translation tooling as is.
  * - Templates use single-brace interpolation: `"Move queued prompt {index} up"`.
+ * - `{product}` is the product name the person knows (`productName`, "Opengeni" by default), so
+ *   an embedding product shows its own name without supplying every string that names it.
  * - Counted text uses plural-category suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
  *   `_other`) selected with `Intl.PluralRules` for the active locale, so a language can supply
  *   exactly the forms it needs. `_other` is required for every counted key. Where the
@@ -38,7 +40,14 @@ type TemplateOf<K> = K extends CatalogKey
   : K extends PluralBaseKey
     ? Catalog[`${K}_other` & CatalogKey]
     : never;
-type ParamNames<K> = TemplateParams<TemplateOf<K>> | (K extends PluralBaseKey ? "count" : never);
+/** Filled from the provider's `productName`; callers never pass it. */
+type ProductParam = "product";
+type ParamNames<K> =
+  | Exclude<TemplateParams<TemplateOf<K>>, ProductParam>
+  | (K extends PluralBaseKey ? "count" : never);
+
+/** The product name `{product}` shows when no provider sets one. */
+export const DEFAULT_PRODUCT_NAME = "Opengeni";
 
 /** Values interpolated into templates; `null` and `undefined` render as empty text. */
 export type MessageParamValue = string | number | null | undefined;
@@ -121,9 +130,12 @@ function layeredText(
   host: Lookup,
   locale: string | undefined,
   fallback: UntypedText | null,
+  productName: string,
 ): OpenGeniText {
   const defaults: Lookup = englishMessages;
-  const text: UntypedText = (key, params) => {
+  const text: UntypedText = (key, given) => {
+    // An outer provider's text receives this name too, so the nearest name wins.
+    const params = { product: productName, ...given };
     const count = countOf(params);
     const own = pick(host, key, locale, count);
     if (own !== undefined) return interpolate(own, params);
@@ -135,17 +147,32 @@ function layeredText(
 
 /** The plain translation function, for code outside React and for tests. */
 export function createOpenGeniText(
-  options: { messages?: OpenGeniMessages | undefined; locale?: string | undefined } = {},
+  options: {
+    messages?: OpenGeniMessages | undefined;
+    locale?: string | undefined;
+    /** The name `{product}` shows. Default "Opengeni". */
+    productName?: string | undefined;
+  } = {},
 ): OpenGeniText {
-  return layeredText(options.messages ?? {}, options.locale, null);
+  return layeredText(
+    options.messages ?? {},
+    options.locale,
+    null,
+    options.productName ?? DEFAULT_PRODUCT_NAME,
+  );
 }
 
 type MessagesContextValue = {
   text: OpenGeniText;
   locale: string | undefined;
+  productName: string;
 };
 
-const ENGLISH: MessagesContextValue = { text: createOpenGeniText(), locale: undefined };
+const ENGLISH: MessagesContextValue = {
+  text: createOpenGeniText(),
+  locale: undefined,
+  productName: DEFAULT_PRODUCT_NAME,
+};
 const MessagesContext = createContext<MessagesContextValue>(ENGLISH);
 
 export type OpenGeniMessagesProviderProps = {
@@ -153,6 +180,11 @@ export type OpenGeniMessagesProviderProps = {
   locale?: string | undefined;
   /** Your text for any subset of keys. Missing keys come from an outer provider, then English. */
   messages?: OpenGeniMessages | undefined;
+  /**
+   * The product name people know, shown wherever the built-in text names the product
+   * (`{product}`). Default "Opengeni", or the name an outer provider set.
+   */
+  productName?: string | undefined;
   children?: ReactNode;
 };
 
@@ -163,15 +195,21 @@ export type OpenGeniMessagesProviderProps = {
 export function OpenGeniMessagesProvider({
   locale,
   messages,
+  productName,
   children,
 }: OpenGeniMessagesProviderProps) {
   const outer = useContext(MessagesContext);
   const value = useMemo<MessagesContextValue>(() => {
-    if (!messages && locale === undefined) return outer;
+    if (!messages && locale === undefined && productName === undefined) return outer;
     const resolvedLocale = locale ?? outer.locale;
+    const resolvedProduct = productName ?? outer.productName;
     const fallback = outer === ENGLISH ? null : (outer.text as unknown as UntypedText);
-    return { text: layeredText(messages ?? {}, resolvedLocale, fallback), locale: resolvedLocale };
-  }, [locale, messages, outer]);
+    return {
+      text: layeredText(messages ?? {}, resolvedLocale, fallback, resolvedProduct),
+      locale: resolvedLocale,
+      productName: resolvedProduct,
+    };
+  }, [locale, messages, productName, outer]);
   return <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>;
 }
 
@@ -195,7 +233,7 @@ export function SingleSendWording({
 }) {
   const outer = useContext(MessagesContext);
   const value = useMemo<MessagesContextValue>(
-    () => (enabled ? { text: singleSendText(outer.text), locale: outer.locale } : outer),
+    () => (enabled ? { ...outer, text: singleSendText(outer.text) } : outer),
     [enabled, outer],
   );
   return <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>;

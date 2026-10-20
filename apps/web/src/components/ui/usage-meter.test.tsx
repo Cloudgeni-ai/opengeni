@@ -66,6 +66,12 @@ describe("usage levels", () => {
 });
 
 describe("UsageMeter", () => {
+  test("loading reserves the reset-time line instead of moving later sections down", () => {
+    const html = renderToStaticMarkup(<UsageMeter label="Weekly" percent={null} loading />);
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain("h-4.5 w-32");
+    expect(html).not.toContain("Not reported yet");
+  });
   test("a known reading is a meter with a text value", () => {
     const html = renderToStaticMarkup(
       <UsageMeter label="Weekly" percent={22} resetsLabel="Mon 28 Sep, 09:00" />,

@@ -843,10 +843,11 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   );
   expect(loginOnly.json.sites).toMatchObject({ loginOnly: true, publicAgentsEnabled: false });
 
-  // Viewers of the Site are not its managers; Only me Sites cannot be published.
-  const denied = await f.publication(f.member, site.id, "PUT", {});
+  // Read-only viewers of the Site are not its managers; Only me Sites cannot be published.
+  const readOnly = await f.person(["workspace:read", "artifacts:read"]);
+  const denied = await f.publication(readOnly, site.id, "PUT", {});
   expect(denied.status).toBe(403);
-  expect(code(denied)).toBe("site_manager_required");
+  expect(JSON.stringify(denied.json)).toContain("artifacts:publish");
   const privateSite = await f.publish("Mine only", "private");
   const notShared = await f.publication(f.owner, privateSite.id, "PUT", {});
   expect(notShared.status).toBe(409);
@@ -874,6 +875,8 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   expect(created.json.label).toMatch(/^team-crm-[a-z0-9]{4}$/u);
   expect(created.json.hostname).toBe(`${created.json.label}.${DOMAIN}`);
   expect((await f.publication(f.owner, site.id, "GET")).status).toBe(200);
+  // A teammate who publishes artifacts manages a Site someone else started.
+  expect((await f.publication(f.member, site.id, "GET")).status).toBe(200);
 
   const renamed = await f.publication(f.owner, site.id, "PUT", { label: "team-crm" });
   expect(renamed.status).toBe(200);
@@ -2061,7 +2064,8 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     contactEmail: "a@example.com",
     status: "open",
   });
-  expect((await f.publication(f.member, site.id, "GET", undefined, "/reports")).status).toBe(403);
+  // Any teammate who can publish artifacts manages the Site, reports included.
+  expect((await f.publication(f.member, site.id, "GET", undefined, "/reports")).status).toBe(200);
   const spam = reports.json.reports.find((report: any) => report.category === "spam");
   const dismissed = await f.publication(
     f.owner,
@@ -2072,18 +2076,8 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   );
   expect(dismissed.json.status).toBe("dismissed");
 
-  // Only the owner or a workspace admin takes a Site down.
-  const memberTakedown = await f.publication(
-    f.member,
-    site.id,
-    "POST",
-    { reason: "Looks bad" },
-    "/takedown",
-  );
-  expect(memberTakedown.status).toBe(403);
-  expect(code(memberTakedown)).toBe("site_owner_or_admin_required");
   // Taking down and restoring change what viewers see: a read-only credential
-  // fails the artifacts:publish check before the owner-or-admin rule.
+  // fails the artifacts:publish check.
   const readOnly = await f.person(["workspace:read", "artifacts:read"]);
   const readOnlyTakedown = await f.publication(
     readOnly,
@@ -2186,6 +2180,18 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   );
   expect(ownerTakedown.json.moderation.suspendedBy).toBe("owner");
   expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
+  // A teammate who publishes artifacts can pause and restore it too; like the
+  // owner, they cannot lift an admin's takedown.
+  const memberTakedown = await f.publication(
+    f.member,
+    site.id,
+    "POST",
+    { reason: "Fixing a bug" },
+    "/takedown",
+  );
+  expect(memberTakedown.status, JSON.stringify(memberTakedown.json)).toBe(200);
+  expect(memberTakedown.json.moderation.suspendedBy).toBe("owner");
+  expect((await f.publication(f.member, site.id, "POST", {}, "/restore")).status).toBe(200);
 
   // A platform takedown (operator script) holds against the owner and admins.
   // It places a hostname hold, which only the schema owner (the operator's

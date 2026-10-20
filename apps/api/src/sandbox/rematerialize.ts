@@ -247,6 +247,11 @@ export async function establishApiSandboxSpawner(input: {
     established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
+      createIdentity: {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+      },
       ...(input.objectStorage
         ? {
             loadHostWorkspaceArchive: async (ref) => {

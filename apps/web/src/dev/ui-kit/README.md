@@ -13,6 +13,21 @@ ignores older stored picks of a retired version.
 The route is registered in `src/App.tsx` only when `import.meta.env.DEV`, and the kit is lazy
 loaded, so none of this reaches a production build.
 
+## Models cache preview
+
+From the repository root, run `bun install --frozen-lockfile`, then
+`cd apps/web && bun --bun node_modules/vite/bin/vite.js --host 127.0.0.1 --port 31747 --strictPort`.
+Open `/dev/ui-kit?section=page-models-cache&theme=light&chrome=0` on that port.
+Add `&page=account&state=loading` for the account's loading state, then click
+**Finish loading**. **Other settings → Models** unmounts/remounts the production
+readers; the fixture request count stays unchanged while the cache is fresh.
+**Refresh** re-reads them; **Cold load** replaces the fixture client to start empty.
+
+This DEV-only section imports the production account rows, account/access pages,
+hooks and refresh control. Only the SDK transport is replaced with in-memory
+responses: it needs no backend, sign-in, provider credentials, or environment file.
+Availability edits are simulated; other mutations show a fixture-only error.
+
 ## Rules for builders
 
 - Every component you show is the **real primitive** from `src/components/ui/`. Alternatives are

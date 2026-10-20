@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "4.1.3",
+  "version": "4.2.0",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -153,6 +153,10 @@
     "./gateway-realtime-transport": {
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
+    },
+    "./realtime-websocket-transport": {
+      "types": "./src/realtime-websocket-transport.ts",
+      "default": "./src/realtime-websocket-transport.ts"
     },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",

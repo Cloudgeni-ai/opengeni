@@ -428,9 +428,45 @@ same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
-`packages/sdk/src/gateway-realtime-transport.ts`,
+`packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
+
+Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
+one WebSocket path: `POST …/realtime/websocket` asks the provider registry in
+`apps/api/src/realtime-websocket.ts` for the model's provider, which mints a
+short-lived client secret and returns the socket URL, subprotocols, wire
+dialect (`openai` or `ai-gateway`), and the complete session update the browser
+sends unchanged. The browser transport only speaks the two wire dialects; it
+holds no provider-specific configuration. A new OpenAI-compatible provider is
+one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
+aliases of the same handler for older clients.
+
+Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
+and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
+API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The
+mint is authoritative: ElevenLabs applies the minted instructions, delegation
+tool and audio settings at `session.created`, so the entry returns no session
+update. ElevenLabs accepts only `semantic_vad` turn detection (we use high
+eagerness) and its transcription language defaults to English, which also
+steers the reply language; there is no automatic language detection. Its
+transcripts carry expressive audio tags such as `[calm]`, so the answer sets
+`transcriptAudioTags` and the browser strips them before ledger sync.
+
+Voice startup overlaps its waits. Starting voice from the new-chat page calls
+`prestartSessionRealtime` right after the session is created, so begin,
+negotiation and the socket open while the session page loads; that page's
+`useSessionRealtime` adopts the running controller (same workspace, session and
+model) and consumes its `?realtime=` autostart instead of starting a second
+call. The controller asks for the microphone alongside the begin request, and
+the WebSocket transport prepares capture while the server mints the provider
+session; audio is sent only once the socket is open and configured. Capture
+uses an AudioWorklet that sends 20 ms frames (a 4096-sample ScriptProcessor is
+the fallback where blob worklet modules are refused), so the provider hears the
+end of speech without waiting for a large capture block. A delegated turn's
+result is pulled as soon as the session reports the turn's outcome (agent
+message completed or a terminal turn event); the one-second ledger sync remains
+the fallback.
 
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or
@@ -1526,6 +1562,21 @@ fetch-layer `TimeoutError` ("The operation timed out.", raised by the runtime's
 own socket idle timeout) classify as retryable `provider_unavailable` and use
 the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
 transport timers and classification.
+
+Required first-party MCP connect/tools-list connectivity failures are the narrow
+exception to finite provider recovery. The runtime stamps setup provenance only
+at the verified required first-party boundary; generic socket errors, third-party
+servers and tool invocations cannot acquire it. `first_party_mcp_setup_unavailable`
+keeps the accepted turn recovering at a 30-second minimum pace until the API
+returns, without a count or elapsed-time cutoff. History and quiescence gates,
+Pause/Cancel and authority checks remain unchanged. Checkpoint database recovery
+uses the next count only as an exact-state witness and preserves pacing; these
+waits never spend or reset the model provider’s retry count. A durable wait
+instant suspends its elapsed-time recovery window; the next provider recovery
+resumes the remaining window, and a completed model response clears both clocks.
+Authentication and protocol rejections retain their existing failure policy.
+This does not replay tool mutations or repair already-failed
+historical turns.
 
 Default automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
@@ -2724,6 +2775,65 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+### Current workspace retry and deliberate empty continuation
+
+A degraded/unrecoverable verdict describes one restore attempt, not a permanent
+ban on the conversation. A new cold election may revalidate the exact CURRENT
+complete archive when its archive generation equals the workspace generation.
+It never implicitly selects `archive.previous` or accepts a generation gap.
+The cold election stamps the backend from the accepted session route; the source
+archive envelope retains its original backend/provenance. Live instances and
+outcome-unknown provider creates cannot be retargeted. Portable host archives can
+restore into a remote provider after an object-store migration: the configured
+store resolves the retained key, byte count and SHA are checked, and the hydrated
+content-tree fingerprint must match before warm publication. Native provider
+checkpoints retain their provider/binding constraints.
+
+The existing session `sandbox-recovery` GET/POST surface also exposes `retry`
+and `continue_fresh` actions to the canonical managed or built-in local human.
+The latter requires `acceptEmptyWorkspace: true`, control of EVERY group member
+under the exclusive workspace control fence, and a quiescent group. Group identity
+is immutable: no private chat is detached to evade another member's authority.
+Mixed-ownership groups require the operator path below. Both actions bind an
+operation UUID to the exact GET `target` (session/group/route/authority/lease
+epochs, generations, archive revision and restore verdict). A repeated identical
+operation replays; stale selections and changed payloads fail. An uncertain POST
+outcome is reconciled by read-only GET, never by automatically issuing new consent.
+
+`retry` retains the archive and clears only the failed attempt verdict so the
+normal verifier can run. `continue_fresh` explicitly authorizes an empty workspace,
+retains the old archive and generation-gap evidence, and writes an immutable
+receipt and `sandbox.recovery.selected` notice to every group member. It neither
+rewrites messages nor rolls back external effects nor replays commands. The normal
+restore/creation path still has to prove readiness. Empty publication advances
+the workspace generation once; its receipt also retains the abandoned revision,
+excluding that revision from ordinary and automatic historical recovery after a
+later provider loss. An operator may still explicitly authorize historical recovery.
+Every future agent attempt receives the discontinuity from its durable receipt
+as a new turn-scoped operational notice at the history tail. Earlier items and
+the legacy session-instruction prefix are never rewritten by this decision;
+compaction does not erase the receipt. Migration 0871 requires
+warning protocol v4 on affected turn claims, so older workers cannot silently
+omit the new reason during a rolling deployment; ordinary sessions are unaffected.
+
+Operators use the same decision seam through:
+
+```sh
+bun scripts/operator/sandbox-recovery.ts preview /private/recovery-scope.json
+bun scripts/operator/sandbox-recovery.ts apply /private/recovery-request.json
+```
+
+The private preview JSON contains `accountId`, `workspaceId`, `sessionId`, and
+`subjectId`. The application database configuration supplies operator authority;
+`subjectId` attributes the audit and is not a grant by itself. The apply JSON adds
+`request: { operationId, action: "retry", target }`, copying the exact preview target.
+For deliberate empty continuation use `action: "continue_fresh"` and also set
+`acceptEmptyWorkspace: true`. Preview is provider-free; apply persists the choice
+but does not dispatch a turn. Retry the chat or send a new message afterwards.
+If the group is active, quiesce its work normally and preview again. Do not edit
+lease JSON, remove archive references, fabricate provider success, or reuse a
+stale target. The historical-checkpoint CLI filename remains a compatibility alias.
+
 An operator may explicitly authorize recovery from an older, verified checkpoint
 after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
 accepts `preview` or `authorize` and a private JSON input file. Preview needs
@@ -2758,8 +2868,9 @@ The selection binds session/group, tenancy and route epochs, lease identity/epoc
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
 The generation gap is not a count of missing edits or files. Conversation and tool
 receipts remain; changes after the checkpoint are unavailable and external effects
-are not undone. Consent never resets to an empty workspace or replays commands
-(the separate system lane below is the only empty-workspace continuation).
+are not undone. Historical checkpoint consent never resets to an empty workspace
+or replays commands; the explicit current-workspace action above and the separate
+system lane below are distinct decisions.
 
 Consent takes the existing workspace tenancy fence exclusively before checking
 complete group membership, including actor-hidden sessions. It then takes the
@@ -3510,7 +3621,7 @@ observation window is never substituted for termination proof.
 box through a non-expiring interaction holder, so before migration 0705 an
 open browser or desktop that nobody used kept its Modal box warm until the
 provider deadline. They now follow the general idle grace
-(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default one minute, never under one minute);
 there is no separate window.
 
 Activity is deliberate and durable: the newest of the interaction holder's
@@ -3591,7 +3702,8 @@ there returns the candidate to active instead of stranding it in
 `suspending`. Up to three candidates are tried; when none can be saved, the
 create fails with the controller's `capacity_exhausted` error as before.
 Nothing happens below the limit. The saved browser resumes from its working
-copy on its next open.
+copy on its next open; a resume that reaches a full controller makes room the
+same way, once, without saving the browser being resumed.
 
 Downloads kept when a browser is saved (by capacity, an explicit suspend or a
 deadline checkpoint) follow the browser's chat, whoever's request stops it:

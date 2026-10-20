@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "c399e3160ec200c8a9b4d2078c2a5f4e45d430310b3a7e466466c4e88ed21377"
+      "sha256": "cfec1c45d48c26d1e02cfa3a1a2b2b36fc5541c2986673d35fb68a81c84a5131"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "89e70d63097b07c71d99203afe965789e94a131e16cccb73f05ecf56cdf6556b"
+      "sha256": "6805bdded9e4fb8547c18a446a82967f7b2b223f73f152c0ed2d9d29a83d8e2e"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -26,7 +26,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "fd10ad3b8823353d35fa65de7a0332f5b33e6eac1cff16c340b160fef179f980"
+      "sha256": "ab5f8efc7a399d0561618a24c1a5090e3eb39467579d82614ed54b44b0b25788"
+    },
+    {
+      "path": ".github/workflows/compute-ci.yml",
+      "sha256": "16ffc44d2ff8b13f639f1618ee2d1ce17a463c591f02de471a53ac5f8bfd01f3"
+    },
+    {
+      "path": ".github/workflows/compute-release.yml",
+      "sha256": "d855ba559b6fdaaed5dcba2680d1df4d4c93731fc1fdf61e49543896727456bb"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -46,7 +54,7 @@
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "7c61ecd027bc59bdcf196600364de9a706f6ae9cecb86185f5b376d9b4fe51b9"
+      "sha256": "95e967b74b5e74c0f6d51b67c6d080e58975994df4b600cf0dc699487cc0b906"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -66,11 +74,11 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "3df4a6050c9448b76421708eea7b15a4d50222c4237898651bbc379a50cb1245"
+      "sha256": "68f381c17bf4e9086912c932b0834f0bf89bf08959e713facf3d159213b37f50"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "17902076236fd5cccd0d82163ecff8a126e18067e6c1784d5fae5a3e20b48764"
+      "sha256": "d4d7ab1c0aaa8314f2005cc74a287a75684f2f55ea917cb07e26a008bb2ac1e0"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -265,7 +273,13 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "6670c980f74155967c09fd3c8fe0be8c8882ee56bc5b23f56b80ef27fd7f669a"
+      "sha256": "0472457afcd7d85cf00dddf60b569a51a0e4a670237f69eed4789634ca1c9e96"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
+      "step": "Install the pinned nats-server for the agent's wire tests",
+      "sha256": "e25b35e241487667e4e4757f0268f42f7d3463758af56e2b608d027599803ef0"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -367,7 +381,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS codesign + notarize (if creds present)",
-      "sha256": "04409b0e9e5fec5243e7686dc8c4c43ce5628c8a45b2a1785b6ebdac17696d06"
+      "sha256": "e969d335e54c74e801ac8817faf163438be50da56e81560b9b13e26f604d327d"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -725,6 +739,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "desktop-image",
+      "step": "Verify anonymous desktop image resolution",
+      "sha256": "ab5bbe2c89fda9f60a36a58dc74323ecf7763c26f2f227afbff4c14b7c1d4854"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "e2e-shards",
       "step": "Install dependencies",
       "sha256": "1d7e772f27cb0541a9370d9b2821a04e9f73a075ba77c2f659b2f52b0026d8fd"
@@ -739,13 +759,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "9a2431314e5cdf5185503a5d6bf04803d26eaeb185e0bd952615ba9c4d6910c2"
+      "sha256": "a3af46be51b64462bbe19dfc3a19f52773b66ef09f962bf3a1b68d9bafa03c00"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Write exact-main-SHA canary receipt",
-      "sha256": "af201a1f4f55151cc8f220d4f0911f1fc0bda4aece1fa5c17ed367a1db8a5962"
+      "sha256": "2409d2f9e94791492054700adab22bf4fa270d42093d2ae2e9476ec47be44b5d"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -925,7 +945,163 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "unit-shards",
       "step": "Install dependencies",
-      "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
+      "sha256": "e4fcbcf8dfa696270d7185fee7c21706af0a4b314368f407203418f3493dbeb2"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "e2e environment and suite",
+      "sha256": "5f13978a7bff282d3bc0d7be388a5b59d0357f50fc323ef74fff5efa89890d41"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "Helm chart (computeControl)",
+      "sha256": "543a48014150e1b5810c5985f563e66f121a36d590970abd0988f6c8bf2307fd"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "host certificate script",
+      "sha256": "92af6a4b63b454ad64c35314b9dc08534cdc4fb8d446c7a0f0649f775a3f1a15"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "shellcheck",
+      "sha256": "beefde52b8bae1aa2c7d010993b6212c825bf417cffae639a74c6c18a0a8a499"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "deploy",
+      "step": "Terraform (GCP host fleet)",
+      "sha256": "cff12b37177650c612d1bf7fabe8b3fac4c08b8e709521a41c94ba709b93e36a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "An XFS lab directory, and access to KVM",
+      "sha256": "cb761c3ff64f20eb15ade51d55c4212283d6628554277b1264e1e1d3c891f5f9"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Collect the conformance logs and results",
+      "sha256": "2e66cee0781d1130b081db7a1de0e5b3ee5fa32cf6c2fe5a05904a0cfcca3d1a"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Huge pages for the nested profile",
+      "sha256": "95ace5da0c3accf0b6d576b14a4506fa109de0c2eb8739bb1139bbd08be122e3"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Let sandbox traffic through Docker's firewall",
+      "sha256": "5051d376141b7e70aca44d9c1b14a14f3dbeebb0aa862c0142bb13e4257010ba"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Room on the runner",
+      "sha256": "49012d547b62cf07a5a7f4255247aecb52dee7ff91461a623b33f534cb7d4b84"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "The KVM gate",
+      "sha256": "0f605ce130a7a0a2a6c76a757d0550ab06e959b74a23d40b56232df4aaa3d277"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "kvm",
+      "step": "Where the lab's room went",
+      "sha256": "1cdcefa60960582c3abfc26ced0adc8c68c9656fdf26c103b328cdc1bf0765e7"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo arch",
+      "sha256": "7a1bc979d1308bc67ba4e10935cee3be6257c8d861dc42d75f767ef8879e7769"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo clippy (pedantic, warnings are errors)",
+      "sha256": "f5cb547cc89e43791988fa529300a795f18cb9c3ee32b499d1f5aa4ba86e5415"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "lint",
+      "step": "cargo fmt --check",
+      "sha256": "2e27c7a50050056bc3abfdc9d6c0a957bf911f574b72155ec9bbdda7b4c0ced8"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "An XFS directory for the checkpoint tests",
+      "sha256": "3536d57583ed03dfdab080533839b5c40282db074d225bf20af102194693bcc3"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "cargo test --workspace",
+      "sha256": "7720250bac9a13e634839d616a7274b06b8d8b0c1870fd8d3cc7bceccf4f34f0"
+    },
+    {
+      "workflow": ".github/workflows/compute-ci.yml",
+      "job": "test",
+      "step": "Smoke framework tests",
+      "sha256": "738fe76d4eff704d48a722dae727cf2c89aeb01bce648cb8d664993856a51a9c"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "control-image",
+      "step": "Check the pushed image runs",
+      "sha256": "acb9b963deed51022b904165b935d3fb25476646187024e5b70934c455bce865"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "guard",
+      "step": "Resolve the version",
+      "sha256": "3ce1a09c7b1412d30e3ecdb0843dd23f1ef93e271f936f955350833d5d8b8fc6"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Build it again elsewhere; the two must match",
+      "sha256": "fd6daa4fdf3ed764bccd4dcf6cf2854f52371860ac811ab62b7db679a2505081"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Build the bundle",
+      "sha256": "9f2c3305775376b34cda1a5835aafb3887608496e7044de5eae2c8168ee57e85"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "host-bundle",
+      "step": "Tools",
+      "sha256": "45d8b98b7c13d3b442e7aac0fc3c5f4a57befee48717220731f81e7ec8f58023"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "promote",
+      "step": "Name the candidate",
+      "sha256": "448805c8f4036248eab08575cbcab4632f630f2b40ba11a231c1838099367a23"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "promote",
+      "step": "Wait for Compute CI on this commit",
+      "sha256": "11747eb1eb5164ecd35d50ec176deb75b9c1df1de205905c93bcf95f8b6a20cf"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "publish",
+      "step": "SHA256SUMS",
+      "sha256": "9c5b7317a003c784f2481e26bd0e9431154250b4de16517cbcefa97a5bb81c53"
     },
     {
       "workflow": ".github/workflows/deprecate-pre-1.0.yml",
@@ -1075,7 +1251,7 @@
       "workflow": ".github/workflows/open-version-pr.yml",
       "job": "version",
       "step": "Install dependencies",
-      "sha256": "d49a8117b6f9103df4e23d9b163453bde1977e4bbf8b612304d7e3eab784cbae"
+      "sha256": "2f3cbebfa070c23adcaf5e3225846728d14008e1c2f007e5863805be2f78241c"
     },
     {
       "workflow": ".github/workflows/production-pr-heads.yml",
@@ -1151,6 +1327,18 @@
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
+      "job": "confirm",
+      "step": "Install controller dependencies without lifecycle scripts",
+      "sha256": "ad98aac8bcf007208b9f6455c627e3e045c3be0f9f14f5ba9de1d6c04abb31ba"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "confirm",
+      "step": "Wait for npm to serve the accepted cohort",
+      "sha256": "91f0c090e4207dfe7a252a1887e7cdc935537d1fd3e797b4b68602af5570bf64"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Admit exact source and CI",
       "sha256": "dc894f956640654d7075246f3d4a8ad042575fbdd55f687a74dd0fad793b8adc"
@@ -1189,7 +1377,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "0cb9c571b7799a7b28947d061a45817f3bc25d8eccc3c3443c948454f0fbd408"
+      "sha256": "9152611098866280b2e6eea496cf456998ba2813cd45610f7f80d90e093686e8"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

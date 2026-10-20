@@ -14,6 +14,7 @@ import {
 import { join, resolve } from "node:path";
 import {
   CanaryReceiptStore,
+  canaryErrorCategory,
   canaryResponseHeaders,
   withCanaryReadSignal,
 } from "./canary-publication-receipts";
@@ -49,6 +50,7 @@ export type Controller = { source: string; runId: string; attempt: string };
 export type FileReference = { file: string; bytes: number; sha256: string };
 const REGISTRY = "https://registry.npmjs.org";
 const API = `https://api.github.com/repos/${REPOSITORY}`;
+const CONFIRM_JOB = "Confirm canary.N registry receipts";
 export const RECOVERY_LIMITS = Object.freeze({
   deadlineMs: 900_000,
   requestMs: 30_000,
@@ -123,11 +125,23 @@ export function admitFailedPublisher(
   );
   const listed = object(jobs),
     rows = array(listed.jobs);
+  const named = (name: string) => rows.map(object).filter((row) => row.name === name);
+  const [job, ...extraPublishJobs] = named("Publish canary.N");
+  const [confirmation, ...extraConfirmJobs] = named(CONFIRM_JOB);
   requireThat(
-    listed.total_count === rows.length && rows.length === 1,
+    !(job?.conclusion === "success" && confirmation?.conclusion === "failure"),
+    `This publisher attempt's writes all succeeded and only "${CONFIRM_JOB}" failed; ` +
+      "re-run that failed job in the publisher run instead of reconciling",
+  );
+  requireThat(
+    listed.total_count === rows.length &&
+      job !== undefined &&
+      extraPublishJobs.length === 0 &&
+      extraConfirmJobs.length === 0 &&
+      rows.length === (confirmation ? 2 : 1) &&
+      (!confirmation || confirmation.conclusion === "skipped"),
     "Publisher job inventory differs",
   );
-  const job = object(rows[0]);
   requireThat(
     job.name === "Publish canary.N" &&
       job.status === "completed" &&
@@ -139,18 +153,13 @@ export function admitFailedPublisher(
   );
   const steps = array(job.steps).map(object);
   const publish = steps.findIndex((s) => s.name === "Publish canary versions");
-  const site = steps.findIndex(
-    (s) => s.name === "Retain exact Site package pins for this deployment",
-  );
   const receipts = steps.findIndex(
     (s) => s.name === "Retain bounded publication and registry receipts",
   );
   requireThat(
     publish > 0 &&
-      site === publish + 1 &&
-      receipts === site + 1 &&
+      receipts === publish + 1 &&
       steps[publish]?.conclusion === "failure" &&
-      steps[site]?.conclusion === "skipped" &&
       steps[receipts]?.conclusion === "success" &&
       steps.slice(0, publish).every((s) => s.conclusion === "success") &&
       steps.filter((s) => s.conclusion === "failure").length === 1 &&
@@ -167,8 +176,13 @@ export function admitFailedPublisher(
       !all.some((a) => a.name === `site-package-versions-${origin.source}`),
     "Publisher Site delivery is not absent",
   );
-  const matches = all.filter((a) => a.name === `canary-publication-receipts-${origin.source}`);
-  requireThat(matches.length === 1, "Publisher receipt artifact absent or ambiguous");
+  // Each attempt retains its own receipts; the run lists every attempt's artifacts.
+  const receiptName = `canary-publication-receipts-${origin.source}-${origin.attempt}`;
+  const matches = all.filter((a) => a.name === receiptName);
+  requireThat(
+    matches.length === 1,
+    `Publisher receipt artifact ${receiptName} is ${matches.length ? "ambiguous" : "absent"}`,
+  );
   const artifact = matches[0]!,
     workflow = object(artifact.workflow_run);
   requireThat(
@@ -456,6 +470,8 @@ export class RecoveryGets {
     const signal = AbortSignal.timeout(
       Math.max(1, Math.ceil(Math.min(this.requestMs, this.remaining()))),
     );
+    let status: number | undefined;
+    let stage = "request";
     try {
       const response = await withCanaryReadSignal(
         this.request(url, {
@@ -476,19 +492,40 @@ export class RecoveryGets {
         }),
         signal,
       );
+      status = response.status;
+      stage = "body";
       const retained = await this.store.body(response, label, available, signal, (count) => {
         this.used[kind] += count;
       });
+      stage = "admission";
       requireThat(this.remaining() > 0, "Recovery stage deadline exceeded");
       requireThat(
         response.status === 200 || (kind === "zip" && provider && response.status === 302),
         "GET returned unsupported status",
       );
       return { ...retained, status: response.status, location: response.headers.get("location") };
-    } catch {
+    } catch (error) {
       this.failed = true;
-      this.store.record("GET_FAILED", { label, noRetry: true });
-      throw new Error("Recovery GET failed; no retry");
+      // Only fixed diagnostics: transport errors and redirect URLs can carry credentials.
+      const reason =
+        stage === "admission" && error instanceof Error
+          ? error.message
+          : canaryErrorCategory(error) === "request_timeout"
+            ? "request timed out"
+            : stage === "body"
+              ? "response body could not be retained"
+              : "request failed";
+      this.store.record("GET_FAILED", {
+        label,
+        stage,
+        status: status ?? null,
+        reason,
+        noRetry: true,
+      });
+      // eslint-disable-next-line preserve-caught-error
+      throw new Error(
+        `Recovery GET ${label} failed (${reason}${status === undefined ? "" : `, HTTP ${status}`}); no retry`,
+      );
     }
   }
   async provider(path: string, label: string): Promise<unknown> {
@@ -784,7 +821,7 @@ type ReconciliationOptions = {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     timeoutMs?: number;
-    maxReads?: number;
+    pollIntervalMs?: number;
   };
 };
 class RecoveryMetadataStore extends CanaryReceiptStore {
@@ -993,6 +1030,21 @@ export async function reconcileAcknowledgedCanaries(
   return { origin, controller, ...result };
 }
 
+/** Retains why reconciliation held and returns the error that reports it. */
+export function holdReconciliation(store: RecoveryStore, error: unknown): Error {
+  // Every message reaching here is a fixed or already-sanitized diagnostic.
+  const reason = error instanceof Error ? error.message : "unknown failure";
+  store.record("RECONCILIATION_HELD", {
+    reason,
+    publisherConclusion: "failure",
+    providerSiteArtifact: "absent",
+    noReplay: true,
+  });
+  return new Error(
+    `Canary reconciliation held: ${reason}. Retained evidence only, no publication retry`,
+  );
+}
+
 export async function main() {
   const root = resolve(import.meta.dir, ".."),
     head = git(root, ["rev-parse", "HEAD"]).toString().trim();
@@ -1061,13 +1113,10 @@ export async function main() {
     process.stdout.write(
       "Verified linked GET-only reconciliation; failed publisher conclusion preserved.\n",
     );
-  } catch {
-    store.record("RECONCILIATION_HELD", {
-      publisherConclusion: "failure",
-      providerSiteArtifact: "absent",
-      noReplay: true,
-    });
-    throw new Error("Canary reconciliation held; retained evidence only, no publication retry");
+  } catch (error) {
+    const held = holdReconciliation(store, error);
+    process.stdout.write(`::error::${held.message}\n`);
+    throw held;
   }
 }
 if (import.meta.main) await main();

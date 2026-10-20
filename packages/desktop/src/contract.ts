@@ -28,7 +28,9 @@ export type DesktopCapability =
   /** Open a URL in the default browser. */
   | "openExternal"
   /** Menu bar and keyboard commands for the web app to carry out. */
-  | "commands";
+  | "commands"
+  /** A shortcut sends the window the person is looking at into the composer. */
+  | "appShots";
 
 /**
  * What the app's menus and shortcuts ask the web app to do. A page that does
@@ -67,6 +69,86 @@ export type {
 } from "@opengeni/sdk/this-computer";
 
 export type Unsubscribe = () => void;
+
+/** A modifier key pressed on both sides of the keyboard at once. */
+export type DesktopAppShotModifier = "command" | "option" | "control" | "shift";
+
+/**
+ * What triggers an app-shot: both keys of a modifier pair (both Command keys
+ * by default on macOS), or an ordinary key combination in Electron's
+ * accelerator syntax, e.g. "CommandOrControl+Shift+2".
+ */
+export type DesktopAppShotShortcut =
+  | { kind: "modifierPair"; modifier: DesktopAppShotModifier }
+  | { kind: "accelerator"; accelerator: string };
+
+export interface DesktopAppShotSettings {
+  /** Off until the person turns it on. */
+  enabled: boolean;
+  shortcut: DesktopAppShotShortcut;
+}
+
+/** The system permissions an app-shot needs, where the system asks for them. */
+export type DesktopAppShotPermissionId = "screenRecording" | "accessibility";
+
+export interface DesktopAppShotStatus {
+  settings: DesktopAppShotSettings;
+  /** App-shots work on this computer. */
+  supported: boolean;
+  /** The modifier pairs this computer can watch for. */
+  modifierPairs: DesktopAppShotModifier[];
+  /** Where the system asks (macOS): whether each permission is allowed. */
+  permissions: { id: DesktopAppShotPermissionId; granted: boolean }[];
+  /** On, but the shortcut could not be set up (e.g. another app owns it). */
+  shortcutError: string | null;
+}
+
+/** The page in a captured web browser window. */
+export interface DesktopAppShotBrowser {
+  /** The page's address (http or https). */
+  url: string;
+  /** A Chromium-based browser, which can carry the Opengeni browser extension. */
+  chromium: boolean;
+}
+
+/** A window captured by the shortcut, for the web app to attach. */
+export interface DesktopAppShot {
+  /** PNG bytes of the window. */
+  image: Uint8Array;
+  mimeType: "image/png";
+  app: string;
+  bundleId?: string;
+  title: string;
+  /** ISO timestamp. */
+  capturedAt: string;
+  platform: DesktopPlatform;
+  /** The window's accessibility text, when it could be read. */
+  text?: string;
+  /** Not all of the text was kept. */
+  textTruncated?: boolean;
+  /** The window as the system identifies it. */
+  window?: { processId: number; windowId: number };
+  /** When the window is a web browser's, the page it shows. */
+  browser?: DesktopAppShotBrowser;
+}
+
+/** Why a capture produced nothing to attach. */
+export type DesktopAppShotErrorCode =
+  /** A system permission is missing; `permission` names it. */
+  | "permission"
+  /** No other app's window was on screen. */
+  | "no_window"
+  | "failed";
+
+export type DesktopAppShotResult =
+  | { ok: true; shot: DesktopAppShot }
+  | {
+      ok: false;
+      code: DesktopAppShotErrorCode;
+      permission?: DesktopAppShotPermissionId;
+      /** A plain English sentence. */
+      message: string;
+    };
 
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
@@ -113,6 +195,24 @@ export interface DesktopBridge {
   };
   /** Follow the web app's appearance, so window materials and controls match it. */
   setAppearance(appearance: "light" | "dark" | "system"): void;
+  /** App-shots. With the `appShots` capability. */
+  readonly appShots?: {
+    status(): Promise<DesktopAppShotStatus>;
+    /** Change the settings; the shortcut follows at once. */
+    update(settings: Partial<DesktopAppShotSettings>): Promise<DesktopAppShotStatus>;
+    /**
+     * Ask for one permission: the system prompt the first time, then its list
+     * in System Settings with the app's guide beside it.
+     */
+    requestPermission(id: DesktopAppShotPermissionId): Promise<void>;
+    /**
+     * Captures from the shortcut (the window then comes to the front), and
+     * their failures. Only the newest listener receives them.
+     */
+    onCapture(listener: (result: DesktopAppShotResult) => void): Unsubscribe;
+    /** Settings, permissions or the shortcut's state changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
@@ -149,6 +249,11 @@ export const DESKTOP_IPC = {
   openExternal: "og:open-external",
   command: "og:command",
   appearanceSet: "og:appearance:set",
+  appShotsStatus: "og:app-shots:status",
+  appShotsUpdate: "og:app-shots:update",
+  appShotsRequestPermission: "og:app-shots:request-permission",
+  appShotsCaptured: "og:app-shots:captured",
+  appShotsChanged: "og:app-shots:changed",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",

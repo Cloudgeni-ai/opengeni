@@ -66,6 +66,7 @@ import { applySessionArchiveProjection } from "@/lib/session-pagination";
 import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
+import { windowControlsInPage } from "@/lib/desktop";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("@/components/session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -74,7 +75,7 @@ const LazySessionTenancyRouteControl = lazy(() =>
 );
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
-function RailBody() {
+export function RailBody() {
   const rail = useRail();
   const [mobileSection, setMobileSection] = useState<"sessions" | "workspace">("sessions");
   const sessionsTabRef = useRef<HTMLButtonElement>(null);
@@ -93,14 +94,21 @@ function RailBody() {
       data-rail
       className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
     >
+      {/* Native macOS controls sit over this row. Keep it outside the clipped
+          viewport so navigation cannot scroll underneath them. */}
+      {windowControlsInPage ? (
+        <div data-rail-window-controls className="relative z-10 shrink-0 pb-3">
+          <RailHeader showSwitcher={false} />
+        </div>
+      ) : null}
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          <RailHeader />
+          {!windowControlsInPage ? <RailHeader /> : null}
 
-          {rail.collapsed ? <SwitcherBlock /> : null}
+          {rail.collapsed || windowControlsInPage ? <SwitcherBlock /> : null}
 
           {rail.isMobile ? (
             <>

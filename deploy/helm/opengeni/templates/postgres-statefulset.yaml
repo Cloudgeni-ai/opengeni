@@ -96,6 +96,10 @@ spec:
         - name: postgres
           image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          {{- with .Values.postgres.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             {{- toYaml .Values.postgres.securityContext | nindent 12 }}
           {{- with .Values.postgres.parameters }}

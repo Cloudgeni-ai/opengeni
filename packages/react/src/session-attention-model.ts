@@ -60,3 +60,20 @@ export function sessionAttentionReadThroughSequence(events: readonly SessionEven
   }
   return 0;
 }
+
+/**
+ * Where an open conversation should be acknowledged through, and whether it
+ * needs it: the server says unread, or a newer attention boundary has been
+ * delivered since the session row was read. The frontier never moves for
+ * streaming activity, so a reader writes personal state once per boundary.
+ */
+export function readAcknowledgementFrontier(
+  session: { unread?: boolean | undefined; lastSequence?: number | undefined } | null | undefined,
+  attentionThrough: number,
+): { readThrough: number; unread: boolean } {
+  const lastSequence = session?.lastSequence ?? 0;
+  return {
+    readThrough: Math.max(lastSequence, attentionThrough),
+    unread: Boolean(session?.unread) || attentionThrough > lastSequence,
+  };
+}

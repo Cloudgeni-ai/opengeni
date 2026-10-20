@@ -33,7 +33,8 @@ import {
   isAgentWithFullAccess,
   requireFullAccessIfAgent,
 } from "../http/acting-person";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 /* ----------------------------------------------------------------------------
    Admin access for agent sessions.

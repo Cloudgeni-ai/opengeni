@@ -2816,6 +2816,37 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.session).toBe(defaultBackend);
   });
 
+  test("a machine shared from another workspace is addressed in its own workspace", async () => {
+    const machineWorkspace = "22222222-2222-2222-2222-222222222222";
+    const responder = new MockAgentResponder();
+    const subjects: string[] = [];
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection: async () => ({
+        ...(await resolveSelfhostedConnection()),
+        workspaceId: machineWorkspace,
+      }),
+      controlRpcFactory: () => ({
+        request: async (subject, request, options) => {
+          subjects.push(subject);
+          return await responder.request(subject, request, options);
+        },
+      }),
+      relay: RELAY,
+    });
+    const r = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 1 });
+    await (r.session as SandboxSessionLike)
+      .readFile({ path: "/home/user/project/x" })
+      .catch(() => undefined);
+    expect(subjects.length).toBeGreaterThan(0);
+    for (const subject of subjects) {
+      expect(subject.startsWith(`agent.${machineWorkspace}.`)).toBe(true);
+    }
+  });
+
   test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
     const original = new FakeBackend("group-before-repair");
     const replacement = new FakeBackend("group-after-repair");

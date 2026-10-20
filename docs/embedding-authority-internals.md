@@ -226,8 +226,8 @@ Inline visualizations receive the shared visualization stylesheet and helper scr
 with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
 The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
 generates both the renderer constants and the visualization skill’s preview/export
-assets from them. The default opengeni-visualize skill owns detailed inline design
-guidance; the main operational prompt only routes to it and to opengeni-sites.
+assets from them. The default visualize skill owns detailed inline design
+guidance; the main operational prompt only routes to it and to sites.
 Markdown image references use artifact:<uuid>. The native chat resolves metadata
 through the current workspace API and reuses the retained-artifact image loader
 (object URL cleanup, unavailable states, and current viewer authentication).

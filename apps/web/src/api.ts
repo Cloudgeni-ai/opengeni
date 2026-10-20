@@ -8,6 +8,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
 } from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { desktopAppHeaders } from "./lib/desktop";
 import { userActivityHeaders } from "./lib/user-activity";
 
 import type { AuthSession, ClientConfig } from "./types";
@@ -16,7 +17,12 @@ import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "./lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { browserAccountBridgeBlockersSnapshot } from "./lib/browser-account-bridge";
-import { decideVoiceDeployment, type VoiceDeploymentDecision } from "./lib/voice-deployment-guard";
+import {
+  decideVoiceDeployment,
+  voiceRelaunchUrl,
+  withVoiceDeploymentGuard,
+  type VoiceDeploymentDecision,
+} from "./lib/voice-deployment-guard";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -195,7 +201,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
-    headers: () => ({ ...authHeaders(), ...userActivityHeaders() }),
+    headers: () => ({ ...authHeaders(), ...userActivityHeaders(), ...desktopAppHeaders() }),
     fetch: async (input, init) => {
       const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
       if (actorBound) {
@@ -861,6 +867,7 @@ export async function requestResponse(path: string, init?: RequestInit): Promise
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...authHeaders(),
       ...userActivityHeaders(),
+      ...desktopAppHeaders(),
       ...init?.headers,
     },
   });
@@ -1373,6 +1380,21 @@ function voiceReloadBlocked(): boolean {
 /** A stale tab that cannot reload right now says so plainly. */
 export function showVoiceUpdatePrompt(): void {
   showApiUpdateNotice(false);
+}
+
+/**
+ * The client a voice call runs on. Live voice starts only from the current
+ * build: a stale tab reloads once onto `sessionHref()` and resumes voice there
+ * via `?realtime=`.
+ */
+export function voiceRealtimeClient<
+  C extends { beginSessionRealtime: (...args: never[]) => Promise<unknown> },
+>(client: C, sessionHref: () => string): C {
+  return withVoiceDeploymentGuard(client, {
+    decide: checkVoiceDeployment,
+    relaunch: (model) => window.location.assign(voiceRelaunchUrl(sessionHref(), model)),
+    prompt: showVoiceUpdatePrompt,
+  });
 }
 
 function reloadIfStaleDeployment(config: ClientConfig): void {

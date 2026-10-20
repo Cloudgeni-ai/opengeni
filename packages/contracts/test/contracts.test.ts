@@ -36,6 +36,8 @@ import {
   KnowledgeMemorySearchRequest,
   KnowledgeSearchResponse,
   mergeToolRefs,
+  SessionMcpServerInput,
+  ToolRef,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
   SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
@@ -357,7 +359,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "Opengeni is temporarily unavailable — retry.",
+          message: "The workspace is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -367,7 +369,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",
@@ -381,7 +383,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient Opengeni credits",
+          message: "insufficient workspace credits",
           retryable: false,
         },
       }),
@@ -389,7 +391,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient Opengeni credits",
+        message: "insufficient workspace credits",
         retryable: false,
       },
     });
@@ -3026,6 +3028,46 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
+  });
+
+  test("mergeToolRefs: eager tool lists unite in first-seen order and true wins", () => {
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search", "get"] }],
+        [{ kind: "mcp", id: "app", eager: ["get", "list"] }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search", "get", "list"] }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", eager: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: true }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search"] }]);
+    expect(
+      mergeToolRefs([{ kind: "mcp", id: "app", eager: [] }], [{ kind: "mcp", id: "app" }]),
+    ).toEqual([{ kind: "mcp", id: "app" }]);
+  });
+
+  test("ToolRef and session MCP attachments accept an exact eager tool list", () => {
+    expect(
+      ToolRef.parse({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] }),
+    ).toEqual({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] });
+    expect(ToolRef.parse({ kind: "mcp", id: "app", eager: true }).eager).toBe(true);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: [""] }).success).toBe(false);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: "search" }).success).toBe(false);
+    expect(
+      SessionMcpServerInput.parse({
+        id: "app",
+        url: "https://app.example.test/mcp",
+        eager: ["search_records"],
+      }).eager,
+    ).toEqual(["search_records"]);
   });
 });
 

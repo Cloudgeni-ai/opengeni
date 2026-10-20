@@ -939,15 +939,19 @@ function ScheduleAside({
   const machine = machineId
     ? fleet.machines.find((candidate) => candidate.sandboxId === machineId)
     : undefined;
-  const where = machineId
-    ? `${machine?.name ?? "Connected machine"}${
-        task.agentConfig.machineTarget?.workingDir
-          ? ` · ${task.agentConfig.machineTarget.workingDir}`
-          : ""
-      }`
-    : task.runMode === "existing_session"
-      ? "Where the chat runs"
-      : "Managed sandbox";
+  const where = scheduleInheritsChatSettings(task)
+    ? "Where the chat runs"
+    : task.agentConfig.executionTarget === "workspace_default"
+      ? "Workspace default"
+      : machineId
+        ? `${machine?.name ?? "Connected machine"}${
+            task.agentConfig.machineTarget?.workingDir
+              ? ` · ${task.agentConfig.machineTarget.workingDir}`
+              : ""
+          }`
+        : task.runMode === "existing_session"
+          ? "Where the chat runs"
+          : "Managed sandbox";
   return (
     <DetailAside label={`About ${task.name}`}>
       <DetailAsideItem label="Owner">

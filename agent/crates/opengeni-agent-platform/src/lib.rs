@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+mod continuous_clock;
 mod desktop;
 mod error;
 #[cfg(unix)]
@@ -39,6 +40,7 @@ mod native;
 #[cfg(unix)]
 mod process_cleanup;
 mod pty;
+pub mod run_as;
 pub mod service;
 pub mod transactional_write;
 mod work_scope;
@@ -60,6 +62,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use continuous_clock::continuous_time;
 pub use opengeni_agent_engine::update_drain::WorkReservation;
 pub use work_scope::{
     current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,
@@ -128,11 +131,31 @@ pub struct BrowserControlEndpoint {
     pub sidecar_generation: String,
 }
 
-/// Host-owned lifecycle seam for browserd.
-///
-/// The agent binary implements this because it owns installation paths,
-/// configuration storage, and child-process shutdown. The platform and relay
-/// crates depend only on this narrow capability, never on Bun/browserd details.
+/// Content-free evidence about work that must survive or finish before update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBlocker {
+    /// Stable category; never command text, URLs or filesystem paths.
+    pub kind: String,
+    /// Opaque session/operation identity, when known.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Number of retained owners in this category.
+    pub count: u32,
+}
+
+/// One atomic controller admission proof and its retained owners.
+#[derive(Debug, Clone)]
+pub struct UpdateAdmission {
+    /// True only when restart preserves all owned work.
+    pub idle: bool,
+    /// Diagnostic evidence, not authorization to end the named work.
+    pub blockers: Vec<UpdateBlocker>,
+}
+
+/// Host-owned lifecycle seam for browserd. The agent binary owns installation,
+/// configuration and child-process shutdown; platform/relay crates depend only
+/// on this boundary, never on Bun/browserd details.
 #[async_trait]
 pub trait BrowserControlBackend: Send + Sync {
     /// Proves every owned browser/computer controller is idle before restart.
@@ -141,7 +164,7 @@ pub trait BrowserControlBackend: Send + Sync {
 
     /// Atomically fence new controller requests and prove existing work ended.
     /// Older controllers cannot provide this proof and must fail closed.
-    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
         let _ = operation_id;
         Err(PlatformError::Unsupported(
             "controller update admission is unavailable".into(),
@@ -357,6 +380,13 @@ pub trait Platform: Send + Sync {
 
     /// Whether this platform implements the transactional upload contract.
     fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform honors a request's `run_as` (Hello
+    /// `Capabilities.run_as`). Platforms that do not must refuse a non-empty
+    /// `run_as` instead of ignoring it.
+    fn run_as_supported(&self) -> bool {
         false
     }
 

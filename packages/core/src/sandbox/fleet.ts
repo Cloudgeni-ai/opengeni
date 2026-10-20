@@ -167,6 +167,17 @@ export type FleetSandboxEntry = {
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
   hasDisplay?: boolean;
   lastSeenAt?: string | null;
+  /** Latest retained update proof; no command text or page contents. */
+  agentVersion?: string | null;
+  agentUpdate?: {
+    status: string;
+    targetVersion: string;
+    errorCode: string | null;
+    requestedAt: string;
+    updatedAt: string;
+    waitingForMs: number | null;
+    blockers: Array<{ kind: string; count: number }>;
+  } | null;
   /** Orthogonal truth dimensions. `liveness` is only their conservative UI
    * projection and is never evidence for a specific dimension. */
   providerStatus: "not_created" | "creating" | "exists" | "missing" | "unknown";
@@ -190,6 +201,31 @@ export type FleetSandboxEntry = {
   archiveGeneration: number | null;
   archiveComplete: boolean;
 };
+
+/** Public update projection omits connection credentials and authority coordinates. */
+export function fleetAgentProgress(
+  enrollment: Pick<EnrollmentRecord, "agentVersion" | "agentUpdate">,
+  now = Date.now(),
+): Pick<FleetSandboxEntry, "agentVersion" | "agentUpdate"> {
+  const update = enrollment.agentUpdate;
+  return {
+    agentVersion: enrollment.agentVersion,
+    agentUpdate: update
+      ? {
+          status: update.status,
+          targetVersion: update.targetVersion,
+          errorCode: update.errorCode,
+          requestedAt: update.requestedAt,
+          updatedAt: update.updatedAt,
+          waitingForMs:
+            update.status === "waiting_for_idle"
+              ? Math.max(0, now - Date.parse(update.requestedAt))
+              : null,
+          blockers: update.blockers ?? [],
+        }
+      : null,
+  };
+}
 
 export type FleetListResult = {
   /** The session's currently-active sandbox id, or null == the group box. */
@@ -271,7 +307,7 @@ export function personalMachineRefusal(
       code: "personal_machine_permission_required",
       reason:
         "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
-        "The owner can allow it from this chat: choose the machine with Use in this chat, then allow it once, for this chat, or always.",
+        "To ask them, call capability_authorization_request once with capabilityId api:connected-machine: the card it posts lets them allow it, so do not describe buttons or steps.",
     };
   }
   if (
@@ -543,6 +579,7 @@ export async function listFleet(
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
+      ...fleetAgentProgress(enrollment),
       providerStatus:
         probe.liveness === "online"
           ? "exists"
@@ -581,9 +618,13 @@ export function fleetAgentNotice(fleet: FleetListResult): string {
     "before answering, call capability_authorization_request once with capabilityId api:connected-machine so they can connect it. They then see what to do, so do not describe buttons, commands or install steps.";
   const unlisted = `If the computer the person means is not in this list, it is not connected: ${offer}`;
   if (computers.length === 0) return `None of the person's computers is connected. ${unlisted}`;
-  if (offline.length === 0) return unlisted;
+  // A listed personal computer may still need its owner's permission for this
+  // chat. Trying it is the way to ask: that refusal shows the owner a card.
+  const allow =
+    "A listed computer may still need its owner to allow this chat: just use it, and if it is not allowed yet, the chat shows the owner a card to allow it.";
+  if (offline.length === 0) return `${unlisted} ${allow}`;
   const names = offline.map((entry) => entry.name).join(", ");
-  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer}`;
+  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer} ${allow}`;
 }
 
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
@@ -948,6 +989,8 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  /** Typed refusal for a personal (Only me) machine this attempt may not use. */
+  code?: PersonalMachineRefusalCode;
   notice?: string;
 };
 
@@ -1048,6 +1091,7 @@ function runOnOperationAdmission(
     transactionalFsWriteMachineSupported:
       enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
@@ -1316,14 +1360,15 @@ export async function runOnSandbox(
         };
       }
     } catch (error) {
+      const refusal = personalMachineRefusal(error);
       return {
         target,
         targetName: sandbox.name,
         kind: op.kind,
         ok: false,
         reason:
-          personalMachineRefusal(error)?.reason ??
-          "personal Connected Machine authority is not live for this attempt",
+          refusal?.reason ?? "personal Connected Machine authority is not live for this attempt",
+        ...(refusal ? { code: refusal.code } : {}),
       };
     }
   }
@@ -1415,6 +1460,10 @@ export async function runOnSandbox(
               transport: new NatsOpStreamTransport(
                 async () => services.bus?.getOpStreamConnection?.() ?? null,
               ),
+              ...(enrollment.agentCapabilities.opRelease === true
+                ? { outputReleaseSupported: true }
+                : {}),
+              connectionGeneration: String(enrollment.connectionGeneration),
             },
           }
         : {}),

@@ -7,6 +7,7 @@ import {
   useEffect,
   useState,
   type ComponentProps,
+  type ReactNode,
 } from "react";
 
 import { Field, TextInput } from "@/components/ui/field";
@@ -15,6 +16,7 @@ import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { returnToSearch, type ReturnTo } from "@/lib/return-to";
+import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
 
 /**
  * Where a Models page lives: Organization settings > Models, opened through
@@ -89,13 +91,13 @@ export function modelsScopeLabels(
 /**
  * The tag of an organization account, from its "Available in": everyone,
  * one named workspace, selected workspaces or people, or none. "Shared by
- * Acme" until the policy is known.
+ * Acme" is never guessed while the policy is unknown.
  */
 export function organizationReachLabel(
   labels: ModelsScopeLabels,
   access: ModelConnectionAccessResponse | null | undefined,
-): string {
-  if (!access) return labels.organization;
+): ReactNode {
+  if (!access) return <ModelSettingsPlaceholder />;
   const { policy, personalWorkspacesSupported } = access;
   if (policy.allowedPeople) return policy.allowedPeople.length ? "Selected people" : "No one";
   const personal = personalWorkspacesSupported && policy.allowPersonalWorkspaces;

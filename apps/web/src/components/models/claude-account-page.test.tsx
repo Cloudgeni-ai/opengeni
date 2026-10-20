@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { invalidateModelSettingsQueries } from "@/lib/shared-query";
 let createRoot: typeof import("react-dom/client").createRoot;
 let useClaude: typeof import("./use-claude-subscriptions").useClaudeSubscriptions;
 let ClaudeAccountPage: typeof import("./claude-subscription-models").ClaudeAccountPage;
@@ -78,6 +79,7 @@ test("Enable account shows Enabled or Disabled and still maps to the allocator",
   const client = {
     listClaudeSubscriptionAccounts: list,
     getClaudeSubscriptionAccountUsage: async () => baseUsage,
+    refreshClaudeSubscriptionAccountUsage: async () => baseUsage,
     getModelConnectionAccess: async () => null,
     setClaudeSubscriptionAccountAllocator: async (...args: unknown[]) => {
       calls.push(args);
@@ -154,17 +156,13 @@ for (const [organization, poll] of [
         ...baseUsage,
         refreshStatus: reconnect ? "reconnect" : "not_checked",
       });
-      const refresh = async () => {
-        reconnect = true;
-        return read();
-      };
       const client = {
         listClaudeSubscriptionAccounts: list,
         listOrganizationClaudeSubscriptionAccounts: list,
         getClaudeSubscriptionAccountUsage: read,
         getOrganizationClaudeSubscriptionAccountUsage: read,
-        refreshClaudeSubscriptionAccountUsage: refresh,
-        refreshOrganizationClaudeSubscriptionAccountUsage: refresh,
+        refreshClaudeSubscriptionAccountUsage: read,
+        refreshOrganizationClaudeSubscriptionAccountUsage: read,
         getModelConnectionAccess: async () => null,
       };
       function Harness() {
@@ -182,18 +180,26 @@ for (const [organization, poll] of [
         'button[aria-label="Check usage now"]',
       )!;
       await act(async () => {
+        reconnect = true;
         if (poll) {
-          reconnect = true;
+          // A visibility event must not force a live check inside freshness.
           document.dispatchEvent(new Event("visibilitychange"));
         } else refreshButton.click();
       });
+      if (poll) {
+        expect(reads).toBe(1);
+        expect(pool.accounts[0]!.status).toBe("active");
+        await act(async () => invalidateModelSettingsQueries(client));
+      }
       expect(container.textContent).toContain("Claude no longer accepts this token.");
       expect(container.querySelector('[data-slot="notice"]')).not.toBeNull();
-      expect(reads).toBe(2);
+      // Global refresh re-reads metadata, then the live reconnect receipt
+      // reconciles the account; a meter-only refresh only needs the latter.
+      expect(reads).toBe(poll ? 3 : 2);
       expect(pool.accounts[0]!.status).toBe("needs_relogin");
       expect(container.textContent).toContain("Sign in to Claude again");
       await act(async () => document.dispatchEvent(new Event("visibilitychange")));
-      expect(reads).toBe(2);
+      expect(reads).toBe(poll ? 3 : 2);
     },
   );
 }
@@ -231,6 +237,7 @@ for (const [outcome, changeScope] of [
           },
         }),
         getClaudeSubscriptionAccountUsage: async () => baseUsage,
+        refreshClaudeSubscriptionAccountUsage: async () => baseUsage,
         getModelConnectionAccess: async () => null,
         disconnectClaudeSubscriptionAccount: async () => {
           disconnects++;

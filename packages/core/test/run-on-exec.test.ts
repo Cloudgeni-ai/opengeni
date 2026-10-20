@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import {
   FakeOpRunner,
@@ -245,7 +245,7 @@ describe("run_on Connected Machine exec receipts", () => {
 
   test("<deadline exit 0 and nonzero preserve exact terminal status", async () => {
     const runner = new InMemoryMachineRunner({
-      clean: { durationMs: 119_999, exitCode: 0, stdout: "clean\n" },
+      clean: { durationMs: 31_000, exitCode: 0, stdout: "clean\n" },
       nonzero: { durationMs: 1, exitCode: 7, stderr: "failed\n" },
     });
 
@@ -272,27 +272,76 @@ describe("run_on Connected Machine exec receipts", () => {
     expect(runner.executions).toBe(2);
   });
 
-  test("configured 120s exec deadline is distinct from the 30s control deadline", async () => {
-    const runner = new InMemoryMachineRunner({
-      build: { durationMs: 31_000, exitCode: 0, stdout: "built\n" },
-    });
+  test.each([
+    [0, 0],
+    [1, 0],
+    [0, 25],
+    [1, 25],
+  ])(
+    "configured exec deadline deducts %dms initial admission and %dms before-send revalidation",
+    async (admissionMs, revalidationMs) => {
+      const runner = new InMemoryMachineRunner({
+        build: { durationMs: 31_000, exitCode: 0, stdout: "built\n" },
+      });
+      let now = 1_000_000;
+      let admissions = 0;
+      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        const exec = await executeRunOnSelfhostedMachine(
+          {
+            workspaceId: WORKSPACE,
+            agentId: AGENT,
+            connectionInstanceId: CONNECTION_INSTANCE,
+            workspaceRoot: "/home/user/project",
+            controlRpc: runner,
+            opStream: runner.opStream,
+            relay: { host: "relay.test", tls: true },
+            controlTimeoutMs: 30_000,
+            execTimeoutMs: 120_000,
+            resolveOperationAdmission: async () => {
+              // Admission and the final route check share one absolute deadline.
+              now += admissions++ === 0 ? admissionMs : revalidationMs;
+              return {
+                connectionInstanceId: CONNECTION_INSTANCE,
+                workspaceRoot: "/home/user/project",
+                opStream: runner.opStream,
+                operationResourcePolicySupported: true,
+                operationCpuQuotaSupported: true,
+                operationResourcePolicy: {
+                  memoryMaxBytes: null,
+                  memoryHighBytes: null,
+                  cpuMaxMillicores: null,
+                  revision: 0,
+                },
+              };
+            },
+          },
+          TARGET,
+          { kind: "exec", cmd: "build" },
+        );
+        expect(exec.deadlineMs).toBe(120_000);
+        expect(admissions).toBe(2);
+        expect(exec).toMatchObject({ ok: true, exitCode: 0, stdout: "built\n" });
+        const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
+        if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
+        if (execRequest.req.op.opStart.op?.$case !== "exec") {
+          throw new Error("expected op-stream exec request");
+        }
+        expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(
+          120_000 - admissionMs - revalidationMs,
+        );
+        expect(execRequest.wireTimeoutMs).toBe(30_000);
 
-    const exec = await run(runner, { kind: "exec", cmd: "build" });
-    expect(exec.deadlineMs).toBe(120_000);
-    const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
-    if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
-    if (execRequest.req.op.opStart.op?.$case !== "exec") {
-      throw new Error("expected op-stream exec request");
-    }
-    expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(120_000);
-    expect(execRequest.wireTimeoutMs).toBe(30_000);
-
-    const read = await run(runner, { kind: "read", path: "/tmp/result" });
-    expect(read).toMatchObject({ kind: "read", ok: true, content: "machine-file" });
-    const readRequest = runner.requests.find(({ req }) => req.op?.$case === "fsRead");
-    expect(readRequest?.req.op?.$case).toBe("fsRead");
-    expect(readRequest?.wireTimeoutMs).toBe(30_000);
-  });
+        const read = await run(runner, { kind: "read", path: "/tmp/result" });
+        expect(read).toMatchObject({ kind: "read", ok: true, content: "machine-file" });
+        const readRequest = runner.requests.find(({ req }) => req.op?.$case === "fsRead");
+        expect(readRequest?.req.op?.$case).toBe("fsRead");
+        expect(readRequest?.wireTimeoutMs).toBe(30_000);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
 
   test(">deadline execution is killed, typed, and never ok:true", async () => {
     const runner = new InMemoryMachineRunner({

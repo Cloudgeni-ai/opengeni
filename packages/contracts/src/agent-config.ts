@@ -409,6 +409,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   computer_clipboard: "browser",
   computer_act: "browser",
   computer_lifecycle: "browser",
+  // Office.js in a workbook the person has open with the Opengeni add-in.
+  excel_run: "browser",
 
   github_connect_link: "workspaceConnectors",
   github_repositories_list: "workspaceConnectors",

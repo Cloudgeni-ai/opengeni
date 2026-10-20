@@ -13,7 +13,7 @@ import { HTTPException } from "hono/http-exception";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { z } from "zod";
 
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization

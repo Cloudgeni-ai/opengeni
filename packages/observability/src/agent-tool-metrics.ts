@@ -42,6 +42,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   command_wait: "shell",
   command_read: "shell",
   interaction_discover: "browser",
+  excel_run: "browser",
   interaction_request_human: "human_handoff",
   request_human_input: "human_input",
   wait_for_input: "human_input",

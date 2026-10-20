@@ -606,9 +606,11 @@ export function sessionDraftFromNewSessionDraftOptions(
         }
       : {
           kind: "sandbox",
-          // Ignore persisted managed-backend overrides — the create UI no longer
-          // offers that control; always use the deployment default.
-          backend: "",
+          // Preserve an explicit managed choice when the workspace defaults to a machine.
+          backend:
+            options.sandboxBackend && options.sandboxBackend !== "selfhosted"
+              ? options.sandboxBackend
+              : "",
         },
     rigId: options.rigId ?? "",
     goalText: options.goal?.text ?? "",
@@ -689,6 +691,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   cloudflare: "Cloudflare",
   vercel: "Vercel",
   opensandbox: "OpenSandbox",
+  compute: "Opengeni compute",
 };
 
 function backendLabel(backend: SandboxBackend): string {

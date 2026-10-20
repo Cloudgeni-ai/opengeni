@@ -5,7 +5,7 @@ import {
   renderMessageSentAtForModel,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
@@ -27,6 +27,8 @@ import {
   hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
+  listSessionEventPage,
+  searchSessionMessagesForSubject,
   markSessionWorkflowWakeDelivered,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
@@ -38,9 +40,12 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
+  withSessionRlsActorContext,
   type SessionCommandActor,
 } from "../src/index";
+import { nestedPostgresSqlState } from "../src/persistence-errors";
 import * as schema from "../src/schema";
+import { listSessionEventSlices } from "../src/session-event-slices";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -888,6 +893,100 @@ describe("attempt-fenced Agent session commands", () => {
     expect(publicProjection).not.toContain(grant.subjectId);
   });
 
+  test("the owner's internal-update turn spawns witnessed children only for its own human", async () => {
+    const grant = await fixture();
+    const parent = await activeAgent(grant);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `service-turn-child:${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+      lineage: {
+        parentSessionId: parent.session.id,
+        parentTurnId: parent.turn.id,
+        childSessionId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error(`child result was not added: ${update.reason}`);
+    const attemptId = crypto.randomUUID();
+    const serviceClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (serviceClaim.action !== "claimed") throw new Error("internal update was not claimed");
+    expect(serviceClaim.turn.initiator).toMatchObject({
+      kind: "service",
+      subjectId: "internal-update",
+    });
+    expect(serviceClaim.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    const actor: Extract<SessionCommandActor, { type: "agent_attempt" }> = {
+      type: "agent_attempt",
+      sessionId: parent.session.id,
+      turnId: serviceClaim.turn.id,
+      attemptId,
+      executionGeneration: serviceClaim.turn.executionGeneration,
+    };
+    // Production shape: the worker bearer's subject plus the attempt's
+    // verified initiating human, as the API installs them.
+    const spawn = (initiatingHumanSubjectId: string) =>
+      withSessionRlsActorContext(
+        { subjectId: "worker:first-party-mcp", initiatingHumanSubjectId },
+        () =>
+          createSession(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            initialMessage: "service-turn child",
+            resources: [],
+            metadata: {},
+            model: "scripted-model",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
+            sandboxBackend: "none",
+            parentSessionId: parent.session.id,
+            createdByActor: actor,
+            subjectId: "worker:first-party-mcp",
+          }),
+      );
+    const child = await spawn(grant.subjectId);
+    const [witness] = await shared.admin`select agent_creation_attempt_id,created_by_kind,
+      created_by_subject_id from sessions where id=${child.id}`;
+    expect(witness).toMatchObject({
+      agent_creation_attempt_id: attemptId,
+      created_by_kind: "service",
+      created_by_subject_id: "internal-update",
+    });
+    let failure: unknown;
+    try {
+      await spawn(`subject-other-${crypto.randomUUID()}`);
+    } catch (error) {
+      failure = error;
+    }
+    expect(nestedPostgresSqlState(failure)).toBe("42501");
+  });
+
   test("child completion keeps the exact spawning parent-turn authority after the parent moves on", async () => {
     const grant = await fixture();
     const spawningDelegations: McpPersonalConnectionDelegation[] = [
@@ -914,6 +1013,15 @@ describe("attempt-fenced Agent session commands", () => {
       createdByActor: parent.actor,
       personalConnectionDelegations: spawningDelegations,
     });
+    // This internal create carries no request claims at all (no subject and
+    // no agent-attempt RLS actor), so it keeps the ordinary insert path. Its
+    // MCP lineage remains valid, but it has no machine-tree creation witness.
+    // Real agent requests (including the owner's service-initiated turns)
+    // carry the attempt's initiating human and take the atomic seam; see the
+    // service-turn witness test above.
+    const [machineWitness] = await shared.admin`select agent_creation_attempt_id
+      from sessions where id=${child.id}`;
+    expect(machineWitness!.agent_creation_attempt_id).toBeNull();
 
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: parent.session.id,
@@ -1863,67 +1971,188 @@ describe("attempt-fenced Agent session commands", () => {
     expect(humanClaim.turn.id).toBe(queued.turnId);
   });
 
-  test("a human Steer claims ahead of an older pending Agent Steer and carries it as context", async () => {
-    const grant = await fixture();
-    const caller = await activeAgent(grant);
-    const target = await makeSession(grant, caller.session.id);
-    await submit(grant, target.id, "currently running");
-    const targetAttemptId = crypto.randomUUID();
-    const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-      sessionId: target.id,
-      workflowId: `session-${target.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: targetAttemptId,
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    if (targetClaim.action !== "claimed") throw new Error("Target was not claimed");
+  test.each([1, 2])(
+    "%i human Steers claim ahead of an older pending Agent Steer and carry it as context",
+    async (count) => {
+      const grant = await fixture();
+      const caller = await activeAgent(grant);
+      const target = await makeSession(grant, caller.session.id);
+      await submit(grant, target.id, "currently running");
+      const targetAttemptId = crypto.randomUUID();
+      const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: targetAttemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (targetClaim.action !== "claimed") throw new Error("Target was not claimed");
 
-    const agentSteer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-      db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as unknown as typeof db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId!,
-          targetSessionId: target.id,
-          actor: caller.actor,
-          operationKey: crypto.randomUUID(),
-          instruction: "inspect the older agent direction",
-        }),
-      ),
-    );
-    const humanSteer = await submit(grant, target.id, "the human replacement direction", "steer");
+      const agentSteer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            instruction: "inspect the older agent direction",
+          }),
+        ),
+      );
+      let humanSteer = await submit(grant, target.id, "the human replacement direction", "steer");
+      if (count === 2)
+        humanSteer = await submit(grant, target.id, "the final human direction", "steer");
 
-    expect(
-      await handOverAtModelStep(grant, target.id, targetClaim.turn, targetAttemptId),
-    ).toMatchObject({ action: "settled" });
+      const visiblePrompts = async () => {
+        const options = {
+          direction: "after" as const,
+          includeTypes: ["user.message"] as const,
+          limit: 8,
+        };
+        const page = await listSessionEventPage(client.db, grant.workspaceId!, target.id, {
+          ...options,
+          excludeUnclaimedHumanPrompts: true,
+        });
+        const slices = await listSessionEventSlices(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          options,
+        );
+        const search = await searchSessionMessagesForSubject(
+          client.db,
+          grant.workspaceId!,
+          {
+            sessionId: target.id,
+            query: "human",
+            limit: 8,
+          },
+          { subjectId: grant.subjectId },
+        );
+        return { page, slices, search };
+      };
+      if (count === 2) {
+        const before = await visiblePrompts();
+        expect(JSON.stringify(before.page.events)).not.toContain("the human replacement direction");
+        expect(JSON.stringify(before.slices.events)).not.toContain(
+          "the human replacement direction",
+        );
+        expect(before.search.matches).toHaveLength(0);
+      }
 
-    const replacement = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-      sessionId: target.id,
-      workflowId: `session-${target.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    if (replacement.action !== "claimed") throw new Error("Human Steer was not claimed");
-    expect(replacement.turn.id).toBe(humanSteer.turnId);
-    expect(replacement.turn.source).toBe("user");
-    expect(
-      await listSessionSystemUpdatesForTurn(
-        client.db,
-        grant.workspaceId!,
-        target.id,
-        replacement.turn.id,
-      ),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: agentSteer.updateId,
-          kind: "agent_steer_instruction",
-        }),
-      ]),
-    );
-  });
+      expect(
+        await handOverAtModelStep(grant, target.id, targetClaim.turn, targetAttemptId),
+      ).toMatchObject({ action: "settled" });
+
+      const replacement = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (replacement.action !== "claimed") throw new Error("Human Steer was not claimed");
+      expect(replacement.turn.id).toBe(humanSteer.turnId);
+      expect(replacement.turn.source).toBe("user");
+      expect(
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          replacement.turn.id,
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: agentSteer.updateId,
+            kind: "agent_steer_instruction",
+          }),
+        ]),
+      );
+      if (count === 2) {
+        // Real admission events remain visible to all conversation readers,
+        // including after compaction makes their model history inactive.
+        for (const compacted of [false, true]) {
+          if (compacted)
+            await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+              db
+                .update(schema.sessionHistoryItems)
+                .set({ active: false })
+                .where(
+                  and(
+                    eq(schema.sessionHistoryItems.workspaceId, grant.workspaceId!),
+                    eq(schema.sessionHistoryItems.sessionId, target.id),
+                  ),
+                ),
+            );
+          const visible = await visiblePrompts();
+          expect(JSON.stringify(visible.page.events)).toContain("the human replacement direction");
+          expect(JSON.stringify(visible.slices.events)).toContain(
+            "the human replacement direction",
+          );
+          expect(visible.search.matches).toHaveLength(2);
+        }
+        // Restore active flags for the existing exact history-order assertions.
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .update(schema.sessionHistoryItems)
+            .set({ active: true })
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, grant.workspaceId!),
+                eq(schema.sessionHistoryItems.sessionId, target.id),
+              ),
+            ),
+        );
+        const items = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, target.id);
+        const history = JSON.stringify(items);
+        expect(history.indexOf("the human replacement direction")).toBeLessThan(
+          history.indexOf("the final human direction"),
+        );
+        expect(history.indexOf("the final human direction")).toBeLessThan(
+          history.indexOf("inspect the older agent direction"),
+        );
+        expect(
+          items.filter((item) =>
+            JSON.stringify(item).includes("inspect the older agent direction"),
+          ),
+        ).toHaveLength(1);
+        // Exercise the actual archive history purge: turns and readable
+        // supersession receipts remain, but the history proof disappears.
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: target.id,
+          turnId: replacement.turn.id,
+          triggerEventId: replacement.turn.triggerEventId,
+          attemptId: replacement.turn.activeAttemptId!,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [],
+        });
+        await shared.admin`update sessions set content_archive_state='archived',
+          content_archive_started_at=now(), content_archived_at=now(),
+          content_archive=${shared.admin.json({ sha256: "a".repeat(64) })}
+          where workspace_id=${grant.workspaceId!}::uuid and id=${target.id}::uuid`;
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db.execute(sql`
+          select opengeni_private.purge_archived_session_content(
+            ${grant.workspaceId!}::uuid, ${target.id}::uuid, 'session_history_items', 100)
+        `),
+        );
+        const [remaining] = await shared.admin`select count(*)::int as n from session_history_items
+          where workspace_id=${grant.workspaceId!}::uuid and session_id=${target.id}::uuid
+          and turn_id<>${replacement.turn.id}::uuid`;
+        expect(remaining!.n).toBe(0);
+        const archived = await visiblePrompts();
+        expect(JSON.stringify(archived.page.events)).toContain("the human replacement direction");
+        expect(JSON.stringify(archived.slices.events)).toContain("the human replacement direction");
+        expect(archived.search.matches).toHaveLength(2);
+      }
+    },
+  );
 });
 
 describe("machine input after a terminal context compaction failure", () => {

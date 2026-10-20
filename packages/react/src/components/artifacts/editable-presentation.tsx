@@ -32,6 +32,12 @@ import {
   type PresentationProjectionTextStyle,
   type PresentationSlideProjection,
 } from "./presentation-editor";
+import { EditableArtifactDownloadButton, type EditableArtifactDownload } from "./artifact-download";
+import {
+  ArtifactSubmissionProvider,
+  artifactSubmissionSessionKey,
+  useArtifactSubmissions,
+} from "./artifact-submissions";
 import { ArtifactSurface } from "./artifact-surface";
 import { useLatestTaskRunner } from "./latest-task-runner";
 import {
@@ -71,6 +77,8 @@ export type EditablePresentationArtifactSurfaceProps = Omit<
   readOnly?: boolean | undefined;
   /** Called only after the durable SDK command has been accepted locally. */
   onCommit?: PresentationCommitHandler | undefined;
+  /** Host-authenticated PPTX export; omitted for hosts without export support. */
+  download?: EditableArtifactDownload | undefined;
 };
 
 export type ComposedPresentationProjection = Readonly<{
@@ -88,7 +96,17 @@ type PresentationProjectionState = {
  * Durable presentation editor over the public SDK. The Worker owns canonical
  * state; React only receives bounded catalog and per-slide editor projections.
  */
-export function EditablePresentationArtifactSurface({
+export function EditablePresentationArtifactSurface(
+  props: EditablePresentationArtifactSurfaceProps,
+) {
+  return (
+    <ArtifactSubmissionProvider key={artifactSubmissionSessionKey(props.session)}>
+      <EditablePresentationArtifactSurfaceSession {...props} />
+    </ArtifactSubmissionProvider>
+  );
+}
+
+function EditablePresentationArtifactSurfaceSession({
   session,
   title: titleProp,
   showHeader,
@@ -96,12 +114,15 @@ export function EditablePresentationArtifactSurface({
   readOnly = false,
   onCommit,
   onCommandError,
+  download,
+  actions: actionsProp,
   ...surfaceProps
 }: EditablePresentationArtifactSurfaceProps) {
   const t = useOpenGeniText();
   const title =
     titleProp === undefined ? t("artifacts.editablePresentation.presentation") : titleProp;
   const view = useEditableArtifactView(session);
+  const submissions = useArtifactSubmissions();
   const invalidator = editableArtifactProjectionKey(view);
   const [retryEpoch, setRetryEpoch] = useState(0);
   const [state, setState] = useState<PresentationProjectionState>({
@@ -283,6 +304,23 @@ export function EditablePresentationArtifactSurface({
       t,
     ],
   );
+  const submitCommit = useCallback(
+    (commit: PresentationCommit) => submissions.run(() => applyCommit(commit)),
+    [applyCommit, submissions],
+  );
+  const actions = download ? (
+    <>
+      {actionsProp}
+      <EditableArtifactDownloadButton
+        session={session}
+        title={title}
+        download={download}
+        format="pptx"
+      />
+    </>
+  ) : (
+    actionsProp
+  );
 
   const projection = state.composed?.projection ?? null;
   const status = editableArtifactStatusLabel(t, view);
@@ -292,6 +330,7 @@ export function EditablePresentationArtifactSurface({
       {...surfaceProps}
       title={title}
       showHeader={showHeader}
+      actions={actions}
       subtitle={
         (subtitle ?? writable)
           ? t("counts.slides", { count: projection.slides.length })
@@ -300,7 +339,7 @@ export function EditablePresentationArtifactSurface({
             })
       }
       projection={projection}
-      commit={writable ? applyCommit : undefined}
+      commit={writable ? submitCommit : undefined}
       readOnly={!writable}
       authoringBlockedReason={view.authoringBlockedReason}
       busy={state.loading}
@@ -312,7 +351,7 @@ export function EditablePresentationArtifactSurface({
       title={title}
       showHeader={showHeader}
       subtitle={subtitle ?? status}
-      actions={surfaceProps.actions}
+      actions={accessRevoked ? actionsProp : actions}
       busy={!accessRevoked && !state.error}
       className={surfaceProps.className}
     >

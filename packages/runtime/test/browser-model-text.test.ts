@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   browserActionText,
+  browserNodeLine,
   browserObservationText,
   browserOpenText,
   browserReadText,
@@ -120,6 +121,17 @@ describe("browser model text", () => {
     );
   });
 
+  test("clips a long form field value and says how long it is", () => {
+    const value = `${"word ".repeat(600)}end`;
+    const line = browserNodeLine(
+      { ref: "e0000000c", role: "textbox", depth: 0, name: "Body", value },
+      false,
+    );
+    expect(line).toBe(
+      `- textbox "Body" [e0000000c] value=${JSON.stringify(`${value.slice(0, 2_000)}…`)} valueChars=${value.length}`,
+    );
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
@@ -196,6 +208,18 @@ describe("browser model text", () => {
     expect(browserTabsText({ browserSessionId: session.id, targets: [target] })).toBe(
       `BrowserSession ${session.id} has 1 tab:\nTab T1 selected: "Checkout" https://shop.example/checkout`,
     );
+    // The observed tab is listed once, by the observation that follows.
+    const tabsWithOutline = browserTabsText({
+      browserSessionId: session.id,
+      targets: [target, { ...target, id: "T2", title: "Other", selected: false }],
+      mutationObservation: formObservation(),
+    });
+    expect(tabsWithOutline.split("\n").slice(0, 3)).toEqual([
+      `BrowserSession ${session.id} has 2 tabs:`,
+      'Tab T2: "Other" https://shop.example/checkout',
+      'Tab T1: "Checkout" https://shop.example/checkout',
+    ]);
+    expect(tabsWithOutline.match(/Tab T1\b/g)).toHaveLength(1);
     expect(
       browserReadText({
         targetId: "T1",

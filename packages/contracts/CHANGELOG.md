@@ -1,5 +1,22 @@
 # @opengeni/contracts
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+- e018445: Files can be shared like Sites. A file is Only me or visible to the whole workspace; a new file follows its chat, and its owner can share it or limit it again.
+
+  - `client.updateFileVisibility(workspaceId, fileId, { visibility })` changes who can open one file; only its owner can.
+  - `FileAsset.ownerSubjectId`, `FileAsset.access`, `CreateFileUploadResponse.access` and `SandboxFileArtifactReceipt.access` say who can open a file (`access.whoCanOpen` is one plain sentence). `ArtifactCatalogItem.ownedByViewer` marks files the viewer can share.
+  - `PublishSandboxFileArtifactRequest.visibility` chooses a published file's audience.
+  - Opening someone else's Only me file returns `403` with the retained-output reason `"private"`; a missing file is still `404`.
+
+### Patch Changes
+
+- 5715a3e: Preserve complete words such as History, HelloWorld, and Heyday during automatic title cleanup by requiring a separator after greeting prefixes.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+
 ## 4.1.3
 
 ## 4.1.1

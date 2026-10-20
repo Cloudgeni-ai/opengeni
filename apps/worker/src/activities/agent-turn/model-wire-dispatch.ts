@@ -2,8 +2,8 @@ import type { ModelTransportDispatchClock } from "@opengeni/runtime";
 
 type DispatchIdentity = { provider: string; dispatchId: string };
 
-/** One immutable physical fetch-entry observation per worker attempt. Generic
- * fallback events already carry that attempt's dispatch/execution identity. */
+/** One immutable transport-handoff observation per worker attempt, not a remote
+ * receipt. Events retain the matching attempt's dispatch/execution identity. */
 export class InitialModelWireDispatchClock {
   private initial: (DispatchIdentity & { initialWireDispatchedAt: string }) | null = null;
 

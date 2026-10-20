@@ -28,6 +28,7 @@
  * shared with chat refresh.
  */
 import { sql } from "drizzle-orm";
+import { recordSubscriptionUsageReading, withSubscriptionUsageReading } from "./usage-reading";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
@@ -846,6 +847,9 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         )`,
       );
       if (!connection) return { applied: false, recovered: false };
+      // Preserve the fetched measurement even if generation/merge policy declines it.
+      if (observation.source === "usage_endpoint" || observation.source === "response_headers")
+        await recordSubscriptionUsageReading(tx, accountId, connectionId, providerId, observation);
       const refreshGeneration = Number(connection.refresh_generation);
       if (ref && observation.observedRefreshGeneration !== refreshGeneration)
         return { applied: false, recovered: false };
@@ -987,7 +991,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         quotaCapacity(current, observedAt).kind === "exhausted" &&
         quotaCapacity(next, observedAt).kind !== "exhausted");
     return {
-      stored: storedQuotaDocument(next),
+      stored: withSubscriptionUsageReading(storedQuotaDocument(next), observation),
       observedAt,
       recovered,
     };
