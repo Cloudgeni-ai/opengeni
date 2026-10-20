@@ -325,6 +325,22 @@ export function hasResetInventory(
 }
 
 /**
+ * True once the overview says this plan doesn't report usage limit resets and
+ * nothing is left to show. Such an account has no reset section: "no resets
+ * available" would claim a count the provider never gave.
+ */
+export function planReportsNoResets(
+  overview: CodexAccountOverview | undefined,
+  recoveryAttempts: readonly RedemptionAttemptView[],
+): boolean {
+  return (
+    overview !== undefined &&
+    overview.resetCredits.detailState === "unsupported" &&
+    !hasResetInventory(overview, recoveryAttempts)
+  );
+}
+
+/**
  * Flat list of usage limit resets: one row per reset with its expiry, and a
  * Redeem button only when it can actually be redeemed by this person.
  */
