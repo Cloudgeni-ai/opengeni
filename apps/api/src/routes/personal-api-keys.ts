@@ -25,7 +25,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 /* ----------------------------------------------------------------------------
    Personal API keys: keys that act as the person who created them. A script

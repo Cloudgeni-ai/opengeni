@@ -67,7 +67,7 @@ import {
   upsertSitePublicationForManager,
 } from "../site-publishing/service";
 import { effectiveSiteAccess, signedInSiteViewerKind } from "../site-publishing/viewer";
-import { requireSameOriginBrowserMutation } from "./subscription-pool-access";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 /** A one-time sign-in code lives this long. */
 export const SITE_AUTH_CODE_TTL_SECONDS = 60;
