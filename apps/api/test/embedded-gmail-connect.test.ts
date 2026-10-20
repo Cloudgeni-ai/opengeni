@@ -190,7 +190,9 @@ test.each(["personal"] as const)(
         `/v1/integrations/oauth/callback?${new URLSearchParams({ state, ...(code ? { code: "synthetic-code" } : {}) })}`,
       );
     const read = async (id: string) => (await app.request(`${base}/${id}`, { headers })).json();
-    const begin = async (providerId = "gmail") => {
+    // Reconnecting names the exact account, as the console's Reconnect does;
+    // an attempt without one connects an additional account.
+    const begin = async (providerId = "gmail", reconnectAccountId?: string) => {
       const response = await app.request(base, {
         method: "POST",
         headers,
@@ -198,6 +200,7 @@ test.each(["personal"] as const)(
           providerId,
           ownership,
           returnUrl,
+          ...(reconnectAccountId ? { reconnectAccountId } : {}),
           idempotencyKey: randomUUID(),
         }),
       });
@@ -454,7 +457,7 @@ test.each(["personal"] as const)(
       // version and ownership unchanged; preview availability is irrelevant.
       for (const failure of grantFailures) {
         const reason = setGrantFailure(failure);
-        const reconnect = await begin();
+        const reconnect = await begin("gmail", completed.account.id);
         const response = await callback(reconnect.state);
         expect(response.headers.get("location")).toBe(returnUrl);
         const failedAttempt = await read(reconnect.attempt.id);
@@ -478,7 +481,7 @@ test.each(["personal"] as const)(
       }
       setGrantFailure();
       expect(previewRequests).toBe(0);
-      const verifiedReconnect = await begin();
+      const verifiedReconnect = await begin("gmail", completed.account.id);
       expect((await callback(verifiedReconnect.state)).headers.get("location")).toBe(returnUrl);
       expect(await read(verifiedReconnect.attempt.id)).toMatchObject({
         state: "complete",
