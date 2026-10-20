@@ -207,6 +207,31 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         expect(((await actual()) as State & { dragEvents: number }).dragEvents).toBeGreaterThan(0);
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
 
+        // A computer_act batch is one operation: every action is resolved in
+        // one observation, CUA runs them in one run_steps call, and a replay
+        // does not act again. (After native CUA reads, the legacy observation
+        // carries no tree, so this runs before them.)
+        const id = (value: string) => ({ kind: "identifier" as const, value });
+        const batch = makeCommand(await supervisor.observe(reference, target.id), {
+          type: "batch",
+          actions: [
+            {
+              type: "semantic",
+              locator: id("fixture-text"),
+              action: "set_value",
+              value: "Batched",
+            },
+            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
+            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
+          ],
+        });
+        const batchReceipt = await supervisor.action(batch);
+        expect(batchReceipt).toMatchObject({ state: "completed", targetId: target.id });
+        expect(batchReceipt.observation?.target.id).toBe(target.id);
+        expect(await supervisor.action(batch)).toEqual(batchReceipt);
+        await Bun.sleep(100);
+        expect((await actual()).value).toBe("Batched");
+        expect((await actual()).clicks).toBe(6);
         const nativeCall = (tool: string, args: Record<string, unknown>) => ({
           protocolVersion: 1 as const,
           operationId: randomUUID(),
@@ -245,7 +270,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         const batchedReceipt = await supervisor.nativeCall(batched);
         expect(batchedReceipt.state).toBe("completed");
         expect(await supervisor.nativeCall(batched)).toEqual(batchedReceipt);
-        expect((await actual()).clicks).toBe(5);
+        expect((await actual()).clicks).toBe(7);
         // Native pixel coordinates use a different image size from the viewer.
         // A passive preview must not change their scale or retire zoom state.
         const pixelRead = await supervisor.nativeCall(
@@ -270,7 +295,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           ),
         ).toMatchObject({ state: "completed" });
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(6);
+        expect((await actual()).clicks).toBe(8);
         const zoom = await supervisor.nativeCall(
           nativeCall("zoom", {
             x1: pixelX - 20,
@@ -300,7 +325,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           ),
         ).toMatchObject({ state: "completed" });
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(7);
+        expect((await actual()).clicks).toBe(9);
         // Actual viewer input replaces the coordinate basis. Old native pixels
         // must fail closed; a normal native read restores the action basis.
         const takeoverFrame = await supervisor.capture(reference, target.id, {
@@ -324,34 +349,10 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         );
         expect(staleNative.state).not.toBe("completed");
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(8);
+        expect((await actual()).clicks).toBe(10);
         expect(
           await supervisor.nativeCall(nativeCall("get_window_state", { include_screenshot: true })),
         ).toMatchObject({ state: "completed" });
-        // A computer_act batch is one operation: every action is resolved in
-        // one observation, CUA runs them in one run_steps call, and a replay
-        // does not act again.
-        const id = (value: string) => ({ kind: "identifier" as const, value });
-        const batch = makeCommand(await supervisor.observe(reference, target.id), {
-          type: "batch",
-          actions: [
-            {
-              type: "semantic",
-              locator: id("fixture-text"),
-              action: "set_value",
-              value: "Batched",
-            },
-            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
-            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
-          ],
-        });
-        const batchReceipt = await supervisor.action(batch);
-        expect(batchReceipt).toMatchObject({ state: "completed", targetId: target.id });
-        expect(batchReceipt.observation?.target.id).toBe(target.id);
-        expect(await supervisor.action(batch)).toEqual(batchReceipt);
-        await Bun.sleep(100);
-        expect((await actual()).value).toBe("Batched");
-        expect((await actual()).clicks).toBe(10);
         const after = await supervisor.observe(reference, target.id);
         expect(
           await supervisor.action(
