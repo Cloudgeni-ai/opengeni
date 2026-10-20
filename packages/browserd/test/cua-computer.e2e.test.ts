@@ -339,27 +339,21 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           ),
         ).toMatchObject({ state: "completed" });
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
-        // A computer_act batch is one operation: every ref comes from one
-        // observation, CUA runs the actions in one run_steps call, and a
-        // replay does not act again.
-        const batchSource = await supervisor.observe(reference, target.id);
-        const tree = batchSource.semantic;
-        if (tree?.kind !== "snapshot") throw new Error("Fixture needs a full snapshot");
-        type Node = (typeof tree.roots)[number];
-        const flat = (nodes: Node[]): Node[] =>
-          nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
-        const ref = (name: string) => flat(tree.roots).find((node) => node.name === name)!.ref;
-        const batch = makeCommand(batchSource, {
+        // A computer_act batch is one operation: every action is resolved in
+        // one observation, CUA runs them in one run_steps call, and a replay
+        // does not act again.
+        const label = (text: string) => ({ kind: "label" as const, text, exact: true });
+        const batch = makeCommand(await supervisor.observe(reference, target.id), {
           type: "batch",
           actions: [
             {
               type: "semantic",
-              locator: { kind: "ref", ref: ref("Fixture text") },
+              locator: label("Fixture text"),
               action: "set_value",
               value: "Batched",
             },
-            { type: "semantic", locator: { kind: "ref", ref: ref("Increment") }, action: "invoke" },
-            { type: "semantic", locator: { kind: "ref", ref: ref("Increment") }, action: "invoke" },
+            { type: "semantic", locator: label("Increment"), action: "invoke" },
+            { type: "semantic", locator: label("Increment"), action: "invoke" },
           ],
         });
         const batchReceipt = await supervisor.action(batch);
