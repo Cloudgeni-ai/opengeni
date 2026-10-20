@@ -12,6 +12,7 @@ import {
   codexAccountName,
   hasResetInventory,
   planLabel,
+  planReportsNoResets,
   useCodexResetRedemption,
 } from "@/components/codex-connection";
 import {
@@ -324,6 +325,7 @@ function OrgCodexResets({
   }, [client, onRedeemed]);
   const resets = useCodexResetRedemption("organization", organizationId, afterRedemption);
   const attempts = resets.redemptionAttempts(account.id, overview);
+  if (planReportsNoResets(overview, attempts)) return null;
   const count = overview?.resetCredits.availableCount ?? 0;
   return (
     <DetailSection title={count > 0 ? `Usage limit resets (${count})` : "Usage limit resets"}>
