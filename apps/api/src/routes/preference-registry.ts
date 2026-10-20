@@ -134,12 +134,11 @@ function isDeploymentKeyOperator(access: AccessGrantAuthorization): boolean {
 export function authorizePreferenceRegistryScopeMutation(
   access: AccessGrantAuthorization,
   scope: PreferenceRegistryScope,
-  // Workspace-scoped content is collaborative for some registries: Skills are
-  // shared team procedures that ordinary Members (documents:manage) may author
-  // and review, just as their agents already can under Agent learning. Generic
-  // preference-registry records keep the administrative default.
-  workspacePermission: Permission = "workspace:admin",
 ): void {
+  // The registry is the Skills authority. Workspace Skills are shared team
+  // procedures that ordinary Members (documents:manage) author, review, move
+  // and retire, just as their agents already can under Agent learning.
+  const workspacePermission: Permission = "documents:manage";
   const { grant } = access;
   requireHumanMutation(access);
   if (scope === "organization") {

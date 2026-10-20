@@ -2,11 +2,14 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Skill, API Integration, and Integration Facet mutations
+Capability, Plugin, API Integration, and Integration Facet mutations
 require the narrow `capabilities:manage` permission. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
+Workspace Skill authoring, review, install, import and removal instead require
+`documents:manage`, which ordinary Members hold: workspace Skills are shared
+team content.
 
 The catalog merges:
 

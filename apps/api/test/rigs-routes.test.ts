@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
+  createApiKey,
   createDb,
   createRig,
   createRigVersion,
@@ -547,6 +548,24 @@ describe("rig route permission matrix", () => {
     });
     expect(cleared.status).toBe(200);
     expect((await cleared.json()).defaultRigId).toBeNull();
+
+    // A person-less API key keeps the rigs:manage an administrator gave it.
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "compute",
+      prefix: token.slice(0, 14),
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "rigs:manage"],
+    });
+    const byKey = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(byKey.status, await byKey.clone().text()).toBe(200);
+    expect((await byKey.json()).defaultRigId).toBe(rig.id);
   });
 
   test.each(["organization", "user"] as const)(

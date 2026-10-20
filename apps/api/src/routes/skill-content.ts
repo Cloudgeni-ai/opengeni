@@ -35,7 +35,7 @@ export function authorizeSkillScopeMutation(
   access: AccessGrantAuthorization,
   scope: PreferenceRegistryScope,
 ): void {
-  authorizePreferenceRegistryScopeMutation(access, scope, "documents:manage");
+  authorizePreferenceRegistryScopeMutation(access, scope);
 }
 
 const scopeSchema = z.enum(["workspace", "organization", "user"]);

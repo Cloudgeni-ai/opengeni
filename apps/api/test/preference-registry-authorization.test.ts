@@ -101,7 +101,7 @@ describe("preference registry scope authorization", () => {
     expect(() => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "user")).not.toThrow();
     expectForbidden(
       () => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "workspace"),
-      "workspace:admin",
+      "documents:manage",
     );
     expectForbidden(
       () => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "organization"),
@@ -162,7 +162,7 @@ describe("preference registry scope authorization", () => {
           }),
           "workspace",
         ),
-      "workspace:admin",
+      "documents:manage",
     );
     for (const access of [
       authorization({
@@ -247,11 +247,8 @@ describe("workspace Skills are team content", () => {
     expect(() => authorizeSkillScopeMutation(access, "user")).not.toThrow();
     // Organization Skills still need organization administration.
     expectForbidden(() => authorizeSkillScopeMutation(access, "organization"), "account:admin");
-    // Generic preference-registry records keep the administrative default.
-    expectForbidden(
-      () => authorizePreferenceRegistryScopeMutation(access, "workspace"),
-      "workspace:admin",
-    );
+    // Lifecycle routes (scope moves, deactivate, supersede, reject) use the same rule.
+    expect(() => authorizePreferenceRegistryScopeMutation(access, "workspace")).not.toThrow();
   });
 
   test("a viewer cannot change workspace Skills, and agents still use Agent learning", () => {

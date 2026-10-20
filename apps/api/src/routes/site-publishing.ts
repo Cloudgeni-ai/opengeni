@@ -293,6 +293,8 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     });
     requireSiteManager(management);
     // An admin's takedown (even of their own Site) is one only an admin restores.
+    // "owner" is the manager-level takedown kind (any Site manager, not just
+    // the creator); suspendedBySubject records who actually took it down.
     const by = management.admin ? "admin" : "owner";
     const publication = await runSitePublishing(() =>
       suspendSitePublication(deps.db, management.scope, management.record.id, {

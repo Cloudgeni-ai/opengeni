@@ -1732,6 +1732,27 @@ describe("connections routes", () => {
         metadata: Record<string, unknown>;
       };
     };
+    // Nor replace or disconnect the workspace's provider key someone else set.
+    const memberAuthorization = await bearer(workspace, "subject-member", [
+      "connections:read",
+      "connections:write",
+    ]);
+    const memberRotate = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      {
+        method: "PATCH",
+        headers: { authorization: memberAuthorization, "content-type": "application/json" },
+        body: JSON.stringify({ credential: { apiKey: "gateway-member-rotate" } }),
+      },
+    );
+    expect(memberRotate.status).toBe(403);
+    expect(await memberRotate.text()).toContain("capabilities:manage");
+    const memberDisconnect = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      { method: "DELETE", headers: { authorization: memberAuthorization } },
+    );
+    expect(memberDisconnect.status).toBe(403);
+    expect(await memberDisconnect.text()).toContain("capabilities:manage");
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
     ).toBeUndefined();

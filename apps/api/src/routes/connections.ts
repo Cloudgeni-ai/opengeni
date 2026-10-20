@@ -293,6 +293,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       payload.metadata = { ...payload.metadata, directModelProvider: config.data };
+      // A direct model key is always workspace-owned: refuse before calling the provider.
+      requireWorkspaceIntegrationAdministration(grant);
       if (payload.verifyModelAccess) {
         await verifyDirectModelAccess(
           config.data,
@@ -1054,6 +1056,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
           assertNotReservedExternalVaultMetadata(existing?.metadata);
           if (existing && isOpenGeniSlackBotConnection(existing)) {
+            // The workspace Slack bot is workspace configuration, like its install.
+            requireWorkspaceIntegrationAdministration(grant);
             const destination = ConnectorDocumentDestinationSelection.safeParse(
               payload.metadata?.documentDestination,
             );
