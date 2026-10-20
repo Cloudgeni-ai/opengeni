@@ -2631,11 +2631,13 @@ The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
 Node for official Sigstore/TUF cryptography; package builds and packing stay on
 Bun. Signed split-source bundles survive failures as separate, hash-linked public
 provenance evidence. Diagnostic categories do not settle unknown registry writes.
-Canary packages prepack the complete cohort, retain write acknowledgements, then
-perform bounded strict read-only verification before producing Site pins.
-Post-write verification selects current tags and one immutable version manifest;
-each actual GET shares the original request quota, deadline and custody limits,
-including final complete-cohort qualification. Pre-write discovery is unchanged.
+Canary packages prepack the complete cohort and retain write acknowledgements in
+the credentialed `publish` job. npm accepts writes with 202 and processes them
+asynchronously, so a separate credential-free `confirm` job waits for every
+version with time-based backoff, rereads the complete cohort strictly, and only
+then produces Site pins. Re-running a failed `confirm` job resumes waiting without
+publishing. Verification selects current tags and one immutable version manifest;
+pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 For a completely acknowledged failed canary, the protected
 `reconcile-canary-publication.yml` controller can independently verify retained

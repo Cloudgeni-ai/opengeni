@@ -74,7 +74,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "3df4a6050c9448b76421708eea7b15a4d50222c4237898651bbc379a50cb1245"
+      "sha256": "68f381c17bf4e9086912c932b0834f0bf89bf08959e713facf3d159213b37f50"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -1327,6 +1327,18 @@
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
+      "job": "confirm",
+      "step": "Install controller dependencies without lifecycle scripts",
+      "sha256": "ad98aac8bcf007208b9f6455c627e3e045c3be0f9f14f5ba9de1d6c04abb31ba"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "confirm",
+      "step": "Wait for npm to serve the accepted cohort",
+      "sha256": "91f0c090e4207dfe7a252a1887e7cdc935537d1fd3e797b4b68602af5570bf64"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Admit exact source and CI",
       "sha256": "dc894f956640654d7075246f3d4a8ad042575fbdd55f687a74dd0fad793b8adc"
@@ -1365,7 +1377,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "0cb9c571b7799a7b28947d061a45817f3bc25d8eccc3c3443c948454f0fbd408"
+      "sha256": "9152611098866280b2e6eea496cf456998ba2813cd45610f7f80d90e093686e8"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",
