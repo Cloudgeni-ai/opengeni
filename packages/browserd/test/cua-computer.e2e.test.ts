@@ -71,7 +71,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
       expect(JSON.stringify(observed)).not.toContain("fixture-secret-never-observe");
       const makeCommand = (
         source: ComputerObservation,
-        action: ComputerAction,
+        action: ComputerActionCommand["action"],
       ): ComputerActionCommand => ({
         protocolVersion: 1,
         operationId: randomUUID(),
@@ -338,6 +338,37 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
             }),
           ),
         ).toMatchObject({ state: "completed" });
+        expect((await actual()).frontmostPid).not.toBe(fixturePid);
+        // A computer_act batch is one operation: every ref comes from one
+        // observation, CUA runs the actions in one run_steps call, and a
+        // replay does not act again.
+        const batchSource = await supervisor.observe(reference, target.id);
+        if (batchSource.semantic?.kind !== "snapshot")
+          throw new Error("Fixture needs a full snapshot");
+        const ref = (name: string) =>
+          (batchSource.semantic as { roots: { name?: string | null; ref: string }[] }).roots.find(
+            (node) => node.name === name,
+          )!.ref;
+        const batch = makeCommand(batchSource, {
+          type: "batch",
+          actions: [
+            {
+              type: "semantic",
+              locator: { kind: "ref", ref: ref("Fixture text") },
+              action: "set_value",
+              value: "Batched",
+            },
+            { type: "semantic", locator: { kind: "ref", ref: ref("Increment") }, action: "invoke" },
+            { type: "semantic", locator: { kind: "ref", ref: ref("Increment") }, action: "invoke" },
+          ],
+        });
+        const batchReceipt = await supervisor.action(batch);
+        expect(batchReceipt).toMatchObject({ state: "completed", targetId: target.id });
+        expect(batchReceipt.observation?.target.id).toBe(target.id);
+        expect(await supervisor.action(batch)).toEqual(batchReceipt);
+        await Bun.sleep(100);
+        expect((await actual()).value).toBe("Batched");
+        expect((await actual()).clicks).toBe(10);
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
       } finally {
         await stream.close();
