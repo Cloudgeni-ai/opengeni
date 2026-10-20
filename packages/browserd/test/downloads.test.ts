@@ -55,6 +55,84 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
+  test("follows the file Chromium names and keeps it across a restart", async () => {
+    const rootDirectory = await newRoot();
+    const open = async () =>
+      await BrowserDownloadStore.open({
+        rootDirectory,
+        browserSessionId,
+        controllerGeneration,
+        createId: () => firstDownloadId,
+      });
+    const store = await open();
+    await store.begin({ guid: "named-guid", targetId: null, suggestedFilename: "report.pdf" });
+    // Chromium saved it under a name of its own choosing, beside an earlier
+    // file with the same suggested name.
+    const path = join(store.filesDirectory, "report (1).pdf");
+    await writeFile(path, "%PDF bytes");
+    await store.progress({
+      guid: "named-guid",
+      state: "completed",
+      receivedBytes: 10,
+      totalBytes: 10,
+      filePath: path,
+    });
+    expect((await store.completedFile(firstDownloadId)).path).toBe(path);
+    expect((await store.get(firstDownloadId))?.filename).toBe("report.pdf");
+    await store.close();
+    // An orphan Chromium left behind is swept; the named file is retained.
+    await writeFile(join(rootDirectory, "files", "stray.pdf.crdownload"), "partial");
+    const reopened = await open();
+    expect(await readFile((await reopened.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "%PDF bytes",
+    );
+    await expect(readFile(join(reopened.filesDirectory, "stray.pdf.crdownload"))).rejects.toThrow();
+    await reopened.close();
+  });
+
+  test("removes a named file that completed over its quota", async () => {
+    const { store } = await fixture({ maxFileBytes: 5, maxSessionBytes: 20 });
+    await store.begin({ guid: "over", targetId: null, suggestedFilename: "large.bin" });
+    const path = join(store.filesDirectory, "large.bin");
+    await writeFile(path, "ten bytes!");
+    await expect(
+      store.progress({
+        guid: "over",
+        state: "completed",
+        receivedBytes: 10,
+        totalBytes: 10,
+        filePath: path,
+      }),
+    ).resolves.toEqual({ cancelReason: "download_quota_exceeded" });
+    await store.reject("over", "download_quota_exceeded");
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_quota_exceeded",
+    });
+    await expect(readFile(path)).rejects.toThrow();
+    await store.close();
+  });
+
+  test("never follows a reported file outside its folder", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "escape", targetId: null, suggestedFilename: "x.txt" });
+    const outside = join(store.rootDirectory, "outside.txt");
+    await writeFile(outside, "elsewhere");
+    await store.progress({
+      guid: "escape",
+      state: "completed",
+      receivedBytes: 9,
+      totalBytes: 9,
+      filePath: outside,
+    });
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    expect(await readFile(outside, "utf8")).toBe("elsewhere");
+    await store.close();
+  });
+
   test("recovers interrupted work as failed and removes orphaned bytes", async () => {
     const rootDirectory = await newRoot();
     const store = await BrowserDownloadStore.open({
