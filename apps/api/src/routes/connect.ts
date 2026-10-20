@@ -13,6 +13,8 @@ import {
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
+  OPENGENI_DESKTOP_APP_HEADER,
+  desktopAppReturnUrl,
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
@@ -1323,7 +1325,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const input = await parseRequestJson(c, BeginConnectRequest);
+    const requested = await parseRequestJson(c, BeginConnectRequest);
+    // A sign-in started in the desktop app finishes in the person's browser;
+    // return that browser to the console's hand-back page, which reopens the
+    // app. The browser's Origin names the console that made this request.
+    const input = c.req.header(OPENGENI_DESKTOP_APP_HEADER)
+      ? {
+          ...requested,
+          returnUrl: desktopAppReturnUrl(requested.returnUrl, c.req.header("origin") ?? null),
+        }
+      : requested;
     const setupPermission =
       input.providerId === "mcp-install"
         ? "capabilities:manage"
