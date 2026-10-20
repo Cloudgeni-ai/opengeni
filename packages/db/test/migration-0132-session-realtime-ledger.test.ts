@@ -87,6 +87,7 @@ describe("0132/0133 session realtime ledger migrations", () => {
       "session_realtime_entries_delegation_call_uq",
       "session_realtime_entries_delegation_terminal_uq",
       "session_realtime_entries_delegation_turn_uq",
+      "session_realtime_entries_history_item_idx",
       "session_realtime_entries_operation_uq",
       "session_realtime_entries_outbound_pending_idx",
       "session_realtime_entries_pkey",
