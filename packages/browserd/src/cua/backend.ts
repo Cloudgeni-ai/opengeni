@@ -373,6 +373,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const windows = Windows.parse(data).windows;
     const live = new Set<string>();
     for (const window of windows) {
+      // Another CUA worker's cursor overlay (another computer session, or
+      // another agent on this desktop) spans the screen above every app. It
+      // is never a window a person or an agent works in.
+      if (window.app_name === CUA_WORKER_APP) continue;
       const id = `cua:window:${window.pid}:${window.window_id}`;
       live.add(id);
       const old = this.targetsById.get(id);
@@ -1139,6 +1143,8 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+/** The app name CUA's worker process lists its own overlay windows under. */
+const CUA_WORKER_APP = "cua-driver";
 
 /** Whether two readings show the same window (title, process, generation,
  * place) with the same elements in the same order: everything but the
