@@ -152,12 +152,13 @@ COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/packag
 COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
+COPY packages/testing/src/acquisition-diagnostics.ts packages/testing/src/acquisition-diagnostics.ts
 # The cache mount only holds Bun's download cache; the exact lock-resolved
 # node_modules tree still lands in the layer and is byte-identical without it.
 # Each stage owns its own cache id so concurrently building stages never share
 # one writer.
 RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/cache,sharing=locked \
-    bun install --frozen-lockfile
+    bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 COPY . .
 
 # Unreleased local work only. Deployed Sites install exact registry versions.
@@ -307,7 +308,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},ta
     && input="/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE/$TARGETARCH/installation.json" \
     && if [ -f "$input" ]; then \
       test "$(node --version)" = "v22.22.0"; \
-      bun install --frozen-lockfile; \
+      bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile; \
       bun scripts/verify-artifact-runtime-container-inputs.ts \
         --root "/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE" \
         --source-sha "$OPENGENI_SOURCE_SHA" \
