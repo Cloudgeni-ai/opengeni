@@ -142,18 +142,26 @@ export function useTurnQueue(
 
   useEffect(() => {
     if (acceptedSteers.length === 0 || options.events === undefined) return;
-    const durablyStartedTurnIds = new Set(
+    const durablyConsumedTurnIds = new Set(
       options.events.flatMap((event) =>
-        event.type === "turn.started" && event.turnId ? [event.turnId] : [],
+        [
+          "turn.started",
+          "turn.superseded",
+          "turn.cancelled",
+          "turn.failed",
+          "turn.completed",
+        ].includes(event.type) && event.turnId
+          ? [event.turnId]
+          : [],
       ),
     );
-    if (durablyStartedTurnIds.size === 0) return;
+    if (durablyConsumedTurnIds.size === 0) return;
     // steer_requested can reach the browser before the timeline projection
     // that moves the queued user.message into chat. Keep this bridge through
-    // physical cancellation; turn.started is the first boundary at which the
-    // replacement timeline must already be visible.
+    // physical cancellation. Starting or settling that exact queued turn
+    // proves the durable timeline has taken ownership (including batched Steers).
     setAcceptedSteers((current) =>
-      current.filter((steer) => !durablyStartedTurnIds.has(steer.turnId)),
+      current.filter((steer) => !durablyConsumedTurnIds.has(steer.turnId)),
     );
   }, [acceptedSteers.length, options.events]);
 
