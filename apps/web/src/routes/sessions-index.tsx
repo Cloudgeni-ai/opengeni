@@ -1,3 +1,4 @@
+import { initialWorkspaceMachineCompute } from "@/lib/workspace-default-machine";
 import { t } from "@/lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
@@ -378,7 +379,9 @@ function SessionsIndexRouteContent({
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
-  const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
+  const rigs = useWorkspaceRigs({
+    enabled: fixedResourceCatalogEnabled && canUseRigs,
+  });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -626,7 +629,19 @@ function SessionsIndexRouteContent({
   });
   const setExplicitComputeDraft = useLatestCallback((nextDraft: SessionDraft) => {
     setProjectProvenancePresent(true);
-    setDraft(nextDraft);
+    setDraft(
+      nextDraft.compute.kind === "sandbox" &&
+        !nextDraft.compute.backend &&
+        defaultSandboxBackend !== "selfhosted"
+        ? {
+            ...nextDraft,
+            compute: {
+              ...nextDraft.compute,
+              backend: defaultSandboxBackend ?? "",
+            },
+          }
+        : nextDraft,
+    );
   });
 
   useEffect(() => {
@@ -702,7 +717,10 @@ function SessionsIndexRouteContent({
 
   const computeReady =
     isSessionDraftComputeReady(draft) &&
-    (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
+    (draft.compute.kind !== "machine" ||
+      (!fleet.loading &&
+        selectedMachine !== null &&
+        isMachineComputeSelectable(selectedMachine.state)));
   const persistedToolPolicy = useMemo(
     () =>
       fitToolPolicyToAgentCapabilities(
@@ -825,7 +843,13 @@ function SessionsIndexRouteContent({
         hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote),
       );
       setSelectedProjectChannelId(projectSelection.channelId);
-      setDraft({ ...restored, compute: projectSelection.compute });
+      const compute = initialWorkspaceMachineCompute({
+        settings: workspace?.settings,
+        options: remote.options,
+        fallback: projectSelection.compute,
+        backend: defaultSandboxBackend,
+      });
+      setDraft({ ...restored, compute });
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
@@ -869,6 +893,7 @@ function SessionsIndexRouteContent({
       defaultSandboxBackend,
       setSelectedProjectChannelId,
       workspaceDefaultToolIdsForHydration,
+      workspace?.settings,
     ],
   );
   const newSessionDraft = useNewSessionDraft({
@@ -1181,7 +1206,9 @@ function SessionsIndexRouteContent({
               }
               await preserveNewerLocalDraft();
               newSessionDraft.clearError();
-              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
+              toast.error("Couldn't start voice", {
+                description: DRAFT_CHANGED_DURING_SEND_TEXT,
+              });
               return null;
             }
 
@@ -1659,7 +1686,10 @@ function SessionsIndexRouteContent({
                               disabled={busy || newSessionDraft.loading}
                               onChange={(visibility) => {
                                 visibilityChosenRef.current = true;
-                                setDraft((current) => ({ ...current, visibility }));
+                                setDraft((current) => ({
+                                  ...current,
+                                  visibility,
+                                }));
                               }}
                             />
                           ),
@@ -2267,7 +2297,10 @@ function workspaceRepositoryPickerProps(
             next.add(matched.id);
             return next;
           });
-          context.setSelectedRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+          context.setSelectedRepoRefs((current) => ({
+            ...current,
+            [matched.id]: ref,
+          }));
           context.setSelectedPersonalGitHubRepoIds(
             (current) =>
               new Set(
@@ -2394,118 +2427,43 @@ function ComputeTargetControl(props: {
 }) {
   const { draft, onChange } = props;
   const { fleet, machines } = props;
-  const fleetEmpty = machines.length === 0;
   const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
   // Managed-primary deployments keep Connected Machine opt-in and hide the
   // chooser when the fleet is empty. Selfhosted-primary deployments always show
   // the required machine path, including its honest unavailable state.
-  const showComputeTarget = selfhostedPrimary || fleet.loading || !fleetEmpty;
   const machineAvailabilityKey = machines
     .map((machine) => `${machine.sandboxId}:${machine.state}`)
     .join("\u0000");
 
-  const sandboxBackendOverride = draft.compute.kind === "sandbox" ? draft.compute.backend : "";
   const selectedMachineSandboxId =
     draft.compute.kind === "machine" ? draft.compute.sandboxId : null;
 
-  // Defensive: if the segmented control is hidden (clean flow) while a stale draft
-  // still points at a machine (e.g. the last machine just left the fleet), fall
-  // back to the managed sandbox so a hidden machine target can never be submitted.
-  // Also drop any leftover managed-backend override — that control is gone from
-  // the composer, so a stale draft must not keep forcing a sandbox type.
+  // A named machine stays selected when it disconnects or is removed. The
+  // unavailable notice and submission gate require an explicit replacement.
   useEffect(() => {
-    if (selfhostedPrimary && draft.compute.kind === "sandbox") {
-      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
-      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
-      onChange({
-        ...draft,
-        compute: {
-          kind: "machine",
-          sandboxId: firstSelectable?.sandboxId ?? null,
-          folder: firstSelectable
-            ? rememberedMachineFolder(
-                props.selectionHistory,
-                props.selectedChannelId,
-                firstSelectable.sandboxId,
-              )
-            : { kind: "root" },
-        },
-      });
-      return;
-    }
-    if (!showComputeTarget && draft.compute.kind === "machine") {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
-      return;
-    }
     if (
       selfhostedPrimary &&
-      !fleet.loading &&
       draft.compute.kind === "machine" &&
-      selectedMachineSandboxId === null
+      selectedMachineSandboxId === null &&
+      !fleet.loading
     ) {
       const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
-      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
-      if (firstSelectable) {
+      if (firstSelectableId)
         onChange({
           ...draft,
           compute: {
             kind: "machine",
-            sandboxId: firstSelectable.sandboxId,
+            sandboxId: firstSelectableId,
             folder: rememberedMachineFolder(
               props.selectionHistory,
               props.selectedChannelId,
-              firstSelectable.sandboxId,
+              firstSelectableId,
             ),
           },
         });
-      }
-      return;
-    }
-    if (
-      !fleet.loading &&
-      draft.compute.kind === "machine" &&
-      selectedMachineSandboxId !== null &&
-      !machines.some(
-        (machine) =>
-          machine.sandboxId === selectedMachineSandboxId &&
-          isMachineComputeSelectable(machine.state),
-      )
-    ) {
-      const fallbackId = resolveSelectableMachineSandboxId(machines, selectedMachineSandboxId);
-      const fallback = machines.find((machine) => machine.sandboxId === fallbackId);
-      onChange({
-        ...draft,
-        compute: fallback
-          ? {
-              kind: "machine",
-              sandboxId: fallback.sandboxId,
-              folder: rememberedMachineFolder(
-                props.selectionHistory,
-                props.selectedChannelId,
-                fallback.sandboxId,
-              ),
-            }
-          : selfhostedPrimary
-            ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
-            : { kind: "sandbox", backend: "" },
-      });
-      return;
-    }
-    if (draft.compute.kind === "sandbox" && sandboxBackendOverride) {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    showComputeTarget,
-    selfhostedPrimary,
-    fleet.loading,
-    machineAvailabilityKey,
-    draft.compute.kind,
-    selectedMachineSandboxId,
-    sandboxBackendOverride,
-    props.selectedChannelId,
-    props.selectionHistory,
-  ]);
+  }, [selfhostedPrimary, fleet.loading, machineAvailabilityKey, selectedMachineSandboxId]);
 
   // A 404 means Connected Machines are off here, not a failure.
   const fleetLoadFailed =

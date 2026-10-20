@@ -66,6 +66,8 @@ opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = tr
 opengeni-agent-files-ffi = { path = "../opengeni-agent-files-ffi" }
 
 [dev-dependencies]
+# The fake relay registrar the run-as PTY test opens a terminal through.
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net", "sync"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }

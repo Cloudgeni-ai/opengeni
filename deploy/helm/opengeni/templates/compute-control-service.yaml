@@ -1,0 +1,49 @@
+{{- if .Values.computeControl.enabled }}
+{{- $cc := .Values.computeControl }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ $cc.service.apiPort }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-hosts" (include "opengeni.computeControl.name" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+  {{- with $cc.hostsService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $cc.hostsService.type }}
+  {{- with $cc.hostsService.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: hosts
+      port: {{ $cc.hostsService.port }}
+      targetPort: hosts
+      protocol: TCP
+      {{- if and (eq $cc.hostsService.type "NodePort") $cc.hostsService.nodePort }}
+      nodePort: {{ $cc.hostsService.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+{{- end }}

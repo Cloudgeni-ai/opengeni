@@ -189,9 +189,12 @@ async fn dispatch_future<P: Platform>(
         // The runner does not advertise `Capabilities.op_stream`, so a compliant
         // server never sends these; answer any that arrive with a typed Unsupported
         // rather than a silent drop, until the op engine is wired.
-        Op::OpStart(_) | Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::WriteChunk(_) => {
-            op_stream_unsupported(request_id)
-        }
+        Op::OpStart(_)
+        | Op::OpCancel(_)
+        | Op::OpQuery(_)
+        | Op::OpAttach(_)
+        | Op::OpRelease(_)
+        | Op::WriteChunk(_) => op_stream_unsupported(request_id),
 
         // --- platform-backed Channel-A ops -----------------------------------
         // NOTE: `fs_read` can produce a reply larger than the transport's max

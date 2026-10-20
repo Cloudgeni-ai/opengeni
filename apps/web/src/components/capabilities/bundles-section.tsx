@@ -46,6 +46,7 @@ export function BundlesSection({
   workspaceId,
   connections,
   canManage,
+  canManagePlugins = canManage,
   items,
   logoUrl,
   busyCatalogId,
@@ -71,8 +72,10 @@ export function BundlesSection({
   client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
-  /** Workspace administrator authority: install, update, remove, register. */
+  /** Skill authority: install, update and remove imported Skills (documents:manage). */
   canManage: boolean;
+  /** Plugin authority (capabilities:manage); defaults to canManage. */
+  canManagePlugins?: boolean;
 
   items: CapabilityCatalogItem[];
   logoUrl: (item: CapabilityCatalogItem) => string | null;
@@ -89,6 +92,7 @@ export function BundlesSection({
     workspaceId,
     connections,
     canManage,
+    canManagePlugins,
     onChanged,
     restoreFocusRef: openerRef,
     restoreFocusFallbackRef: removalFallbackRef,
@@ -126,7 +130,7 @@ export function BundlesSection({
     const collected: BundleRow[] = [
       ...source.plugins.map((plugin) =>
         pluginBundleRow(plugin, {
-          canManage,
+          canManage: canManagePlugins,
           busy: source.busyKey === `plugin:${plugin.pluginKey}`,
           onUpdate: () => leaveSheet(() => source.updatePlugin(plugin)),
           onRemove: () => leaveSheet(() => source.removePlugin(plugin)),
@@ -162,7 +166,17 @@ export function BundlesSection({
     logoUrl,
     busyCatalogId,
     canManage,
+    canManagePlugins,
   ]);
+
+  // Skills are team content (documents:manage); plugins stay administrative.
+  const lacksPlugins = section !== "skills" && !canManagePlugins;
+  const restrictionNote =
+    !canManage && (lacksPlugins || section === "skills")
+      ? "Workspace administrators can install, update, and remove these items."
+      : lacksPlugins
+        ? "Workspace administrators can install, update, and remove plugins."
+        : null;
 
   const visible = useMemo(
     () =>
@@ -288,10 +302,8 @@ export function BundlesSection({
                 ? "Manage imported skills and their updates."
                 : "Skills and connections installed together."}
             </p>
-            {!canManage ? (
-              <p className="mt-1 text-2xs leading-4 text-fg-subtle">
-                Workspace administrators can install, update, and remove these items.
-              </p>
+            {restrictionNote ? (
+              <p className="mt-1 text-2xs leading-4 text-fg-subtle">{restrictionNote}</p>
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -299,7 +311,7 @@ export function BundlesSection({
               type="button"
               variant="outline"
               size="sm"
-              disabled={!canManage}
+              disabled={!canManagePlugins}
               hidden={section !== "plugins"}
               onClick={source.installPlugin}
             >
@@ -373,7 +385,7 @@ export function BundlesSection({
           <CatalogHeader
             title="Plugins"
             action={
-              <Button disabled={!canManage} onClick={source.installPlugin}>
+              <Button disabled={!canManagePlugins} onClick={source.installPlugin}>
                 <PlusIcon />
                 Import plugin
               </Button>
@@ -405,7 +417,7 @@ export function BundlesSection({
               client={client}
               workspaceId={workspaceId}
               query={query}
-              canManage={canManage}
+              canManage={canManagePlugins}
               onChanged={() => {
                 source.reload();
                 onChanged();
@@ -431,7 +443,7 @@ export function BundlesSection({
           client={client}
           workspaceId={workspaceId}
           query={query}
-          canManage={canManage}
+          canManage={canManagePlugins}
           onChanged={() => {
             source.reload();
             onChanged();

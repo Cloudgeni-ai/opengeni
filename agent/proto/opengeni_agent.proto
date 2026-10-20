@@ -82,6 +82,9 @@ enum ErrorCode {
   // the oversized publish fail silently and the caller time out opaquely.
   // Not retryable — the same op would produce the same oversized reply.
   ERROR_CODE_PAYLOAD_TOO_LARGE = 11;
+  // The request's run_as names no user in the runner's password database.
+  // Not retryable.
+  ERROR_CODE_RUN_AS_UNKNOWN_USER = 12;
 }
 
 // The operating system family the agent runs on.
@@ -214,6 +217,17 @@ message Capabilities {
   // Requires transactional_fs_write. Older runners require a nonzero session
   // epoch; callers MUST NOT invent one for a machine-addressed operation.
   bool transactional_fs_write_machine = 18;
+  // The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+  // as root on Linux and switches to the named user per request. False (absent)
+  // runners MUST NOT receive a non-empty run_as.
+  bool run_as = 19;
+  // The runner serves OpRelease: it confirms an output release in its answer
+  // and forgets the op at once. It also reports its OperationInventory, on
+  // every connection and while it holds completed output nobody released, and
+  // stores each op's OpStart.connection_generation. False (absent) runners
+  // keep the fire-and-forget final OpAck, which they apply at their next
+  // housekeeping pass.
+  bool op_release = 20;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.
@@ -434,6 +448,12 @@ message ExecRequest {
   bytes stdin = 5;
   // Optional hard wall-clock timeout; 0 means no process deadline.
   uint32 timeout_ms = 6;
+  // Run this request as this local user instead of the agent's own account: a
+  // user name, else a decimal uid; it must exist in the password database (else
+  // ERROR_CODE_RUN_AS_UNKNOWN_USER). Empty = the agent's account. Honored only
+  // where Capabilities.run_as is advertised; elsewhere a non-empty value fails
+  // with ERROR_CODE_UNSUPPORTED.
+  string run_as = 7;
 }
 
 message ExecResponse {
@@ -457,6 +477,8 @@ message FsReadRequest {
   // Optional byte offset + length for ranged reads (0 length => to EOF).
   uint64 offset = 2;
   uint64 length = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsReadResponse {
@@ -474,6 +496,8 @@ message FsWriteRequest {
   bool append = 4;
   // POSIX mode for a newly created file (e.g. 0644); 0 => platform default.
   uint32 mode = 5;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 6;
 }
 
 message FsWriteResponse {
@@ -484,6 +508,8 @@ message FsListRequest {
   string path = 1;
   // Recurse into subdirectories.
   bool recursive = 2;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 3;
 }
 
 message FsListResponse {
@@ -513,6 +539,8 @@ message FsMkdirRequest {
   // Create intermediate directories (mkdir -p).
   bool parents = 2;
   uint32 mode = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsMkdirResponse {}
@@ -522,12 +550,16 @@ message FsMoveRequest {
   string to = 2;
   // Overwrite the destination if it exists.
   bool overwrite = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsMoveResponse {}
 
 message FsStatRequest {
   string path = 1;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 2;
 }
 
 message FsStatResponse {
@@ -540,6 +572,8 @@ message FsRemoveRequest {
   string path = 1;
   // Remove directories recursively.
   bool recursive = 2;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 3;
 }
 
 message FsRemoveResponse {}
@@ -557,6 +591,8 @@ message GitRequest {
   string cwd = 2;
   // Free-form args for ops that pass through (e.g. log/diff flags).
   repeated string args = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 enum GitOp {
@@ -623,6 +659,8 @@ message PtyOpenRequest {
   // capability/token refreshes reattach the same terminal while separate sessions
   // on one machine remain isolated.
   string scope_id = 7;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 8;
 }
 
 message PtyOpenResponse {
@@ -1166,6 +1204,9 @@ enum OpLostReason {
   // The runner process restarted and the op's in-memory scope did not survive
   // (until the journal + scope re-adoption of a later milestone).
   OP_LOST_REASON_AGENT_RESTARTED = 2;
+  // The server released the op's retained output (OpRelease): it consumed the
+  // result, and the runner dropped it. Not a loss of anything the server needs.
+  OP_LOST_REASON_RELEASED = 3;
 }
 
 // The terminal outcome of an op — carried in the Exit frame body AND echoed in
@@ -1214,6 +1255,8 @@ message FsWriteBegin {
   // Exactly one of expected_absent / expected_base_digest is required.
   // Creation publishes atomically without replacing a concurrently created file.
   bool expected_absent = 7;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 8;
 }
 
 // Start an op (server→runner). IDEMPOTENT by op_id (= ControlRequest.request_id):
@@ -1235,6 +1278,11 @@ message OpStart {
   int64 deadline_ms = 11;
   // The originating session id, for per-origin fair admission.
   string origin_id = 12;
+  // The generation of the connection Opengeni dispatches this start under
+  // (it increments each time a different runner process claims the
+  // enrollment's connection). The runner stores it with the op at admission
+  // and reports it in its OperationInventory. 0 from an older Opengeni.
+  uint64 connection_generation = 13;
 }
 
 message OpStarted {
@@ -1270,8 +1318,22 @@ message OpAttach {
   uint64 window_bytes = 4;
 }
 
-// The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,
-// and embedded in OpStarted).
+// Release a completed op's retained output (server→runner) once the server has
+// durably stored all of it, through the terminal frame at `exit_seq`. The
+// runner drops the op at once and answers with the op's status: LOST with
+// lost_reason RELEASED confirms the release (and answers every later request
+// about the op, so a duplicate release or attach is idempotent). A different
+// terminal frame, or an op still running, is answered with its actual status
+// and nothing is released. Only sent to runners advertising
+// Capabilities.op_release. Reply is OpStatus.
+message OpRelease {
+  string op_id = 1;
+  // The sequence of the op's terminal (Exit) frame the server stored.
+  uint64 exit_seq = 2;
+}
+
+// The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach/
+// OpRelease, and embedded in OpStarted).
 message OpStatus {
   string op_id = 1;
   OpState state = 2;
@@ -1404,6 +1466,7 @@ message ControlRequest {
     CredentialRenewRequest credential_renew = 40;
     BrowserControlHttpRequest browser_control_http = 41;
     BrowserControlHttpReadRequest browser_control_http_read = 42;
+    OpRelease op_release = 43;
   }
 }
 
@@ -1436,7 +1499,7 @@ message ControlResponse {
     DesktopInputResponse desktop_input = 29;
     DesktopScreenshotResponse desktop_screenshot = 30;
     // Op-stream (v1.1) replies, additive. OpStart → OpStarted; OpCancel / OpQuery /
-    // OpAttach all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
+    // OpAttach / OpRelease all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
     OpStarted op_start = 31;
     OpStatus op_status = 32;
     WriteChunkAck write_chunk = 35;
@@ -1473,6 +1536,7 @@ message AgentEvent {
     GoingOffline going_offline = 11;
     AgentUpdateProgress agent_update_progress = 12;
     OperationCompleted operation_completed = 13;
+    OperationInventory operation_inventory = 14;
   }
 }
 
@@ -1484,12 +1548,55 @@ message OperationCompleted {
   OpExit exit = 2;
 }
 
+// The operations one runner process still runs or retains. It reports them on
+// every connection of a link, and again while that connection lasts whenever
+// it holds a completed op whose output nobody released for a while (about a
+// minute after completion, then with backoff). Opengeni answers each page in
+// that same exchange: which ops to end, and it collects completed output it
+// has not stored yet. It is the runner's own recovery of output releases and
+// of ops Opengeni settled without reaching it, so nothing about them is ever
+// sent to a runner that is not talking. Sent in pages until each page is
+// answered on the ack subject; the authenticated events subject supplies the
+// exact connection identity. Runners advertising Capabilities.op_release send
+// it; others keep every op until their own retention ends it.
+message OperationInventory {
+  // Identifies this connection's report (unique within the runner process).
+  uint64 report_id = 1;
+  // Zero-based page index and the page count of this report.
+  uint32 page = 2;
+  uint32 pages = 3;
+  repeated InventoryOperation operations = 4;
+}
+
+message InventoryOperation {
+  string op_id = 1;
+  // The OpStart.connection_generation the op was admitted under; 0 when an
+  // older Opengeni started it.
+  uint64 connection_generation = 2;
+  // The op exited and its output is retained, unreleased. How long ago is
+  // deliberately not reported: age never shows that anyone consumed it.
+  bool complete = 3;
+  reserved 4;
+}
+
 // The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).
 message AgentEventAck {
   oneof ack {
     HeartbeatAck heartbeat = 10;
     OperationCompletedAck operation_completed = 11;
+    OperationInventoryAck operation_inventory = 12;
   }
+}
+
+// Answers one OperationInventory page, only while the reporting process holds
+// its enrollment's connection. The runner ends each listed op and never
+// reports it again: a running one is cancelled and dropped when it exits, a
+// completed one is released as OpRelease would release it. Every other op is
+// kept.
+message OperationInventoryAck {
+  uint64 report_id = 1;
+  uint32 page = 2;
+  repeated string end_op_ids = 3;
 }
 
 // The server durably owns exit reconciliation. This acknowledges notification

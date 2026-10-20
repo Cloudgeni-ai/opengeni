@@ -18,8 +18,10 @@ export type ArtifactCatalogItem = {
   status: "active" | "archived";
   /** Shared workspace pin; absent on older servers. Never grants content access. */
   pinned?: boolean;
-  /** Sites only: "private" when only its owner (the viewer) can see it. */
+  /** Sites and files: "private" when only its owner (the viewer) can see it. */
   visibility?: "private" | "workspace";
+  /** Files only: the viewer owns the file, so they can share or limit it. */
+  ownedByViewer?: boolean;
   /** Present only when the viewer can read this session. */
   sourceSessionId?: string;
   versionId?: string;

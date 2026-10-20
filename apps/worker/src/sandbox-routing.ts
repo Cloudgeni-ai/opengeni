@@ -16,6 +16,7 @@ import { isDeepStrictEqual } from "node:util";
 // request/reply connection.
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { releaseStoredConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
   getRetainedProviderCommand,
@@ -97,6 +98,7 @@ import {
   type SelfhostedRelayConfig,
   type OpStreamJournal,
   type SelfhostedOpStreamDeps,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
 
@@ -1628,6 +1630,7 @@ export type SelfhostedTurnSessionArgs = {
   transactionalFsWriteSupported?: boolean;
   transactionalFsWriteMachineSupported?: boolean;
   browserControlHttpSupported?: boolean;
+  runAsSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1676,6 +1679,8 @@ export type SelfhostedTurnSessionArgs = {
 function opStreamDepsFor(
   services: RoutingWiringServices,
   machineAdvertisesOpStream: boolean,
+  outputReleaseSupported = false,
+  connectionGeneration?: number,
 ): SelfhostedOpStreamDeps | undefined {
   const { settings, bus, opJournal } = services;
   if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
@@ -1684,6 +1689,10 @@ function opStreamDepsFor(
   return {
     transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
     ...(opJournal !== undefined ? { journal: opJournal } : {}),
+    ...(outputReleaseSupported ? { outputReleaseSupported: true } : {}),
+    ...(connectionGeneration !== undefined
+      ? { connectionGeneration: String(connectionGeneration) }
+      : {}),
   };
 }
 
@@ -1694,7 +1703,12 @@ export function connectionBindingFor(
   enrollment: EnrollmentRecord | null,
 ): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
-  const opStream = opStreamDepsFor(services, enrollment.opStream === true);
+  const opStream = opStreamDepsFor(
+    services,
+    enrollment.opStream === true,
+    enrollment.agentCapabilities.opRelease === true,
+    enrollment.connectionGeneration,
+  );
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
@@ -1707,6 +1721,7 @@ export function connectionBindingFor(
     transactionalFsWriteMachineSupported:
       enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
@@ -1752,76 +1767,32 @@ async function resolveRoutedMachineConnection(
   );
 }
 
-export async function establishSelfhostedTurnSession(
-  services: RoutingWiringServices,
-  args: SelfhostedTurnSessionArgs,
-): Promise<EstablishedSandboxSession> {
-  const { db, settings, bus, onOp } = services;
-  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
-  const opStream = opStreamDepsFor(services, args.opStream);
-  const { client, session } = await buildSelfhostedBackendSession({
-    workspaceId: args.workspaceId,
-    ...(args.controlWorkspaceId !== undefined
-      ? { controlWorkspaceId: args.controlWorkspaceId }
-      : {}),
-    agentId: args.agentId,
-    connectionInstanceId: args.connectionInstanceId,
-    workspaceRoot: args.workspaceRoot,
-    relay: relayConfigFromSettings(settings),
-    controlRpcFactory: controlRpcFactory(bus),
-    epoch: args.epoch,
-    environment: args.environment,
-    ...(args.transientExecEnvironment !== undefined
-      ? { transientExecEnvironment: args.transientExecEnvironment }
-      : {}),
-    // Give this turn's exec ops the long deadline (control ops stay short) so a real
-    // command is not killed at the control wall.
-    timeoutMs,
-    execTimeoutMs,
-    operationResourcePolicy: args.operationResourcePolicy,
-    operationResourcePolicySupported: args.operationResourcePolicySupported,
-    operationCpuQuotaSupported: args.operationCpuQuotaSupported,
-    transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
-    transactionalFsWriteMachineSupported: args.transactionalFsWriteMachineSupported === true,
-    browserControlHttpSupported: args.browserControlHttpSupported === true,
-    resolveOperationAdmission: async () => {
-      // The machine's audience can change in place during a turn. Read the
-      // current scope on every admitted operation: a machine that is Only me now
-      // needs the frozen accepted-attempt authority, a shared one does not.
-      const current = await getLiveEnrollmentConnection(
-        db,
-        args.controlWorkspaceId ?? args.workspaceId,
-        args.agentId,
-      );
-      const enrollment =
-        current?.scope !== "user"
-          ? current
-          : args.personalMachineAttempt
-            ? await resolvePersonalMachineConnectionForAttempt(db, {
-                accountId: args.personalMachineAttempt.accountId,
-                workspaceId: args.workspaceId,
-                subjectId: args.personalMachineAttempt.subjectId,
-                sessionId: args.personalMachineAttempt.sessionId,
-                turnId: args.personalMachineAttempt.turnId,
-                attemptId: args.personalMachineAttempt.attemptId,
-                executionGeneration: args.personalMachineAttempt.executionGeneration,
-                enrollmentId: args.agentId,
-                requireActiveSandbox: true,
-              })
-            : null;
-      const binding = connectionBindingFor(services, enrollment);
-      if (!binding) return null;
-      if (!binding.workspaceRoot) {
-        throw new ActiveBackendUnresolvableError(
-          "workspace_root_unavailable",
-          "Connected Machine no longer has a reported workspace root",
-        );
-      }
-      return {
-        ...binding,
-        workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
-      };
-    },
+/**
+ * The background-command ledger hooks of an agent session (a Connected
+ * Machine, or the agent inside a compute sandbox): a yielded command is
+ * adopted into the session's ledger, its output captured, and its exit settled.
+ */
+/** One answered OpRelease to a live runner. */
+const CONNECTED_OUTPUT_RELEASE_TIMEOUT_MS = 10_000;
+
+export function agentBackgroundCommandDeps(
+  db: Database,
+  bus: EventBus | undefined,
+  args: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    backgroundCommandAttempt?: {
+      turnId: string;
+      executionGeneration: number;
+      attemptId: string;
+    };
+  },
+): Pick<
+  SelfhostedSessionDeps,
+  "adoptBackgroundCommand" | "captureBackgroundCommandOutput" | "settleBackgroundCommand"
+> {
+  return {
     ...(args.backgroundCommandAttempt
       ? {
           adoptBackgroundCommand: async (command) => {
@@ -1882,6 +1853,24 @@ export async function establishSelfhostedTurnSession(
           receipt: command.outputReceipt,
           exitCode: command.exitCode,
         });
+        // Stored: release it on the runner now, in one answered exchange. A
+        // runner without OpRelease, or a failure, leaves it to the reconciler.
+        if (bus)
+          await releaseStoredConnectedCommandOutput(db, {
+            command: {
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              commandId: command.commandId,
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+            },
+            exitSeq: command.outputReceipt.exitSeq,
+            controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+            controlTimeoutMs: CONNECTED_OUTPUT_RELEASE_TIMEOUT_MS,
+          }).catch(() => undefined);
       }
       if (settlement && bus) {
         await bus
@@ -1889,6 +1878,88 @@ export async function establishSelfhostedTurnSession(
           .catch(() => undefined);
       }
     },
+  };
+}
+
+export async function establishSelfhostedTurnSession(
+  services: RoutingWiringServices,
+  args: SelfhostedTurnSessionArgs,
+): Promise<EstablishedSandboxSession> {
+  const { db, settings, bus, onOp } = services;
+  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
+  const opStream = opStreamDepsFor(services, args.opStream);
+  const { client, session } = await buildSelfhostedBackendSession({
+    workspaceId: args.workspaceId,
+    ...(args.controlWorkspaceId !== undefined
+      ? { controlWorkspaceId: args.controlWorkspaceId }
+      : {}),
+    agentId: args.agentId,
+    connectionInstanceId: args.connectionInstanceId,
+    workspaceRoot: args.workspaceRoot,
+    relay: relayConfigFromSettings(settings),
+    controlRpcFactory: controlRpcFactory(bus),
+    epoch: args.epoch,
+    environment: args.environment,
+    ...(args.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: args.transientExecEnvironment }
+      : {}),
+    // Give this turn's exec ops the long deadline (control ops stay short) so a real
+    // command is not killed at the control wall.
+    timeoutMs,
+    execTimeoutMs,
+    operationResourcePolicy: args.operationResourcePolicy,
+    operationResourcePolicySupported: args.operationResourcePolicySupported,
+    operationCpuQuotaSupported: args.operationCpuQuotaSupported,
+    transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: args.transactionalFsWriteMachineSupported === true,
+    browserControlHttpSupported: args.browserControlHttpSupported === true,
+    runAsSupported: args.runAsSupported === true,
+    resolveOperationAdmission: async () => {
+      // The machine's audience can change in place during a turn. Read the
+      // current scope on every admitted operation: a machine that is Only me now
+      // needs the frozen accepted-attempt authority, a shared one does not.
+      const current = await getLiveEnrollmentConnection(
+        db,
+        args.controlWorkspaceId ?? args.workspaceId,
+        args.agentId,
+      );
+      const enrollment =
+        current?.scope !== "user"
+          ? current
+          : args.personalMachineAttempt
+            ? await resolvePersonalMachineConnectionForAttempt(db, {
+                accountId: args.personalMachineAttempt.accountId,
+                workspaceId: args.workspaceId,
+                subjectId: args.personalMachineAttempt.subjectId,
+                sessionId: args.personalMachineAttempt.sessionId,
+                turnId: args.personalMachineAttempt.turnId,
+                attemptId: args.personalMachineAttempt.attemptId,
+                executionGeneration: args.personalMachineAttempt.executionGeneration,
+                enrollmentId: args.agentId,
+                requireActiveSandbox: true,
+              })
+            : null;
+      const binding = connectionBindingFor(services, enrollment);
+      if (!binding) return null;
+      if (!binding.workspaceRoot) {
+        throw new ActiveBackendUnresolvableError(
+          "workspace_root_unavailable",
+          "Connected Machine no longer has a reported workspace root",
+        );
+      }
+      return {
+        ...binding,
+        workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
+      };
+    },
+    ...agentBackgroundCommandDeps(db, bus, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      sessionId: args.sessionId,
+      ...(args.backgroundCommandAttempt
+        ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
+        : {}),
+    }),
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the

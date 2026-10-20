@@ -205,6 +205,42 @@ describe("Connected Machine event ingestion scheduling", () => {
     expect(seen).toEqual(["slow", "heartbeat", "fast", "slow"]);
   });
 
+  test("an inventory page that collects output does not block its runner's liveness, and every page is answered in order", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let progressed!: () => void;
+    const progress = new Promise<void>((resolve) => {
+      progressed = resolve;
+    });
+    const seen: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationInventory") {
+        seen.push(`page-${event.operationInventory.page}`);
+        if (event.operationInventory.page === 0) await gate;
+      } else if (event?.$case === "heartbeat") {
+        seen.push("heartbeat");
+        progressed();
+      }
+    });
+    const page = (index: number) =>
+      AgentEvent.encode({
+        event: {
+          $case: "operationInventory",
+          operationInventory: { reportId: "1", page: index, pages: 3, operations: [] },
+        },
+      }).finish();
+    for (const index of [0, 1, 2]) scheduler.enqueue(page(index), subjectA);
+    scheduler.enqueue(heartbeat(1), subjectA);
+    await progress;
+    expect(seen).toEqual(["page-0", "heartbeat"]);
+    release();
+    await scheduler.whenIdle();
+    expect(seen).toEqual(["page-0", "heartbeat", "page-1", "page-2"]);
+  });
+
   test("a rejected event does not strand later liveness for the same runner", async () => {
     const handled: string[] = [];
     const scheduler = createAgentEventIngestionScheduler(async (payload) => {

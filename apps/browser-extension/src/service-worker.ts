@@ -1,3 +1,4 @@
+import { agentUnavailableDetail } from "./agent-status";
 import {
   BRIDGE_PROTOCOL_VERSION,
   NATIVE_HOST_NAME,
@@ -45,6 +46,8 @@ let inventoryPublication: Promise<void> = Promise.resolve();
 let currentDeviceId: string | null = null;
 let currentProfileLabel: string | null = null;
 let lastError: string | null = null;
+// The agent accepted this profile at least once in this worker's lifetime.
+let everConnected = false;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Set<number>();
@@ -228,6 +231,7 @@ function handleNativeMessage(message: unknown): void {
       }
       clearHandshakeTimer();
       readyGeneration = generation;
+      everConnected = true;
       reconnectDelayMs = 500;
       lastError = null;
       void setBadge(true);
@@ -581,12 +585,16 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
   const typed = message as { type: string; profileLabel?: unknown };
   if (typed.type === "status") {
+    const connected = nativePort !== null && readyGeneration === connectionGeneration;
     respond({
-      connected: nativePort !== null && readyGeneration === connectionGeneration,
+      connected,
       deviceId: currentDeviceId,
       connectionGeneration,
       profileLabel: currentProfileLabel,
       error: lastError,
+      detail: connected
+        ? null
+        : agentUnavailableDetail(lastError ? { error: lastError, everConnected } : null),
     });
     return false;
   }

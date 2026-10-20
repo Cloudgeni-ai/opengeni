@@ -1,0 +1,48 @@
+# The benchmark client's identity: it creates and deletes claims, suspends
+# and resumes sandboxes and triggers snapshots in the compare namespace, and
+# nothing else. `kubectl create token compare-client -n compare
+# --duration=24h` gives the harness its token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: compare-client
+  namespace: compare
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: compare-client
+  namespace: compare
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools", "sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["podsnapshot.gke.io"]
+    resources: ["podsnapshotmanualtriggers"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["podsnapshot.gke.io"]
+    resources: ["podsnapshots"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: compare-client
+  namespace: compare
+subjects:
+  - kind: ServiceAccount
+    name: compare-client
+    namespace: compare
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: compare-client

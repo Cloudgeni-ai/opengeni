@@ -47,6 +47,11 @@ const memberPermissions = [
   "artifacts:read",
   "artifacts:publish",
 ] as const;
+// A Site viewer: anyone with artifacts:publish manages any Site they can see,
+// so the viewer fixtures (`member`, `third`) hold read access only.
+const viewerPermissions = memberPermissions.filter(
+  (permission) => permission !== "artifacts:publish",
+);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 
 function memoryObjectStorage() {
@@ -177,8 +182,9 @@ async function fixture(overrides: Partial<Settings> = {}) {
     };
   };
   const owner = await person(memberPermissions);
-  const member = await person(memberPermissions);
-  const third = await person(memberPermissions);
+  const member = await person(viewerPermissions);
+  const third = await person(viewerPermissions);
+  const teammate = await person(memberPermissions);
   const admin = await person([...memberPermissions, "workspace:admin"]);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-data-test')`;
@@ -252,6 +258,7 @@ async function fixture(overrides: Partial<Settings> = {}) {
     owner,
     member,
     third,
+    teammate,
     admin,
     objects,
     call,
@@ -268,9 +275,12 @@ test("each access mode applies to viewers and managers", async () => {
   const f = await fixture();
   const s = f.site((await f.publish("Team CRM")).id);
 
-  // Only managers define collections; members are viewers of the owner's Site.
+  // Only managers define collections; read-only members are viewers of the owner's Site.
   const denied = await s.define(f.member, "contacts", { accessMode: "shared" });
   expect(denied.status).toBe(403);
+  // A teammate who can publish artifacts manages a Site someone else started.
+  const teammate = await s.define(f.teammate, "teammate-notes", { accessMode: "shared" });
+  expect(teammate.status, JSON.stringify(teammate.json)).toBe(201);
   for (const [name, definition] of [
     ["contacts", { accessMode: "shared", uniqueFields: [["email"]] }],
     ["companies", { accessMode: "shared_read" }],
@@ -1310,7 +1320,7 @@ test("new records are validated before the write takes the Site's lock", async (
   );
 });
 
-test("only personless keys and people who manage the Site are managers", async () => {
+test("personless keys and people who can publish artifacts are managers", async () => {
   const { siteDataRole } = await import("../src/site-data/service");
   const site = { ownerSubjectId: "owner", createdBySubjectId: "owner" };
   const grant = (principalKind: AccessGrant["principalKind"]): AccessGrant => ({
@@ -1327,7 +1337,11 @@ test("only personless keys and people who manage the Site are managers", async (
   expect(siteDataRole(grant("human_session"), site, null)).toBe("viewer");
   expect(siteDataRole(grant(undefined), site, null)).toBe("viewer");
   expect(siteDataRole(grant("agent_attempt"), site, "owner")).toBe("manager");
-  expect(siteDataRole(grant("human_session"), site, "someone")).toBe("viewer");
+  // Sites are shared work: any teammate (or their agent) with artifacts:publish manages them.
+  expect(siteDataRole(grant("human_session"), site, "someone")).toBe("manager");
+  expect(siteDataRole(grant("agent_attempt"), site, "someone")).toBe("manager");
+  const readOnly = { ...grant("human_session"), permissions: ["artifacts:read" as const] };
+  expect(siteDataRole(readOnly, site, "someone")).toBe("viewer");
 });
 
 test("counters, per-record charge, record cap, bounded filters and tampered cursors", async () => {

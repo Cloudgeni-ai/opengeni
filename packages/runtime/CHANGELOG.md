@@ -1,5 +1,67 @@
 # @opengeni/runtime
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+- 641e179: A finished command's stored output is now released on its runner in one answered exchange, for foreground and background commands alike. The agent serves a new `OpRelease` request (advertised as `capabilities.op_release`): it drops the operation at once and confirms the release in its answer, so the release settles right where the output is stored, while the agent is live from the command, and nothing about the command is left for a later maintenance pass. When the storing process dies first, the agent's own operation inventory recovers the release, so maintenance never sends such an agent anything to release output. Every request Opengeni sends on its own behalf carries `Opengeni-No-Wake`, which a compute host answers itself instead of waking a sleeping sandbox; an unanswered one records nothing and is left to the agent's next inventory. The agent remembers every operation it has started for longer than Opengeni may resend a start for it, independent of output retention and across an in-place update, so a released operation never runs again. Connected Machine agents without the capability keep the existing final acknowledgement and later observation; a compute sandbox whose agent lacks it is refused as an image built with an older agent.
+
+### Patch Changes
+
+- 641e179: A command or file operation in flight when a Connected Machine's agent restarts,
+  or when a compute sandbox's VM dies and boots fresh, now ends as soon as the new
+  agent connection is live instead of retrying the old one for minutes. A command
+  that may have started is handed to the session's command ledger with a stop
+  request and reported with an unknown outcome, a read is read again from the new
+  agent, and a request that never reached the old agent is sent to the new one
+  with only the time it has left. A streaming command's timeout now also covers
+  its start, so abandoned work no longer keeps a sandbox lease warm or blocks
+  deleting the chat.
+- 641e179: Stopping a background command on a Connected Machine or compute sandbox now sends
+  the cancellation to the runner at once instead of waiting for the next maintenance
+  pass, so the process ends within moments of Stop. Stop answers within its five-second
+  budget; the reconciler still delivers the cancellation when that attempt fails, and
+  the runner's pushed exit settles the command. A stop to a compute sandbox that no
+  host currently serves wakes the sandbox, as any other request to it does.
+- e189078: A JavaScript dialog (alert, confirm, prompt) that a browser action opens no longer leaves the call hanging or silent. The action returns at once with the dialog's type and text, even when no page view was requested; a batch stops at the dialog and says how many of its actions ran; and page reads, fenced batch steps and screenshots that the dialog blocks end immediately with the same guidance to answer it with `handle_dialog`, instead of waiting out their timeouts. This holds in managed browsers and in the user's own Chrome.
+- 49b121d: Browser observations now show what form fields contain (text inputs, text areas, search boxes, number fields), as the page shows them on screen, so an agent can read a draft or a prefilled form and check what it typed without a screenshot or an extra read. Password fields stay redacted. Every secret value a browser or computer session typed from a secret reference is now remembered for that session and redacted from all its later observations, page reads, dialogs, clipboard reads and window titles, not only from the result of the action that typed it. Field values longer than 2,000 characters are clipped in the page outline with their full length noted; `browser_read` with `mode: "dom"` returns more.
+- b02f045: List the observed tab once in browser_tabs results and browser resume notices; its outline already starts with the tab's line.
+- aebb860: Browser tools now resume a browser that stopped between calls, the way browser_open already does. A browser is suspended while idle when its machine needs room for another one, and is lost when its controller restarts, for example after an agent update. Before, the agent's next browser_observe, browser_act or browser_tabs call failed with "BrowserSession is not active", and an agent that did not think to call browser_open again opened a fresh browser and lost its signed-in state.
+
+  Now the call resumes the same browser from its saved working copy; concurrent calls share one resume. Reads of the current tab (observe, read, screenshot), listing tabs, and opening a tab the browser refused to open then run on the restored browser. Calls that name a tab from before the resume, actions, diagnostics, and a tab operation that already changed the browser do not run (again), because tab IDs changed and unsaved page input may be gone: they return a `browser_resumed` error with the restored tabs and the selected tab's outline, so the next call can continue directly. An action admitted before any result reported the resume never runs on the reloaded page. A failed resume returns its own reason, and any other refusal is unchanged.
+
+- c27cffc: Make bulk browser work easy to script with Opengeni's own browsers. `navigate` takes an optional `waitUntil` (`load` or `network_idle`), and `viewport` defaults to desktop layout when `mobile` is omitted. `tab.navigate(url, { waitUntil })` passes it through in Code Mode. An explicit `load` wait now waits for the page's load event (images and other subresources finished), not just a parsed document. `ogtool call` and the native `codemode call` now write image blocks such as screenshots to files and print their paths instead of base64 pixels, and `--save-image <path>` saves the single image at an exact path. An existing `--save-image` path is refused before the call; a completed call whose image cannot be saved still prints its result with `imageSaveError` and exits with status 4. Expired temporary image directories are removed only when private and owned by the same user.
+- 1830cf0: computer_act can run a batch of semantic and keyboard actions in one call: they run in order on the same window, each acting on the state the one before it left, stop at the first that does not complete, and return the window's state after the last. A known sequence, such as pressing a run of Calculator buttons or filling several known fields, now takes one tool call instead of one per step. Each action stays its own durable operation, so a retried call repeats the same operations instead of acting twice.
+- a336e51: Keep session title generation independent of conversation handover. Steer and cancellation no longer wait for a title or cancel it; a durable metadata operation retains the accepted provider account, request custody, usage accounting and human-title precedence across recovery.
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- 523bac6: Clear a Connected Machine session's saved working directory when it is the filesystem root `/` or a Windows `System32` service launch directory left by older agents, so attachments, tool results and generated images work again in those chats. A filesystem or drive root, or anything inside the Windows directory, is never used as a working directory; the machine's reported root applies instead. The agent also moves out of the Windows system directory into the user's home, as it already did for a filesystem root.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- da09a6e: Recover pending Connected Machine requests immediately when the machine's control transport reconnects, preserving exact delivery identity and operation deadlines instead of waiting for a lost reply to time out.
+- dfd0ce5: Release turn cleanup after a refused command when the exact runner confirms a terminal operation with no output frames. Preserve the original command error and retain cleanup custody when the runner's outcome is uncertain.
+- Updated dependencies [c27cffc]
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+- Updated dependencies [641e179]
+- Updated dependencies [641e179]
+- Updated dependencies [25c316a]
+  - @opengeni/codemode@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/agent-proto@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/capabilities@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/interaction@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+  - @opengeni/vaults@4.2.0
+  - @opengeni/network@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
 ## 4.1.3
 
 ### Patch Changes

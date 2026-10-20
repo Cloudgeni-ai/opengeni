@@ -50,6 +50,7 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -87,6 +88,16 @@ const forwardMigrations = [
   "0730_maintenance_work_probes.sql",
   // Rewrites the visibility transition installed by withheld 0501; replay after it.
   "0738_private_sessions_share_sandboxes.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Replaces the file ownership trigger from 0461 and reads 0499's file
+  // read-capability table; replay after both.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines from replayed 0738; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and backfills over 0560's import column.
+  "0856_session_fork_workflow_identity.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

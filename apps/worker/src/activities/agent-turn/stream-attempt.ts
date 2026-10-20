@@ -12,6 +12,7 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  getSandboxRecoveryDiscontinuity,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -532,6 +533,15 @@ export async function runTurnStreamAttempt(
     let historyPreparationOutcome: "completed" | "failed" = "completed";
     let preparedHistoryCount: number | null = null;
     try {
+      // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
+      // existing history stays byte-for-byte intact, including after retries;
+      // the durable receipt restores the warning after compaction as well.
+      const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        "explicit_notice",
+      );
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -539,6 +549,7 @@ export async function runTurnStreamAttempt(
           subjectId: fileAuthoritySubjectId,
         },
         recovering: turn.executionGeneration > 1,
+        ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -1032,7 +1043,7 @@ export async function runTurnStreamAttempt(
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           beforeModelRequest: (point) => {
-            streamTiming.onModelRequestEntry();
+            streamTiming.onModelRequestEntry(point);
             return modelCallAdmission.beforeModelRequest(point);
           },
           onModelResponse: (event) => {

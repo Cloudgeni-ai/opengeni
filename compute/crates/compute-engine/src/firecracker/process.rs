@@ -1,0 +1,222 @@
+//! VMM processes the host agent watches but does not parent.
+//!
+//! The jailer forks Firecracker into its own PID namespace and session and
+//! exits, so the VMM is never a child of the host agent: it survives the
+//! agent stopping, crashing or being upgraded, and the init process reaps
+//! it. The agent instead holds a pidfd, which names exactly one process for
+//! as long as the descriptor is open (a recycled pid can never be confused
+//! with it), becomes readable when that process exits, and can signal it.
+
+use std::fs;
+use std::io;
+use std::io::Write;
+use std::os::fd::OwnedFd;
+use std::path::Path;
+use std::sync::Arc;
+
+use rustix::process::{Pid, PidfdFlags, Signal};
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
+use tokio::sync::watch;
+
+/// What the out-of-memory killer adds to the badness of a process that
+/// keeps a VM alive, in thousandths of the host's memory: it ends nearly
+/// anything else first. Not -1000, which would make it unkillable and turn
+/// a host with nothing else left into a kernel panic.
+pub(crate) const OOM_SCORE_ADJ: i32 = -900;
+
+/// Makes process `pid` one of the out-of-memory killer's last choices; see
+/// [`OOM_SCORE_ADJ`]. Lowering it needs `CAP_SYS_RESOURCE`. `pid` must be
+/// the caller's own child, not yet reaped, so the number cannot name
+/// another process; for any other use [`Process::protect_from_oom`].
+pub(crate) fn protect_from_oom(pid: Pid) -> io::Result<()> {
+    open_oom_score_adj(pid)?.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+}
+
+fn open_oom_score_adj(pid: Pid) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/{}/oom_score_adj", pid.as_raw_pid()))
+}
+
+/// Whether a VMM process is still alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// Still running.
+    Running,
+    /// Ended.
+    Exited,
+}
+
+/// One VMM process, pinned by a pidfd.
+#[derive(Debug)]
+pub(crate) struct Process {
+    pid: Pid,
+    pidfd: Arc<AsyncFd<OwnedFd>>,
+    exit: watch::Receiver<Exit>,
+}
+
+impl Process {
+    /// Pins process `pid` and starts watching for its exit. Must be called
+    /// within a Tokio runtime.
+    pub fn open(pid: Pid) -> io::Result<Self> {
+        let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::NONBLOCK)?;
+        // SAFETY: an `OwnedFd` returns the descriptor it owns from every
+        // `as_raw_fd` call and keeps it open until dropped, which only
+        // happens when the `AsyncFd` is.
+        let pidfd = unsafe { AsyncFd::register_with_interest(pidfd, Interest::READABLE) }
+            .map_err(io::Error::from)?;
+        let pidfd = Arc::new(pidfd);
+        let (exit_tx, exit) = watch::channel(Exit::Running);
+        let watched = Arc::clone(&pidfd);
+        tokio::spawn(async move {
+            // A pidfd turns readable once its process has exited. An error
+            // here only means the runtime is shutting down.
+            let _ = watched.readable().await;
+            let _ = exit_tx.send(Exit::Exited);
+        });
+        Ok(Self { pid, pidfd, exit })
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    pub fn exit(&self) -> watch::Receiver<Exit> {
+        self.exit.clone()
+    }
+
+    pub fn is_running(&self) -> bool {
+        *self.exit.borrow() == Exit::Running
+    }
+
+    /// Makes this process one of the out-of-memory killer's last choices;
+    /// see [`OOM_SCORE_ADJ`]. The file is opened by number, then written
+    /// only if the pinned process has not exited since: a procfs file
+    /// names the process that had the number when it was opened, and the
+    /// number cannot pass to another before the pinned process exits.
+    pub fn protect_from_oom(&self) -> io::Result<()> {
+        let mut file = open_oom_score_adj(self.pid)?;
+        let mut ready = [rustix::event::PollFd::new(
+            self.pidfd.get_ref(),
+            rustix::event::PollFlags::IN,
+        )];
+        let zero = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
+            return Err(io::Error::from_raw_os_error(
+                rustix::io::Errno::SRCH.raw_os_error(),
+            ));
+        }
+        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+    }
+
+    /// Kills the process. Succeeds if it has already exited.
+    pub fn kill(&self) -> io::Result<()> {
+        match rustix::process::pidfd_send_signal(self.pidfd.get_ref(), Signal::KILL) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Resolves once the process has exited.
+    pub async fn exited(&self) {
+        let mut exit = self.exit.clone();
+        let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
+    }
+}
+
+/// Makes `command` start its process in a process group of its own, so
+/// signals aimed at the agent's group (such as Ctrl-C) never reach a VM or
+/// its pager.
+///
+/// A process group, unlike a `setsid` hook run before exec, lets the
+/// standard library start the process with `posix_spawn`. A hook would make
+/// it `fork` the whole agent, which locks every allocator arena and the
+/// agent's address space while page tables are copied: under a burst of
+/// wakes, every other agent thread then waits.
+pub(crate) fn detach(command: &mut tokio::process::Command) {
+    command.process_group(0);
+}
+
+/// Whether process `pid` currently belongs to the cgroup at `relative`
+/// (its path below the cgroup v2 mount, starting with `/`).
+pub(crate) fn in_cgroup(pid: Pid, relative: &Path) -> io::Result<bool> {
+    let membership = match fs::read_to_string(format!("/proc/{}/cgroup", pid.as_raw_pid())) {
+        Ok(membership) => membership,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(membership
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"))
+        .any(|path| Path::new(path) == relative))
+}
+
+/// Parses a pid file the jailer wrote.
+pub(crate) fn parse_pid(text: &str) -> Option<Pid> {
+    text.trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .and_then(Pid::from_raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_files_hold_one_positive_number() {
+        assert_eq!(parse_pid("4242").map(Pid::as_raw_pid), Some(4242));
+        assert_eq!(parse_pid(" 17\n").map(Pid::as_raw_pid), Some(17));
+        assert!(parse_pid("").is_none());
+        assert!(parse_pid("0").is_none());
+        assert!(parse_pid("-3").is_none());
+        assert!(parse_pid("12 13").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_detached_process_leads_a_group_of_its_own() {
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30").kill_on_drop(true);
+        detach(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()).unwrap();
+        assert_eq!(rustix::process::getpgid(Some(pid)).unwrap(), pid);
+        assert_ne!(rustix::process::getpgrp(), pid);
+        child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pidfd_sees_its_process_exit_and_survives_pid_reuse() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let process = Process::open(pid).unwrap();
+        assert!(process.is_running());
+        process.kill().unwrap();
+        process.exited().await;
+        assert!(!process.is_running());
+        let _ = child.wait();
+        // Signalling a reaped process through its pidfd never reaches a
+        // process that reused the pid.
+        process.kill().unwrap();
+    }
+
+    #[test]
+    fn this_process_is_in_its_own_cgroup() {
+        let me = Pid::from_raw(i32::try_from(std::process::id()).unwrap()).unwrap();
+        let own = fs::read_to_string("/proc/self/cgroup").unwrap();
+        let path = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .unwrap();
+        assert!(in_cgroup(me, Path::new(path)).unwrap());
+        assert!(!in_cgroup(me, Path::new("/not-this-one")).unwrap());
+    }
+}

@@ -16,6 +16,8 @@
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
 //!   `--purge`) delete credentials + deactivate the enrollment.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// The Opengeni self-hosted agent: run your own machine as a first-class Opengeni
@@ -114,6 +116,13 @@ pub struct RunArgs {
     /// The virtual-desktop framebuffer geometry `WIDTHxHEIGHT`.
     #[arg(long, default_value = "1280x800")]
     pub virtual_geometry: String,
+
+    /// Run inside an Opengeni compute sandbox, as its guest init starts the
+    /// agent: the link file names the enrollment and the loopback address of
+    /// the sandbox's host. No enrollment, renewal, update or service
+    /// installation happens in this mode.
+    #[arg(long, value_name = "LINK_FILE")]
+    pub compute: Option<std::path::PathBuf>,
 }
 
 /// Arguments for the `enroll` subcommand.
@@ -373,6 +382,13 @@ pub struct CodemodeCallArgs {
     /// `structuredContent` as JSON is omitted.
     #[arg(long)]
     pub full: bool,
+
+    /// Save the result's single image (such as a browser screenshot) at this
+    /// path; an existing file is never overwritten. Without it, images are
+    /// written to a private temporary file. Either way the printed result
+    /// names the file instead of carrying base64 pixels, unless --full is set.
+    #[arg(long, value_name = "PATH")]
+    pub save_image: Option<PathBuf>,
 }
 
 /// Arguments for the `permissions` subcommand.

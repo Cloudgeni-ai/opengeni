@@ -176,7 +176,7 @@ function SkillReview({
     human &&
     (record.scope === "user" ||
       (record.scope === "workspace" &&
-        hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin")) ||
+        hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage")) ||
       (record.scope === "organization" &&
         grant &&
         hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),

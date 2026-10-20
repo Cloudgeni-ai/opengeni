@@ -55,6 +55,17 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   },
+  // compute needs the control service, its agent gateway and the relay its agents use.
+  compute: {
+    computeApiUrl: "https://compute.example.test",
+    computeApiKey: "k",
+    computeLinkUrl: "wss://opengeni.example.test/v1/compute/agent-link",
+    publicBaseUrl: "https://opengeni.example.test",
+    selfhostedRelayUrl: "wss://relay.example.test",
+    selfhostedRelayTokenSecret: "relay-token-secret",
+    selfhostedNatsUrl: "nats://nats.example.test:4222",
+    agentOpStreamEnabled: true,
+  },
 };
 
 describe("provider registry — descriptor invariants + backendId assertion", () => {
@@ -417,6 +428,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       "blaxel",
       "cloudflare",
       "vercel",
+      "compute",
     ] as const) {
       const settings = testSettings({ sandboxBackend: backend });
       expect(() => createSandboxClient(settings)).toThrow(SandboxConfigError);

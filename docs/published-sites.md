@@ -33,7 +33,10 @@ Open the Site and choose **Publish**. The **Publish to web** page sets:
 
 Only the Site's owner and workspace admins with `artifacts:publish` see the
 button. A Site must be shared with its workspace first; an **Only me** Site
-can't be published. **Unpublish** takes the Site offline at once and keeps
+can't be published. In a **Personal workspace**, where every chat is Only me
+and nobody else is in the workspace, publishing an Only me Site shares it
+with that one-person workspace as it publishes: only its owner, or their own
+agent, can do this. **Unpublish** takes the Site offline at once and keeps
 its address reserved; publishing again brings it back on the same address.
 
 Agents can do the same with the first-party tools `site_publication_get`,
@@ -52,6 +55,11 @@ Invited people sign in to Opengeni with the invited email. They don't join
 the organization or workspace and see nothing else in it. The API checks
 access again on every call, so removing an address or changing the mode
 takes effect on the next request.
+
+A member is anyone with live authority in the Site's workspace, checked on
+every call: a workspace membership whose organization membership is active,
+or, for a Personal workspace, its owner (who has no membership row). Anyone
+else in the organization is outside the workspace.
 
 Anonymous visitors of a public Site are guests: `guest:<visitorId>`, where
 the visitor id comes from a cookie the gateway signs. Guests aren't users,
@@ -127,6 +135,13 @@ the gateway origin and secret stay configured. Details and limits are in
 
 When the embedded agent is on, workspace members start ordinary private chats
 as themselves, with their live native permissions and normal workspace defaults.
+That needs `sessions:create`. A member without it (the Viewer preset) uses the
+agent on a Site that admits people outside the workspace (invited or anyone
+with the link) as a signed-in outside visitor would: invited or `user`, with
+the Site service identity, viewer-bound data tools and the Site's limits
+(`resolveSiteAgentViewer`), never more than outside visitors get. On a
+members-only Site they have no agent, and `site.config` reports
+`capabilities.agent: false`.
 Site-origin and console turns have identical tools, compute, learning, and
 agent reach. Author instructions remain explicit. Saved settings are never
 rewritten on Send; old chats retain their stored selections, editable normally.

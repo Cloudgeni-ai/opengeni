@@ -80,12 +80,7 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/library/:libraryId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
     const { grant } = access;
     const skillActor = skillInstallerActor(access);
     const libraryId = decodeURIComponent(c.req.param("libraryId"));
@@ -169,12 +164,7 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
     const { grant } = access;
     const skillActor = skillInstallerActor(access);
     const payload = await parseRequestJson(c, InstallSkillRequest);
@@ -244,12 +234,7 @@ export function registerSkillRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/skills/:capabilityId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
     const { grant } = access;
     const skillActor = skillRemovalActor(access);
     const capabilityId = decodeURIComponent(c.req.param("capabilityId"));

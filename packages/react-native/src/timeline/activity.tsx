@@ -17,6 +17,7 @@ import {
   toolRowPresentation,
   workerRowTitle,
   type ToolBody,
+  type ToolDetails,
   type ToolIconKind,
   type ToolPreview,
   type ToolRowPresentation,
@@ -61,6 +62,11 @@ export interface NativeActivityOptions {
   renderTool?: NativeToolRenderer | undefined;
   /** Active compute label for exec previews ("on <label> · …"). */
   computeLabel?: string | null | undefined;
+  /**
+   * `"plain"` keeps every tool step visible with its plain name and status but
+   * never shows raw arguments, output or JSON. Defaults to `"full"`.
+   */
+  toolDetails?: ToolDetails | undefined;
   renderMarkdown?:
     | ((text: string, options: { tone: "body" | "muted"; streaming?: boolean }) => ReactNode)
     | undefined;
@@ -233,6 +239,8 @@ function ToolBodyView({ body }: { body: ToolBody }) {
           ))}
         </View>
       );
+    case "none":
+      return null;
     case "listing":
       return (
         <>
@@ -396,6 +404,7 @@ export function PresentedToolRow({
       cancelled={p.cancelled}
       compact={compact}
       preview={p.preview ? previewContent(p.preview, compact) : undefined}
+      expandable={p.body.kind !== "none"}
     >
       <ToolBodyView body={p.body} />
     </ActivityDisclosure>
@@ -405,7 +414,10 @@ export function PresentedToolRow({
 function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }) {
   const t = useOpenGeniText();
   const options = useNativeActivityOptions();
-  const presentation = toolRowPresentation(t, item, { computeLabel: options.computeLabel ?? null });
+  const presentation = toolRowPresentation(t, item, {
+    computeLabel: options.computeLabel ?? null,
+    details: options.toolDetails ?? "full",
+  });
   const leaf = item.name.includes("__")
     ? item.name.slice(item.name.lastIndexOf("__") + 2)
     : item.name;

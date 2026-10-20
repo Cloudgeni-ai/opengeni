@@ -25,6 +25,7 @@ import {
   createEnrollment,
   createSandbox,
   createScheduledTask,
+  createSandboxEnrollment,
   createSession,
   getEnrollment,
   initializeSessionStartAtomically,
@@ -650,6 +651,52 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         isSessionGroup: false,
       }),
     );
+  }, 60_000);
+
+  test("a compute session lists its compute group and never its sandbox enrollment", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "compute",
+    });
+    await createSandboxEnrollment(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      enrollmentId: crypto.randomUUID(),
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    const app = appFor(bus, {
+      settings: testSettings({
+        ...settings,
+        sandboxBackend: "compute",
+        computeApiUrl: "http://control.test",
+        computeApiKey: "control-key",
+        computeLinkUrl: "wss://link.test",
+      }),
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
+    for (const query of [`?sessionId=${session.id}`, ""]) {
+      const response = await app.request(`/v1/workspaces/${workspaceId}/machines${query}`, {
+        headers: { authorization: auth },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        machines: Array<{ sandboxId: string; kind: string; isSessionGroup: boolean }>;
+      };
+      expect(body.machines).toEqual(
+        query
+          ? [
+              expect.objectContaining({
+                sandboxId: session.sandboxGroupId,
+                kind: "compute",
+                isSessionGroup: true,
+              }),
+              expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" }),
+            ]
+          : [expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" })],
+      );
+    }
   }, 60_000);
 
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {

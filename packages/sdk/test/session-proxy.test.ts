@@ -1708,6 +1708,40 @@ describe("createSessionProxyHandler", () => {
     expect((await off.browser.getClientConfig()).archive).toBe(false);
   });
 
+  test("an open conversation can mark itself read, and nothing else about attention", async () => {
+    const { upstream, browser } = setup();
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, {
+      unread: false,
+      acknowledgedThroughSequence: 42,
+    });
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, { unread: false });
+    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+    ]);
+    expect(upstream.requests.map((request) => request.body)).toEqual([
+      { unread: false, acknowledgedThroughSequence: 42 },
+      { unread: false },
+    ]);
+    for (const request of [
+      { unread: true },
+      { activelyWorking: true },
+      { unread: false, activelyWorking: false },
+      { unread: false, expectedVersion: 3 },
+      { unread: false, acknowledgedThroughSequence: -1 },
+      { unread: false, acknowledgedThroughSequence: 1.5 },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, request as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(2);
+  });
+
   test("retained media a session produced is served under files, scoped and association-checked", async () => {
     const RETAINED = "44444444-4444-4444-8444-444444444444";
     const OTHER_SESSION = "55555555-5555-4555-8555-555555555555";

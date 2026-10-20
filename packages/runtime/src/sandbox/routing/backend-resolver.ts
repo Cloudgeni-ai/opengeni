@@ -70,6 +70,7 @@ export interface SelfhostedConnectionBinding {
   transactionalFsWriteSupported?: boolean;
   transactionalFsWriteMachineSupported?: boolean;
   browserControlHttpSupported?: boolean;
+  runAsSupported?: boolean;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -125,6 +126,8 @@ export interface ActiveBackendResolverDeps {
   selfhostedAdoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  /** See SelfhostedSessionDeps.abandonCommand: for callers without a turn. */
+  selfhostedAbandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   selfhostedCaptureBackgroundCommandOutput?: (
     commandId: string,
     frames: OpStreamOutputFrame[],
@@ -388,6 +391,9 @@ export function makeActiveBackendResolver(
         ...(deps.selfhostedAdoptBackgroundCommand !== undefined
           ? { adoptBackgroundCommand: deps.selfhostedAdoptBackgroundCommand }
           : {}),
+        ...(deps.selfhostedAbandonCommand !== undefined
+          ? { abandonCommand: deps.selfhostedAbandonCommand }
+          : {}),
         ...(deps.selfhostedSettleBackgroundCommand !== undefined
           ? { settleBackgroundCommand: deps.selfhostedSettleBackgroundCommand }
           : {}),
@@ -402,6 +408,7 @@ export function makeActiveBackendResolver(
         transactionalFsWriteMachineSupported:
           connection.transactionalFsWriteMachineSupported === true,
         browserControlHttpSupported: connection.browserControlHttpSupported === true,
+        runAsSupported: connection.runAsSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
         // snapshot only when a new exec/Git is admitted.

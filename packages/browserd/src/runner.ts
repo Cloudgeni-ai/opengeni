@@ -476,8 +476,23 @@ export class AgentBrowserJsonRunner {
       }
       const daemonLive = await assertDaemonIdentity(daemon);
       if (!this.recoveredBrowserClosed) {
-        if (daemonLive && (await processParentPid(this.recoveredProcess.pid)) !== daemon.pid)
-          throw daemonLineageUnavailable();
+        if (daemonLive) {
+          // A browser that already shut down, for example at the controller's
+          // own close request, has no lineage left to prove; its receipt
+          // alone shows that it exited.
+          let parent: number | null = null;
+          let lineageError: unknown = null;
+          try {
+            parent = await processParentPid(this.recoveredProcess.pid);
+          } catch (error) {
+            lineageError = error;
+          }
+          if (
+            parent !== daemon.pid &&
+            (await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "exited"
+          )
+            throw lineageError ?? daemonLineageUnavailable();
+        }
         await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
         // Preserve a proved stop for the same cleanup retry; a missing macOS
         // PID still cannot authorize a fresh exact-directory launch.

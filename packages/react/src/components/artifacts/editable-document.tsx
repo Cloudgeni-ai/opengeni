@@ -19,6 +19,12 @@ import {
   type DocumentProjectionArtifactSurfaceProps,
   type DocumentProjectionPageGeometry,
 } from "./document-editor";
+import { EditableArtifactDownloadButton, type EditableArtifactDownload } from "./artifact-download";
+import {
+  ArtifactSubmissionProvider,
+  artifactSubmissionSessionKey,
+  useArtifactSubmissions,
+} from "./artifact-submissions";
 import { ArtifactSurface } from "./artifact-surface";
 import {
   asEditableArtifactError,
@@ -48,6 +54,8 @@ export type EditableDocumentArtifactSurfaceProps = Omit<
   readOnly?: boolean | undefined;
   /** Called only after the durable SDK command has been accepted locally. */
   onCommit?: DocumentCommitHandler | undefined;
+  /** Host-authenticated DOCX export; omitted for hosts without export support. */
+  download?: EditableArtifactDownload | undefined;
 };
 
 type DocumentProjectionState = {
@@ -69,7 +77,15 @@ type DocumentCommandState = {
  * Durable document editor over the public SDK session. Canonical state and
  * speculative replay remain Worker-owned; React receives bounded projections.
  */
-export function EditableDocumentArtifactSurface({
+export function EditableDocumentArtifactSurface(props: EditableDocumentArtifactSurfaceProps) {
+  return (
+    <ArtifactSubmissionProvider key={artifactSubmissionSessionKey(props.session)}>
+      <EditableDocumentArtifactSurfaceSession {...props} />
+    </ArtifactSubmissionProvider>
+  );
+}
+
+function EditableDocumentArtifactSurfaceSession({
   session,
   title,
   showHeader,
@@ -77,10 +93,13 @@ export function EditableDocumentArtifactSurface({
   readOnly = false,
   onCommit,
   onCommandError,
+  download,
+  actions: actionsProp,
   ...surfaceProps
 }: EditableDocumentArtifactSurfaceProps) {
   const t = useOpenGeniText();
   const view = useEditableArtifactView(session);
+  const submissions = useArtifactSubmissions();
   const invalidator = editableArtifactProjectionKey(view);
   const [retryEpoch, setRetryEpoch] = useState(0);
   const [state, setState] = useState<DocumentProjectionState>({
@@ -257,6 +276,23 @@ export function EditableDocumentArtifactSurface({
     },
     [commandState, onCommandError, onCommit, refresh, session, state, writable, t],
   );
+  const submitCommit = useCallback(
+    (commit: DocumentCommit) => submissions.run(() => applyCommit(commit)),
+    [applyCommit, submissions],
+  );
+  const actions = download ? (
+    <>
+      {actionsProp}
+      <EditableArtifactDownloadButton
+        session={session}
+        title={title}
+        download={download}
+        format="docx"
+      />
+    </>
+  ) : (
+    actionsProp
+  );
 
   const projection = state.session === session ? state.projection : null;
   const status = editableArtifactStatusLabel(t, view);
@@ -266,6 +302,7 @@ export function EditableDocumentArtifactSurface({
       {...surfaceProps}
       title={title}
       showHeader={showHeader}
+      actions={actions}
       subtitle={
         (subtitle ?? writable)
           ? t("counts.blocks", { count: projection.blocks.length })
@@ -274,7 +311,7 @@ export function EditableDocumentArtifactSurface({
             })
       }
       projection={projection}
-      commit={writable ? applyCommit : undefined}
+      commit={writable ? submitCommit : undefined}
       readOnly={!writable}
       busy={state.loading}
       onCommandError={onCommandError}
@@ -285,6 +322,7 @@ export function EditableDocumentArtifactSurface({
       title={title}
       showHeader={showHeader}
       subtitle={subtitle ?? status}
+      actions={accessRevoked ? actionsProp : actions}
       busy={!accessRevoked && !state.error}
       className={surfaceProps.className}
     >

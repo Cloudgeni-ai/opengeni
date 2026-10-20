@@ -171,6 +171,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       parsed.jobs["api-image"],
       parsed.jobs["artifact-materializer-image"],
       parsed.jobs["sandbox-image"],
+      parsed.jobs["desktop-image"],
     ];
     for (const job of runtimeConsumers) {
       expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
@@ -213,6 +214,10 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       (step) => step.id === "sandbox_image",
     );
     expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
+      (step) => step.id === "desktop_image",
+    );
+    expect(desktopBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
   });
 
   test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
@@ -259,15 +264,5 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
     expect(desktopBuild?.with?.labels).toContain(
       "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
     );
-    for (const glob of [
-      "packages/artifact-tool/**",
-      "packages/artifact-kernel-wasm-document/**",
-      "packages/artifact-kernel-wasm-presentation/**",
-      "packages/artifact-kernel-wasm-spreadsheet/**",
-      "scripts/*artifact*.ts",
-      ".github/workflows/artifact-runtime.yml",
-    ]) {
-      expect(source).toContain(`- "${glob}"`);
-    }
   });
 });

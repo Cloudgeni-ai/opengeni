@@ -201,7 +201,8 @@ approval, and answer; the endpoint checks it with `verifyToolRequest` from
 ([your own tools](product-integration.md#your-own-tools-as-the-signed-in-user-node)).
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
-`@opengeni/sdk` outside React. See
+`@opengeni/sdk` outside React. Your product's own links (its scheme, in-app
+paths) are drawn with `renderLink` on `Markdown` or `OpenGeniLinkProvider`. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
 
 A host that mounts the styled React surfaces

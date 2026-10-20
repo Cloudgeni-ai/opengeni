@@ -39,6 +39,11 @@ export enum ErrorCode {
    * Not retryable — the same op would produce the same oversized reply.
    */
   ERROR_CODE_PAYLOAD_TOO_LARGE = 11,
+  /**
+   * ERROR_CODE_RUN_AS_UNKNOWN_USER - The request's run_as names no user in the runner's password database.
+   * Not retryable.
+   */
+  ERROR_CODE_RUN_AS_UNKNOWN_USER = 12,
 }
 
 export function errorCodeFromJSON(object: any): ErrorCode {
@@ -79,6 +84,9 @@ export function errorCodeFromJSON(object: any): ErrorCode {
     case 11:
     case "ERROR_CODE_PAYLOAD_TOO_LARGE":
       return ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE;
+    case 12:
+    case "ERROR_CODE_RUN_AS_UNKNOWN_USER":
+      return ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER;
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -110,6 +118,8 @@ export function errorCodeToJSON(object: ErrorCode): string {
       return "ERROR_CODE_FENCED";
     case ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE:
       return "ERROR_CODE_PAYLOAD_TOO_LARGE";
+    case ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER:
+      return "ERROR_CODE_RUN_AS_UNKNOWN_USER";
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -712,6 +722,11 @@ export enum OpLostReason {
    * (until the journal + scope re-adoption of a later milestone).
    */
   OP_LOST_REASON_AGENT_RESTARTED = 2,
+  /**
+   * OP_LOST_REASON_RELEASED - The server released the op's retained output (OpRelease): it consumed the
+   * result, and the runner dropped it. Not a loss of anything the server needs.
+   */
+  OP_LOST_REASON_RELEASED = 3,
 }
 
 export function opLostReasonFromJSON(object: any): OpLostReason {
@@ -725,6 +740,9 @@ export function opLostReasonFromJSON(object: any): OpLostReason {
     case 2:
     case "OP_LOST_REASON_AGENT_RESTARTED":
       return OpLostReason.OP_LOST_REASON_AGENT_RESTARTED;
+    case 3:
+    case "OP_LOST_REASON_RELEASED":
+      return OpLostReason.OP_LOST_REASON_RELEASED;
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum OpLostReason");
   }
@@ -738,6 +756,8 @@ export function opLostReasonToJSON(object: OpLostReason): string {
       return "OP_LOST_REASON_EVICTED";
     case OpLostReason.OP_LOST_REASON_AGENT_RESTARTED:
       return "OP_LOST_REASON_AGENT_RESTARTED";
+    case OpLostReason.OP_LOST_REASON_RELEASED:
+      return "OP_LOST_REASON_RELEASED";
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum OpLostReason");
   }
@@ -1124,6 +1144,21 @@ export interface Capabilities {
    * epoch; callers MUST NOT invent one for a machine-addressed operation.
    */
   transactionalFsWriteMachine: boolean;
+  /**
+   * The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+   * as root on Linux and switches to the named user per request. False (absent)
+   * runners MUST NOT receive a non-empty run_as.
+   */
+  runAs: boolean;
+  /**
+   * The runner serves OpRelease: it confirms an output release in its answer
+   * and forgets the op at once. It also reports its OperationInventory, on
+   * every connection and while it holds completed output nobody released, and
+   * stores each op's OpStart.connection_generation. False (absent) runners
+   * keep the fire-and-forget final OpAck, which they apply at their next
+   * housekeeping pass.
+   */
+  opRelease: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -1330,6 +1365,14 @@ export interface ExecRequest {
   stdin: Uint8Array;
   /** Optional hard wall-clock timeout; 0 means no process deadline. */
   timeoutMs: number;
+  /**
+   * Run this request as this local user instead of the agent's own account: a
+   * user name, else a decimal uid; it must exist in the password database (else
+   * ERROR_CODE_RUN_AS_UNKNOWN_USER). Empty = the agent's account. Honored only
+   * where Capabilities.run_as is advertised; elsewhere a non-empty value fails
+   * with ERROR_CODE_UNSUPPORTED.
+   */
+  runAs: string;
 }
 
 export interface ExecRequest_EnvEntry {
@@ -1354,6 +1397,8 @@ export interface FsReadRequest {
   /** Optional byte offset + length for ranged reads (0 length => to EOF). */
   offset: string;
   length: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsReadResponse {
@@ -1371,6 +1416,8 @@ export interface FsWriteRequest {
   append: boolean;
   /** POSIX mode for a newly created file (e.g. 0644); 0 => platform default. */
   mode: number;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsWriteResponse {
@@ -1381,6 +1428,8 @@ export interface FsListRequest {
   path: string;
   /** Recurse into subdirectories. */
   recursive: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsListResponse {
@@ -1403,6 +1452,8 @@ export interface FsMkdirRequest {
   /** Create intermediate directories (mkdir -p). */
   parents: boolean;
   mode: number;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsMkdirResponse {
@@ -1413,6 +1464,8 @@ export interface FsMoveRequest {
   to: string;
   /** Overwrite the destination if it exists. */
   overwrite: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsMoveResponse {
@@ -1420,6 +1473,8 @@ export interface FsMoveResponse {
 
 export interface FsStatRequest {
   path: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsStatResponse {
@@ -1432,6 +1487,8 @@ export interface FsRemoveRequest {
   path: string;
   /** Remove directories recursively. */
   recursive: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsRemoveResponse {
@@ -1448,6 +1505,8 @@ export interface GitRequest {
   cwd: string;
   /** Free-form args for ops that pass through (e.g. log/diff flags). */
   args: string[];
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface GitResponse {
@@ -1499,6 +1558,8 @@ export interface PtyOpenRequest {
    * on one machine remain isolated.
    */
   scopeId: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface PtyOpenRequest_EnvEntry {
@@ -2120,6 +2181,8 @@ export interface FsWriteBegin {
    * Creation publishes atomically without replacing a concurrently created file.
    */
   expectedAbsent: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 /**
@@ -2145,6 +2208,13 @@ export interface OpStart {
   deadlineMs: string;
   /** The originating session id, for per-origin fair admission. */
   originId: string;
+  /**
+   * The generation of the connection Opengeni dispatches this start under
+   * (it increments each time a different runner process claims the
+   * enrollment's connection). The runner stores it with the op at admission
+   * and reports it in its OperationInventory. 0 from an older Opengeni.
+   */
+  connectionGeneration: string;
 }
 
 export interface OpStarted {
@@ -2189,8 +2259,24 @@ export interface OpAttach {
 }
 
 /**
- * The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,
- * and embedded in OpStarted).
+ * Release a completed op's retained output (server→runner) once the server has
+ * durably stored all of it, through the terminal frame at `exit_seq`. The
+ * runner drops the op at once and answers with the op's status: LOST with
+ * lost_reason RELEASED confirms the release (and answers every later request
+ * about the op, so a duplicate release or attach is idempotent). A different
+ * terminal frame, or an op still running, is answered with its actual status
+ * and nothing is released. Only sent to runners advertising
+ * Capabilities.op_release. Reply is OpStatus.
+ */
+export interface OpRelease {
+  opId: string;
+  /** The sequence of the op's terminal (Exit) frame the server stored. */
+  exitSeq: string;
+}
+
+/**
+ * The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach/
+ * OpRelease, and embedded in OpStarted).
  */
 export interface OpStatus {
   opId: string;
@@ -2344,6 +2430,7 @@ export interface ControlRequest {
     | { $case: "credentialRenew"; credentialRenew: CredentialRenewRequest }
     | { $case: "browserControlHttp"; browserControlHttp: BrowserControlHttpRequest }
     | { $case: "browserControlHttpRead"; browserControlHttpRead: BrowserControlHttpReadRequest }
+    | { $case: "opRelease"; opRelease: OpRelease }
     | undefined;
 }
 
@@ -2376,7 +2463,7 @@ export interface ControlResponse {
     | //
     /**
      * Op-stream (v1.1) replies, additive. OpStart → OpStarted; OpCancel / OpQuery /
-     * OpAttach all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
+     * OpAttach / OpRelease all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
      */
     { $case: "opStart"; opStart: OpStarted }
     | { $case: "opStatus"; opStatus: OpStatus }
@@ -2414,6 +2501,7 @@ export interface AgentEvent {
     | { $case: "goingOffline"; goingOffline: GoingOffline }
     | { $case: "agentUpdateProgress"; agentUpdateProgress: AgentUpdateProgress }
     | { $case: "operationCompleted"; operationCompleted: OperationCompleted }
+    | { $case: "operationInventory"; operationInventory: OperationInventory }
     | undefined;
 }
 
@@ -2427,12 +2515,62 @@ export interface OperationCompleted {
   exit: OpExit | undefined;
 }
 
+/**
+ * The operations one runner process still runs or retains. It reports them on
+ * every connection of a link, and again while that connection lasts whenever
+ * it holds a completed op whose output nobody released for a while (about a
+ * minute after completion, then with backoff). Opengeni answers each page in
+ * that same exchange: which ops to end, and it collects completed output it
+ * has not stored yet. It is the runner's own recovery of output releases and
+ * of ops Opengeni settled without reaching it, so nothing about them is ever
+ * sent to a runner that is not talking. Sent in pages until each page is
+ * answered on the ack subject; the authenticated events subject supplies the
+ * exact connection identity. Runners advertising Capabilities.op_release send
+ * it; others keep every op until their own retention ends it.
+ */
+export interface OperationInventory {
+  /** Identifies this connection's report (unique within the runner process). */
+  reportId: string;
+  /** Zero-based page index and the page count of this report. */
+  page: number;
+  pages: number;
+  operations: InventoryOperation[];
+}
+
+export interface InventoryOperation {
+  opId: string;
+  /**
+   * The OpStart.connection_generation the op was admitted under; 0 when an
+   * older Opengeni started it.
+   */
+  connectionGeneration: string;
+  /**
+   * The op exited and its output is retained, unreleased. How long ago is
+   * deliberately not reported: age never shows that anyone consumed it.
+   */
+  complete: boolean;
+}
+
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
 export interface AgentEventAck {
-  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | {
-    $case: "operationCompleted";
-    operationCompleted: OperationCompletedAck;
-  } | undefined;
+  ack:
+    | { $case: "heartbeat"; heartbeat: HeartbeatAck }
+    | { $case: "operationCompleted"; operationCompleted: OperationCompletedAck }
+    | { $case: "operationInventory"; operationInventory: OperationInventoryAck }
+    | undefined;
+}
+
+/**
+ * Answers one OperationInventory page, only while the reporting process holds
+ * its enrollment's connection. The runner ends each listed op and never
+ * reports it again: a running one is cancelled and dropped when it exits, a
+ * completed one is released as OpRelease would release it. Every other op is
+ * kept.
+ */
+export interface OperationInventoryAck {
+  reportId: string;
+  page: number;
+  endOpIds: string[];
 }
 
 /**
@@ -3114,6 +3252,8 @@ function createBaseCapabilities(): Capabilities {
     macPermissions: undefined,
     browserControlHttp: false,
     transactionalFsWriteMachine: false,
+    runAs: false,
+    opRelease: false,
   };
 }
 
@@ -3172,6 +3312,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.transactionalFsWriteMachine !== false) {
       writer.uint32(144).bool(message.transactionalFsWriteMachine);
+    }
+    if (message.runAs !== false) {
+      writer.uint32(152).bool(message.runAs);
+    }
+    if (message.opRelease !== false) {
+      writer.uint32(160).bool(message.opRelease);
     }
     return writer;
   },
@@ -3327,6 +3473,22 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.transactionalFsWriteMachine = reader.bool();
           continue;
         }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.runAs = reader.bool();
+          continue;
+        }
+        case 20: {
+          if (tag !== 160) {
+            break;
+          }
+
+          message.opRelease = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3404,6 +3566,16 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.transactional_fs_write_machine)
         ? globalThis.Boolean(object.transactional_fs_write_machine)
         : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.Boolean(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.Boolean(object.run_as)
+        : false,
+      opRelease: isSet(object.opRelease)
+        ? globalThis.Boolean(object.opRelease)
+        : isSet(object.op_release)
+        ? globalThis.Boolean(object.op_release)
+        : false,
     };
   },
 
@@ -3463,6 +3635,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.transactionalFsWriteMachine !== false) {
       obj.transactionalFsWriteMachine = message.transactionalFsWriteMachine;
     }
+    if (message.runAs !== false) {
+      obj.runAs = message.runAs;
+    }
+    if (message.opRelease !== false) {
+      obj.opRelease = message.opRelease;
+    }
     return obj;
   },
 
@@ -3493,6 +3671,8 @@ export const Capabilities: MessageFns<Capabilities> = {
       : undefined;
     message.browserControlHttp = object.browserControlHttp ?? false;
     message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
+    message.runAs = object.runAs ?? false;
+    message.opRelease = object.opRelease ?? false;
     return message;
   },
 };
@@ -5286,7 +5466,7 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
 };
 
 function createBaseExecRequest(): ExecRequest {
-  return { command: [], shell: false, cwd: "", env: {}, stdin: new Uint8Array(0), timeoutMs: 0 };
+  return { command: [], shell: false, cwd: "", env: {}, stdin: new Uint8Array(0), timeoutMs: 0, runAs: "" };
 }
 
 export const ExecRequest: MessageFns<ExecRequest> = {
@@ -5308,6 +5488,9 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     }
     if (message.timeoutMs !== 0) {
       writer.uint32(48).uint32(message.timeoutMs);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(58).string(message.runAs);
     }
     return writer;
   },
@@ -5370,6 +5553,14 @@ export const ExecRequest: MessageFns<ExecRequest> = {
           message.timeoutMs = reader.uint32();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5399,6 +5590,11 @@ export const ExecRequest: MessageFns<ExecRequest> = {
         : isSet(object.timeout_ms)
         ? globalThis.Number(object.timeout_ms)
         : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5428,6 +5624,9 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     if (message.timeoutMs !== 0) {
       obj.timeoutMs = Math.round(message.timeoutMs);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5450,6 +5649,7 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     );
     message.stdin = object.stdin ?? new Uint8Array(0);
     message.timeoutMs = object.timeoutMs ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -5694,7 +5894,7 @@ export const ExecResponse: MessageFns<ExecResponse> = {
 };
 
 function createBaseFsReadRequest(): FsReadRequest {
-  return { path: "", offset: "0", length: "0" };
+  return { path: "", offset: "0", length: "0", runAs: "" };
 }
 
 export const FsReadRequest: MessageFns<FsReadRequest> = {
@@ -5707,6 +5907,9 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     }
     if (message.length !== "0") {
       writer.uint32(24).uint64(message.length);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -5742,6 +5945,14 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
           message.length = reader.uint64().toString();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5756,6 +5967,11 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       offset: isSet(object.offset) ? globalThis.String(object.offset) : "0",
       length: isSet(object.length) ? globalThis.String(object.length) : "0",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5770,6 +5986,9 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     if (message.length !== "0") {
       obj.length = message.length;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5781,6 +6000,7 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     message.path = object.path ?? "";
     message.offset = object.offset ?? "0";
     message.length = object.length ?? "0";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -5866,7 +6086,7 @@ export const FsReadResponse: MessageFns<FsReadResponse> = {
 };
 
 function createBaseFsWriteRequest(): FsWriteRequest {
-  return { path: "", content: new Uint8Array(0), createParents: false, append: false, mode: 0 };
+  return { path: "", content: new Uint8Array(0), createParents: false, append: false, mode: 0, runAs: "" };
 }
 
 export const FsWriteRequest: MessageFns<FsWriteRequest> = {
@@ -5885,6 +6105,9 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     }
     if (message.mode !== 0) {
       writer.uint32(40).uint32(message.mode);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(50).string(message.runAs);
     }
     return writer;
   },
@@ -5936,6 +6159,14 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
           message.mode = reader.uint32();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5956,6 +6187,11 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
         : false,
       append: isSet(object.append) ? globalThis.Boolean(object.append) : false,
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5976,6 +6212,9 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     if (message.mode !== 0) {
       obj.mode = Math.round(message.mode);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5989,6 +6228,7 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     message.createParents = object.createParents ?? false;
     message.append = object.append ?? false;
     message.mode = object.mode ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6058,7 +6298,7 @@ export const FsWriteResponse: MessageFns<FsWriteResponse> = {
 };
 
 function createBaseFsListRequest(): FsListRequest {
-  return { path: "", recursive: false };
+  return { path: "", recursive: false, runAs: "" };
 }
 
 export const FsListRequest: MessageFns<FsListRequest> = {
@@ -6068,6 +6308,9 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     }
     if (message.recursive !== false) {
       writer.uint32(16).bool(message.recursive);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(26).string(message.runAs);
     }
     return writer;
   },
@@ -6095,6 +6338,14 @@ export const FsListRequest: MessageFns<FsListRequest> = {
           message.recursive = reader.bool();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6108,6 +6359,11 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     return {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       recursive: isSet(object.recursive) ? globalThis.Boolean(object.recursive) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6119,6 +6375,9 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     if (message.recursive !== false) {
       obj.recursive = message.recursive;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6129,6 +6388,7 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     const message = createBaseFsListRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6338,7 +6598,7 @@ export const FsEntry: MessageFns<FsEntry> = {
 };
 
 function createBaseFsMkdirRequest(): FsMkdirRequest {
-  return { path: "", parents: false, mode: 0 };
+  return { path: "", parents: false, mode: 0, runAs: "" };
 }
 
 export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
@@ -6351,6 +6611,9 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     }
     if (message.mode !== 0) {
       writer.uint32(24).uint32(message.mode);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6386,6 +6649,14 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
           message.mode = reader.uint32();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6400,6 +6671,11 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       parents: isSet(object.parents) ? globalThis.Boolean(object.parents) : false,
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6414,6 +6690,9 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     if (message.mode !== 0) {
       obj.mode = Math.round(message.mode);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6425,6 +6704,7 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     message.path = object.path ?? "";
     message.parents = object.parents ?? false;
     message.mode = object.mode ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6473,7 +6753,7 @@ export const FsMkdirResponse: MessageFns<FsMkdirResponse> = {
 };
 
 function createBaseFsMoveRequest(): FsMoveRequest {
-  return { from: "", to: "", overwrite: false };
+  return { from: "", to: "", overwrite: false, runAs: "" };
 }
 
 export const FsMoveRequest: MessageFns<FsMoveRequest> = {
@@ -6486,6 +6766,9 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     }
     if (message.overwrite !== false) {
       writer.uint32(24).bool(message.overwrite);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6521,6 +6804,14 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
           message.overwrite = reader.bool();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6535,6 +6826,11 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
       from: isSet(object.from) ? globalThis.String(object.from) : "",
       to: isSet(object.to) ? globalThis.String(object.to) : "",
       overwrite: isSet(object.overwrite) ? globalThis.Boolean(object.overwrite) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6549,6 +6845,9 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     if (message.overwrite !== false) {
       obj.overwrite = message.overwrite;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6560,6 +6859,7 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     message.from = object.from ?? "";
     message.to = object.to ?? "";
     message.overwrite = object.overwrite ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6608,13 +6908,16 @@ export const FsMoveResponse: MessageFns<FsMoveResponse> = {
 };
 
 function createBaseFsStatRequest(): FsStatRequest {
-  return { path: "" };
+  return { path: "", runAs: "" };
 }
 
 export const FsStatRequest: MessageFns<FsStatRequest> = {
   encode(message: FsStatRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.path !== "") {
       writer.uint32(10).string(message.path);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(18).string(message.runAs);
     }
     return writer;
   },
@@ -6634,6 +6937,14 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
           message.path = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6644,13 +6955,23 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
   },
 
   fromJSON(object: any): FsStatRequest {
-    return { path: isSet(object.path) ? globalThis.String(object.path) : "" };
+    return {
+      path: isSet(object.path) ? globalThis.String(object.path) : "",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
+    };
   },
 
   toJSON(message: FsStatRequest): unknown {
     const obj: any = {};
     if (message.path !== "") {
       obj.path = message.path;
+    }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
     }
     return obj;
   },
@@ -6661,6 +6982,7 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
   fromPartial<I extends Exact<DeepPartial<FsStatRequest>, I>>(object: I): FsStatRequest {
     const message = createBaseFsStatRequest();
     message.path = object.path ?? "";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6744,7 +7066,7 @@ export const FsStatResponse: MessageFns<FsStatResponse> = {
 };
 
 function createBaseFsRemoveRequest(): FsRemoveRequest {
-  return { path: "", recursive: false };
+  return { path: "", recursive: false, runAs: "" };
 }
 
 export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
@@ -6754,6 +7076,9 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     }
     if (message.recursive !== false) {
       writer.uint32(16).bool(message.recursive);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(26).string(message.runAs);
     }
     return writer;
   },
@@ -6781,6 +7106,14 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
           message.recursive = reader.bool();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6794,6 +7127,11 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     return {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       recursive: isSet(object.recursive) ? globalThis.Boolean(object.recursive) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6805,6 +7143,9 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     if (message.recursive !== false) {
       obj.recursive = message.recursive;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6815,6 +7156,7 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     const message = createBaseFsRemoveRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6863,7 +7205,7 @@ export const FsRemoveResponse: MessageFns<FsRemoveResponse> = {
 };
 
 function createBaseGitRequest(): GitRequest {
-  return { op: 0, cwd: "", args: [] };
+  return { op: 0, cwd: "", args: [], runAs: "" };
 }
 
 export const GitRequest: MessageFns<GitRequest> = {
@@ -6876,6 +7218,9 @@ export const GitRequest: MessageFns<GitRequest> = {
     }
     for (const v of message.args) {
       writer.uint32(26).string(v!);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6911,6 +7256,14 @@ export const GitRequest: MessageFns<GitRequest> = {
           message.args.push(reader.string());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6925,6 +7278,11 @@ export const GitRequest: MessageFns<GitRequest> = {
       op: isSet(object.op) ? gitOpFromJSON(object.op) : 0,
       cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
       args: globalThis.Array.isArray(object?.args) ? object.args.map((e: any) => globalThis.String(e)) : [],
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6939,6 +7297,9 @@ export const GitRequest: MessageFns<GitRequest> = {
     if (message.args?.length) {
       obj.args = message.args;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6950,6 +7311,7 @@ export const GitRequest: MessageFns<GitRequest> = {
     message.op = object.op ?? 0;
     message.cwd = object.cwd ?? "";
     message.args = object.args?.map((e) => e) || [];
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -7301,7 +7663,7 @@ export const GitFileStatus: MessageFns<GitFileStatus> = {
 };
 
 function createBasePtyOpenRequest(): PtyOpenRequest {
-  return { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "", scopeId: "" };
+  return { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "", scopeId: "", runAs: "" };
 }
 
 export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
@@ -7326,6 +7688,9 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     }
     if (message.scopeId !== "") {
       writer.uint32(58).string(message.scopeId);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(66).string(message.runAs);
     }
     return writer;
   },
@@ -7396,6 +7761,14 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
           message.scopeId = reader.string();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7425,6 +7798,11 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
         ? globalThis.String(object.scopeId)
         : isSet(object.scope_id)
         ? globalThis.String(object.scope_id)
+        : "",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
         : "",
     };
   },
@@ -7458,6 +7836,9 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     if (message.scopeId !== "") {
       obj.scopeId = message.scopeId;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -7481,6 +7862,7 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     message.rows = object.rows ?? 0;
     message.term = object.term ?? "";
     message.scopeId = object.scopeId ?? "";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -13521,6 +13903,7 @@ function createBaseFsWriteBegin(): FsWriteBegin {
     contentDigest: "",
     contentSize: undefined,
     expectedAbsent: false,
+    runAs: "",
   };
 }
 
@@ -13546,6 +13929,9 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     }
     if (message.expectedAbsent !== false) {
       writer.uint32(56).bool(message.expectedAbsent);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(66).string(message.runAs);
     }
     return writer;
   },
@@ -13613,6 +13999,14 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
           message.expectedAbsent = reader.bool();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13651,6 +14045,11 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
         : isSet(object.expected_absent)
         ? globalThis.Boolean(object.expected_absent)
         : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -13677,6 +14076,9 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     if (message.expectedAbsent !== false) {
       obj.expectedAbsent = message.expectedAbsent;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -13692,12 +14094,13 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     message.contentDigest = object.contentDigest ?? "";
     message.contentSize = object.contentSize ?? undefined;
     message.expectedAbsent = object.expectedAbsent ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
 
 function createBaseOpStart(): OpStart {
-  return { op: undefined, windowBytes: "0", deadlineMs: "0", originId: "" };
+  return { op: undefined, windowBytes: "0", deadlineMs: "0", originId: "", connectionGeneration: "0" };
 }
 
 export const OpStart: MessageFns<OpStart> = {
@@ -13721,6 +14124,9 @@ export const OpStart: MessageFns<OpStart> = {
     }
     if (message.originId !== "") {
       writer.uint32(98).string(message.originId);
+    }
+    if (message.connectionGeneration !== "0") {
+      writer.uint32(104).uint64(message.connectionGeneration);
     }
     return writer;
   },
@@ -13780,6 +14186,14 @@ export const OpStart: MessageFns<OpStart> = {
           message.originId = reader.string();
           continue;
         }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.connectionGeneration = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13817,6 +14231,11 @@ export const OpStart: MessageFns<OpStart> = {
         : isSet(object.origin_id)
         ? globalThis.String(object.origin_id)
         : "",
+      connectionGeneration: isSet(object.connectionGeneration)
+        ? globalThis.String(object.connectionGeneration)
+        : isSet(object.connection_generation)
+        ? globalThis.String(object.connection_generation)
+        : "0",
     };
   },
 
@@ -13837,6 +14256,9 @@ export const OpStart: MessageFns<OpStart> = {
     }
     if (message.originId !== "") {
       obj.originId = message.originId;
+    }
+    if (message.connectionGeneration !== "0") {
+      obj.connectionGeneration = message.connectionGeneration;
     }
     return obj;
   },
@@ -13869,6 +14291,7 @@ export const OpStart: MessageFns<OpStart> = {
     message.windowBytes = object.windowBytes ?? "0";
     message.deadlineMs = object.deadlineMs ?? "0";
     message.originId = object.originId ?? "";
+    message.connectionGeneration = object.connectionGeneration ?? "0";
     return message;
   },
 };
@@ -14199,6 +14622,90 @@ export const OpAttach: MessageFns<OpAttach> = {
     message.fromSeq = object.fromSeq ?? "0";
     message.attachGeneration = object.attachGeneration ?? "0";
     message.windowBytes = object.windowBytes ?? "0";
+    return message;
+  },
+};
+
+function createBaseOpRelease(): OpRelease {
+  return { opId: "", exitSeq: "0" };
+}
+
+export const OpRelease: MessageFns<OpRelease> = {
+  encode(message: OpRelease, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.exitSeq !== "0") {
+      writer.uint32(16).uint64(message.exitSeq);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OpRelease {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOpRelease();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.exitSeq = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OpRelease {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      exitSeq: isSet(object.exitSeq)
+        ? globalThis.String(object.exitSeq)
+        : isSet(object.exit_seq)
+        ? globalThis.String(object.exit_seq)
+        : "0",
+    };
+  },
+
+  toJSON(message: OpRelease): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.exitSeq !== "0") {
+      obj.exitSeq = message.exitSeq;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OpRelease>, I>>(base?: I): OpRelease {
+    return OpRelease.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OpRelease>, I>>(object: I): OpRelease {
+    const message = createBaseOpRelease();
+    message.opId = object.opId ?? "";
+    message.exitSeq = object.exitSeq ?? "0";
     return message;
   },
 };
@@ -15065,6 +15572,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "browserControlHttpRead":
         BrowserControlHttpReadRequest.encode(message.op.browserControlHttpRead, writer.uint32(338).fork()).join();
         break;
+      case "opRelease":
+        OpRelease.encode(message.op.opRelease, writer.uint32(346).fork()).join();
+        break;
     }
     return writer;
   },
@@ -15383,6 +15893,14 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 43: {
+          if (tag !== 346) {
+            break;
+          }
+
+          message.op = { $case: "opRelease", opRelease: OpRelease.decode(reader, reader.uint32()) };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15553,6 +16071,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           $case: "browserControlHttpRead",
           browserControlHttpRead: BrowserControlHttpReadRequest.fromJSON(object.browser_control_http_read),
         }
+        : isSet(object.opRelease)
+        ? { $case: "opRelease", opRelease: OpRelease.fromJSON(object.opRelease) }
+        : isSet(object.op_release)
+        ? { $case: "opRelease", opRelease: OpRelease.fromJSON(object.op_release) }
         : undefined,
     };
   },
@@ -15632,6 +16154,8 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.browserControlHttp = BrowserControlHttpRequest.toJSON(message.op.browserControlHttp);
     } else if (message.op?.$case === "browserControlHttpRead") {
       obj.browserControlHttpRead = BrowserControlHttpReadRequest.toJSON(message.op.browserControlHttpRead);
+    } else if (message.op?.$case === "opRelease") {
+      obj.opRelease = OpRelease.toJSON(message.op.opRelease);
     }
     return obj;
   },
@@ -15866,6 +16390,12 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             $case: "browserControlHttpRead",
             browserControlHttpRead: BrowserControlHttpReadRequest.fromPartial(object.op.browserControlHttpRead),
           };
+        }
+        break;
+      }
+      case "opRelease": {
+        if (object.op?.opRelease !== undefined && object.op?.opRelease !== null) {
+          message.op = { $case: "opRelease", opRelease: OpRelease.fromPartial(object.op.opRelease) };
         }
         break;
       }
@@ -16866,6 +17396,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "operationCompleted":
         OperationCompleted.encode(message.event.operationCompleted, writer.uint32(106).fork()).join();
         break;
+      case "operationInventory":
+        OperationInventory.encode(message.event.operationInventory, writer.uint32(114).fork()).join();
+        break;
     }
     return writer;
   },
@@ -16923,6 +17456,17 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           };
           continue;
         }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.event = {
+            $case: "operationInventory",
+            operationInventory: OperationInventory.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -16959,6 +17503,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operationCompleted) }
         : isSet(object.operation_completed)
         ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operation_completed) }
+        : isSet(object.operationInventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventory.fromJSON(object.operationInventory) }
+        : isSet(object.operation_inventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventory.fromJSON(object.operation_inventory) }
         : undefined,
     };
   },
@@ -16976,6 +17524,8 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       obj.agentUpdateProgress = AgentUpdateProgress.toJSON(message.event.agentUpdateProgress);
     } else if (message.event?.$case === "operationCompleted") {
       obj.operationCompleted = OperationCompleted.toJSON(message.event.operationCompleted);
+    } else if (message.event?.$case === "operationInventory") {
+      obj.operationInventory = OperationInventory.toJSON(message.event.operationInventory);
     }
     return obj;
   },
@@ -17013,6 +17563,15 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           message.event = {
             $case: "operationCompleted",
             operationCompleted: OperationCompleted.fromPartial(object.event.operationCompleted),
+          };
+        }
+        break;
+      }
+      case "operationInventory": {
+        if (object.event?.operationInventory !== undefined && object.event?.operationInventory !== null) {
+          message.event = {
+            $case: "operationInventory",
+            operationInventory: OperationInventory.fromPartial(object.event.operationInventory),
           };
         }
         break;
@@ -17102,6 +17661,220 @@ export const OperationCompleted: MessageFns<OperationCompleted> = {
   },
 };
 
+function createBaseOperationInventory(): OperationInventory {
+  return { reportId: "0", page: 0, pages: 0, operations: [] };
+}
+
+export const OperationInventory: MessageFns<OperationInventory> = {
+  encode(message: OperationInventory, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reportId !== "0") {
+      writer.uint32(8).uint64(message.reportId);
+    }
+    if (message.page !== 0) {
+      writer.uint32(16).uint32(message.page);
+    }
+    if (message.pages !== 0) {
+      writer.uint32(24).uint32(message.pages);
+    }
+    for (const v of message.operations) {
+      InventoryOperation.encode(v!, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationInventory {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationInventory();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reportId = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.page = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.pages = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.operations.push(InventoryOperation.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationInventory {
+    return {
+      reportId: isSet(object.reportId)
+        ? globalThis.String(object.reportId)
+        : isSet(object.report_id)
+        ? globalThis.String(object.report_id)
+        : "0",
+      page: isSet(object.page) ? globalThis.Number(object.page) : 0,
+      pages: isSet(object.pages) ? globalThis.Number(object.pages) : 0,
+      operations: globalThis.Array.isArray(object?.operations)
+        ? object.operations.map((e: any) => InventoryOperation.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: OperationInventory): unknown {
+    const obj: any = {};
+    if (message.reportId !== "0") {
+      obj.reportId = message.reportId;
+    }
+    if (message.page !== 0) {
+      obj.page = Math.round(message.page);
+    }
+    if (message.pages !== 0) {
+      obj.pages = Math.round(message.pages);
+    }
+    if (message.operations?.length) {
+      obj.operations = message.operations.map((e) => InventoryOperation.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationInventory>, I>>(base?: I): OperationInventory {
+    return OperationInventory.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationInventory>, I>>(object: I): OperationInventory {
+    const message = createBaseOperationInventory();
+    message.reportId = object.reportId ?? "0";
+    message.page = object.page ?? 0;
+    message.pages = object.pages ?? 0;
+    message.operations = object.operations?.map((e) => InventoryOperation.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseInventoryOperation(): InventoryOperation {
+  return { opId: "", connectionGeneration: "0", complete: false };
+}
+
+export const InventoryOperation: MessageFns<InventoryOperation> = {
+  encode(message: InventoryOperation, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.connectionGeneration !== "0") {
+      writer.uint32(16).uint64(message.connectionGeneration);
+    }
+    if (message.complete !== false) {
+      writer.uint32(24).bool(message.complete);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InventoryOperation {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInventoryOperation();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.connectionGeneration = reader.uint64().toString();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.complete = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InventoryOperation {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      connectionGeneration: isSet(object.connectionGeneration)
+        ? globalThis.String(object.connectionGeneration)
+        : isSet(object.connection_generation)
+        ? globalThis.String(object.connection_generation)
+        : "0",
+      complete: isSet(object.complete) ? globalThis.Boolean(object.complete) : false,
+    };
+  },
+
+  toJSON(message: InventoryOperation): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.connectionGeneration !== "0") {
+      obj.connectionGeneration = message.connectionGeneration;
+    }
+    if (message.complete !== false) {
+      obj.complete = message.complete;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InventoryOperation>, I>>(base?: I): InventoryOperation {
+    return InventoryOperation.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InventoryOperation>, I>>(object: I): InventoryOperation {
+    const message = createBaseInventoryOperation();
+    message.opId = object.opId ?? "";
+    message.connectionGeneration = object.connectionGeneration ?? "0";
+    message.complete = object.complete ?? false;
+    return message;
+  },
+};
+
 function createBaseAgentEventAck(): AgentEventAck {
   return { ack: undefined };
 }
@@ -17114,6 +17887,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         break;
       case "operationCompleted":
         OperationCompletedAck.encode(message.ack.operationCompleted, writer.uint32(90).fork()).join();
+        break;
+      case "operationInventory":
+        OperationInventoryAck.encode(message.ack.operationInventory, writer.uint32(98).fork()).join();
         break;
     }
     return writer;
@@ -17145,6 +17921,17 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           };
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.ack = {
+            $case: "operationInventory",
+            operationInventory: OperationInventoryAck.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -17165,6 +17952,13 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           $case: "operationCompleted",
           operationCompleted: OperationCompletedAck.fromJSON(object.operation_completed),
         }
+        : isSet(object.operationInventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventoryAck.fromJSON(object.operationInventory) }
+        : isSet(object.operation_inventory)
+        ? {
+          $case: "operationInventory",
+          operationInventory: OperationInventoryAck.fromJSON(object.operation_inventory),
+        }
         : undefined,
     };
   },
@@ -17175,6 +17969,8 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
       obj.heartbeat = HeartbeatAck.toJSON(message.ack.heartbeat);
     } else if (message.ack?.$case === "operationCompleted") {
       obj.operationCompleted = OperationCompletedAck.toJSON(message.ack.operationCompleted);
+    } else if (message.ack?.$case === "operationInventory") {
+      obj.operationInventory = OperationInventoryAck.toJSON(message.ack.operationInventory);
     }
     return obj;
   },
@@ -17200,7 +17996,116 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         }
         break;
       }
+      case "operationInventory": {
+        if (object.ack?.operationInventory !== undefined && object.ack?.operationInventory !== null) {
+          message.ack = {
+            $case: "operationInventory",
+            operationInventory: OperationInventoryAck.fromPartial(object.ack.operationInventory),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationInventoryAck(): OperationInventoryAck {
+  return { reportId: "0", page: 0, endOpIds: [] };
+}
+
+export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
+  encode(message: OperationInventoryAck, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reportId !== "0") {
+      writer.uint32(8).uint64(message.reportId);
+    }
+    if (message.page !== 0) {
+      writer.uint32(16).uint32(message.page);
+    }
+    for (const v of message.endOpIds) {
+      writer.uint32(26).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationInventoryAck {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationInventoryAck();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reportId = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.page = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.endOpIds.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationInventoryAck {
+    return {
+      reportId: isSet(object.reportId)
+        ? globalThis.String(object.reportId)
+        : isSet(object.report_id)
+        ? globalThis.String(object.report_id)
+        : "0",
+      page: isSet(object.page) ? globalThis.Number(object.page) : 0,
+      endOpIds: globalThis.Array.isArray(object?.endOpIds)
+        ? object.endOpIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.end_op_ids)
+        ? object.end_op_ids.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: OperationInventoryAck): unknown {
+    const obj: any = {};
+    if (message.reportId !== "0") {
+      obj.reportId = message.reportId;
+    }
+    if (message.page !== 0) {
+      obj.page = Math.round(message.page);
+    }
+    if (message.endOpIds?.length) {
+      obj.endOpIds = message.endOpIds;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(base?: I): OperationInventoryAck {
+    return OperationInventoryAck.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(object: I): OperationInventoryAck {
+    const message = createBaseOperationInventoryAck();
+    message.reportId = object.reportId ?? "0";
+    message.page = object.page ?? 0;
+    message.endOpIds = object.endOpIds?.map((e) => e) || [];
     return message;
   },
 };

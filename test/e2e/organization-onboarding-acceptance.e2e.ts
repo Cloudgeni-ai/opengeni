@@ -876,9 +876,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       "Couldn't load your connected machines",
     );
     await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/machines`);
-    await setupPage
-      .getByText("Machines are managed by your workspace admin", { exact: true })
-      .waitFor();
+    // Members see and pick the workspace's machines; enrolling stays admin-managed.
+    await setupPage.getByRole("heading", { name: "Machines" }).first().waitFor();
+    await setupPage.waitForLoadState("networkidle");
+    expect(
+      await setupPage
+        .getByText("Machines are managed by your workspace admin", { exact: true })
+        .count(),
+    ).toBe(0);
     expect(await setupPage.getByRole("button", { name: /Connect a machine/ }).count()).toBe(0);
     expect(deniedReads).toEqual([]);
     await setupPage.screenshot({

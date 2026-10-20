@@ -207,6 +207,7 @@ export type DocumentProjectionArtifactSurfaceProps = Omit<
   title: string;
   showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
+  actions?: ReactNode | undefined;
   busy?: boolean | undefined;
   className?: string | undefined;
   editorClassName?: string | undefined;
@@ -1063,6 +1064,7 @@ export function DocumentProjectionArtifactSurface({
   title,
   showHeader,
   subtitle,
+  actions,
   busy,
   className,
   editorClassName,
@@ -1075,6 +1077,7 @@ export function DocumentProjectionArtifactSurface({
       title={title}
       showHeader={showHeader}
       subtitle={subtitle}
+      actions={actions}
       busy={busy}
       className={className}
     >

@@ -15,6 +15,7 @@ import type { RuntimeMetricsHooks } from "../../metrics";
 import { assertDescriptorRegistryInvariants } from "../capabilities";
 import { blaxelProvider } from "./blaxel";
 import { cloudflareProvider } from "./cloudflare";
+import { computeProvider } from "./compute";
 import { daytonaProvider } from "./daytona";
 import { dockerProvider } from "./docker";
 import { e2bProvider } from "./e2b";
@@ -45,6 +46,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   vercel: vercelProvider,
   selfhosted: selfhostedProvider,
   opensandbox: opensandboxProvider,
+  compute: computeProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the
@@ -69,6 +71,16 @@ const ASSERTION_STUB_SETTINGS = {
   openSandboxApiKey: "stub",
   openSandboxImage:
     "ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  computeApiUrl: "https://compute.example.test",
+  computeApiKey: "stub",
+  computeVcpus: 2,
+  computeMemoryMib: 4096,
+  computeAgentReadyTimeoutMs: 120_000,
+  publicBaseUrl: "https://opengeni.example.test",
+  enrollmentSigningSecret: "stub-enrollment-signing-secret-0123456789",
+  sandboxSelfhostedEnabled: true,
+  selfhostedNatsUrl: "nats://nats.example.test:4222",
+  agentOpStreamEnabled: true,
 } as unknown as Settings;
 
 /**

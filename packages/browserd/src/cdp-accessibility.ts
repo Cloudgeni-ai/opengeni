@@ -183,7 +183,7 @@ export function normalizeCdpAccessibilityTree(options: {
       role: entry.role,
       ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
-      ...safeValue(raw, entry.role, entry.states),
+      ...safeValue(raw, entry.role),
       states: entry.states,
       actions: entry.actions,
       ...(children.length > 0 ? { children } : {}),
@@ -250,21 +250,22 @@ export function accessibilityContainer(
   return null;
 }
 
+const EDITABLE_VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+
 function safeValue(
   node: CdpAxNode,
   role: string,
-  states: readonly string[],
 ): { value?: string | { redacted: true; reason: "password" } } {
   const value = stringValue(node.value);
   if (!value) return {};
-  // Text typed into a field may hold a secret, so editable values stay out of
-  // observations. A non-editable combobox (a native select or a custom
-  // picker) only shows the option chosen on the page, which the agent needs
-  // to confirm a selection.
-  if (role === "combobox" && !states.some((state) => state.startsWith("editable"))) {
-    return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
+  // Chromium exposes a password field's value as one mask character per
+  // character typed. Report it as redacted rather than as dots. Other form
+  // field values are shown, as on screen: the agent needs them to read drafts
+  // and prefilled forms and to check what it typed. Secret values the
+  // controller typed are redacted from the whole observation by the driver.
+  if (EDITABLE_VALUE_ROLES.has(role) && /^[\u2022\u25CF*]+$/u.test(value)) {
+    return { value: { redacted: true, reason: "password" } };
   }
-  if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
   return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
 

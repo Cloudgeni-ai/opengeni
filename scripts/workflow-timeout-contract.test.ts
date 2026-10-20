@@ -185,15 +185,9 @@ const EXPECTED_CAPS = [
     2,
     "run",
   ],
-  ["ci.yml", "browserd-real-e2e", "Run actual browserd end-to-end suite", 6, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headless browserd end-to-end suite", 6, "run"],
+  ["ci.yml", "browserd-real-e2e", "Run headed browserd streaming and interaction suite", 5, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
-  [
-    "publish-desktop-image.yml",
-    "ghcr-mirror",
-    "Mirror desktop image to GHCR (best effort)",
-    5,
-    "run",
-  ],
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
   ["ci.yml", "browser-acceptance", "Install pinned lane browser runtimes", 17, "action"],
   ["ci.yml", "package-contracts", "Install Chromium for packed WASM package proof", 17, "action"],
@@ -214,9 +208,8 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
   "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
-  "ci.yml:browserd-real-e2e": { stepCaps: 25, needed: 26, jobCap: 27 },
+  "ci.yml:browserd-real-e2e": { stepCaps: 30, needed: 31, jobCap: 33 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
-  "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
 } as const;
 
 async function loadWorkflows(): Promise<Record<string, Workflow>> {

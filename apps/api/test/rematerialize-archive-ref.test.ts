@@ -133,7 +133,7 @@ function objectStorageFor(
   };
 }
 
-async function setupColdArchiveLease() {
+async function setupColdArchiveLease(oldFailure?: "unrecoverable" | "degraded") {
   const { accountId, workspaceId, groupId } = await freshWorkspace();
   const seed = await establishSandboxSessionFromEnvelope(settings, null, {
     sessionId: groupId,
@@ -169,6 +169,19 @@ async function setupColdArchiveLease() {
   };
   const envelope = {
     backendId,
+    ...(oldFailure
+      ? {
+          opengeniRecovery: {
+            provider: { status: "not_created", instanceId: null, diagnostic: "replacement_failed" },
+            restore: {
+              status: oldFailure,
+              failureCode: "archive_metadata_invalid",
+              retryable: false,
+            },
+            workspace: { status: oldFailure },
+          },
+        }
+      : {}),
     sessionState: {
       workspaceArchiveRef: ref,
       workspaceArchiveMeta: archive.descriptor,
@@ -292,6 +305,40 @@ test("API cold spawner restores a valid object-storage archive ref", async () =>
     throw new Error("missing persisted state");
   expect(parseWorkspaceArchiveObjectRef(persistedState.workspaceArchiveRef)).not.toBeNull();
   expect(persistedState.workspaceArchive).toBeUndefined();
+}, 120_000);
+
+for (const oldFailure of ["unrecoverable", "degraded"] as const) {
+  test(`API restores retained files from a migrated store after an old ${oldFailure} verdict`, async () => {
+    const fixture = await setupColdArchiveLease(oldFailure);
+    const storage = objectStorageFor(fixture.ref, fixture.archive.bytes);
+    // The reference records provenance, not today's storage routing. Objects
+    // copied under their exact keys remain subject to SHA/size/tree checks.
+    storage.objectStorage.backend = "azure-blob";
+    expect(fixture.ref.backend).toBe("s3-compatible");
+    const result = await establishArchiveFixture(fixture, storage.objectStorage);
+    seeded.push(result.established);
+    const proof = await result.established.session.exec({
+      cmd: "cat /workspace/api-object-ref-proof.txt",
+    });
+    expect(proof.exitCode).toBe(0);
+    expect(proof.stdout.trim()).toBe("api-object-ref-proof");
+    expect(result.lease.recovery.restore.status).toBe("ready");
+    expect(result.lease.recovery.workspace.status).toBe("ready");
+    expect(result.established.restoredArchive?.revision).toBe(fixture.archive.descriptor.revision);
+  }, 120_000);
+}
+
+test("revalidating an old failed archive never publishes corrupt migrated bytes", async () => {
+  const fixture = await setupColdArchiveLease("unrecoverable");
+  const damaged = fixture.archive.bytes.slice();
+  damaged[damaged.length - 1] = damaged[damaged.length - 1]! ^ 1;
+  const storage = objectStorageFor(fixture.ref, damaged);
+  storage.objectStorage.backend = "azure-blob";
+  await expect(establishArchiveFixture(fixture, storage.objectStorage)).rejects.toThrow();
+  expectFailedArchiveRestore(
+    await readLease(db!, fixture.workspaceId, fixture.groupId),
+    "archive_hash_mismatch",
+  );
 }, 120_000);
 
 test("viewer attach forwards object storage and restores a cold archive ref", async () => {
