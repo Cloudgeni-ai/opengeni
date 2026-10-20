@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0876_connection_validation_shared_locks.sql",
       "0875_realtime_history_reference_index.sql",
       "0874_elevenlabs_realtime_models.sql",
       "0873_mcp_binding_delegation_revocation.sql",

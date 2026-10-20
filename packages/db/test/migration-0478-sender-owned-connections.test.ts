@@ -37,6 +37,8 @@ const withheldMigrations = [
   migration,
   accountBindingsMigration,
   sharingMigration,
+  // Rewrites this cutover's resolver; replay only after it is installed.
+  "0876_connection_validation_shared_locks.sql",
   // Extends machine grant predicates rewritten by withheld 0501.
   "0851_personal_machine_session_tree.sql",
   admissionDiagnosticsMigration,

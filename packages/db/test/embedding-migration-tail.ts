@@ -350,5 +350,7 @@ export const embeddingMigrationTail = [
   // Patches the account-binding fence as rewritten by withheld 0501 and the
   // trigger from withheld 0836; replay after both.
   "0873_mcp_binding_delegation_revocation.sql",
+  // Rewrites the resolver installed by withheld 0478; replay after it.
+  "0876_connection_validation_shared_locks.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

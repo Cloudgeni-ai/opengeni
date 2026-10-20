@@ -153,6 +153,9 @@ Raw-isolation rollback:
 validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
+Connection-use validation follows that lifecycle order with shared read fences
+and the existing fair workspace-control queue; independent validations do not
+exclusively lock each other, while lifecycle changes still exclude validation.
 
 Deleted session workflows close only after a worker-scoped absence proof;
 actor-filtered or wrong-tenant observations stay retryable. The versioned
