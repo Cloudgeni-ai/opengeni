@@ -57,6 +57,21 @@ type ControlHelper = ControlObservation & {
   inFlight?: Promise<SupervisionControlResult>;
 };
 
+/** New bytes, a newly reached EOF, or the terminal exit of fully read streams. */
+function observedProgress(
+  command: ModalRouterProviderCommand,
+  page: ReturnType<typeof collectModalRawOutputPage>,
+): boolean {
+  return (
+    page.output.exitCode !== null ||
+    (["stdout", "stderr"] as const).some(
+      (stream) =>
+        page.raw.streams[stream].bytes.byteLength > 0 ||
+        (page.raw.streams[stream].eof && !command.streams[stream].eof),
+    )
+  );
+}
+
 /** Cancels this waiter, not the shared provider operation. The rejection
  * handler remains attached even when an uncooperative provider settles late. */
 function awaitRouterAccess<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -768,8 +783,9 @@ export class ModalCommandControl {
       for (let attempt = 0; attempt < 5; attempt++) {
         signal?.throwIfAborted();
         if (attempt > 0 && performance.now() >= deadline) break;
+        let page: ReturnType<typeof collectModalRawOutputPage>;
         try {
-          return await this.readRouterPage(
+          page = await this.readRouterPage(
             command,
             Math.min(Math.max(1, waitMs), Math.max(1, deadline - performance.now())),
             budget.signal,
@@ -799,7 +815,17 @@ export class ModalCommandControl {
             signal?.throwIfAborted();
             break;
           }
+          continue;
         }
+        // A quiet page is the router's normal answer when a healthy stream has
+        // nothing new before its deadline. After this read already failed, a
+        // retry that merely reached the remaining (possibly tiny) deadline
+        // proves nothing about the stream: the client gives up before a slow
+        // provider can answer either way. Only new bytes, EOF or a terminal
+        // exit show recovery; otherwise the earlier failure remains this
+        // read's outcome.
+        if (lastError === undefined || observedProgress(command, page)) return page;
+        break;
       }
       throw new ProviderCommandObservationUnavailableError(structuredClone(command), lastError);
     } finally {
