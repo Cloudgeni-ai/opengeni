@@ -254,7 +254,6 @@ export function execPresentation(
       iconTone: "failed",
       failed: true,
       chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
-      preview: textPreview(t("timeline.toolPresentation.itMayHaveRun")),
       body: { kind: "term", command: null, workdir, output: out, failed: true },
     };
   }
@@ -1553,10 +1552,11 @@ export function plainToolRow(
       row.iconTone === "failed" || row.chip?.tone === "bad" || item.status === "failed";
     plain.title = toolStepLabel(t, "runCommand", failed ? "running" : toolStepPhase(item.status));
     if (isConnectedMachineOutcomeUnknownOutput(item.output)) {
-      // Keep the uncertainty chip and an inspectable reason even when raw
-      // command output is hidden or the narrow row truncates its preview.
+      // The call has ended, but its effects remain unknown. Keep that verdict
+      // in the chip, with the explanation available without raw command output.
       return {
         ...plain,
+        title: toolStepLabel(t, "runCommand", "done"),
         body: { kind: "note", tone: "error", text: t("toolActionReview.itMayHaveRunCheck") },
       };
     }

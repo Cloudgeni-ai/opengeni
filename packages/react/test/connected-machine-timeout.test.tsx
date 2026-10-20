@@ -51,14 +51,14 @@ test.each([false, true])(
       const row = toolRowPresentation(t, item, { details });
       expect(row.failed).toBe(true);
       expect(row.chip).toEqual({ tone: "bad", text: "outcome unknown" });
-      expect(row.preview).toEqual({ kind: "text", text: "It may have run" });
+      expect(row.preview).toBeUndefined();
       if (details === "plain") {
         expect(row.body).toEqual({
           kind: "note",
           tone: "error",
           text: "It may have run. Check the result before trying again.",
         });
-        expect(row.title).not.toBe("Ran a command");
+        expect(row.title).toBe("Ran a command");
         expect(JSON.stringify(row)).not.toContain("fixture command");
       } else {
         expect(JSON.stringify(row.body)).toContain("ERROR_CODE_TIMEOUT");
@@ -77,6 +77,8 @@ test("actual plain production renderer displays uncertainty without command deta
   );
   await flush();
   expect(rendered.container.textContent).toContain("outcome unknown");
+  expect(rendered.container.textContent).toContain("Ran a command");
+  expect(rendered.container.textContent).not.toContain("It may have run");
   const disclosure = rendered.container.querySelector<HTMLElement>('[role="button"]')!;
   expect(disclosure).not.toBeNull();
   await act(async () => disclosure.click());
