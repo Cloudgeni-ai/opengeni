@@ -85,6 +85,13 @@ caller's own, and are reversible: archive keeps the source and full version
 history, restore republishes an archived Site, and rollback restores an earlier
 version without discarding the current one.
 
+Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
+who can see a Site manages it like its owner: Site Data and Site SQL,
+publication settings, abuse reports, and taking it down or restoring it. Only an
+administrator lifts an administrator's takedown, raises resource limits, or
+grants a Site assistant extra workspace tools, and only the owner changes who
+can see an "Only me" Site.
+
 ## Who can open a file
 
 Files have the same two audiences as Sites and chats: **Only me**

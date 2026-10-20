@@ -2325,6 +2325,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0867_member_teammate_permissions_backfill.sql",
+      "0866_member_teammate_permissions_backfill_index.sql",
+      "0865_member_teammate_permissions.sql",
       "0864_scheduled_bot_capability.sql",
       "0863_classify_connected_command_ops.sql",
       "0862_compute_stale_sandbox_enrollments.sql",

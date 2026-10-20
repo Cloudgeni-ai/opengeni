@@ -44,6 +44,7 @@ import {
   upsertSitePublication,
   readSiteHostnameEdgeState,
   readSiteHostnameLiveGeneration,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type PublishedSiteRecord,
   type SiteDataSite,
   type SiteHostnameEdgeState,
@@ -834,8 +835,9 @@ export async function requireSitePublicationWriter(
 
 /**
  * Resolve a Site for publication management. The caller must see the Site
- * (its audience); managers are the Site Data managers (owner, workspace admin,
- * an agent acting for one, or a person-less key with artifacts:publish).
+ * (its audience); managers are the Site Data managers (anyone in the workspace
+ * with artifacts:publish, an agent acting for one, or a person-less key with
+ * artifacts:publish).
  * `mutate` callers must also pass `requireSitePublicationWriter`.
  */
 export async function resolveSiteManagement(
@@ -857,10 +859,32 @@ export async function resolveSiteManagement(
     site,
     record,
     manager: siteDataRole(grant, site, viewer.subjectId) === "manager",
-    admin: hasLiteralPermission(grant.permissions, "workspace:admin"),
+    admin: await isSiteAdministrator(deps, grant, viewer.subjectId),
     owner: viewer.subjectId !== null && owner === viewer.subjectId,
     subjectId: viewer.subjectId,
   };
+}
+
+/**
+ * Site administration (limits, extra assistant tools, lifting an admin
+ * takedown): a workspace admin, or the owner of a Personal workspace (and
+ * their agents) in that workspace. A Personal workspace deliberately carries
+ * no workspace:admin, but its owner administers it, as workspace settings do.
+ */
+export async function isSiteAdministrator(
+  deps: Pick<SitePublishingDeps, "db">,
+  grant: AccessGrant,
+  personSubjectId: string | null,
+): Promise<boolean> {
+  if (hasLiteralPermission(grant.permissions, "workspace:admin")) return true;
+  if (personSubjectId === null) return false;
+  return (
+    (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: personSubjectId,
+    })) !== null
+  );
 }
 
 export function requireSiteManager(management: SiteManagement): void {
@@ -869,7 +893,7 @@ export function requireSiteManager(management: SiteManagement): void {
       403,
       "forbidden",
       "site_manager_required",
-      "Only the Site's owner or a workspace admin can manage its publication",
+      "You need permission to publish artifacts in this workspace to manage this Site's publication",
     );
 }
 

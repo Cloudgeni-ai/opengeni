@@ -529,7 +529,7 @@ async function freshWorkspace(): Promise<{
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${account!.id}, ${workspace!.id}, ${subjectId}, ${subjectId}, 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
+        ${shared!.admin.json(["connections:read", "connections:write", "capabilities:manage"])}
       )`;
   }
   return { accountId: account!.id, workspaceId: workspace!.id };
@@ -1457,6 +1457,7 @@ async function startBotInstall(
         authorization: await bearer(workspace, subjectId, [
           "connections:read",
           "connections:write",
+          "capabilities:manage",
         ]),
         "content-type": "application/json",
       },
@@ -1634,6 +1635,58 @@ async function withFailingConnectionInsert<T>(
 }
 
 describe("Opengeni Slack bot connection", () => {
+  test("installing the workspace bot is integration administration, not a Member action", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const denied = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("capabilities:manage");
+    expect(slack.calls).toEqual([]);
+  });
+
+  test("a Member cannot install the workspace bot through the shared Connect flow either", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const denied = await app(slack.fetch, { ...settings, integrationsEnabled: true }).request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "workspace:read",
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerId: "slack-bot",
+          ownership: "workspace",
+          returnUrl: "https://host.example/finish",
+          idempotencyKey: randomUUID(),
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("capabilities:manage");
+    expect(slack.calls).toEqual([]);
+  });
+
   test("requires connections:write before starting Slack OAuth", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1670,6 +1723,7 @@ describe("Opengeni Slack bot connection", () => {
           authorization: await bearer(workspace, "subject-a", [
             "connections:read",
             "connections:write",
+            "capabilities:manage",
           ]),
           "content-type": "application/json",
         },
@@ -1747,7 +1801,12 @@ describe("Opengeni Slack bot connection", () => {
       name: "Slack embedding",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["workspace:read", "connections:read", "connections:write"],
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ],
     });
     const headers = {
       authorization: `Bearer ${token}`,
@@ -1880,7 +1939,10 @@ describe("Opengeni Slack bot connection", () => {
       {
         method: "POST",
         headers: {
-          authorization: await bearer(other, "subject-a", ["connections:write"]),
+          authorization: await bearer(other, "subject-a", [
+            "connections:write",
+            "capabilities:manage",
+          ]),
           "content-type": "application/json",
         },
         body: JSON.stringify({ connectionId: body.connection.id }),
@@ -2238,7 +2300,10 @@ describe("Opengeni Slack bot connection", () => {
       {
         method: "POST",
         headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:write",
+            "capabilities:manage",
+          ]),
           "content-type": "application/json",
         },
         body: JSON.stringify({}),
@@ -2284,7 +2349,7 @@ describe("Opengeni Slack bot connection", () => {
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'subject-a', 'subject-a', 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
+        ${shared!.admin.json(["connections:read", "connections:write", "capabilities:manage"])}
       )`;
     const connected = await app(slack.fetch).request(
       `/v1/integrations/slack/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
@@ -2541,7 +2606,10 @@ describe("Opengeni Slack bot connection", () => {
         {
           method: "DELETE",
           headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            authorization: await bearer(workspace, "subject-a", [
+              "connections:write",
+              "capabilities:manage",
+            ]),
           },
         },
       );
@@ -4997,7 +5065,13 @@ describe("Opengeni Slack bot connection", () => {
     const connected = await connectBot(workspace, slack.fetch);
     const connectionId = connected.body.connection.id;
     const endpoint = `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}`;
-    const writeAuthorization = await bearer(workspace, "subject-a", ["connections:write"]);
+    // The workspace bot is workspace configuration: a Member with only
+    // connections:write cannot repoint it, even to their own destination.
+    const memberAuthorization = await bearer(workspace, "subject-a", ["connections:write"]);
+    const writeAuthorization = await bearer(workspace, "subject-a", [
+      "connections:write",
+      "capabilities:manage",
+    ]);
     const before = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,
@@ -5007,6 +5081,16 @@ describe("Opengeni Slack bot connection", () => {
     expect(before).toMatchObject({ version: 1, verifiedInstallVersion: 1 });
     expect(before?.verifiedInstallAt).not.toBeNull();
     if (!before?.verifiedInstallAt) throw new Error("expected verified Slack bot fixture");
+
+    const memberDenied = await app(slack.fetch).request(endpoint, {
+      method: "PATCH",
+      headers: { authorization: memberAuthorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        metadata: { documentDestination: { authorityKind: "personal", collectionId: null } },
+      }),
+    });
+    expect(memberDenied.status).toBe(403);
+    expect(await memberDenied.text()).toContain("capabilities:manage");
 
     const personal = await app(slack.fetch).request(endpoint, {
       method: "PATCH",

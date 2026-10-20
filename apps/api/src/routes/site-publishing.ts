@@ -13,9 +13,9 @@ import {
 } from "@opengeni/contracts";
 import {
   getManagedSession,
-  hasLiteralPermission,
   requireAccessContext,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -37,6 +37,7 @@ import {
   type SiteAbuseReportRecord,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
@@ -281,7 +282,8 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     return context.json(await sitePublicationView(deps, management.scope, result.publication));
   });
 
-  // Take a Site down at once: the Site's owner or a workspace admin.
+  // Take a Site down at once: any of the Site's managers (its owner, a
+  // workspace admin or a teammate who can publish artifacts).
   app.post(`${base}/takedown`, async (context) => {
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
@@ -289,14 +291,10 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
       mutate: true,
     });
-    if (!management.owner && !management.admin)
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_owner_or_admin_required",
-        "Only the Site's owner or a workspace admin can take it down",
-      );
+    requireSiteManager(management);
     // An admin's takedown (even of their own Site) is one only an admin restores.
+    // "owner" is the manager-level takedown kind (any Site manager, not just
+    // the creator); suspendedBySubject records who actually took it down.
     const by = management.admin ? "admin" : "owner";
     const publication = await runSitePublishing(() =>
       suspendSitePublication(deps.db, management.scope, management.record.id, {
@@ -332,14 +330,8 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
       mutate: true,
     });
-    if (!management.owner && !management.admin)
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_owner_or_admin_required",
-        "Only the Site's owner or a workspace admin can restore it",
-      );
-    // An owner cannot lift an admin's takedown (the database refuses it too).
+    requireSiteManager(management);
+    // Only an admin lifts an admin's takedown (the database refuses it too).
     const by = management.admin ? "admin" : "owner";
     const publication = await runSitePublishing(() =>
       restoreSitePublication(deps.db, management.scope, management.record.id, {
@@ -462,19 +454,20 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.put("/v1/workspaces/:workspaceId/site-limit-profile", async (context) => {
     requireSitesDomain(deps.settings);
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      context.req.param("workspaceId")!,
-      "workspace:admin",
-    );
-    if (!hasLiteralPermission(grant.permissions, "workspace:admin"))
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_admin_required",
-        "Only a workspace admin can change Site limits",
-      );
+    // A workspace setting: a workspace admin, or the owner of a Personal workspace.
+    let grant;
+    try {
+      grant = await requireWorkspaceSettingsGrant(context, deps, context.req.param("workspaceId")!);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 403)
+        throw sitePublishingError(
+          403,
+          "forbidden",
+          "site_admin_required",
+          "Only a workspace admin can change Site limits",
+        );
+      throw error;
+    }
     await requireSitePublicationWriter(deps, grant);
     const request = await body(context, SiteLimitProfile);
     const stored = await putWorkspaceSiteLimitProfile(

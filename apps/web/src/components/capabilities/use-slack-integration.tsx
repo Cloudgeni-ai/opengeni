@@ -147,7 +147,9 @@ export function canInstallOpenGeniSlackBot(
   accessContext: ReturnType<typeof useAppContext>["accessContext"],
   workspaceId: string,
 ): boolean {
-  return canWriteWorkspaceConnections(accessContext, workspaceId);
+  // The workspace Slack bot is workspace configuration (capabilities:manage);
+  // Members with connections:write connect their own Slack instead.
+  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
 export function canManageSlackReactionSummon(
@@ -186,11 +188,10 @@ export const SLACK_PERSONAL_PERMISSION_SENTENCE =
   "Slack connects here as your own personal Slack account. Connection management permission is required to connect or change it; ask a workspace admin to grant it.";
 
 /**
- * Maps Slack onto the shared integration view-model. Anyone with connection
- * management permission (connections:write or workspace admin) sees the
- * Opengeni bot (its installation, what it can see, and install/reconnect/
- * disconnect; the options stay admin-gated); everyone else sees their own
- * personal Slack account. Nobody is offered both.
+ * Maps Slack onto the shared integration view-model. Anyone who manages
+ * workspace integrations (capabilities:manage) sees the Opengeni bot (its
+ * installation, what it can see, and install/reconnect/disconnect); everyone
+ * else sees their own personal Slack account. Nobody is offered both.
  */
 export function useSlackIntegration({
   workspaceId,
@@ -314,8 +315,8 @@ export function useSlackIntegration({
       !readOnly,
   );
   const canMutateInstalledBot = canInstallBot && bindingActive;
-  // Reaction summon, knowledge destination, and decision publication remain
-  // admin-gated even though any connections:write holder sees the bot sheet.
+  // Reaction summon, knowledge destination, and decision publication are
+  // gated on the same integration-administration authority as the bot sheet.
   const canManageReaction = isAdmin && bindingActive;
   const scopeReady = botConnection
     ? hasOpenGeniSlackReactionScope(botConnection.grantedScopes)
@@ -699,8 +700,8 @@ export function useSlackIntegration({
     }
   }
 
-  // Anyone who can manage workspace connections (connections:write or admin)
-  // manages the bot; everyone else sees their own personal Slack account.
+  // Integration administrators manage the bot; everyone else sees their own
+  // personal Slack account.
   const model =
     discovery.bindings.length > 0 || discovery.loading || discovery.failed
       ? organizationModel()

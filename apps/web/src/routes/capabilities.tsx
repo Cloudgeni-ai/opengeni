@@ -498,10 +498,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     context.accessContext,
     workspaceId,
   );
+  // Skills are shared team procedures that Members may install and manage;
+  // plugins can add connections and MCP servers and stay administrative.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "capabilities:manage",
+    "documents:manage",
   );
 
   // One adapter per integration maps its own data onto the shared view-model.
@@ -2137,6 +2139,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       workspaceId={workspaceId}
                       connections={connections}
                       canManage={canManageSkills}
+                      canManagePlugins={canManageApiIntegrationInstances}
                       items={items}
                       logoUrl={logoUrl}
                       busyCatalogId={busyId}

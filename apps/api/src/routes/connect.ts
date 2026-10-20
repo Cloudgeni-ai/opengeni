@@ -213,7 +213,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Slack workspace bot",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
@@ -1295,7 +1295,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ? "github:manage"
                   : attempt.providerId === "github-lens"
                     ? "workspace:admin"
-                    : "connections:write";
+                    : attempt.providerId === "slack-bot"
+                      ? "capabilities:manage"
+                      : "connections:write";
           if (
             !hasPermission(authorization.grant.permissions, permission) ||
             (attempt.providerId === "github-lens" &&
@@ -1333,7 +1335,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             ? "github:manage"
             : input.providerId === "github-lens"
               ? "workspace:admin"
-              : "connections:write";
+              : // The workspace Slack bot configures the whole workspace, so installing it is
+                // integration administration even though Members hold connections:write.
+                input.providerId === "slack-bot"
+                ? "capabilities:manage"
+                : "connections:write";
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,

@@ -8,6 +8,8 @@ import {
 import { accessGrantAuthorizationFromContext } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import { authorizePreferenceRegistryScopeMutation } from "../src/routes/preference-registry";
+import { authorizeSkillScopeMutation } from "../src/routes/skill-content";
+import { requireWorkspaceIntegrationAdministration } from "../src/routes/connections";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const otherAccountId = "22222222-2222-4222-8222-222222222222";
@@ -99,7 +101,7 @@ describe("preference registry scope authorization", () => {
     expect(() => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "user")).not.toThrow();
     expectForbidden(
       () => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "workspace"),
-      "workspace:admin",
+      "documents:manage",
     );
     expectForbidden(
       () => authorizePreferenceRegistryScopeMutation(ordinaryHuman, "organization"),
@@ -160,7 +162,7 @@ describe("preference registry scope authorization", () => {
           }),
           "workspace",
         ),
-      "workspace:admin",
+      "documents:manage",
     );
     for (const access of [
       authorization({
@@ -229,5 +231,57 @@ describe("preference registry scope authorization", () => {
       expect(access.accountGrant).toBeNull();
       expectForbidden(() => authorizePreferenceRegistryScopeMutation(access, "organization"));
     }
+  });
+});
+
+describe("workspace Skills are team content", () => {
+  const memberPermissions: Permission[] = ["workspace:read", "documents:manage"];
+
+  test("a member who manages documents authors and reviews workspace Skills", () => {
+    const access = authorization({
+      principalKind: "human_session",
+      workspacePermissions: memberPermissions,
+      accountPermissions: [],
+    });
+    expect(() => authorizeSkillScopeMutation(access, "workspace")).not.toThrow();
+    expect(() => authorizeSkillScopeMutation(access, "user")).not.toThrow();
+    // Organization Skills still need organization administration.
+    expectForbidden(() => authorizeSkillScopeMutation(access, "organization"), "account:admin");
+    // Lifecycle routes (scope moves, deactivate, supersede, reject) use the same rule.
+    expect(() => authorizePreferenceRegistryScopeMutation(access, "workspace")).not.toThrow();
+  });
+
+  test("a viewer cannot change workspace Skills, and agents still use Agent learning", () => {
+    const viewer = authorization({
+      principalKind: "human_session",
+      workspacePermissions: ["workspace:read", "documents:search"],
+      accountPermissions: [],
+    });
+    expectForbidden(() => authorizeSkillScopeMutation(viewer, "workspace"), "documents:manage");
+    const agent = authorization({
+      principalKind: "agent_attempt",
+      workspacePermissions: memberPermissions,
+      accountPermissions: [],
+    });
+    expectForbidden(() => authorizeSkillScopeMutation(agent, "workspace"));
+  });
+});
+
+describe("workspace integration administration", () => {
+  test("workspace provider keys and the Slack bot need capabilities:manage", () => {
+    expect(() =>
+      requireWorkspaceIntegrationAdministration({
+        permissions: ["workspace:read", "connections:write"],
+      }),
+    ).toThrow("capabilities:manage");
+    expect(() =>
+      requireWorkspaceIntegrationAdministration({
+        permissions: ["workspace:read", "connections:write", "capabilities:manage"],
+      }),
+    ).not.toThrow();
+    // workspace:admin implies every workspace permission.
+    expect(() =>
+      requireWorkspaceIntegrationAdministration({ permissions: ["workspace:admin"] }),
+    ).not.toThrow();
   });
 });
