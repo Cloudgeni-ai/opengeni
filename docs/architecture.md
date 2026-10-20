@@ -1568,6 +1568,15 @@ accepted turn. Accepted private uploads gain session read grants; original owner
 and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
+An app-shot is an image upload whose `files.app_shot` column records the captured
+window (app, title, capture time, accessibility text up to 32,000 characters, and the
+machine and window ids when that computer is connected, plus a browser window's page address
+and the browser profiles connected from that computer). It is written once with the
+upload and never changed. `renderAppShotForModel` (`packages/contracts/src/app-shot.ts`)
+appends it as untrusted data right after the screenshot, inside the user message it was
+sent with, so earlier request bytes never change. See
+[desktop app](design/desktop-app.md#app-shots).
+
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's

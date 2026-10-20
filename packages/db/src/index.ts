@@ -104,6 +104,7 @@ import {
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
   readTurnServingPolicyV1,
+  AppShotCapture,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -7581,6 +7582,8 @@ export async function createFileUpload(
     bucket: string;
     objectKey: string;
     expiresAt: Date;
+    /** An app-shot's capture, stored with the file once. */
+    appShot?: AppShotCapture | null;
   },
 ): Promise<{ file: FileAsset; uploadId: string; expiresAt: string }> {
   return await withRlsContext(
@@ -7604,6 +7607,7 @@ export async function createFileUpload(
             sha256: input.sha256 ?? null,
             bucket: input.bucket,
             objectKey: input.objectKey,
+            appShot: input.appShot ?? null,
             status: "pending_upload",
           })
           .returning();
@@ -87622,7 +87626,15 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
     objectKey: row.objectKey,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    ...appShotOfRow(row.appShot),
   };
+}
+
+/** A stored capture as the contract reads it; anything malformed is left out. */
+function appShotOfRow(value: unknown): { appShot?: AppShotCapture } {
+  if (value === null || value === undefined) return {};
+  const parsed = AppShotCapture.safeParse(value);
+  return parsed.success ? { appShot: parsed.data } : {};
 }
 
 function mapRetainedScreenshotArtifact(

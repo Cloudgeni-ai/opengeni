@@ -1,4 +1,4 @@
-import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
+import type { AppShotCapture, FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEmbeddedFileAttachments,
@@ -34,6 +34,11 @@ export type FileAttachment = {
   error?: string | undefined;
   /** Original diagnostic failure; presentation copy is kept separately in `error`. */
   errorCause?: unknown;
+  /**
+   * An app-shot: a screenshot of another app's window with the window it
+   * shows and the text it exposed, sent to the agent with the image.
+   */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type UseFileAttachmentsResult = {
@@ -53,6 +58,12 @@ export type UseFileAttachmentsResult = {
   hasUnresolved: boolean;
   /** Explicit picker / drop path — uploads every file, no filter. */
   addFiles: (files: Iterable<File>) => void;
+  /**
+   * Attach a window screenshot as an app-shot: the image plus the window it
+   * shows and the text it exposed, stored with the file. Optional so custom
+   * attachment stores written before app-shots keep satisfying this type.
+   */
+  addAppShot?: ((image: File, appShot: AppShotCapture) => void) | undefined;
   /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
   /** Restore already-ready server assets without recreating browser-local bytes. */
@@ -131,6 +142,7 @@ export function useFileAttachments(
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
+  const appShots = useRef<Map<string, AppShotCapture>>(new Map());
   // Object URLs must be owned synchronously: React may discard an attachment
   // state update when its component unmounts in the same batch that minted the
   // preview. The registry remains available to cleanup even before a render.
@@ -194,6 +206,7 @@ export function useFileAttachments(
     previousScope.current = { client, workspaceId };
     scopeGeneration.current += 1;
     sources.current.clear();
+    appShots.current.clear();
     revokeAllPreviews();
     setAttachments([]);
   }, [client, revokeAllPreviews, workspaceId]);
@@ -219,6 +232,7 @@ export function useFileAttachments(
           contentType: file.type || "application/octet-stream",
           data: file,
           ...(options.scope ? { scope: options.scope } : {}),
+          ...(appShots.current.has(id) ? { appShot: appShots.current.get(id) } : {}),
         })
         .then((asset) => {
           if (scopeGeneration.current !== generation) return;
@@ -226,6 +240,7 @@ export function useFileAttachments(
           // Drop the source File immediately; restored/ready attachments must
           // never retain browser-local byte authority.
           sources.current.delete(id);
+          appShots.current.delete(id);
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -284,6 +299,30 @@ export function useFileAttachments(
         ]);
         startUpload(id, file);
       }
+    },
+    [startUpload],
+  );
+
+  const addAppShot = useCallback(
+    (image: File, appShot: AppShotCapture) => {
+      const id = createAttachmentId();
+      sources.current.set(id, image);
+      appShots.current.set(id, appShot);
+      const previewUrl = URL.createObjectURL(image);
+      previewUrls.current.set(id, previewUrl);
+      setAttachments((current) => [
+        ...current,
+        {
+          id,
+          name: image.name || `${appShot.app}.png`,
+          contentType: image.type || "image/png",
+          sizeBytes: image.size,
+          status: "uploading",
+          previewUrl,
+          appShot,
+        },
+      ]);
+      startUpload(id, image);
     },
     [startUpload],
   );
@@ -353,6 +392,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                appShot: file.appShot ?? existing.appShot,
                 errorCode: undefined,
                 error: undefined,
                 errorCause: undefined,
@@ -364,6 +404,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                ...(file.appShot ? { appShot: file.appShot } : {}),
                 // No source File and no object URL: server metadata is the
                 // only authority restored across page/device boundaries.
               };
@@ -405,6 +446,7 @@ export function useFileAttachments(
   const remove = useCallback(
     (id: string) => {
       sources.current.delete(id);
+      appShots.current.delete(id);
       revokePreview(id);
       setAttachments((current) => current.filter((attachment) => attachment.id !== id));
     },
@@ -427,6 +469,7 @@ export function useFileAttachments(
 
   const clear = useCallback(() => {
     sources.current.clear();
+    appShots.current.clear();
     revokeAllPreviews();
     setAttachments([]);
   }, [revokeAllPreviews]);
@@ -441,6 +484,7 @@ export function useFileAttachments(
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
     hasUnresolved: attachments.some((attachment) => attachment.status !== "ready"),
     addFiles,
+    addAppShot,
     addFromPaste,
     restoreReadyFiles,
     ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),

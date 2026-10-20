@@ -553,6 +553,10 @@ export const englishMessages = {
   "commands.registry.thisSessionHasNoGoal": "This session has no goal to control.",
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
+  "composer.appShotSummary": "{app} · App-shot",
+  "composer.appShotTextIncluded":
+    "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
+  "composer.appShotNoText": "Only the screenshot: this window shared no text.",
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",

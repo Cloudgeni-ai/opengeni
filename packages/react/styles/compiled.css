@@ -1461,6 +1461,9 @@
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
   }
+:where(.og-root).max-w-\[320px\],:where(.og-root) .max-w-\[320px\] {
+    max-width: 320px;
+  }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
   }
@@ -2771,6 +2774,9 @@
   }
 :where(.og-root).object-cover,:where(.og-root) .object-cover {
     object-fit: cover;
+  }
+:where(.og-root).object-top,:where(.og-root) .object-top {
+    object-position: top;
   }
 :where(.og-root).p-0,:where(.og-root) .p-0 {
     padding: calc(var(--spacing) * 0);

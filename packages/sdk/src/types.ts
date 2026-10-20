@@ -7641,6 +7641,42 @@ export type FileAccess = {
   whoCanOpen: string;
 };
 
+/**
+ * An app-shot: a screenshot of another app's window, sent from a desktop app,
+ * with the window it shows and the text the window exposed. Stored with the
+ * file once and never changed.
+ */
+export type AppShotCapture = {
+  /** The app's name as the system shows it. */
+  app: string;
+  /** The app's stable identifier, where the system has one (macOS bundle id). */
+  bundleId?: string | undefined;
+  /** The window title; empty when the window has none. */
+  title: string;
+  /** ISO timestamp. */
+  capturedAt: string;
+  platform: "macos" | "windows" | "linux";
+  /** Text read through accessibility, at most 32,000 characters. */
+  text?: string | undefined;
+  /** The window had more text than was kept. */
+  textTruncated?: boolean | undefined;
+  /** The window as the system identifies it. */
+  window?: { processId: number; windowId: number } | undefined;
+  /** The computer the window is on, when connected to this workspace. */
+  computer?: { name: string; sandboxId?: string | undefined } | undefined;
+  /**
+   * A web browser window's page address (http or https) and, when the computer
+   * is connected, the browser profiles connected from it (at most 10) by the
+   * attached browser device id browser tools use.
+   */
+  browser?:
+    | {
+        url: string;
+        profiles?: { deviceId: string; name: string }[] | undefined;
+      }
+    | undefined;
+};
+
 export type FileAsset = {
   /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
@@ -7660,6 +7696,8 @@ export type FileAsset = {
   updatedAt: string;
   /** Present on upload, publish and sharing results: who can open the file. */
   access?: FileAccess | undefined;
+  /** A screenshot sent as an app-shot: the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
@@ -7920,6 +7958,8 @@ export type CreateFileUploadRequest = {
   contentType: string;
   sizeBytes: number;
   sha256?: string | undefined;
+  /** The upload is an app-shot (images only). */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type CreateFileUploadResponse = {
@@ -7955,6 +7995,8 @@ export type UploadFileInput = {
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** The upload is an app-shot (images only): the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------

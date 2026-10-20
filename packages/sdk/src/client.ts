@@ -7531,6 +7531,7 @@ export class OpenGeniClient {
             ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
             sha256,
+            ...(input.appShot ? { appShot: input.appShot } : {}),
           },
           { signal },
         ),

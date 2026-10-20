@@ -113,6 +113,39 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("an app-shot uploads its capture with the screenshot and keeps it on the chip", async () => {
+    const uploads: unknown[] = [];
+    const client = fakeClient({
+      uploadFile: async (_workspaceId: string, input: unknown) => {
+        uploads.push(input);
+        return fakeAsset({ filename: "Safari - Example Domain.png" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const capture = {
+      app: "Safari",
+      title: "Example Domain",
+      capturedAt: "2026-10-20T09:15:00.000Z",
+      platform: "macos" as const,
+      text: "Example Domain",
+    };
+
+    await flushing(() =>
+      hook.result.current.addAppShot?.(imageFile("Safari - Example Domain.png"), capture),
+    );
+    expect(uploads).toHaveLength(1);
+    expect((uploads[0] as { appShot?: unknown }).appShot).toEqual(capture);
+    expect(created).toHaveLength(1);
+    const attachment = hook.result.current.attachments[0]!;
+    expect(attachment.status).toBe("ready");
+    expect(attachment.appShot).toEqual(capture);
+    expect(attachment.previewUrl).toBe(created[0]);
+    await hook.unmount();
+  });
+
   test("remove(id) revokes the attachment's object-URL", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
     const hook = await renderHook(
