@@ -5643,6 +5643,19 @@ export function evaluateRuntimeDatabasePosture(
     ) {
       violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
+    const enrollmentInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
+    );
+    if (
+      enrollmentInventory &&
+      (!enrollmentInventory.execute ||
+        enrollmentInventory.publicExecute ||
+        !enrollmentInventory.securityDefiner ||
+        enrollmentInventory.owner !== capability.owner ||
+        !enrollmentInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Compute enrollment inventory has unsafe owner, ACL or runtime privileges");
+    }
   }
   if (organizationUsageCapability) {
     const capability = organizationUsageCapability;

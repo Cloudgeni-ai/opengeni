@@ -606,6 +606,14 @@ test("strict-owner backfill retains preexisting work and restores FORCE RLS", as
     new URL("../drizzle/0848_strict_owner_maintenance_probes.sql", import.meta.url),
     "utf8",
   );
+  // Later migrations that widen a projection for their probes. Replaying 0848
+  // at head rebuilds its projections with 0848's columns, so these run after it
+  // to widen them again, as on a database migrated in order.
+  const widening = await Promise.all(
+    ["0860_compute_commands_settle_by_push.sql"].map(
+      async (name) => await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8"),
+    ),
+  );
   const rollback = new Error("rollback backfill");
   await shared.admin
     .begin(async (tx) => {
@@ -622,9 +630,17 @@ test("strict-owner backfill retains preexisting work and restores FORCE RLS", as
       VALUES (${lease},${account},${workspace},${group},'warm','modal',now()+interval '10 minutes')`;
       await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
       await tx.unsafe(`SET LOCAL ROLE "${shared.ownerRole}"`);
+      // A probe a later migration widened names columns 0848 does not project
+      // until that migration runs again below.
+      await tx.unsafe("SET LOCAL check_function_bodies = off");
       await tx.unsafe(migration);
+      await tx.unsafe("SET LOCAL check_function_bodies = on");
+      for (const later of widening) await tx.unsafe(later);
       await tx.unsafe("SET LOCAL ROLE opengeni_app");
       const [due] = await tx`SELECT opengeni_private.sandbox_lease_reaper_due_v1() AS due`;
+      const [commands] =
+        await tx`SELECT opengeni_private.connected_command_reconciliation_due_v1() AS due`;
+      expect(typeof commands!.due).toBe("boolean");
       expect(due!.due).toBe(true);
       await tx.unsafe("RESET ROLE");
       const [table] =

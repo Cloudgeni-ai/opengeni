@@ -82,6 +82,110 @@ transparent successes: the existing failure/unknown-outcome semantics remain,
 and ambiguous mutations are never automatically reissued as fresh deliveries.
 No model-visible schema, result text, or previously sent history changes.
 
+Retrying stops early when the agent process a request was sent to is replaced.
+While an attempt waits for its reply (every second, from Opengeni's own records,
+never by contacting the agent) and after each failed attempt, the requester
+checks the enrollment's live connection instance (an unknown answer counts as
+unchanged), so a request a host holds for an agent that no longer holds the
+connection ends too. Once a new connection has replaced the request's (the
+agent restarted, a second process took over, or a compute sandbox's VM booted
+fresh), the request ends at once with `agent_offline`: "The machine's agent was
+replaced before this request reached it, so it did not run." when no attempt
+reached a responder, otherwise "The machine's agent was replaced while this
+request was in flight, so its outcome is unknown." The texts say "replaced",
+not "restarted": a new connection does not tell which happened. A request that reached no responder is re-admitted to the new
+connection like any never-sent request, and a read whose outcome is unknown is
+read again; nothing else is re-sent, and the old subject is never rebound to the
+new connection. A replaced connection does not prove the old agent process
+exited: an agent keeps its operations across a disconnect, and once the new
+connection's lease expires the old process can hold the connection again. So a
+streaming exec that was started, or may have been, is not settled by the
+requester. It is handed to the session's command ledger with a stop request
+bound to its exact enrollment, connection instance and operation (the same
+adoption used when a machine stops answering), and the exec ends with
+`agent_offline`. Once an agent had acknowledged the command (accepted its
+start, or reported its status, also to an earlier read through the same
+connection), the text is "The machine's agent was replaced while this command
+was running, so its outcome is unknown: it may still be running, or it may have
+finished." Otherwise it is "The machine's agent was replaced before this
+command's outcome was known: it may not have started, may still be running, or
+may have finished." Either ends with " A stop has been requested for it." only
+once the ledger has recorded that stop. A turn records it through its own
+adoption; a direct terminal or file request records it in the same ledger
+without a turn. If recording fails, the caller keeps custody and goes on
+stopping it, as for a machine that stopped answering, and the text claims no
+stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+same answer, not exit 124: it reports 124 only when its deadline provably ended
+the command. The reconciler alone decides the outcome: it delivers the stop if the old
+runner answers again, and settles the command as lost once the enrollment
+retires that runner (revoked, a different connection instance, or a stopped
+connection). The exec's own timeout also covers its
+start and first attach, so an exec whose agent never answers ends at that
+timeout; a start that timeout abandoned is never sent afterwards, every retry
+of a start keeps the one absolute deadline fixed when the exec began (neither
+subscription setup nor a retry extends it, and no start is sent once it has
+passed), and a start re-admitted to a new connection is sent only the time
+left. A start that timeout or deadline ended before any OpStart was sent fails
+as never sent, so nothing keeps custody of it or waits on its agent.
+
+A runner reports what it still runs or retains, and Opengeni answers which of
+those to end. Every OpStart carries the connection generation Opengeni
+dispatched it under (the enrollment's generation moves only when a different
+process claims the connection), and the agent stores it with the operation when
+it admits it, so no operation's generation is ever inferred later. On every
+connection, and again while it holds a completed operation whose output nobody
+released (about a minute after completion, then backing off to ten minutes,
+and only while such output remains), the agent reports its operations. The API
+answers each page in the same exchange, and only to the process that holds the
+connection:
+
+- An operation with a command of that exact process is decided by the command.
+  One in flight is kept. One that exited is ended once Opengeni has stored its
+  output (the release is recorded before the answer is sent) or recorded it
+  unavailable, and a lost one is ended. Output Opengeni has not stored is never
+  ended: the API keeps it and collects it while the agent is talking, and
+  collecting releases it in the same exchange.
+- An operation without a command (foreground work, or a command deleted with
+  its chat) is ended when it started under an earlier generation than the
+  current one, because its requester can no longer address it. Otherwise it is
+  kept, running or completed, however long ago it completed: no durable record
+  shows that a foreground requester finished with its output, and age never
+  shows it either, so the agent's own retention bound limits what it keeps. One
+  an older Opengeni started carries generation 0 and is kept.
+
+The agent cancels what it runs and drops what it retains; none of it runs again
+or writes into a settled record. So a process that comes back after another
+process took its connection stops what Opengeni settled meanwhile, whatever
+happened to the chats. The agent starts every such exchange, so none reaches an
+agent that is not talking, such as a sleeping compute sandbox. An agent that
+does not report keeps the earlier behaviour.
+
+Requests Opengeni sends on its own behalf rather than for a call (the release
+of stored output, the collection of output an inventory answer kept, and the
+reconciler's recovery query for a running command, to any runner) carry the
+`Opengeni-No-Wake` header. A compute host delivers such a request only while
+the sandbox runs and its agent holds the link, and otherwise answers it itself
+with `Opengeni-Agent-Unanswered` (`asleep`, `away` or `busy`) without waking
+the sandbox; a Connected Machine agent simply receives it. When such a request
+goes unanswered (that header, no responders, a lost link or a timeout),
+Opengeni records nothing and leaves the work to the agent's next inventory. The
+reconciler asks a runner that reports its inventory, compute or Connected
+Machine, once: after one unanswered query it defers the command (outcome
+`provider_unanswered`) and does not claim it again until the agent reports it,
+the command is stopped, or its runner is retired. A runner that does not report
+its inventory is asked again on a later pass, as when it is offline, and when
+the reconciler cannot read which kind of runner it is, it leaves the command
+for a later pass and records nothing. A Connected Machine never sleeps, so its
+answered queries continue on each pass as before.
+
+A stop can reach an agent before the start it stops, for example when the
+start sat on a link that ended and is delivered again. The agent then refuses
+the start and keeps a tombstone for the operation: a query or attach answers
+`COMPLETE` with a cancelled exit and no output. The requester treats that
+answer as the command's end (cancelled, exit code -1, no output, nothing
+proven to have run) and never waits for frames from it, so the stop settles and
+nothing keeps custody of the command.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
@@ -144,6 +248,13 @@ client. The matching UI ships in
 | Working dir  | `/workspace`                    | the agent-reported absolute host root, optionally narrowed per session |
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
+An Opengeni compute sandbox (`compute`) is a managed sandbox that runs this same
+agent. Its enrollment has kind `sandbox`: Opengeni creates it, it has no key or
+bearer, and it is never listed, offered, attached or granted as a machine; its
+lease authorizes its use, and it is revoked when the sandbox is deleted. The
+agent reaches NATS through its host's link to the API's agent gateway.
+See [compute backend](compute-backend.md).
+
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no Opengeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
@@ -204,7 +315,9 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
 `ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root and removed when the attempt ends. `cmd.exe`, fish
+`/tmp/opengeni-private` root and removed when the attempt ends; that cleanup
+first waits for any write still in flight from an exec that timed out during
+preparation, and such an exec writes no further file. `cmd.exe`, fish
 and unknown shells return `unsupported_shell`. Commands without references run
 exactly as before, and nothing from a vault is copied into the machine's
 environment. See [`secrets.md`](secrets.md#where-references-resolve).
@@ -764,7 +877,11 @@ freezes the physical control workspace, enrollment, connection instance, and op
 ID. Normal turn completion and Steer detach from that adopted command; they do
 not cancel or retarget it. Session/workspace Pause and terminal Cancel atomically
 move adopted commands to `stopping`, after which the global reconciler issues
-`OpCancel` only to that frozen subject. Switching the session's selected machine
+`OpCancel` only to that frozen subject. Stopping one command through
+`DELETE .../background-commands/:commandId` also sends that `OpCancel` from
+the API at once, best effort, so the process ends without waiting for the next
+maintenance pass; the reconciler still delivers it when that attempt fails,
+and the pushed exit settles the command. Switching the session's selected machine
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
@@ -868,7 +985,21 @@ connection, including after worker loss; a newer enrollment route is never
 substituted. Already captured output takes priority over full replay, so older
 uncaptured results cannot delay final acknowledgements for saved results. Publish
 success leaves the obligation pending until an exact runner
-observation establishes that output is no longer retained. Completion input to
+observation establishes that output is no longer retained. A runner that
+advertises `capabilities.op_release` in the Hello of that same connection also
+reports its own operation inventory (above). It is instead sent one
+`OpRelease` for the stored exit frame right where the output is stored; it
+drops the operation at once and confirms the release in its answer (LOST,
+reason RELEASED, which also answers any duplicate), so the release settles in
+that exchange. A different exit frame or a running operation releases nothing.
+Foreground command output is released the same way at its durability point
+when the runner advertises the capability, and by a final ACK when it does not.
+When the storing process dies before it releases or stores the output, that
+runner's own inventory recovers it; the reaper sends such a runner nothing and
+only rechecks the obligation in the database. A runner without the capability
+keeps the attach, final ACK and later observation from the reaper; Connected
+Machines do not sleep, so that exchange is answered on the first pass. Compute
+sandboxes have no such path (see [compute-backend.md](compute-backend.md)). Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.
@@ -1606,6 +1737,33 @@ reporting does not add transactional transfer support to unsupported platforms.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
+
+## Run as another local user
+
+Exec (including op-stream and background commands), git, PTY open and every file
+request, transactional uploads included, carry an optional `run_as`: a local user
+name, else a decimal uid, which must exist in the machine's password database.
+The agent honors it only when it advertises `Capabilities.run_as`, which it does
+only on Linux while running as root (as in a managed sandbox); a Connected
+Machine agent running as its owner's account never does, and the control plane
+must not send `run_as` to an agent that does not advertise it. Such an agent
+refuses a non-empty `run_as` with `ERROR_CODE_UNSUPPORTED` rather than ignoring it,
+and an unknown user fails with `ERROR_CODE_RUN_AS_UNKNOWN_USER`.
+
+A process started for the request runs with the user's uid, primary gid and
+groups (real, effective and saved ids, no capabilities), with `HOME`, `USER`,
+`LOGNAME` and `SHELL` from the password database before the request's own
+environment. A PTY without a command starts the user's login shell, and the user
+owns the terminal device. File requests run on a dedicated agent thread switched
+to the user, so the kernel enforces the user's permissions and everything the
+request creates is the user's; `~` expands to the user's home. Transactional
+uploads stage as the user, so the published file is the user's. Because that
+user can also reach its own staged file, a replacement re-checks the published
+inode and its content right after the atomic exchange: on any difference the
+agent exchanges the previous file back and reports `WRITE_CONFLICT`, or reports
+`WRITE_OUTCOME_UNKNOWN` when it cannot confirm that restore. Exec and git
+children switch identity after their cgroup placement, which still uses the
+agent's privileges.
 
 ## Revoke / detach
 

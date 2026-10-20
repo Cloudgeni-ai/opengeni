@@ -219,6 +219,7 @@ import {
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
+  controllerHasCacheableDataPlane,
   shouldPersistControllerDataPlaneUrl,
   isRetryableControllerTransport,
   withCachedController,
@@ -3627,6 +3628,7 @@ export function registerBrowserSessionRoutes(
         transactionalFsWriteMachineSupported:
           enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -3635,6 +3637,10 @@ export function registerBrowserSessionRoutes(
                 transport: new NatsOpStreamTransport(
                   async () => deps.bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),
@@ -3864,7 +3870,11 @@ export function registerBrowserSessionRoutes(
     placement: BrowserPlacement,
   ): Promise<BrowserPlacement> {
     const sandboxGroupId = placement.controllerHostSandboxGroupId;
-    if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
+    if (
+      !sandboxGroupId ||
+      !placement.lease?.instanceId ||
+      !controllerHasCacheableDataPlane(placement.session)
+    ) {
       return placement;
     }
     if (placement.lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) {

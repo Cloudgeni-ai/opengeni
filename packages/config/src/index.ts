@@ -1358,6 +1358,30 @@ const SettingsSchema = z.object({
     .max(63)
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
+  // --- Opengeni compute (optional; Opengeni's own microVM sandboxes) ---
+  // Every compute sandbox runs the Connected Machine agent, reached through
+  // its host's link to this API's agent gateway, so this backend also needs
+  // the relay and the agent op-stream. Nothing here is read unless a session
+  // or the deployment selects `compute`, or the gateway URL is set.
+  computeApiUrl: z.string().url().optional(),
+  computeApiKey: z.string().min(1).max(8192).optional(),
+  // Compute image refs. Omitted, the control service's default image. The desktop image is
+  // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
+  computeImage: z.string().min(1).max(2048).optional(),
+  computeDesktopImage: z.string().min(1).max(2048).optional(),
+  computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
+  computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
+  // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
+  computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
+  computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
+  // and it is the exact audience of their host tokens and sandbox tickets, so
+  // it must equal the URL the control service is configured with for Opengeni's team.
+  // This API serves the gateway at its path.
+  computeLinkUrl: z.string().url().optional(),
+  // How long a create waits for the sandbox's agent to connect, and how long
+  // a request to an unreachable sandbox keeps waking and retrying it.
+  computeAgentReadyTimeoutMs: z.coerce.number().int().min(1_000).max(900_000).default(120_000),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -4660,6 +4684,11 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
     { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
   ],
+  // compute also needs the gateway and relay; computeSettingsIssues checks them.
+  compute: [
+    { field: "computeApiUrl", env: "OPENGENI_COMPUTE_API_URL" },
+    { field: "computeApiKey", env: "OPENGENI_COMPUTE_API_KEY" },
+  ],
   // selfhosted needs NO per-box credentials: it is the user's own machine reached
   // over the agent's own enrollment. The enrollment-signing + relay-token secrets
   // are deployment-level (a single runtime secret, not per-active-backend creds),
@@ -5109,6 +5138,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openSandboxKubernetesInventoryNamespace: optional(
       "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
     ),
+    computeApiUrl: optional("OPENGENI_COMPUTE_API_URL"),
+    computeApiKey: optional("OPENGENI_COMPUTE_API_KEY"),
+    computeImage: optional("OPENGENI_COMPUTE_IMAGE"),
+    computeDesktopImage: optional("OPENGENI_COMPUTE_DESKTOP_IMAGE"),
+    computeVcpus: optional("OPENGENI_COMPUTE_VCPUS"),
+    computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
+    computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
+    computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
+    computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
@@ -10638,6 +10677,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
     );
   }
+  if (settings.sandboxBackend === "compute") {
+    const issues = computeSettingsIssues(settings);
+    if (issues.length > 0) {
+      throw new Error(`OPENGENI_SANDBOX_BACKEND=compute: ${issues.join("; ")}`);
+    }
+  }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(
@@ -11042,6 +11087,61 @@ export function resolveStreamTokenSecret(settings: Settings): string | undefined
  */
 export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
+}
+
+/** Whether this deployment serves the compute agent gateway: the control service API
+ * it reads link keys from and the gateway's own URL are both configured. */
+export function computeGatewayConfigured(settings: Settings): boolean {
+  return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);
+}
+
+/** Everything a deployment must configure before a compute sandbox can work,
+ * as human-readable problems; empty when it is ready. Checked at boot when
+ * compute is the deployment backend, and whenever a compute client is built,
+ * so a session that selects compute fails clearly instead of half-creating. */
+export function computeSettingsIssues(settings: Settings): string[] {
+  const issues: string[] = [];
+  if (!settings.computeApiUrl) issues.push("OPENGENI_COMPUTE_API_URL is required");
+  if (!settings.computeApiKey) issues.push("OPENGENI_COMPUTE_API_KEY is required");
+  if (
+    settings.computeApiUrl &&
+    !["local", "test"].includes(settings.environment) &&
+    !settings.computeApiUrl.startsWith("https://")
+  ) {
+    issues.push("OPENGENI_COMPUTE_API_URL must use https outside local/test");
+  }
+  const linkUrl = settings.computeLinkUrl;
+  if (!linkUrl) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL is required");
+  } else if (
+    !linkUrl.startsWith("wss://") &&
+    !(["local", "test"].includes(settings.environment) && linkUrl.startsWith("ws://"))
+  ) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL must be a wss:// URL (ws:// only in local/test)");
+  }
+  if (!settings.selfhostedRelayUrl || !resolveRelayTokenSecret(settings)) {
+    issues.push(
+      "OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required (terminal, desktop and ports)",
+    );
+  }
+  if (settings.agentOpStreamEnabled !== true) {
+    issues.push("OPENGENI_AGENT_OP_STREAM_ENABLED must stay true (agent exec needs op-stream)");
+  }
+  if (
+    settings.computeMemoryRequestMib !== undefined &&
+    settings.computeMemoryRequestMib > settings.computeMemoryMib
+  ) {
+    issues.push("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed OPENGENI_COMPUTE_MEMORY_MIB");
+  }
+  if (
+    settings.computeCpuRequestMillis !== undefined &&
+    settings.computeCpuRequestMillis > settings.computeVcpus * 1000
+  ) {
+    issues.push(
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS must not exceed OPENGENI_COMPUTE_VCPUS * 1000",
+    );
+  }
+  return issues;
 }
 
 /**

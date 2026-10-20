@@ -12750,7 +12750,7 @@
         "$.connectedMachines": "boolean?",
         "$.defaultModel": "string!",
         "$.defaultReasoningEffort": "ref(ReasoningEffort)!",
-        "$.defaultSandboxBackend": "enum!=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]",
+        "$.defaultSandboxBackend": "enum!=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]",
         "$.deploymentRevision": "string!",
         "$.documentationUrl": "string? null",
         "$.fileUploads": "object!",
@@ -19359,7 +19359,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
+        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
     "MachineMacPermissions": {
@@ -23157,7 +23157,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
+        "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
     "SandboxFileArtifactReceipt": {

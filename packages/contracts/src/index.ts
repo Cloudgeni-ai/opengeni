@@ -287,12 +287,13 @@ export {
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
 
-// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 13 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
 // enrolled as a first-class sandbox), then `opensandbox` (an optional
-// Kubernetes-native provisioned sandbox provider).
+// Kubernetes-native provisioned sandbox provider), then `compute` (Opengeni's
+// own microVM sandboxes; every box runs the Connected Machine agent).
 export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "docker",
@@ -307,6 +308,7 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
@@ -334,6 +336,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
   opensandbox: ["sandboxId"],
+  compute: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -769,6 +772,42 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     nativeBucketMount: false,
     persistable: true,
     supportsRunAs: false,
+  },
+  // Opengeni compute: a managed microVM sandbox run by Opengeni itself.
+  // Every sandbox runs the Connected Machine agent, reached through its host's
+  // link to Opengeni's agent gateway, so the transport is the agent's (PTY,
+  // desktop frames, browser control and on-demand ports over the relay). The
+  // lifetime is a managed sandbox's: compute sleeps an idle sandbox itself
+  // and keeps its memory and disk across sleep, moves and host loss, so there
+  // is no hard lifetime and no idle killer, and a message to a sleeping
+  // sandbox wakes it. A portable tar is only the fallback that moves a
+  // workspace to another backend.
+  compute: {
+    backend: "compute",
+    backendId: "compute",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "relay-pty", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: true,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    // The box agent runs as root on Linux; each request still gates on the
+    // live agent's Hello `run_as` capability.
+    supportsRunAs: true,
   },
 };
 
@@ -20585,6 +20624,7 @@ export const MachineKind = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type MachineKind = z.infer<typeof MachineKind>;

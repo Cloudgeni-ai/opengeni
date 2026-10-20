@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
+use crate::run_as::{RunAsChild, RunAsIdentity};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
 /// The host-native platform: exec/fs/git against the machine the agent runs on,
@@ -144,11 +145,20 @@ impl NativePlatform {
     /// Resolves a request-supplied machine path. Empty falls back to the agent
     /// root, exact `~` / `~/...` expands against the agent user's home, ordinary
     /// relative paths join the root, and absolute paths pass through unchanged.
-    fn resolve_path(&self, path: &str) -> PlatformResult<PathBuf> {
+    /// For a request running as `identity`, `~` expands against that account's
+    /// home instead.
+    fn resolve_path(
+        &self,
+        path: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
         if path.is_empty() {
             Ok(self.workspace_root.clone())
         } else if path == "~" || path.starts_with("~/") {
-            let home = self.home_dir.as_ref().ok_or_else(|| {
+            let home = identity
+                .map(|identity| &identity.home)
+                .or(self.home_dir.as_ref());
+            let home = home.ok_or_else(|| {
                 PlatformError::os(
                     "cannot resolve '~': the agent service has no HOME or USERPROFILE",
                 )
@@ -171,14 +181,35 @@ impl NativePlatform {
     /// Resolves and validates a process working directory before spawn. Tokio's
     /// spawn error otherwise reports `ENOENT` against the executable even when
     /// the missing object is actually `current_dir`, which is actively misleading.
-    fn resolve_process_cwd(&self, cwd: &str, operation: &str) -> PlatformResult<PathBuf> {
-        let path = self.resolve_path(cwd)?;
-        let metadata = std::fs::metadata(&path).map_err(|error| {
-            PlatformError::from_io(
-                &format!("{operation} working directory {}", path.display()),
-                &error,
-            )
-        })?;
+    fn resolve_process_cwd(
+        &self,
+        cwd: &str,
+        operation: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
+        let path = self.resolve_path(cwd, identity)?;
+        // Checked as the requested user, so a directory only the agent can
+        // reach is reported the same way the user's own chdir would fail.
+        let metadata = match identity {
+            Some(identity) => {
+                let checked = path.clone();
+                let operation = operation.to_string();
+                crate::run_as::on_identity_thread(identity, move || {
+                    std::fs::metadata(&checked).map_err(|error| {
+                        PlatformError::from_io(
+                            &format!("{operation} working directory {}", checked.display()),
+                            &error,
+                        )
+                    })
+                })?
+            }
+            None => std::fs::metadata(&path).map_err(|error| {
+                PlatformError::from_io(
+                    &format!("{operation} working directory {}", path.display()),
+                    &error,
+                )
+            })?,
+        };
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
             detail.insert("path".to_string(), path.to_string_lossy().into_owned());
@@ -355,7 +386,15 @@ impl ExecProcessGroup {
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
         requested_policy: OpCgroupConfig,
+        run_as: Option<&RunAsChild>,
     ) -> std::io::Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Create and configure the operation leaf before either child is forked.
         // Their pre-exec hooks migrate them before user code can create a
         // session-detached or double-forked descendant.
@@ -425,6 +464,12 @@ impl ExecProcessGroup {
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut command)?;
+        }
+        // Registered last: the hooks above still need the agent's privileges.
+        // A failure here, like any later one, is cleaned up by `group`.
+        #[cfg(target_os = "linux")]
+        if let Some(run_as) = run_as {
+            crate::run_as::configure_child(run_as, &mut command)?;
         }
         group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
@@ -1034,7 +1079,7 @@ pub fn spawn_contained(
     command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
 ) -> std::io::Result<ContainedExec> {
-    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default())
+    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default(), None)
 }
 
 /// Policy-aware form of [`spawn_contained`]. `requested_policy` is one
@@ -1044,6 +1089,7 @@ fn spawn_contained_with_policy(
     mut command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
     requested_policy: OpCgroupConfig,
+    run_as: Option<&RunAsChild>,
 ) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
@@ -1051,9 +1097,15 @@ fn spawn_contained_with_policy(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy)?;
+    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy, run_as)?;
     #[cfg(windows)]
     let mut group = {
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
         let _ = (cgroups, requested_policy);
         ExecProcessGroup::spawn(command)?
@@ -1079,6 +1131,10 @@ impl Platform for NativePlatform {
 
     fn operation_resource_policy_supported(&self) -> bool {
         self.cgroups.is_some()
+    }
+
+    fn run_as_supported(&self) -> bool {
+        crate::run_as::supported()
     }
 
     fn operation_cpu_quota_supported(&self) -> bool {
@@ -1107,11 +1163,16 @@ impl Platform for NativePlatform {
         let registry = self.stream_registry.as_ref().ok_or_else(|| {
             PlatformError::Unsupported("pty_open: no relay stream registrar is wired".to_string())
         })?;
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut resolved = req.clone();
-        resolved.cwd = self
-            .resolve_process_cwd(&req.cwd, "pty")?
-            .to_string_lossy()
-            .into_owned();
+        // A run-as terminal without a cwd starts where that user's login would
+        // (the PTY layer picks the user's home); every other cwd resolves here.
+        if !(req.cwd.is_empty() && identity.is_some()) {
+            resolved.cwd = self
+                .resolve_process_cwd(&req.cwd, "pty", identity.as_ref())?
+                .to_string_lossy()
+                .into_owned();
+        }
         registry.open_pty(&resolved, &self.default_shell()).await
     }
 
@@ -1140,6 +1201,7 @@ impl Platform for NativePlatform {
             });
         }
 
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = if req.shell {
             crate::shell_command(&req.command)
         } else {
@@ -1148,7 +1210,17 @@ impl Platform for NativePlatform {
             command
         };
 
-        cmd.current_dir(self.resolve_process_cwd(&req.cwd, "exec")?);
+        let cwd = self.resolve_process_cwd(&req.cwd, "exec", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
+        }
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
@@ -1165,7 +1237,13 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy).map_err(|e| {
+        spawn_contained_with_policy(
+            cmd,
+            self.cgroups.as_deref(),
+            requested_policy,
+            run_as.as_ref(),
+        )
+        .map_err(|e| {
             PlatformError::from_io(
                 &format!(
                     "spawn or apply execution containment for {}",
@@ -1246,36 +1324,10 @@ impl Platform for NativePlatform {
     }
 
     async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let offset = req.offset;
-        let length = req.length;
-        let (content, total_size) = crate::spawn_blocking_reserved(move || {
-            use std::io::{copy, sink, Read};
-
-            let read = || -> std::io::Result<(Vec<u8>, u64)> {
-                let mut file = std::fs::File::open(&path)?;
-                // Drain unrequested bytes without retaining them. Metadata is
-                // not the byte count for procfs/sysfs and other virtual files;
-                // keep the existing actual-stream total_size contract.
-                let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
-                let mut content = Vec::new();
-                let selected = if length == 0 {
-                    file.read_to_end(&mut content)?
-                } else {
-                    file.by_ref().take(length).read_to_end(&mut content)?
-                };
-                let remaining = copy(&mut file, &mut sink())?;
-                Ok((content, skipped + selected as u64 + remaining))
-            };
-            read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
-        })
-        .await
-        .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
-
-        Ok(v1::FsReadResponse {
-            content: prost::bytes::Bytes::from(content),
-            total_size,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (offset, length) = (req.offset, req.length);
+        crate::run_as::run(identity, move || fs_read_at(path, offset, length)).await
     }
 
     fn transactional_fs_write_supported(&self) -> bool {
@@ -1286,118 +1338,63 @@ impl Platform for NativePlatform {
         &self,
         req: &v1::FsWriteBegin,
     ) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
-        crate::transactional_write::begin(&self.resolve_path(&req.path)?, req)
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let Some(identity) = identity else {
+            return crate::transactional_write::begin(&path, req);
+        };
+        // The whole transaction runs as the user (their permissions, their
+        // ownership): staging, publication and the cleanup of an unpublished
+        // write, with the content unnamed until the verified inode is linked.
+        crate::run_as::begin_transactional_write(&identity, path, req.clone())
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
-        let path = self.resolve_path(&req.path)?;
-        if req.create_parents {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
-                })?;
-            }
-        }
-
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(true).create(true);
-        if req.append {
-            opts.append(true);
-        } else {
-            opts.truncate(true);
-        }
-        apply_mode(&mut opts, req.mode);
-
-        let mut file = opts
-            .open(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
-        file.write_all(&req.content)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
-        file.flush()
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
-
-        Ok(v1::FsWriteResponse {
-            bytes_written: req.content.len() as u64,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let req = req.clone();
+        crate::run_as::run(identity, move || fs_write_at(path, req)).await
     }
 
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse> {
-        let root = self.resolve_path(&req.path)?;
-        let mut entries = Vec::new();
-        list_dir(&root, &root, req.recursive, &mut entries).await?;
-        Ok(v1::FsListResponse { entries })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let root = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || async move {
+            let mut entries = Vec::new();
+            list_dir(&root, &root, recursive, &mut entries).await?;
+            Ok(v1::FsListResponse { entries })
+        })
+        .await
     }
 
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let result = if req.parents {
-            tokio::fs::create_dir_all(&path).await
-        } else {
-            tokio::fs::create_dir(&path).await
-        };
-        result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
-        set_mode(&path, req.mode).await?;
-        Ok(v1::FsMkdirResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (parents, mode) = (req.parents, req.mode);
+        crate::run_as::run(identity, move || fs_mkdir_at(path, parents, mode)).await
     }
 
     async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
-        let from = self.resolve_path(&req.from)?;
-        let to = self.resolve_path(&req.to)?;
-        if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
-            return Err(PlatformError::Os {
-                message: format!("move: destination exists: {}", to.display()),
-                detail: BTreeMap::new(),
-            });
-        }
-        tokio::fs::rename(&from, &to).await.map_err(|e| {
-            PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
-        })?;
-        Ok(v1::FsMoveResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let from = self.resolve_path(&req.from, identity.as_ref())?;
+        let to = self.resolve_path(&req.to, identity.as_ref())?;
+        let overwrite = req.overwrite;
+        crate::run_as::run(identity, move || fs_move_at(from, to, overwrite)).await
     }
 
     async fn fs_stat(&self, req: &v1::FsStatRequest) -> PlatformResult<v1::FsStatResponse> {
-        let path = self.resolve_path(&req.path)?;
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(meta) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Ok(v1::FsStatResponse {
-                    exists: true,
-                    entry: Some(metadata_to_entry(&name, &req.path, &meta)),
-                })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
-                exists: false,
-                entry: None,
-            }),
-            Err(e) => Err(PlatformError::from_io(
-                &format!("stat {}", path.display()),
-                &e,
-            )),
-        }
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let requested = req.path.clone();
+        crate::run_as::run(identity, move || fs_stat_at(path, requested)).await
     }
 
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let meta = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
-        let result = if meta.is_dir() {
-            if req.recursive {
-                tokio::fs::remove_dir_all(&path).await
-            } else {
-                tokio::fs::remove_dir(&path).await
-            }
-        } else {
-            tokio::fs::remove_file(&path).await
-        };
-        result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
-        Ok(v1::FsRemoveResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || fs_remove_at(path, recursive)).await
     }
 
     /// Builds the git argv (op-aware) and spawns it inside the shared
@@ -1413,9 +1410,20 @@ impl Platform for NativePlatform {
         req: &v1::GitRequest,
         policy: Option<&v1::OperationResourcePolicy>,
     ) -> PlatformResult<ContainedExec> {
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(git_args(req.op(), &req.args))
-            .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
+        cmd.args(git_args(req.op(), &req.args));
+        let cwd = self.resolve_process_cwd(&req.cwd, "git", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
+        }
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()
             && self
@@ -1428,8 +1436,13 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy)
-            .map_err(|e| PlatformError::from_io("spawn git", &e))
+        spawn_contained_with_policy(
+            cmd,
+            self.cgroups.as_deref(),
+            requested_policy,
+            run_as.as_ref(),
+        )
+        .map_err(|e| PlatformError::from_io("spawn git", &e))
     }
 
     async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
@@ -1562,6 +1575,149 @@ fn parse_status_entry(line: &str) -> Option<v1::GitFileStatus> {
         }
         _ => None,
     }
+}
+
+// --- File operations on resolved paths ---------------------------------------
+// Each runs on the calling task, or on a run-as thread for a request with
+// `run_as` (crate::run_as::run), so the kernel applies that user's identity.
+
+async fn fs_read_at(path: PathBuf, offset: u64, length: u64) -> PlatformResult<v1::FsReadResponse> {
+    let (content, total_size) = crate::spawn_blocking_reserved(move || {
+        use std::io::{copy, sink, Read};
+
+        let read = || -> std::io::Result<(Vec<u8>, u64)> {
+            let mut file = std::fs::File::open(&path)?;
+            // Drain unrequested bytes without retaining them. Metadata is
+            // not the byte count for procfs/sysfs and other virtual files;
+            // keep the existing actual-stream total_size contract.
+            let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
+            let mut content = Vec::new();
+            let selected = if length == 0 {
+                file.read_to_end(&mut content)?
+            } else {
+                file.by_ref().take(length).read_to_end(&mut content)?
+            };
+            let remaining = copy(&mut file, &mut sink())?;
+            Ok((content, skipped + selected as u64 + remaining))
+        };
+        read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
+    })
+    .await
+    .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
+
+    Ok(v1::FsReadResponse {
+        content: prost::bytes::Bytes::from(content),
+        total_size,
+    })
+}
+
+async fn fs_write_at(
+    path: PathBuf,
+    req: v1::FsWriteRequest,
+) -> PlatformResult<v1::FsWriteResponse> {
+    if req.create_parents {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
+            })?;
+        }
+    }
+
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if req.append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    apply_mode(&mut opts, req.mode);
+
+    let mut file = opts
+        .open(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
+    file.write_all(&req.content)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
+    file.flush()
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
+
+    Ok(v1::FsWriteResponse {
+        bytes_written: req.content.len() as u64,
+    })
+}
+
+async fn fs_mkdir_at(
+    path: PathBuf,
+    parents: bool,
+    mode: u32,
+) -> PlatformResult<v1::FsMkdirResponse> {
+    let result = if parents {
+        tokio::fs::create_dir_all(&path).await
+    } else {
+        tokio::fs::create_dir(&path).await
+    };
+    result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
+    set_mode(&path, mode).await?;
+    Ok(v1::FsMkdirResponse {})
+}
+
+async fn fs_move_at(
+    from: PathBuf,
+    to: PathBuf,
+    overwrite: bool,
+) -> PlatformResult<v1::FsMoveResponse> {
+    if !overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+        return Err(PlatformError::Os {
+            message: format!("move: destination exists: {}", to.display()),
+            detail: BTreeMap::new(),
+        });
+    }
+    tokio::fs::rename(&from, &to).await.map_err(|e| {
+        PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
+    })?;
+    Ok(v1::FsMoveResponse {})
+}
+
+async fn fs_stat_at(path: PathBuf, requested: String) -> PlatformResult<v1::FsStatResponse> {
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(meta) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(v1::FsStatResponse {
+                exists: true,
+                entry: Some(metadata_to_entry(&name, &requested, &meta)),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
+            exists: false,
+            entry: None,
+        }),
+        Err(e) => Err(PlatformError::from_io(
+            &format!("stat {}", path.display()),
+            &e,
+        )),
+    }
+}
+
+async fn fs_remove_at(path: PathBuf, recursive: bool) -> PlatformResult<v1::FsRemoveResponse> {
+    let meta = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
+    let result = if meta.is_dir() {
+        if recursive {
+            tokio::fs::remove_dir_all(&path).await
+        } else {
+            tokio::fs::remove_dir(&path).await
+        }
+    } else {
+        tokio::fs::remove_file(&path).await
+    };
+    result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
+    Ok(v1::FsRemoveResponse {})
 }
 
 /// Recursively (or shallowly) lists a directory into `entries`, with each
@@ -2119,19 +2275,37 @@ mod tests {
     #[test]
     fn path_resolution_expands_only_the_current_users_tilde() {
         let (platform, root, home) = rooted_with_home();
-        assert_eq!(platform.resolve_path("").expect("empty"), root.path());
-        assert_eq!(platform.resolve_path("~").expect("home"), home.path());
+        assert_eq!(platform.resolve_path("", None).expect("empty"), root.path());
+        assert_eq!(platform.resolve_path("~", None).expect("home"), home.path());
         assert_eq!(
-            platform.resolve_path("~/repo/src").expect("home child"),
+            platform
+                .resolve_path("~/repo/src", None)
+                .expect("home child"),
             home.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("repo/src").expect("relative"),
+            platform.resolve_path("repo/src", None).expect("relative"),
             root.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("~someone/repo").expect("named tilde"),
+            platform
+                .resolve_path("~someone/repo", None)
+                .expect("named tilde"),
             root.path().join("~someone/repo")
+        );
+        let identity = crate::run_as::RunAsIdentity {
+            name: "dev".into(),
+            uid: 1000,
+            gid: 1000,
+            groups: vec![1000],
+            home: root.path().join("dev-home"),
+            shell: "/bin/sh".into(),
+        };
+        assert_eq!(
+            platform
+                .resolve_path("~/repo", Some(&identity))
+                .expect("run-as tilde"),
+            root.path().join("dev-home/repo")
         );
     }
 
@@ -2633,6 +2807,7 @@ mod tests {
             .expect("write");
         let read = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: "f".to_string(),
                 offset: 3,
                 length: 4,
@@ -2670,6 +2845,7 @@ mod tests {
         ] {
             let response = platform
                 .fs_read(&FsReadRequest {
+                    run_as: String::new(),
                     path: "ranges".to_string(),
                     offset,
                     length,
@@ -2691,6 +2867,7 @@ mod tests {
         assert!(expected.len() > 4);
         let response = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: path.to_string(),
                 offset: 1,
                 length: 3,
@@ -2737,6 +2914,7 @@ mod tests {
         // Stat the directory exists.
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a/b/c".to_string(),
             })
             .await
@@ -2755,6 +2933,7 @@ mod tests {
             .expect("write");
         let listing = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: false,
             })
@@ -2767,6 +2946,7 @@ mod tests {
         // Recursive list reaches the nested dir.
         let deep = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2777,6 +2957,7 @@ mod tests {
         // Remove recursively.
         platform
             .fs_remove(&FsRemoveRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2784,6 +2965,7 @@ mod tests {
             .expect("remove");
         let gone = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
             })
             .await
@@ -2805,6 +2987,7 @@ mod tests {
         // Without overwrite, the move is refused.
         let err = platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: false,
@@ -2816,6 +2999,7 @@ mod tests {
         // With overwrite it succeeds and the destination now holds the source.
         platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: true,
@@ -2837,6 +3021,7 @@ mod tests {
         let (platform, _dir) = rooted();
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "ghost".to_string(),
             })
             .await

@@ -23,6 +23,7 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   type SelfhostedSession,
+  type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
@@ -44,6 +45,7 @@ import {
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
+  agentBackgroundCommandDeps,
   establishSelfhostedTurnSession,
   routingEnabled,
 } from "../../sandbox-routing";
@@ -424,6 +426,25 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   ) {
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
+    // A compute box's provider session is its agent's: bind this turn's op
+    // journal and background-command ledger onto it, as a Connected Machine
+    // turn does, so a yielded command is adopted instead of blocking.
+    const computeTurn: ComputeTurnDeps | undefined =
+      groupBoxBackend === "compute"
+        ? {
+            ...(opJournal !== undefined ? { opJournal } : {}),
+            ...agentBackgroundCommandDeps(db, bus ?? undefined, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              backgroundCommandAttempt: {
+                turnId: turn.id,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+              },
+            }),
+          }
+        : undefined;
     // A committed system recovery decision is rematerialized in this turn even
     // when the sandbox is otherwise on-demand: the decision pins group
     // membership until publication, and the next turn must not dead-end.
@@ -565,6 +586,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.transactionalFsWriteMachine === true,
             browserControlHttpSupported:
               liveMachineEnrollment?.agentCapabilities.browserControlHttp === true,
+            runAsSupported: liveMachineEnrollment?.agentCapabilities.runAs === true,
             // Carried for shared machines too: the audience can narrow to Only me
             // mid-turn, and each operation then rechecks this authority.
             personalMachineAttempt: {
@@ -677,6 +699,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
                   accountId: input.accountId,
@@ -760,6 +783,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
                   accountId: input.accountId,

@@ -38,9 +38,11 @@ use opengeni_agent_proto::v1::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
+use crate::activity::StreamActivity;
 use crate::backoff::ChannelBackoff;
 use crate::browser_pump;
 use crate::channel::{ChannelConfig, RelayChannel};
+use crate::credential::RelayCredential;
 use crate::framebuffer_pump::{self, InputPolicy};
 use crate::pty_pump::{self, PtyCommand, PtyControlTx};
 
@@ -64,20 +66,20 @@ pub const DESKTOP_STREAM_PORT: u32 = 6080;
 const BROWSER_STREAM_PORT_START: u32 = 20_000;
 const BROWSER_STREAM_PORT_END: u32 = 65_535;
 
-/// Static configuration for the relay hub: the agent identity, the relay URL, and
-/// the agent's relay token + consent policy.
+/// Configuration for the relay hub: the agent identity, its relay credential,
+/// and its consent policy.
 #[derive(Debug, Clone)]
 pub struct RelayHubConfig {
     /// The workspace this agent is scoped to (the channel key + token scope).
     pub workspace_id: String,
     /// The agent (machine) id.
     pub agent_id: String,
-    /// The relay base URL to dial (from enrollment; `wss://relay…`).
-    pub relay_url: String,
-    /// The agent's relay token presented on producer registration (enrollment
-    /// scoped). NEVER logged. The viewer's `ogs_` token is a SEPARATE control-plane
-    /// mint (see the module + crate docs).
-    pub agent_token: String,
+    /// The relay address and the agent's producer token, presented on each
+    /// producer registration: fixed by a Connected Machine's enrollment, or
+    /// handed to a compute sandbox's agent by its host and replaced before it
+    /// expires. Never logged. The viewer's `ogs_` token is a SEPARATE
+    /// control-plane mint (see the module + crate docs).
+    pub credential: RelayCredential,
     /// Whether the user consented to screen-control (computer-use input). When
     /// false, desktop channels are view-only (inbound input is dropped).
     pub allow_screen_control: bool,
@@ -103,6 +105,8 @@ pub struct RelayHub {
     /// Allocated logical relay ports for browser frame subscriptions. They are
     /// routing handles, not listening TCP ports.
     browser_ports: Arc<Mutex<HashSet<u32>>>,
+    /// When each open channel last carried traffic.
+    activity: StreamActivity,
 }
 
 #[derive(Clone)]
@@ -147,7 +151,15 @@ impl RelayHub {
             pty_scopes: Arc::new(Mutex::new(HashMap::new())),
             pty_scope_locks: Arc::new(Mutex::new(HashMap::new())),
             browser_ports: Arc::new(Mutex::new(HashSet::new())),
+            activity: StreamActivity::new(),
         }
+    }
+
+    /// When the hub's open channels last carried traffic: what the agent
+    /// reports as streams in use.
+    #[must_use]
+    pub fn activity(&self) -> &StreamActivity {
+        &self.activity
     }
 
     /// Builds a [`StreamChannel`] descriptor for `(kind, port)` with a fresh
@@ -163,12 +175,13 @@ impl RelayHub {
         }
     }
 
-    /// The channel config (descriptor + token + relay url) for a descriptor.
+    /// The channel config (descriptor, credential, activity stamp) for a
+    /// descriptor.
     fn channel_config(&self, channel: StreamChannel) -> ChannelConfig {
         ChannelConfig {
             channel,
-            token: self.config.agent_token.clone(),
-            relay_url: self.config.relay_url.clone(),
+            credential: self.config.credential.clone(),
+            activity: self.activity.track(),
         }
     }
 
@@ -652,8 +665,7 @@ mod tests {
         let hub = RelayHub::new(RelayHubConfig {
             workspace_id: "ws".to_string(),
             agent_id: "ag".to_string(),
-            relay_url: "wss://relay".to_string(),
-            agent_token: "tok".to_string(),
+            credential: RelayCredential::fixed("wss://relay", "tok"),
             allow_screen_control: true,
         });
         let d = hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
@@ -722,8 +734,7 @@ mod tests {
         let hub = RelayHub::new(RelayHubConfig {
             workspace_id: "ws".to_string(),
             agent_id: "ag".to_string(),
-            relay_url: "wss://unreachable.invalid".to_string(),
-            agent_token: "tok".to_string(),
+            credential: RelayCredential::fixed("wss://unreachable.invalid", "tok"),
             allow_screen_control: true,
         });
         let descriptor = hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);

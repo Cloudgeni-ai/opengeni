@@ -4372,6 +4372,9 @@ export async function deleteWorkspaceIfQuiescent(
             .from(schema.sandboxLeases)
             .where(eq(schema.sandboxLeases.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
+          // The workspace's compute sandboxes stay warm while idle; deleting it
+          // ends their groups, so ask the reaper to tear them down now.
+          await requestComputeGroupEndTx(tx, { workspaceId: input.workspaceId });
           if (
             leases.some(
               (lease) =>
@@ -31003,6 +31006,19 @@ export async function deleteSessionTreeIfQuiescent(
             return { status: "externally_referenced" as const };
           }
 
+          // A command already asked to stop on one of this tree's own compute
+          // sandboxes does not hold the deletion: ending the group deletes
+          // that sandbox, which ends the command physically, and the lease
+          // checks below keep the tree until the sandbox is gone.
+          const ownComputeEnrollments = tx
+            .select({ id: schema.enrollments.id })
+            .from(schema.enrollments)
+            .where(
+              and(
+                eq(schema.enrollments.kind, "sandbox"),
+                inArray(schema.enrollments.sandboxGroupId, groupIds),
+              ),
+            );
           const activeBackgroundCommands = await tx
             .select({ id: schema.sessionBackgroundCommands.id })
             .from(schema.sessionBackgroundCommands)
@@ -31010,7 +31026,19 @@ export async function deleteSessionTreeIfQuiescent(
               and(
                 eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
                 inArray(schema.sessionBackgroundCommands.sessionId, sessionIds),
-                inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
+                or(
+                  eq(schema.sessionBackgroundCommands.state, "running"),
+                  and(
+                    eq(schema.sessionBackgroundCommands.state, "stopping"),
+                    or(
+                      isNull(schema.sessionBackgroundCommands.enrollmentId),
+                      notInArray(
+                        schema.sessionBackgroundCommands.enrollmentId,
+                        ownComputeEnrollments,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             )
             .for("update", { noWait: true });
@@ -31039,6 +31067,13 @@ export async function deleteSessionTreeIfQuiescent(
               ),
             )
             .for("update", { noWait: true });
+          // A compute sandbox stays warm while idle; deleting the chat ends its
+          // group, so ask the reaper to tear it down now. The caller retries
+          // while it shuts down, as for any live sandbox.
+          await requestComputeGroupEndTx(tx, {
+            workspaceId: input.workspaceId,
+            sandboxGroupIds: groupIds,
+          });
           if (
             leases.some(
               (lease) =>
@@ -39010,6 +39045,47 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
   );
 }
 
+/** Record one exact Connected Machine or compute operation that a request
+ * outside any turn (a direct terminal or file request) abandoned because its
+ * machine stopped answering or its agent connection was replaced. The row
+ * starts with a stop request bound to the exact enrollment, connection
+ * instance and operation, so the reconciler alone decides its outcome: it
+ * stops the operation if that runner answers again and settles it once the
+ * runner is provably retired. Recording a stop grants nothing, so no turn
+ * fence is needed; the workspace lifecycle locks order it against deletion. */
+export async function recordAbandonedDirectConnectedMachineCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBackgroundCommandWorkspaceLifecycle(
+          tx,
+          [input.workspaceId, input.controlWorkspaceId],
+          "share",
+        );
+        return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, {
+          ...input,
+          abandoned: true,
+        });
+      }),
+  );
+}
+
 /** Transfer one exact managed retained process from a live turn attempt to its
  * session. Retaining the provider process and backgrounding it are deliberately
  * separate: a provider yield only preserves physical ownership; this adoption
@@ -42482,6 +42558,8 @@ type LeaseRow = {
   provider_deadline_at: Date | string | null;
   rotation_requested_at: Date | string | null;
   rotation_reason: "provider_deadline" | "operator" | "teardown_claim" | null;
+  group_end_requested_at?: Date | string | null;
+  compute_asleep_since?: Date | string | null;
   current_checkpoint_artifact_id: string | null;
   previous_checkpoint_artifact_id: string | null;
   shared_preparation_lease_epoch: number | string | null;
@@ -42582,6 +42660,9 @@ export interface LeaseSnapshot {
    * current holders quiesce and the reaper creates a successor. */
   rotationRequestedAt: Date | null;
   rotationReason: "provider_deadline" | "operator" | "teardown_claim" | null;
+  /** A chat or workspace deletion ended this compute lease's group: its
+   * sandbox is deleted without a workspace capture. */
+  groupEndRequestedAt: Date | null;
   currentCheckpointArtifactId: string | null;
   previousCheckpointArtifactId: string | null;
   expiresAt: Date;
@@ -43355,6 +43436,8 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
           ? row.rotation_requested_at
           : new Date(row.rotation_requested_at),
     rotationReason: row.rotation_reason,
+    groupEndRequestedAt:
+      row.group_end_requested_at == null ? null : new Date(row.group_end_requested_at),
     currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
@@ -44404,6 +44487,13 @@ async function acquireLeaseOnce(
               update sandbox_leases
               set resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
                   updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (row.group_end_requested_at) {
+            // Re-armed: whatever group end was requested did not happen.
+            await tx.execute(sql`
+              update sandbox_leases set group_end_requested_at = null, updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -46905,7 +46995,7 @@ export async function failSandboxRematerialization(
             resume_state = ${resumeStateJson}::jsonb,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -47637,7 +47727,7 @@ export async function recordWarmingSandboxCreated(
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
             provider_deadline_at = ${providerDeadlineAt?.toISOString() ?? null}::timestamptz,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
             updated_at        = now()
@@ -49748,7 +49838,7 @@ export async function markWarmLeaseInstanceLost(
             resume_backend_id = coalesce(resume_backend_id, backend),
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -50263,7 +50353,7 @@ export async function failWarmingToCold(
             resume_backend_id = case when ${hasRecovery} then coalesce(resume_backend_id, backend) else null end,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -50286,6 +50376,210 @@ export async function failWarmingToCold(
       }),
   );
 }
+
+// Opengeni compute sleeps an idle sandbox itself and keeps its memory
+// and disk, so a compute lease is never drained for being idle (0859): it stays
+// warm without holders until its group ends or it rotates. A rotation or an
+// archive capture still drains it.
+function computeLeaseStaysWarmWhenIdle(
+  row: Pick<LeaseRow, "backend" | "rotation_requested_at" | "archive_capture_id">,
+): boolean {
+  return (
+    row.backend === "compute" &&
+    row.rotation_requested_at === null &&
+    row.archive_capture_id === null
+  );
+}
+
+/**
+ * End the groups of idle compute leases: a warm compute lease with no holder,
+ * hold or capture becomes drainable now, so the reaper deletes its sandbox and
+ * revokes its agent's enrollment. Runs inside a deletion transaction that has
+ * already locked the leases; a lease with any holder is left alone and the
+ * deletion keeps refusing until it drains.
+ *
+ * A browser or desktop an agent opened on the sandbox ends with it. On a
+ * compute sandbox those stay open across idle (the sandbox sleeps with them
+ * in memory), so their holders would otherwise keep a deleted chat's group
+ * forever. Only a lease held by nothing else qualifies, and only while none of
+ * those resources is mid-operation or mid-transition (the deletion retries).
+ */
+async function requestComputeGroupEndTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
+): Promise<void> {
+  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+  const groupFilter = input.sandboxGroupIds
+    ? sql`and lease.sandbox_group_id in (${sql.join(
+        input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})`
+    : sql``;
+  // A lease held only by its browsers and desktops, none of them busy.
+  const interactionsOnlyAndSettled = sql`
+      and lease.backend = 'compute'
+      and lease.liveness = 'warm'
+      and lease.turn_holders = 0 and lease.viewer_holders = 0
+      and lease.reaper_hold_id is null
+      and lease.archive_capture_id is null
+      and exists (select 1 from sandbox_lease_holders h
+        where h.lease_id = lease.id and h.kind = 'interaction')
+      and not exists (select 1 from sandbox_lease_holders h
+        where h.lease_id = lease.id and h.kind <> 'interaction')
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join interaction_operations operation
+          on operation.workspace_id = h.workspace_id
+          and operation.state in ('prepared', 'dispatched')
+          and h.holder_id = (case operation.resource_kind
+            when 'browser_session' then 'browser-session:'
+            else 'computer-session:' end) || operation.resource_id::text
+        where h.lease_id = lease.id and h.kind = 'interaction')
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join browser_sessions browser
+          on h.holder_id = 'browser-session:' || browser.id::text
+          and browser.workspace_id = h.workspace_id
+        where h.lease_id = lease.id and h.kind = 'interaction'
+          and browser.lifecycle in ('starting', 'suspending', 'restoring', 'ending'))
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join computer_sessions computer
+          on h.holder_id = 'computer-session:' || computer.id::text
+          and computer.workspace_id = h.workspace_id
+        where h.lease_id = lease.id and h.kind = 'interaction'
+          and computer.lifecycle in ('starting', 'suspending', 'restoring', 'ending'))
+  `;
+  const candidates = await rawRows<{ id: string }>(
+    tx,
+    sql`
+    select lease.id from sandbox_leases lease
+    where lease.workspace_id = ${input.workspaceId}
+      ${groupFilter}
+      ${interactionsOnlyAndSettled}
+    order by lease.id
+    for update of lease
+  `,
+  );
+  let interactionLeases: { id: string }[] = [];
+  if (candidates.length > 0) {
+    const candidateIds = sql`(${sql.join(
+      candidates.map((lease) => sql`${lease.id}::uuid`),
+      sql`, `,
+    )})`;
+    // A suspend, resume or end locks its browser or desktop while it prepares.
+    // Lock them all first, then decide again on what is committed now: one
+    // that began a transition while this deletion waited keeps its lease, and
+    // none can begin one before this deletion commits.
+    await tx.execute(sql`
+      select browser.id from browser_sessions browser
+      join sandbox_lease_holders h
+        on h.holder_id = 'browser-session:' || browser.id::text
+        and browser.workspace_id = h.workspace_id
+      where h.lease_id in ${candidateIds} and h.kind = 'interaction'
+      order by browser.id
+      for update of browser
+    `);
+    await tx.execute(sql`
+      select computer.id from computer_sessions computer
+      join sandbox_lease_holders h
+        on h.holder_id = 'computer-session:' || computer.id::text
+        and computer.workspace_id = h.workspace_id
+      where h.lease_id in ${candidateIds} and h.kind = 'interaction'
+      order by computer.id
+      for update of computer
+    `);
+    interactionLeases = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      select lease.id from sandbox_leases lease
+      where lease.id in ${candidateIds}
+        ${interactionsOnlyAndSettled}
+      order by lease.id
+    `,
+    );
+  }
+  if (interactionLeases.length > 0) {
+    const leaseIds = sql`(${sql.join(
+      interactionLeases.map((lease) => sql`${lease.id}::uuid`),
+      sql`, `,
+    )})`;
+    // The controller dies with the sandbox, so its binding is released too.
+    const browsers = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      update browser_sessions browser set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = ${COMPUTE_GROUP_ENDED},
+        updated_at = now()
+      from sandbox_lease_holders h
+      where h.lease_id in ${leaseIds} and h.kind = 'interaction'
+        and h.holder_id = 'browser-session:' || browser.id::text
+        and browser.workspace_id = h.workspace_id
+        and browser.account_id = h.account_id
+        and browser.lifecycle = 'active'
+      returning browser.id
+    `,
+    );
+    const computers = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      update computer_sessions computer set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = ${COMPUTE_GROUP_ENDED},
+        updated_at = now()
+      from sandbox_lease_holders h
+      where h.lease_id in ${leaseIds} and h.kind = 'interaction'
+        and h.holder_id = 'computer-session:' || computer.id::text
+        and computer.workspace_id = h.workspace_id
+        and computer.account_id = h.account_id
+        and computer.lifecycle = 'active'
+      returning computer.id
+    `,
+    );
+    await tx.execute(sql`
+      delete from sandbox_lease_holders
+      where lease_id in ${leaseIds} and kind = 'interaction'
+    `);
+    await tx.execute(sql`
+      update sandbox_leases set refcount = 0, updated_at = now() where id in ${leaseIds}
+    `);
+    if (browsers.length + computers.length > 0) {
+      await tx.execute(sql`
+        update workspace_interaction_revisions set revision = revision + 1, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+      `);
+    }
+  }
+  await tx.execute(sql`
+    update sandbox_leases lease set
+      liveness = 'draining',
+      group_end_requested_at = now(),
+      expires_at = now() - interval '1 millisecond',
+      updated_at = now()
+    where lease.workspace_id = ${input.workspaceId}
+      ${groupFilter}
+      and lease.backend = 'compute'
+      and lease.liveness = 'warm'
+      and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
+      and lease.reaper_hold_id is null
+      and lease.archive_capture_id is null
+      and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
+  `);
+}
+
+/** The SQL twin of {@link computeLeaseStaysWarmWhenIdle} over alias `L`. */
+const COMPUTE_IDLE_DRAINABLE_SQL = sql.raw(
+  "(L.backend <> 'compute' or L.rotation_requested_at is not null or L.archive_capture_id is not null)",
+);
 
 // §4.4 — idempotent delete-my-row (+ opportunistic warm->draining guarded
 // refcount=0 AND turn_holders=0, so a paying turn is never drained).
@@ -50425,7 +50719,11 @@ export async function releaseLeaseHolder(
         // warm + dropped to 0 (AND no turn holders) -> draining, stamp grace deadline.
         // Release during warming decrements only, NEVER touches liveness (the
         // spawner owns warming->warm and re-checks refcount after committing).
-        const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
+        const enterDraining =
+          row.liveness === "warm" &&
+          c.total === 0 &&
+          c.turns === 0 &&
+          !computeLeaseStaysWarmWhenIdle(row);
         // A capture claim is already the durable teardown fence. Once its final
         // holder leaves, waiting through the ordinary idle grace only creates an
         // avoidable availability outage; dispatch recovery on the next sweep.
@@ -51099,9 +51397,11 @@ export async function reapStaleLeaseHolders(
           viewer_holders = c.viewers,
           liveness = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
                             and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
+                            and ${COMPUTE_IDLE_DRAINABLE_SQL}
                           then 'draining' else L.liveness end,
           expires_at = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
                             and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
+                            and ${COMPUTE_IDLE_DRAINABLE_SQL}
                           then case when L.rotation_requested_at is not null
                               or L.archive_capture_id is not null
                             then now() - interval '1 millisecond'
@@ -51190,7 +51490,7 @@ export async function reapStaleLeaseHolders(
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, rotation_reason = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, rotation_reason = null,
             archive_capture_id = null, archive_capture_operation_id = null,
             archive_capture_provider_request_id = null,
             archive_capture_provider_replay_safe = false,
@@ -51858,6 +52158,8 @@ export type IdleInteractionRelease = {
 
 /** Failure code of a browser or desktop stopped because nobody used it. */
 export const IDLE_INTERACTION_RELEASED = "idle_released";
+/** A browser or desktop on a compute sandbox whose chat or workspace was deleted. */
+export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -52737,6 +53039,8 @@ export async function reArmDrainingLease(
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'warm',
+          -- Re-armed: whatever group end was requested did not happen.
+          group_end_requested_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -53114,7 +53418,7 @@ export async function confirmDrainCold(
           resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
           provider_created_at = null,
           provider_deadline_at = null,
-          rotation_requested_at = null,
+          rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
           rotation_reason = null,
           archive_capture_id = null,
           archive_capture_operation_id = null,
@@ -58517,6 +58821,11 @@ export async function persistDrainSnapshot(
         workspaceArchive: null;
         workspaceArchiveMeta?: never;
         checkpointArtifactId?: never;
+        /** A group-end delete without a capture. The CAS additionally requires,
+         * under the same row lock, a compute lease whose group end is still
+         * requested and that no rotation has claimed since; otherwise the
+         * result carries `discardIneligible` and the caller must capture. */
+        groupEndDiscard?: true;
       }
     | {
         /** Base64 provider receipt or tar archive from the verified runtime capture.
@@ -58534,6 +58843,9 @@ export async function persistDrainSnapshot(
   wrote: boolean;
   archiveRevision: string | null;
   candidateDisposition?: WorkspaceArchiveCandidateDisposition;
+  /** Set only for `groupEndDiscard`: the exact capture still owns the lease,
+   * but it is no longer eligible for a delete without a capture. */
+  discardIneligible?: true;
 }> {
   const workspaceArchiveMeta =
     input.workspaceArchive === null ? null : parseArchiveRevision(input.workspaceArchiveMeta);
@@ -58681,6 +58993,22 @@ export async function persistDrainSnapshot(
       // claim intact: it is also the durable teardown claim and must fence new
       // holders until provider termination commits cold or recovery replaces it.
       if (input.workspaceArchive === null) {
+        // Discard eligibility is decided here, under the lock that also fences
+        // the capture: a rotation or re-arm that committed after the reaper read
+        // the lease turns a group-end delete back into a capture.
+        if (
+          input.groupEndDiscard &&
+          !(
+            activePublication &&
+            row.backend === "compute" &&
+            Boolean(row.group_end_requested_at) &&
+            // The capture claim stamps its own `teardown_claim` rotation; only
+            // an earlier, real rotation needs the capture.
+            (!row.rotation_requested_at || row.rotation_reason === "teardown_claim")
+          )
+        ) {
+          return { wrote: false, archiveRevision: null, discardIneligible: true };
+        }
         return {
           wrote: true,
           archiveRevision: null,
@@ -60298,9 +60626,15 @@ export type EnrollmentRecord = {
   workspaceId: string;
   scope: "organization" | "workspace" | "user";
   generation: number;
+  /** "sandbox" is the agent inside one Opengeni compute sandbox, bound to
+   * `sandboxGroupId`; such enrollments are never machines. Absent in rows
+   * read through the scoped machine listing, which returns machines only. */
+  kind?: "machine" | "sandbox";
+  sandboxGroupId?: string | null;
   sandboxId?: string | null;
   sandboxName?: string | null;
-  pubkey: string;
+  /** Null exactly for sandbox enrollments, which hold no credential. */
+  pubkey: string | null;
   exposure: EnrollmentExposure;
   hasDisplay: boolean;
   opStream: boolean;
@@ -60354,6 +60688,8 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     workspaceId: row.workspaceId,
     scope: row.authorityScope as EnrollmentRecord["scope"],
     generation: Number(row.generation),
+    kind: row.kind === "sandbox" ? "sandbox" : "machine",
+    sandboxGroupId: row.sandboxGroupId ?? null,
     sandboxId: null,
     sandboxName: null,
     pubkey: row.pubkey,
@@ -61011,12 +61347,12 @@ export async function listEnrollments(
   }
   const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const where = options.status
-      ? and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.status, options.status),
-        )
-      : eq(schema.enrollments.workspaceId, workspaceId);
+    // Machines only: a compute sandbox's enrollment is never a machine.
+    const where = and(
+      eq(schema.enrollments.workspaceId, workspaceId),
+      eq(schema.enrollments.kind, "machine"),
+      ...(options.status ? [eq(schema.enrollments.status, options.status)] : []),
+    );
     const rows = await scopedDb
       .select()
       .from(schema.enrollments)
@@ -62788,6 +63124,734 @@ export async function finalizeEnrollmentByToken(
   }
 }
 
+// CREATE a compute sandbox's enrollment. Opengeni makes it itself, before the
+// control service create, under the id the sandbox's init names as its agent id. It is
+// active at once, kind 'sandbox', bound to the sandbox group, with no public
+// key and no bearer: the agent inside holds no credential and is reached only
+// through its host's link to the agent gateway. It gets no sandboxes row and
+// is never a machine; its use is authorized by its lease. Repeating the create
+// for the same id and group is a no-op.
+export class SandboxEnrollmentConflictError extends Error {
+  constructor() {
+    super("The enrollment id is taken by another enrollment");
+    this.name = "SandboxEnrollmentConflictError";
+  }
+}
+
+export async function createSandboxEnrollment(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    sandboxGroupId: string;
+    hasDisplay: boolean;
+    workspaceRoot: string;
+  },
+): Promise<EnrollmentRecord> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.enrollments)
+        .values({
+          id: input.enrollmentId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: "sandbox",
+          sandboxGroupId: input.sandboxGroupId,
+          pubkey: null,
+          exposure: "whole-machine",
+          hasDisplay: input.hasDisplay,
+          // Opengeni owns the sandbox; screen control needs no human consent.
+          allowScreenControl: true,
+          workspaceRoot: input.workspaceRoot,
+          status: "active",
+        })
+        .onConflictDoNothing({ target: schema.enrollments.id });
+      const [row] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+          ),
+        )
+        .limit(1);
+      if (
+        !row ||
+        row.kind !== "sandbox" ||
+        row.sandboxGroupId !== input.sandboxGroupId ||
+        row.status !== "active"
+      ) {
+        throw new SandboxEnrollmentConflictError();
+      }
+      return mapEnrollment(row);
+    },
+  );
+}
+
+/** Why the agent gateway refuses or ends a sandbox's link session. */
+export type SandboxAgentLinkRefusal = "unknown_agent" | "revoked" | "stale_epoch" | "duplicate";
+export type SandboxAgentLinkEnd = "revoked" | "superseded" | "lost";
+
+type SandboxAgentLinkInput = {
+  workspaceId: string;
+  agentId: string;
+  /** The owner epoch from the sandbox's ticket. */
+  epoch: number;
+  connectionInstanceId: string;
+};
+
+function assertSandboxAgentLinkInput(input: SandboxAgentLinkInput, leaseMs?: number): void {
+  if (!input.connectionInstanceId || input.connectionInstanceId.length > 128) {
+    throw new Error("connection instance id must be 1-128 characters");
+  }
+  if (!Number.isSafeInteger(input.epoch) || input.epoch < 0) {
+    throw new Error("link epoch must be a non-negative integer");
+  }
+  if (leaseMs !== undefined && (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000)) {
+    throw new Error("connection lease must be at least one second");
+  }
+}
+
+async function lockSandboxEnrollment(scopedDb: Database, workspaceId: string, agentId: string) {
+  const [row] = await scopedDb
+    .select()
+    .from(schema.enrollments)
+    .where(and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.id, agentId)))
+    .for("update")
+    .limit(1);
+  return row;
+}
+
+/**
+ * OPEN a sandbox's link session at the agent gateway: fence it by the control service's
+ * owner epoch, then claim the agent's connection instance. Under the row lock:
+ * an epoch below the highest recorded is refused (`stale_epoch`); a higher one
+ * is recorded and takes the claim from any other instance, since the control service
+ * has fenced the sandbox's previous owner; an equal one claims exactly as the
+ * NATS callout does for a Connected Machine (`duplicate` while another
+ * instance's lease is live). The claim's lease is the database clock's.
+ */
+export async function openSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput & { leaseMs: number },
+): Promise<
+  | { opened: true; connectionGeneration: number; superseded: boolean }
+  | { opened: false; code: SandboxAgentLinkRefusal }
+> {
+  assertSandboxAgentLinkInput(input, input.leaseMs);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const row = await lockSandboxEnrollment(scopedDb, input.workspaceId, input.agentId);
+    if (!row || row.kind !== "sandbox") return { opened: false, code: "unknown_agent" };
+    if (row.status !== "active") return { opened: false, code: "revoked" };
+    const recordedEpoch = row.linkEpoch === null ? null : Number(row.linkEpoch);
+    if (recordedEpoch !== null && input.epoch < recordedEpoch) {
+      return { opened: false, code: "stale_epoch" };
+    }
+    const now = await enrollmentConnectionClock(scopedDb);
+    const sameInstance = row.connectionInstanceId === input.connectionInstanceId;
+    const newerEpoch = recordedEpoch === null || input.epoch > recordedEpoch;
+    const claimAvailable =
+      newerEpoch ||
+      sameInstance ||
+      row.connectionInstanceId === null ||
+      row.connectionLeaseExpiresAt === null ||
+      row.connectionLeaseExpiresAt.getTime() <= now.getTime();
+    if (!claimAvailable) {
+      await scopedDb
+        .update(schema.enrollments)
+        .set({
+          connectionDuplicateDeniedCount: sql`${schema.enrollments.connectionDuplicateDeniedCount} + 1`,
+          connectionDuplicateDeniedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.agentId),
+          ),
+        );
+      return { opened: false, code: "duplicate" };
+    }
+    const connectionGeneration = Number(row.connectionGeneration) + (sameInstance ? 0 : 1);
+    await scopedDb
+      .update(schema.enrollments)
+      .set({
+        linkEpoch: input.epoch,
+        connectionInstanceId: input.connectionInstanceId,
+        connectionGeneration,
+        connectionLeaseExpiresAt: new Date(now.getTime() + input.leaseMs),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+        ),
+      );
+    return {
+      opened: true,
+      connectionGeneration,
+      superseded: newerEpoch && recordedEpoch !== null,
+    };
+  });
+}
+
+/**
+ * RENEW an open link session's claim. The gateway calls this every few seconds
+ * while the session is open, whether the sandbox runs or sleeps, so a sleeping
+ * sandbox stays reachable. It ends the session when the enrollment was revoked,
+ * a later epoch opened elsewhere (`superseded`), or another instance holds the
+ * claim (`lost`).
+ */
+export async function renewSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput & { leaseMs: number },
+): Promise<{ renewed: true } | { renewed: false; code: SandboxAgentLinkEnd }> {
+  assertSandboxAgentLinkInput(input, input.leaseMs);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const row = await lockSandboxEnrollment(scopedDb, input.workspaceId, input.agentId);
+    if (!row || row.kind !== "sandbox" || row.status !== "active") {
+      return { renewed: false, code: "revoked" };
+    }
+    if (row.linkEpoch !== null && Number(row.linkEpoch) > input.epoch) {
+      return { renewed: false, code: "superseded" };
+    }
+    if (row.connectionInstanceId !== input.connectionInstanceId) {
+      return { renewed: false, code: "lost" };
+    }
+    const now = await enrollmentConnectionClock(scopedDb);
+    const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+    await scopedDb
+      .update(schema.enrollments)
+      .set({
+        // Never shorten a lease a heartbeat extended further.
+        connectionLeaseExpiresAt:
+          row.connectionLeaseExpiresAt && row.connectionLeaseExpiresAt > leaseExpiresAt
+            ? row.connectionLeaseExpiresAt
+            : leaseExpiresAt,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+        ),
+      );
+    return { renewed: true };
+  });
+}
+
+/**
+ * RECORD that a compute sandbox went to sleep or woke, as its host reports it
+ * through the agent gateway. Warm time accrues only while the sandbox is awake:
+ * asleep stamps `compute_asleep_since` (no tick accrues past it), and awake
+ * moves the meter cursor forward by exactly the time asleep, so the awake time
+ * before the sleep is still billed and the sleep is not. Only the exact
+ * current claim speaks for the sandbox: the enrollment must be active with this
+ * epoch and connection instance and a live claim lease, so a report delayed
+ * past a newer epoch's open, or one sent after a revocation, is refused
+ * (`accepted: false`). Only the lease whose current box is this sandbox
+ * changes; anything else is a no-op.
+ */
+export async function recordComputeSandboxPower(
+  db: Database,
+  input: SandboxAgentLinkInput & { sandboxId: string; asleep: boolean },
+): Promise<{ accepted: boolean; changed: boolean }> {
+  assertSandboxAgentLinkInput(input);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      // The enrollment row first, as the link's open and renewal lock it: a
+      // newer epoch's open or a revocation commits wholly before or after.
+      const enrollment = await lockSandboxEnrollment(tx, input.workspaceId, input.agentId);
+      const now = await enrollmentConnectionClock(tx);
+      if (
+        !enrollment ||
+        enrollment.kind !== "sandbox" ||
+        enrollment.status !== "active" ||
+        enrollment.linkEpoch === null ||
+        Number(enrollment.linkEpoch) !== input.epoch ||
+        enrollment.connectionInstanceId !== input.connectionInstanceId ||
+        !enrollment.connectionLeaseExpiresAt ||
+        enrollment.connectionLeaseExpiresAt <= now
+      ) {
+        return { accepted: false, changed: false };
+      }
+      const rows = await tx.execute<LeaseRow>(sql`
+        select lease.* from sandbox_leases lease
+        join enrollments e
+          on e.workspace_id = lease.workspace_id
+         and e.sandbox_group_id = lease.sandbox_group_id
+        where lease.workspace_id = ${input.workspaceId}
+          and e.id = ${input.agentId}
+          and e.kind = 'sandbox'
+          and lease.backend = 'compute'
+          and lease.instance_id = ${input.sandboxId}
+        for update of lease
+      `);
+      const row = rows[0];
+      if (!row) return { accepted: true, changed: false };
+      const asleepSince = row.compute_asleep_since ? new Date(row.compute_asleep_since) : null;
+      if (input.asleep) {
+        if (asleepSince) return { accepted: true, changed: false };
+        await tx.execute(sql`
+          update sandbox_leases set compute_asleep_since = clock_timestamp(), updated_at = now()
+          where id = ${row.id}
+        `);
+        return { accepted: true, changed: true };
+      }
+      if (!asleepSince) return { accepted: true, changed: false };
+      // The cursor accrual starts from: the last tick, else the warm instant.
+      const recovery = row.resume_state?.opengeniRecovery as
+        | { restore?: { completedAt?: unknown } }
+        | undefined;
+      const warmStartMs =
+        typeof recovery?.restore?.completedAt === "string"
+          ? Date.parse(recovery.restore.completedAt)
+          : Number.NaN;
+      const cursorMs = row.last_meter_at ? new Date(row.last_meter_at).getTime() : Number.NaN;
+      const startMs = Number.isFinite(warmStartMs)
+        ? Math.max(Number.isFinite(cursorMs) ? cursorMs : 0, warmStartMs)
+        : cursorMs;
+      if (Number.isFinite(startMs) && startMs <= asleepSince.getTime()) {
+        // Shift the unbilled awake interval [start, asleep) to end now.
+        await tx.execute(sql`
+          update sandbox_leases set
+            last_meter_at = ${new Date(startMs).toISOString()}::timestamptz
+              + (clock_timestamp() - compute_asleep_since),
+            compute_asleep_since = null,
+            updated_at = now()
+          where id = ${row.id}
+        `);
+      } else {
+        await tx.execute(sql`
+          update sandbox_leases set compute_asleep_since = null, updated_at = now()
+          where id = ${row.id}
+        `);
+      }
+      return { accepted: true, changed: true };
+    }),
+  );
+}
+
+/** RELEASE a link session's claim when its host closes it, so the agent's next
+ * instance can open at once. Only the exact epoch and instance release. */
+export async function releaseSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput,
+): Promise<{ released: boolean }> {
+  assertSandboxAgentLinkInput(input);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const now = await enrollmentConnectionClock(scopedDb);
+    const rows = await scopedDb
+      .update(schema.enrollments)
+      .set({ connectionLeaseExpiresAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+          eq(schema.enrollments.kind, "sandbox"),
+          eq(schema.enrollments.linkEpoch, input.epoch),
+          eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    return { released: rows.length > 0 };
+  });
+}
+
+/**
+ * A deadline (and optional stop signal) for maintenance work such as the
+ * compute orphan sweep. A bounded call runs in one transaction whose every
+ * statement the server itself ends by the deadline: before each one the work
+ * sets the statement timeout to the time left (`limit`), so a lock wait (the
+ * workspace tenancy lock included) or a slow statement is cancelled by
+ * PostgreSQL at the deadline, whatever the pool's state, and nothing else is
+ * ever cancelled. PostgreSQL never times out COMMIT, so the work runs its
+ * commit-time work (deferred triggers) itself, under the same limit, just
+ * before it; COMMIT then only makes the work durable. A call whose deadline
+ * has passed, or that waited for a pooled connection until then, does nothing.
+ * The call itself always settles by the deadline (or the stop), even when
+ * COMMIT or a statement's answer is held up on the way.
+ *
+ * How a bounded call ends says what happened to its work:
+ * - it returns: the work committed;
+ * - {@link DatabaseWorkDeadlineError}, the stop signal's reason or any other
+ *   error: the work rolled back, because COMMIT was never sent or the server
+ *   refused it;
+ * - {@link DatabaseWorkOutcomeUnknownError}: the deadline passed, the call
+ *   was stopped, or it lost its connection, while COMMIT was in flight, so the
+ *   work may or may not have committed. Read the state again before relying on
+ *   either.
+ */
+export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
+
+export class DatabaseWorkDeadlineError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super("The maintenance deadline passed; the database work was rolled back.", options);
+    this.name = "DatabaseWorkDeadlineError";
+  }
+}
+
+export class DatabaseWorkOutcomeUnknownError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "The maintenance work was interrupted while it committed; it may or may not have committed.",
+      options,
+    );
+    this.name = "DatabaseWorkOutcomeUnknownError";
+  }
+}
+
+/** Give the next statements of bounded work at most the time left. */
+type LimitToDeadline = (db: Database) => Promise<void>;
+
+const QUERY_CANCELED_SQLSTATE = "57014";
+
+async function withinWorkBound<T>(
+  db: Database,
+  bound: DatabaseWorkBound | undefined,
+  fn: (db: Database, limit: LimitToDeadline) => Promise<T>,
+): Promise<T> {
+  if (!bound) return await fn(db, async () => {});
+  const { deadlineAtMs, signal } = bound;
+  const limit: LimitToDeadline = async (handle) => {
+    signal?.throwIfAborted();
+    const remainingMs = Math.floor(deadlineAtMs - Date.now());
+    if (remainingMs <= 0) throw new DatabaseWorkDeadlineError();
+    await handle.execute(
+      sql`select pg_catalog.set_config('statement_timeout', ${`${remainingMs}ms`}, true)`,
+    );
+  };
+  signal?.throwIfAborted();
+  if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
+  // Set once COMMIT may be on its way; until then every failure rolls back.
+  let committing = false;
+  // Set when the deadline or the stop signal ends the call; checked in the
+  // same step that lets COMMIT go, so the two never both happen.
+  let ended = false;
+  const work = (async () => {
+    try {
+      return await db.transaction(async (tx) => {
+        const scoped = tx as unknown as Database;
+        await limit(scoped);
+        const value = await fn(scoped, limit);
+        // Run the deferred work COMMIT would run, while the deadline can still
+        // end it: PostgreSQL applies no statement timeout to COMMIT.
+        await limit(scoped);
+        await scoped.execute(sql`set constraints all immediate`);
+        // Checked in the same step that lets COMMIT go: a stop or deadline
+        // seen here rolls back, and any later one finds `committing` set.
+        signal?.throwIfAborted();
+        if (ended || Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
+        committing = true;
+        return value;
+      });
+    } catch (error) {
+      if (error instanceof DatabaseWorkDeadlineError) throw error;
+      const sqlState = nestedPostgresSqlState(error);
+      // The server cancelled a statement at the deadline: the transaction
+      // rolled back.
+      if (sqlState === QUERY_CANCELED_SQLSTATE)
+        throw new DatabaseWorkDeadlineError({ cause: error });
+      // A COMMIT the server refused rolled back. One whose answer was lost
+      // (the connection failed, or the server ended the session or shut
+      // down, which can happen just after the commit) may have committed.
+      if (committing && (sqlState === null || /^(08|57P)/.test(sqlState)))
+        throw new DatabaseWorkOutcomeUnknownError({ cause: error });
+      throw error;
+    }
+  })();
+  // The call settles by its deadline whatever the connection does, COMMIT
+  // included: PostgreSQL bounds the statements, and this bounds the wait for
+  // a pooled connection's answers and for COMMIT's.
+  work.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<never>((_, reject) => {
+    const end = (reason: unknown) => {
+      if (ended) return;
+      ended = true;
+      reject(committing ? new DatabaseWorkOutcomeUnknownError({ cause: reason }) : reason);
+    };
+    timer = setTimeout(
+      () => end(new DatabaseWorkDeadlineError()),
+      Math.max(0, deadlineAtMs - Date.now()),
+    );
+    if (signal) {
+      onAbort = () => end(signal.reason ?? new Error("The maintenance work was stopped."));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  stopped.catch(() => {});
+  try {
+    return await Promise.race([work, stopped]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+// REVOKE a compute sandbox's enrollment when the sandbox is deleted, which
+// ends its link session at the gateway. Idempotent; never touches a machine.
+// A deleted workspace took the enrollment with it, which is success too.
+export async function revokeSandboxEnrollment(
+  db: Database,
+  input: { workspaceId: string; enrollmentId: string; now?: Date },
+  bound?: DatabaseWorkBound,
+): Promise<{ revoked: boolean }> {
+  const now = input.now ?? new Date();
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          status: "revoked",
+          revokedAt: now,
+          connectionInstanceId: null,
+          connectionLeaseExpiresAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.kind, "sandbox"),
+            eq(schema.enrollments.status, "active"),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { revoked: rows.length > 0 };
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return { revoked: false };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether Opengeni's records still name one compute sandbox, for the orphan
+ * sweep: its enrollment is active, and its group's lease either holds this box
+ * (by sandbox id or enrollment) or is warming, which means a creator still owns
+ * the group and may be about to commit it. A deleted workspace, a revoked
+ * enrollment or a lease that moved on all answer false.
+ */
+export async function computeSandboxNamed(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string; enrollmentId: string; sandboxId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ named: boolean }>(
+        scopedDb,
+        sql`
+        select exists (
+          select 1
+          from enrollments e
+          join sandbox_leases lease
+            on lease.workspace_id = e.workspace_id
+           and lease.sandbox_group_id = e.sandbox_group_id
+          where e.workspace_id = ${input.workspaceId}
+            and e.id = ${input.enrollmentId}
+            and e.kind = 'sandbox'
+            and e.status = 'active'
+            and e.sandbox_group_id = ${input.sandboxGroupId}
+            and (
+              lease.liveness = 'warming'
+              or lease.instance_id = ${input.sandboxId}
+              or lease.resume_state #>> '{sessionState,providerState,sandboxId}' =
+                ${input.sandboxId}
+              or lease.resume_state #>> '{sessionState,providerState,enrollmentId}' =
+                ${input.enrollmentId}
+            )
+        ) as named
+      `,
+      );
+      return rows[0]?.named === true;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its enrollments and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The compute sandbox an active sandbox enrollment runs in, as its group's
+ * lease names it (its envelope's provider state, else the lease's instance),
+ * or null for any other enrollment: a Connected Machine's, a revoked one, or
+ * one no lease names. With a bound, the read ends by its deadline.
+ */
+export async function computeSandboxOfEnrollment(
+  db: Database,
+  input: { workspaceId: string; enrollmentId: string },
+  bound?: DatabaseWorkBound,
+): Promise<string | null> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ sandbox_id: string | null }>(
+        scopedDb,
+        sql`
+        select coalesce(
+          lease.resume_state #>> '{sessionState,providerState,sandboxId}',
+          lease.instance_id
+        ) as sandbox_id
+        from enrollments e
+        join sandbox_leases lease
+          on lease.workspace_id = e.workspace_id
+         and lease.sandbox_group_id = e.sandbox_group_id
+        where e.workspace_id = ${input.workspaceId}
+          and e.id::text = ${input.enrollmentId}
+          and e.kind = 'sandbox'
+          and e.status = 'active'
+          and lease.resume_state #>> '{sessionState,providerState,enrollmentId}' =
+            ${input.enrollmentId}
+        limit 1
+      `,
+      );
+      return rows[0]?.sandbox_id ?? null;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its enrollments and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** The most entries one page of the stale compute enrollment inventory holds. */
+export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
+
+/**
+ * Compute sandbox enrollments nothing can use any more: active, created more
+ * than ten minutes ago (the create settle window), and their group's lease
+ * neither names them (in its envelope, sessionState.providerState.enrollmentId)
+ * nor is warming a new box, nor holds a live compute box whose envelope does
+ * not say which enrollment it runs. These are enrollments whose
+ * sandbox is already gone (a delete whose revoke failed, a create that never
+ * made one), which no listing from the control service shows the orphan sweep. The
+ * cross-workspace inventory (migration 0862) returns ids only, one page in
+ * enrollment-id order after `after` (from the start without it), with `more`
+ * when the inventory may go on past the page; revoke each with
+ * {@link revokeStaleComputeSandboxEnrollment}.
+ */
+export async function listStaleComputeSandboxEnrollments(
+  db: Database,
+  after: string | undefined,
+  bound?: DatabaseWorkBound,
+): Promise<{ candidates: { workspaceId: string; enrollmentId: string }[]; more: boolean }> {
+  const rows = await withinWorkBound(
+    db,
+    bound,
+    async (boundedDb) =>
+      await rawRows<{ workspace_id: string; enrollment_id: string }>(
+        boundedDb,
+        sql`
+          select workspace_id, enrollment_id
+          from opengeni_private.list_stale_compute_sandbox_enrollments(${after ?? null}::uuid)
+          order by enrollment_id
+        `,
+      ),
+  );
+  return {
+    candidates: rows.map((row) => ({
+      workspaceId: row.workspace_id,
+      enrollmentId: row.enrollment_id,
+    })),
+    more: rows.length >= STALE_COMPUTE_ENROLLMENT_PAGE_SIZE,
+  };
+}
+
+/**
+ * Revoke one enrollment the stale inventory listed, under its workspace's RLS.
+ * The revoke re-checks the inventory's condition, so an enrollment a lease
+ * names in the meantime stays active (false). A deleted workspace took the
+ * enrollment with it, which is false too. With a bound, the work ends by its
+ * deadline or stop and then commits nothing.
+ */
+export async function revokeStaleComputeSandboxEnrollment(
+  db: Database,
+  candidate: { workspaceId: string; enrollmentId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, candidate.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`
+        update enrollments e
+        set status = 'revoked',
+            revoked_at = now(),
+            connection_instance_id = null,
+            connection_lease_expires_at = null,
+            updated_at = now()
+        where e.workspace_id = ${candidate.workspaceId}
+          and e.id = ${candidate.enrollmentId}
+          and e.kind = 'sandbox'
+          and e.status = 'active'
+          and e.created_at < now() - interval '10 minutes'
+          and not exists (
+            select 1 from sandbox_leases lease
+            where lease.workspace_id = e.workspace_id
+              and lease.sandbox_group_id = e.sandbox_group_id
+              and (
+                lease.liveness = 'warming'
+                or (
+                  lease.backend = 'compute'
+                  and lease.liveness in ('warm', 'draining')
+                  and lease.instance_id is not null
+                  and lease.resume_state #>> '{sessionState,providerState,enrollmentId}' is null
+                )
+                or lease.resume_state #>> '{sessionState,providerState,enrollmentId}' = e.id::text
+              )
+          )
+        returning e.id
+      `,
+      );
+      return rows.length > 0;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === `Workspace not found: ${candidate.workspaceId}`
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
 //   1. re-read the pending row FOR UPDATE (fence against a double-approve / a
 //      concurrent expiry),
@@ -63832,10 +64896,18 @@ export async function accrueWarmSeconds(
         if (input.finalDrain && !snapshot?.stopChargeAt) {
           throw new Error("sandbox final tick has no durable stop cutoff");
         }
-        const upperBound =
+        const chargeUntil =
           snapshot?.stopChargeAt && input.finalDrain
             ? sql`${snapshot.stopChargeAt}::timestamptz`
             : sql`clock_timestamp()`;
+        // A sleeping compute sandbox runs no VM: nothing accrues past the moment
+        // it fell asleep (recordComputeSandboxPower moves the cursor on waking).
+        const asleepSince = row.compute_asleep_since
+          ? new Date(row.compute_asleep_since).toISOString()
+          : null;
+        const upperBound = asleepSince
+          ? sql`least(${chargeUntil}, ${asleepSince}::timestamptz)`
+          : chargeUntil;
         const elapsedRows = await tx.execute<{ elapsed_ms: number | string }>(sql`
           select greatest(0, floor(extract(epoch from (${upperBound} -
             ${new Date(startMs).toISOString()}::timestamptz)) * 1000))::bigint as elapsed_ms
@@ -64034,6 +65106,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       select lease.id from sandbox_leases lease
       where lease.workspace_id = ${input.workspaceId}
         and lease.liveness = 'warm' and lease.refcount = 0
+        and lease.backend <> 'compute'
         and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
       order by id
       for update
@@ -64050,6 +65123,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
         updated_at = now()
       where lease.workspace_id = ${input.workspaceId}
         and lease.liveness = 'warm' and lease.refcount = 0
+        and lease.backend <> 'compute'
         and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
       returning lease.sandbox_group_id
     `,

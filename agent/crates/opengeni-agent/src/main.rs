@@ -42,6 +42,7 @@ mod browser_sidecar;
 mod capacity;
 mod cli;
 mod codemode;
+mod compute;
 mod config;
 mod credential_renewal;
 mod dispatch;
@@ -51,6 +52,7 @@ mod enrollment;
 #[cfg(unix)]
 mod handover;
 mod instance_lock;
+mod inventory;
 mod job;
 mod legacy;
 mod log_file;
@@ -71,7 +73,7 @@ use std::{path::Path, sync::Arc};
 
 use clap::{CommandFactory as _, Parser as _};
 use opengeni_agent_platform::{NativePlatform, Platform};
-use opengeni_agent_stream::{RelayHub, RelayHubConfig};
+use opengeni_agent_stream::{RelayCredential, RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -406,6 +408,9 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 /// clean SIGINT/SIGTERM stops it.
 #[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+    if let Some(link_file) = args.compute.clone() {
+        return run_compute(&args, &link_file).await;
+    }
     // Capture before any managed update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
     // A verified self-update may have exec'd this new binary from the exact old
@@ -516,24 +521,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // land in their own per-op memory leaves. Returns None (a logged, graceful
     // no-op) when that compatible delegated cgroup-v2 topology is unavailable —
     // the agent then serves exactly as before, with no per-op isolation.
-    let op_cgroup_config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
-    let requires_operation_policy = op_cgroup_config.has_limits();
     // Leaves of commands handed over by the previous image stay in place.
     #[cfg(unix)]
     let handed_over_cgroups = handover::inherited_cgroup_dirs();
     #[cfg(not(unix))]
     let handed_over_cgroups: Vec<std::path::PathBuf> = Vec::new();
-    let op_cgroups =
-        opengeni_agent_platform::establish_oom_isolation(op_cgroup_config, &handed_over_cgroups);
-    if requires_operation_policy
-        && op_cgroups
-            .as_ref()
-            .is_none_or(|cgroups| !cgroups.supports_policy(op_cgroup_config))
-    {
-        return Err(to_boxed(std::io::Error::other(
-            "explicit local operation resource policy requires the corresponding delegated Linux cgroup-v2 controllers; refusing to run it unenforced",
-        )));
-    }
+    let op_cgroups = operation_cgroups(&handed_over_cgroups)?;
 
     // Opt-in Xvfb for a headless Linux box (`--virtual-desktop`). Held for the run
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
@@ -597,6 +590,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             );
         }
         if let Some(inherited) = inherited {
+            supervisor.restore_lost_markers(inherited.lost_markers);
             supervisor.adopt_handed_over(&platform, inherited.ops);
         }
     }
@@ -667,6 +661,145 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     }
     info!("agent stopped");
     Ok(())
+}
+
+/// Per-operation OOM cgroup isolation (issue #345), established BEFORE any
+/// agent-infra child (e.g. Xvfb) is spawned: systemd places the service process
+/// in the generated unit's `supervisor` subgroup, startup verifies that
+/// topology, so children spawned afterward inherit the supervisor leaf and only
+/// host execs land in their own per-op memory leaves. `None` (a logged,
+/// graceful no-op) when that compatible delegated cgroup-v2 topology is
+/// unavailable — the agent then serves exactly as before, with no per-op
+/// isolation — unless an explicit local resource policy demands enforcement.
+fn operation_cgroups(
+    handed_over: &[std::path::PathBuf],
+) -> Result<Option<Arc<opengeni_agent_platform::OpCgroups>>, anyhow_lite::BoxError> {
+    let config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
+    let cgroups = opengeni_agent_platform::establish_oom_isolation(config, handed_over);
+    if config.has_limits()
+        && cgroups
+            .as_ref()
+            .is_none_or(|cgroups| !cgroups.supports_policy(config))
+    {
+        return Err(to_boxed(std::io::Error::other(
+            "explicit local operation resource policy requires the corresponding delegated Linux cgroup-v2 controllers; refusing to run it unenforced",
+        )));
+    }
+    Ok(cgroups)
+}
+
+/// `run --compute`: the agent in an Opengeni compute sandbox, started by the
+/// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
+/// one link, dialed through the sandbox's host with no credential, and keeps
+/// the relay credential the host sends in memory. It reports what it has in
+/// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
+/// when its host has lost its connections), and never enrolls, renews,
+/// updates itself or installs
+/// a service: Opengeni compute owns the sandbox's enrollment and image.
+async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
+    let link_config = compute::ComputeConfig::load(link_file).map_err(to_boxed)?;
+    std::fs::create_dir_all(&link_config.workspace_root).map_err(to_boxed)?;
+    std::env::set_current_dir(&link_config.workspace_root).map_err(to_boxed)?;
+
+    // One agent serves a sandbox: a second would be a duplicate responder for
+    // the same subjects (see `run`).
+    let _instance_lock = match instance_lock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(instance_lock::LockError::Contended { holder_pid }) => {
+            let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
+            return Err(string_err(format!(
+                "another opengeni-agent (pid {pid}) already serves this sandbox"
+            )));
+        }
+        Err(error) => {
+            warn!(%error, "could not acquire the single-instance lock; continuing without it");
+            None
+        }
+    };
+
+    let op_cgroups = operation_cgroups(&[])?;
+    let _virtual_desktop = maybe_spawn_virtual_desktop(args);
+    // The link file names the root explicitly, `/` included: no fallback to
+    // the home directory as for a working directory a user started in.
+    let mut platform = NativePlatform::with_root(&link_config.workspace_root);
+    if let Some(cgroups) = op_cgroups {
+        platform = platform.with_oom_isolation(cgroups);
+    }
+    let config_dir = config::config_dir().ok();
+    let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
+    let (platform, browser_sidecars) =
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
+
+    let credentials = link_config.credentials();
+    let relay = RelayCredential::pending();
+    let hub = RelayHub::new(RelayHubConfig {
+        workspace_id: credentials.workspace_id.clone(),
+        agent_id: credentials.agent_id.clone(),
+        credential: relay.clone(),
+        allow_screen_control: credentials.consented_screen_control,
+    });
+    let streams = hub.activity().clone();
+    let link_platform = Arc::new(platform.with_stream_registry(Arc::new(hub)));
+    let link = SupervisorLink::new(link_config.connection_id(), link_platform, credentials)
+        .with_connection_instance_id(uuid::Uuid::new_v4().to_string())
+        .with_compute(supervisor::ComputeLink { relay });
+    let links = vec![link];
+    let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
+
+    let mut supervisor = match &config_dir {
+        Some(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
+            .with_spool_root(dir.join("spool")),
+        None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
+    };
+    supervisor = supervisor.with_update_drain(update_drain);
+    spawn_signal_handler(supervisor.shutdown_handle());
+    spawn_reconnect_handler(supervisor.reconnect_handle());
+
+    let silence = link_config.stream_silence;
+    let work = supervisor.work_in_progress(silence);
+    let activity = tokio::spawn(compute::report_activity(
+        compute::ActivityFile::new(&link_config.activity_dir, std::process::id()),
+        move || work() + streams.moving(silence),
+    ));
+
+    info!(
+        workspace_root = %link_config.workspace_root.display(),
+        "agent online in a compute sandbox"
+    );
+    let supervisor_result = supervisor.run_with_updates(updates_rx).await;
+    activity.abort();
+    // The file goes with the reporter; wait for it so the guest stops counting
+    // this process before it exits.
+    let _ = activity.await;
+    if let Some(sidecars) = browser_sidecars {
+        sidecars.shutdown().await;
+    }
+    supervisor_result.map_err(to_boxed)?;
+    info!("agent stopped");
+    Ok(())
+}
+
+/// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when
+/// the sandbox's host has no stream for the agent's connections (after a
+/// move, a recovery on another host or a restart of the host agent).
+fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut restored = match signal(SignalKind::user_defined1()) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
+                return;
+            }
+        };
+        while restored.recv().await.is_some() {
+            info!("the host lost this sandbox's connections; reconnecting at once");
+            reconnect.request();
+        }
+    });
+    #[cfg(not(unix))]
+    drop(reconnect);
 }
 
 #[cfg(unix)]
@@ -869,8 +1002,10 @@ fn supervisor_links(
             let hub = RelayHub::new(RelayHubConfig {
                 workspace_id: credentials.workspace_id.clone(),
                 agent_id: credentials.agent_id.clone(),
-                relay_url: credentials.relay_url.clone(),
-                agent_token: credentials.relay_token.clone(),
+                credential: RelayCredential::fixed(
+                    credentials.relay_url.clone(),
+                    credentials.relay_token.clone(),
+                ),
                 allow_screen_control: credentials.consented_screen_control,
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
