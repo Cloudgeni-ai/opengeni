@@ -50,6 +50,29 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
+/** Beta header that admits `thinking.display: "updates"`. */
+export const ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA = "thinking-display-updates-2026-08-18";
+
+/**
+ * Whether this model writes its notes for the person between tool calls as
+ * progress-update `thinking` blocks (Claude Opus 5.5, Sonnet 5.5) rather than
+ * as `text` blocks.
+ *
+ * Such a model is asked for `display: "updates"`: reasoning blocks then come
+ * back empty and every `thinking` block with text is a progress update, which
+ * Anthropic documents as the way to tell the two apart (under "summarized" a
+ * progress update is indistinguishable from reasoning). The transport turns
+ * each non-empty one into an assistant message and replays its signed block
+ * unchanged in place.
+ */
+export function anthropicWritesProgressUpdates(model: string): boolean {
+  return claudeNativeModelProfile(model)?.progressUpdates === true;
+}
+
+function anthropicThinkingDisplay(model: string): "updates" | "summarized" {
+  return anthropicWritesProgressUpdates(model) ? "updates" : "summarized";
+}
+
 /**
  * The response stream broke before its terminal event: it went silent past
  * the idle timeout, or the connection ended without `message_stop`. This is
@@ -273,11 +296,18 @@ function imageSource(value: unknown): Json {
   return { type: "url", url };
 }
 
-function contentBlocks(value: unknown, options: { citations?: boolean } = {}): Json[] {
+function contentBlocks(
+  value: unknown,
+  options: { citations?: boolean; assistant?: boolean } = {},
+): Json[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   const blocks = Array.isArray(value) ? value : [value];
   return blocks.map((entry) => {
     const block = object(entry);
+    // A progress update is Claude's own signed thinking block. It goes back
+    // exactly as received, never as the text it was shown as.
+    const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
+    if (signed?.type === "thinking") return structuredClone(object(signed));
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
       // Claude's own cited text is replayed with its citations exactly while
       // the cited searches are still native in this request.
@@ -338,6 +368,7 @@ export function anthropicMessages(
           role,
           contentBlocks(item.content, {
             citations: role === "assistant" && options.webSearch === true && !foreignSearch,
+            assistant: role === "assistant",
           }),
         );
         break;
@@ -688,7 +719,7 @@ export function buildAnthropicRequest(
       throw new AnthropicProtocolError(
         "The selected Claude model does not support this reasoning effort",
       );
-    body.thinking = { type: "adaptive", display: "summarized" };
+    body.thinking = { type: "adaptive", display: anthropicThinkingDisplay(model) };
     body.output_config = {
       effort,
     };
@@ -790,6 +821,7 @@ export function anthropicResponse(
   searchQueries: ReadonlyMap<string, string> = new Map(),
   requestUsages: Json[] = [],
   accountScope: string | null = null,
+  options: { progressUpdates?: boolean } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -885,6 +917,26 @@ export function anthropicResponse(
           text(block.thinking, "thinking text");
           text(block.signature, "thinking signature");
         } else text(block.data, "redacted thinking data");
+        if (options.progressUpdates && block.type === "thinking" && block.thinking.length > 0) {
+          // Under display "updates" only a progress update carries text: the
+          // note the model wrote for the person before its next tool call. It
+          // is an assistant message like Claude's earlier text blocks, and the
+          // signed block rides along so replay sends it back unchanged.
+          output.push({
+            type: "message",
+            role: "assistant",
+            id,
+            status: message.stop_reason === "max_tokens" ? "incomplete" : "completed",
+            content: [
+              {
+                type: "output_text",
+                text: block.thinking,
+                providerData: { anthropic: { block: structuredClone(block) } },
+              },
+            ],
+          });
+          break;
+        }
         output.push({
           type: "reasoning",
           id,
@@ -1007,7 +1059,7 @@ export class AnthropicMessagesModel implements Model {
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
-        display: "summarized",
+        display: anthropicThinkingDisplay(this.model),
         ...body.thinking,
         block_binding: { prefix_mismatch_behavior: "drop_block" },
       };
@@ -1015,6 +1067,11 @@ export class AnthropicMessagesModel implements Model {
       delete body.top_p;
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("thinking-binding-controls-2026-08-01");
+      headers.set("anthropic-beta", [...betas].join(","));
+    }
+    if (body.thinking?.display === "updates") {
+      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+      betas.add(ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA);
       headers.set("anthropic-beta", [...betas].join(","));
     }
     if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
@@ -1148,11 +1205,12 @@ export class AnthropicMessagesModel implements Model {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
     const accountScope = anthropicSearchAccountScope(this.provider);
+    const progressUpdates = anthropicWritesProgressUpdates(this.model);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
       const current = merged
-        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, progressUpdates)
         : request;
       const response = await this.send(current, false);
       requestId = response.headers.get("request-id") ?? undefined;
@@ -1170,6 +1228,7 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
+      { progressUpdates },
     );
   }
 
@@ -1177,13 +1236,14 @@ export class AnthropicMessagesModel implements Model {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
     const accountScope = anthropicSearchAccountScope(this.provider);
+    const progressUpdates = anthropicWritesProgressUpdates(this.model);
     let merged: Json | undefined;
     let requestId: string | undefined;
     const partial: AnthropicPartialMessage = {};
     try {
       for (let continuation = 0; ; continuation += 1) {
         const current = merged
-          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, progressUpdates)
           : request;
         // A continuation's blocks extend the same logical response: stream
         // their text under the ids the merged response will give them.
@@ -1194,6 +1254,7 @@ export class AnthropicMessagesModel implements Model {
             ...(merged ? { baseId: merged.id as string } : {}),
             offset: merged?.content.length ?? 0,
             ...(merged ? trailingTextRunStart(merged.content) : {}),
+            progressUpdates,
           },
           partial,
         );
@@ -1206,7 +1267,9 @@ export class AnthropicMessagesModel implements Model {
       if (!isModelPreempted(request.signal)) throw error;
       // A Steer cut the stream short. Keep the text blocks Claude already
       // closed (content_block_stop); drop everything else (see
-      // preemptedResponseDone). Claude reports input usage at message_start.
+      // preemptedResponseDone), including progress updates: like reasoning,
+      // their signed blocks cannot be kept without the rest of the response.
+      // Claude reports input usage at message_start.
       const preempted = preemptedAnthropicMessage(merged, partial);
       if (!preempted) {
         yield preemptedResponseDone({ requestId: partial.requestId ?? requestId });
@@ -1237,6 +1300,7 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
+      { progressUpdates },
     );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",
@@ -1246,7 +1310,13 @@ export class AnthropicMessagesModel implements Model {
 
   private async *streamMessage(
     request: ModelRequest,
-    continuation: { started: boolean; baseId?: string; offset: number; textRunStart?: number },
+    continuation: {
+      started: boolean;
+      baseId?: string;
+      offset: number;
+      textRunStart?: number;
+      progressUpdates?: boolean;
+    },
     partial: AnthropicPartialMessage = {},
   ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
     partial.message = undefined;
@@ -1384,11 +1454,23 @@ export class AnthropicMessagesModel implements Model {
               object(delta.citation),
             ];
           } else if (delta.type === "thinking_delta") {
-            state.block.thinking += text(delta.thinking, "thinking delta");
-            yield {
-              type: "model",
-              event: { type: "anthropic.thinking.delta", delta: delta.thinking },
-            };
+            const chunk = text(delta.thinking, "thinking delta");
+            state.block.thinking += chunk;
+            // Under display "updates" any text belongs to a progress update:
+            // it streams as the assistant message the block becomes (same id
+            // as in anthropicResponse), and empty reasoning streams nothing.
+            if (continuation.progressUpdates) {
+              if (chunk)
+                yield {
+                  type: "output_text_delta",
+                  itemId: `${continuation.baseId ?? message!.id}:${state.item}`,
+                  delta: chunk,
+                };
+            } else
+              yield {
+                type: "model",
+                event: { type: "anthropic.thinking.delta", delta: chunk },
+              };
           } else if (delta.type === "signature_delta")
             state.block.signature =
               (state.block.signature ?? "") + text(delta.signature, "signature delta");
@@ -1588,6 +1670,7 @@ function pausedTurnRequest(
   names: Map<string, { name: string; namespace?: string }>,
   searchQueries: ReadonlyMap<string, string>,
   accountScope: string | null,
+  progressUpdates: boolean,
 ): ModelRequest {
   const replay = anthropicResponse(
     { ...paused, stop_reason: "pause_turn" },
@@ -1596,6 +1679,7 @@ function pausedTurnRequest(
     searchQueries,
     [],
     accountScope,
+    { progressUpdates },
   ).output;
   const input =
     typeof request.input === "string"
