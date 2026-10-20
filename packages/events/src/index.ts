@@ -298,6 +298,7 @@ type SubscriptionContext = {
   label: string;
   kind: NatsSubscriptionKind;
   subject: string;
+  queue?: string;
   logger?: EventLogger | undefined;
   onSubscriptionTerminated?: ((termination: NatsSubscriptionTermination) => void) | undefined;
 };
@@ -466,7 +467,7 @@ function subscribeWithResubscribe(
       if (stopped || connectionShuttingDown(nc)) return;
       let sub: Subscription;
       try {
-        sub = nc.subscribe(context.subject);
+        sub = nc.subscribe(context.subject, context.queue ? { queue: context.queue } : undefined);
       } catch (error) {
         reportSubscriptionTermination(context, "resubscribe", { error });
         schedule();
@@ -476,7 +477,7 @@ function subscribeWithResubscribe(
     }, delayMs);
     (timer as { unref?: () => void }).unref?.();
   };
-  pump(nc.subscribe(context.subject));
+  pump(nc.subscribe(context.subject, context.queue ? { queue: context.queue } : undefined));
   return () => {
     stopped = true;
     if (timer) {
@@ -672,10 +673,13 @@ export type EventBus = {
    * subject (so it can extract `<ws>`/`<id>`/`<instance>`). Returns an
    * unsubscribe fn. Decoding the AgentEvent is the caller's concern (this leaf
    * does not depend on `@opengeni/agent-proto`).
+   * An optional queue distributes each delivery to one member of that group;
+   * omitting it preserves broadcast delivery to every subscriber.
    */
   subscribeAgentEvents: (
     subject: string,
     handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+    options?: { queue?: string },
   ) => () => void;
   /**
    * The `RequestConnection` accessor the selfhosted `NatsControlRpc` consumes —
@@ -868,7 +872,8 @@ export async function createNatsEventBus(
       ),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler, options),
-    subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler, options),
+    subscribeAgentEvents: (subject, handler, subscriptionOptions) =>
+      subscribeAgentEvents(nc, subject, handler, options, subscriptionOptions),
     getRequestConnection: () => requestConnection,
     getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
@@ -1336,6 +1341,7 @@ function subscribeAgentEvents(
   subject: string,
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
   busOptions: EventBusOptions,
+  subscriptionOptions?: { queue?: string },
 ): () => void {
   return subscribeWithResubscribe(
     nc,
@@ -1343,6 +1349,7 @@ function subscribeAgentEvents(
       label: "agent-events",
       kind: "agent_events",
       subject,
+      ...(subscriptionOptions?.queue ? { queue: subscriptionOptions.queue } : {}),
       logger: busOptions.logger,
       onSubscriptionTerminated: busOptions.onSubscriptionTerminated,
     },

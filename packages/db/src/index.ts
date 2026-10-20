@@ -61759,40 +61759,50 @@ export async function claimEnrollmentConnection(
 export async function renewEnrollmentConnection(
   db: Database,
   input: {
-    accountId: string;
+    accountId?: string;
     workspaceId: string;
     enrollmentId: string;
     connectionInstanceId: string;
     leaseMs: number;
   },
-): Promise<{ renewed: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = await enrollmentConnectionClock(scopedDb);
-      const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
-      const rows = await scopedDb
-        .update(schema.enrollments)
-        .set({
-          connectionLeaseExpiresAt: leaseExpiresAt,
-          lastSeenAt: now,
-          wentOfflineAt: null,
-          wentOfflineReason: null,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.enrollments.workspaceId, input.workspaceId),
-            eq(schema.enrollments.id, input.enrollmentId),
-            eq(schema.enrollments.status, "active"),
-            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
-          ),
-        )
-        .returning({ id: schema.enrollments.id });
-      return { renewed: rows.length === 1 };
-    },
-  );
+): Promise<{ renewed: boolean; enrollment: EnrollmentRecord | null }> {
+  const renew = async (scopedDb: Database) => {
+    // Resolve the database clock once in the UPDATE, rather than a separate
+    // network exchange. Return the exact runner's accepted metadata so the
+    // heartbeat does not need an enrollment read before or after renewal.
+    const heartbeatClock = scopedDb
+      .$with("heartbeat_clock", { now: sql<Date>`clock_timestamp()`.as("now") })
+      .as(sql`select clock_timestamp() as now`);
+    const heartbeatNow = sql`${heartbeatClock.now}`;
+    const [row] = await scopedDb
+      .with(heartbeatClock)
+      .update(schema.enrollments)
+      .set({
+        connectionLeaseExpiresAt: sql`${heartbeatNow} + ${input.leaseMs} * interval '1 millisecond'`,
+        lastSeenAt: heartbeatNow,
+        wentOfflineAt: null,
+        wentOfflineReason: null,
+        updatedAt: heartbeatNow,
+      })
+      .from(heartbeatClock)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+        ),
+      )
+      .returning(getTableColumns(schema.enrollments));
+    return { renewed: row !== undefined, enrollment: row ? mapEnrollment(row) : null };
+  };
+  return input.accountId !== undefined
+    ? await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        renew,
+      )
+    : await withWorkspaceRls(db, input.workspaceId, renew);
 }
 
 /** Release only the exact active runner. A late goodbye from a fenced process is
