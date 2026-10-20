@@ -166,7 +166,7 @@ config:
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
 desktop:
-  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:554d5b324a580071dd669e7c1190931e498eb1b397412a27c7de84a430ef393a"
+  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805"
 
 secret:
   create: false
