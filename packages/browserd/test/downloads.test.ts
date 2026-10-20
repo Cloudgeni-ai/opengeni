@@ -556,6 +556,52 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
+  for (const savedMeanwhile of [false, true]) {
+    test(`cleanup without hard links puts back another file${savedMeanwhile ? " but never over a newer one" : ""}`, async () => {
+      const realRename = fsPromises.rename;
+      const realCopyFile = fsPromises.copyFile;
+      const { store } = await fixture({ maxFileBytes: 5, maxSessionBytes: 20 });
+      const path = join(store.filesDirectory, "report.txt");
+      const link = spyOn(fsPromises, "link").mockImplementation(async () => {
+        throw Object.assign(new Error("hard links are not supported"), { code: "ENOTSUP" });
+      });
+      // Chromium saves another file under the name just before it is moved
+      // aside, and possibly a third one before it is put back.
+      const renameSpy = spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+        if (String(to).includes(".discard-")) {
+          await writeFile(`${path}.next`, "BBBBB");
+          await realRename(`${path}.next`, path);
+        }
+        await realRename(from, to);
+      });
+      const copySpy = spyOn(fsPromises, "copyFile").mockImplementation(async (from, to, mode) => {
+        if (savedMeanwhile) await writeFile(path, "CCCCC");
+        await realCopyFile(from, to, mode);
+      });
+      try {
+        await store.begin({ guid: "over", targetId: null, suggestedFilename: "report.txt" });
+        await writeFile(path, "ten bytes!");
+        await store.progress({
+          guid: "over",
+          state: "completed",
+          receivedBytes: 10,
+          totalBytes: 10,
+          filePath: path,
+        });
+        await store.reject("over", "download_quota_exceeded");
+        await store.list();
+        expect(renameSpy).toHaveBeenCalled();
+        expect(link).toHaveBeenCalled();
+        expect(await readFile(path, "utf8")).toBe(savedMeanwhile ? "CCCCC" : "BBBBB");
+        await store.close();
+      } finally {
+        link.mockRestore();
+        renameSpy.mockRestore();
+        copySpy.mockRestore();
+      }
+    });
+  }
+
   test("a download of unknown size still receiving data does not hold a completion", async () => {
     const { store } = await fixture();
     await store.begin({ guid: "small", targetId: null, suggestedFilename: "small.txt" });

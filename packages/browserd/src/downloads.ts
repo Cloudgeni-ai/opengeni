@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { chmod, copyFile, link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   BrowserDownload,
@@ -1065,14 +1065,18 @@ export class BrowserDownloadStore {
       return;
     }
     if ((await fileIdentity(aside)) !== expected) {
-      // Not the discarded file: put it back where Chromium saved it. If that
-      // fails it stays aside, and recovery sweeps it.
+      // Not the discarded file: put it back where Chromium saved it, never
+      // over a file saved there since. If that fails it stays aside, and
+      // recovery sweeps it.
       try {
         await link(aside, path);
-      } catch {
-        if (await pathExists(path)) return;
-        await rename(aside, path).catch(() => undefined);
-        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+        try {
+          await copyFile(aside, path, fsConstants.COPYFILE_EXCL);
+        } catch {
+          return;
+        }
       }
     }
     await rm(aside, { force: true });
