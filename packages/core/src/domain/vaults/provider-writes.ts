@@ -210,11 +210,11 @@ function planFieldWrites(
       return refuseProviderOperation(vault, "restoreFieldHistory");
     }
     if (input.fileBase64 !== undefined || kind === "file" || current?.kind === "file") {
-      throw new VaultError(
-        "provider_unavailable",
-        "files in connected vaults are read-only here",
-        { field: input.name, vaultId: vault.id, operation: "writeFiles" },
-      );
+      throw new VaultError("provider_unavailable", "files in connected vaults are read-only here", {
+        field: input.name,
+        vaultId: vault.id,
+        operation: "writeFiles",
+      });
     }
     const totp = kind === "totp" || current?.kind === "totp";
     if (input.remove) {

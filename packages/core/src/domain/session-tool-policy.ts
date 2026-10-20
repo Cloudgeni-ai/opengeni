@@ -425,13 +425,7 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
     ),
   );
   return bundledSkillIds.some((id) => {
-    if (
-      [
-        "builtin:documents",
-        "builtin:spreadsheets",
-        "builtin:presentations",
-      ].includes(id)
-    ) {
+    if (["builtin:documents", "builtin:spreadsheets", "builtin:presentations"].includes(id)) {
       return tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
     }
     if (id === "builtin:sites") {

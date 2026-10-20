@@ -33,7 +33,9 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether the workspace already provides the capability natively");
+    expect(guidance).toContain(
+      "check whether the workspace already provides the capability natively",
+    );
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );

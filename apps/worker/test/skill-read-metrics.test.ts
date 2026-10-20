@@ -70,9 +70,7 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
   expect(series(metrics, { source: "workspace", skill: "custom", kind: "list" })).toBe(1);
   expect(series(metrics, { source: "session", skill: "custom", kind: "full" })).toBe(1);
   expect(series(metrics, { source: "personal", skill: "custom", kind: "full" })).toBe(1);
-  expect(
-    series(metrics, { source: "unknown", skill: "builtin:sites", kind: "refused" }),
-  ).toBe(1);
+  expect(series(metrics, { source: "unknown", skill: "builtin:sites", kind: "refused" })).toBe(1);
   expect(
     series(metrics, { source: "unknown", skill: "builtin:skill-management", kind: "refused" }),
   ).toBe(1);

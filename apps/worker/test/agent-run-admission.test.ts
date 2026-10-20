@@ -448,8 +448,7 @@ describe("worker agent-run admission funding", () => {
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
-          budgetBlocked:
-            "Usage allowance exhausted. Resume when your allowance is available.",
+          budgetBlocked: "Usage allowance exhausted. Resume when your allowance is available.",
           budgetPausedReason: "allowance",
         });
         expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);

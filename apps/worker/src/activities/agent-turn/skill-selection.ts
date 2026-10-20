@@ -46,11 +46,9 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
   const artifacts = loadNativeToolSkillArtifacts({
     projects: names.has("projects"),
     schedules: names.has("schedules"),
-    editableArtifacts: [
-      "documents",
-      "spreadsheets",
-      "presentations",
-    ].some((name) => names.has(name)),
+    editableArtifacts: ["documents", "spreadsheets", "presentations"].some((name) =>
+      names.has(name),
+    ),
     sites: names.has("sites"),
     secrets: names.has("secrets"),
     videoGeneration: names.has("video-generation"),

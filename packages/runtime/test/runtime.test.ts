@@ -13640,11 +13640,7 @@ describe("runtime Skill activation", () => {
     });
     const index = composition.index;
     expect(index.map((entry) => entry.name)).toEqual(
-      expect.arrayContaining([
-        "spreadsheets",
-        "documents",
-        "presentations",
-      ]),
+      expect.arrayContaining(["spreadsheets", "documents", "presentations"]),
     );
     expect(composition.selections).toContainEqual(
       expect.objectContaining({
@@ -14017,12 +14013,7 @@ describe("runtime Skill activation", () => {
       videoGeneration: false,
     });
     expect(bundled.index.map((entry) => entry.name)).toEqual(
-      expect.arrayContaining([
-        "documents",
-        "spreadsheets",
-        "presentations",
-        "sites",
-      ]),
+      expect.arrayContaining(["documents", "spreadsheets", "presentations", "sites"]),
     );
     const configured = composeRuntimeSkills([sessionActivation(infraSkill)]);
     expect(configured.configuredDescriptors).toEqual([

@@ -159,9 +159,9 @@ test("renamed product-named ids stay accepted and resolve to their neutral ids",
       bundledSkillIds: ["builtin:opengeni-documents", "builtin:opengeni-skills"],
     }).bundledSkillIds,
   ).toEqual([documents, "builtin:skill-management"]);
-  expect(() =>
-    BundledSkillSelection.parse(["builtin:opengeni-documents", documents]),
-  ).toThrow("unique");
+  expect(() => BundledSkillSelection.parse(["builtin:opengeni-documents", documents])).toThrow(
+    "unique",
+  );
   expect(
     bundledSkillSelectionFromMetadata({
       _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-sites", "builtin:opengeni-help"],

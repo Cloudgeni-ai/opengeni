@@ -105,11 +105,7 @@ test("host selection narrows every bundled source without forcing unavailable wo
     configuredBundledSkillNames({
       firstPartyTools: [],
       videoGenerationEnabled: false,
-      bundledSkillIds: [
-        "builtin:documents",
-        "builtin:sites",
-        "builtin:video-generation",
-      ],
+      bundledSkillIds: ["builtin:documents", "builtin:sites", "builtin:video-generation"],
     }),
   ).toEqual([]);
 });

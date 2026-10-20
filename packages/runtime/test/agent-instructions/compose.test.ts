@@ -83,8 +83,7 @@ const MARKERS: Record<string, RegExp> = {
     /goal_(?:set|complete|update|pause|resume)|goal pause|active goal|goal is active|goal tools|goal\.completed|completing a goal/u,
   knowledge: /knowledge_|instruction_policy|task_note|Knowledge|durable storage/u,
   subagents: /session_(?:events|wait|get|send_message)|child worker|Session coordination|a child,/u,
-  artifacts:
-    /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
+  artifacts: /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
   attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,

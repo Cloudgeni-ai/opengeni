@@ -152,8 +152,7 @@ describe("skill_read gateway definition", () => {
       ).text();
       for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
         const selected = loadConfiguredBundledSkills({
-          firstPartyTools:
-            name === "sites" ? ["artifacts_create", "artifacts_publish"] : [],
+          firstPartyTools: name === "sites" ? ["artifacts_create", "artifacts_publish"] : [],
           videoGenerationEnabled: false,
           bundledSkillIds,
           get sandboxBackend(): never {

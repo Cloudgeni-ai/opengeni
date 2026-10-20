@@ -476,9 +476,7 @@ describe("fail-closed change impact", () => {
       reason: "bundled artifact skill source boundary",
     });
 
-    const siteSkill = createImpactPlan([
-      "packages/runtime/src/bundled_site_skills/sites/SKILL.md",
-    ]);
+    const siteSkill = createImpactPlan(["packages/runtime/src/bundled_site_skills/sites/SKILL.md"]);
     expect(siteSkill.mode).toBe("focused");
     expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
     expect(siteSkill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");

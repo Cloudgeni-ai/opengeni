@@ -108,8 +108,7 @@ export type RealtimeVoiceUnavailableCode =
   | "credits_disabled";
 
 /** Copy for deployment-funded voice in a workspace that turned Opengeni credits off. */
-export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE =
-  "Credits are turned off in this workspace.";
+export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE = "Credits are turned off in this workspace.";
 
 export { workspaceCreditsDisabled } from "./workspace-credits";
 
