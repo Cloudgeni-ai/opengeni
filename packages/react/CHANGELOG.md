@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 4.3.1
+
+### Patch Changes
+
+- 579239a: The desktop workspace dock drops its separate header row: the machine status and the maximize and hide controls sit under the panel tabs. Site previews can hide their frame toolbar and take reload and full-screen control from the host.
+- ee83178: Editable documents and presentations now have a Download action, exporting DOCX and PPTX like spreadsheets export XLSX. `EditableArtifactView` accepts `downloadArtifact` for all modalities; `downloadSpreadsheet` remains supported.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [b95784c]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/connect@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

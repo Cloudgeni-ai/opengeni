@@ -1,5 +1,18 @@
 # @opengeni/config
 
+## 4.3.1
+
+### Patch Changes
+
+- 017121f: An idle sandbox now stops one minute after its last use instead of fifteen. The workspace is still saved before the box stops, and a later turn restores it from that save, so a long warm tail mostly paid for an idle box. Deployments that prefer warm resumes after longer pauses can raise `OPENGENI_SANDBOX_IDLE_GRACE_MS`.
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [b95784c]
+  - @opengeni/contracts@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

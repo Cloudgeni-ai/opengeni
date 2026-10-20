@@ -1,5 +1,14 @@
 # @opengeni/agent-host
 
+## 4.3.1
+
+### Patch Changes
+
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [b95784c]
+  - @opengeni/sdk@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

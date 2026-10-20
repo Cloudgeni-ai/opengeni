@@ -1,5 +1,16 @@
 # @opengeni/desktop
 
+## 0.2.4
+
+### Patch Changes
+
+- bc9a7f9: Connecting an account from the desktop app works again. Connect, GitHub and model sign-in buttons that open a sign-in window failed with "Allow popups to connect your account", because the app refused every new window. The app now accepts the blank window such a flow reserves, opens the provider's sign-in page in your browser, and the app picks up the finished connection by itself. Pages from the account's own server that a flow opens show as an app window.
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [b95784c]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/agent-host@4.3.0
+
 ## 0.2.3
 
 ### Patch Changes

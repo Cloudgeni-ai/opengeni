@@ -1,5 +1,52 @@
 # @opengeni/worker-bundle
 
+## 4.3.1
+
+### Patch Changes
+
+- Updated dependencies [d142e5b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [18030c8]
+- Updated dependencies [8f66667]
+- Updated dependencies [1e63001]
+- Updated dependencies [fa5347a]
+- Updated dependencies [18030c8]
+- Updated dependencies [017121f]
+- Updated dependencies [72e00f6]
+- Updated dependencies [72e032c]
+- Updated dependencies [b95784c]
+- Updated dependencies [22e3585]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/core@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/github@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/vaults-keeper@4.3.0
+  - @opengeni/vaults-onepassword@4.3.0
+  - @opengeni/vaults-protonpass@4.3.0
+  - @opengeni/jev@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/subscriptions@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

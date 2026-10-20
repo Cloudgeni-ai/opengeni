@@ -1,5 +1,46 @@
 # @opengeni/core
 
+## 4.3.1
+
+### Patch Changes
+
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- Updated dependencies [d142e5b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [91329fc]
+- Updated dependencies [579239a]
+- Updated dependencies [70f0522]
+- Updated dependencies [18030c8]
+- Updated dependencies [8f66667]
+- Updated dependencies [1e63001]
+- Updated dependencies [fa5347a]
+- Updated dependencies [18030c8]
+- Updated dependencies [017121f]
+- Updated dependencies [72e00f6]
+- Updated dependencies [72e032c]
+- Updated dependencies [b95784c]
+- Updated dependencies [22e3585]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/network@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

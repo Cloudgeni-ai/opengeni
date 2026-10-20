@@ -1,5 +1,7 @@
 # @opengeni/subscriptions
 
+## 4.3.1
+
 ## 4.2.0
 
 ### Patch Changes
