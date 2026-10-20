@@ -522,6 +522,49 @@ async fn a_vm_that_cannot_be_checked_is_left_running() {
     lab.assert_clean();
 }
 
+/// A VM the restarted agent cannot take back books all its processors,
+/// however little its sandbox asks for: the agent that started it set its
+/// weight, which may stand for any request up to them, such as all of
+/// them before requests had a smaller default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_not_taken_back_books_all_its_processors() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::new(Delays::default(), policy).await;
+    let sandbox = id(44);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
+    assert_eq!(
+        reserved(&lab.status().await),
+        100,
+        "one vCPU at the default"
+    );
+    let (root, world) = lab.stop().await;
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+
+    let lab = Lab::start(root, world, Delays::default(), policy).await;
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert_eq!(reserved(&status), 1000, "{status:?}");
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.wait_until("its VM's processors to come back", |status| {
+        reserved(status) == 0
+    })
+    .await;
+    lab.assert_clean();
+}
+
 /// A VM that died is torn down before its replacement starts, however long
 /// the teardown takes, so the teardown never touches the new VM's jail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

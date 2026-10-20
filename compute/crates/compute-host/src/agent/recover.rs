@@ -76,7 +76,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 // Its VM may still run.
                 let size = self.retained_size(&record).await;
-                self.unmanaged(id, size);
+                self.unmanaged(id, size, record.config.vcpus);
                 continue;
             }
             // Nothing is done for a sandbox, not even looking at its VM,
@@ -88,7 +88,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
                     self.block(id, format!("record not known to be durable: {error}"));
                     let size = self.retained_size(&record).await;
-                    self.unmanaged(id, size);
+                    self.unmanaged(id, size, record.config.vcpus);
                     continue;
                 }
             };
@@ -100,7 +100,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
                 let size = self.retained_size(&record).await;
-                self.unmanaged(id, size);
+                self.unmanaged(id, size, record.config.vcpus);
                 self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
@@ -148,7 +148,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
                     self.block(id, format!("disk length unknown: {error}"));
                     let size = self.retained_size(&record).await;
-                    self.unmanaged(id, size);
+                    self.unmanaged(id, size, record.config.vcpus);
                 }
             }
         }
@@ -214,7 +214,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         == Some("remote");
                     let disk = Paths::new(&self.root, stray.id).disk;
                     let size = self.retained_size_of(&config, None, disk, !remote).await;
-                    self.unmanaged(stray.id, size);
+                    self.unmanaged(stray.id, size, config.vcpus);
                 }
             }
         }
@@ -239,6 +239,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // the sandbox cannot be taken back.
             let live = !matches!(vm, Ok(None));
             let size = live.then(|| self.record_size(&record));
+            let vcpus = record.config.vcpus;
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
@@ -255,7 +256,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
                     self.block(id, format!("not recovered: {error}"));
                     if let Some(size) = size {
-                        self.unmanaged(id, size);
+                        self.unmanaged(id, size, vcpus);
                     }
                 }
             }
@@ -329,16 +330,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Counts the VM of sandbox `id`, of `size`, which may still run,
     /// against the admission budget at its full size, and against the
-    /// processor budget at its request, while this agent does not manage
-    /// it, and books what it may still write to local disk: a save an
-    /// earlier agent may have started, and its guest disk's growth. Both
-    /// last until a removal ends it.
-    fn unmanaged(&mut self, id: Id, size: Size) {
+    /// processor budget at all its `vcpus`, since the agent that started it
+    /// set its weight, which may stand for any request up to them, while
+    /// this agent does not manage it; and books what it may still write to
+    /// local disk: a save an earlier agent may have started, and its guest
+    /// disk's growth. Both last until a removal ends it.
+    fn unmanaged(&mut self, id: Id, size: Size, vcpus: u8) {
         self.inputs([
             Input::Unmanaged {
                 sandbox: id.0,
                 bytes: size.limit,
-                cpu: size.cpu,
+                cpu: u64::from(vcpus) * 1000,
             },
             Input::Writes {
                 key: id.0,

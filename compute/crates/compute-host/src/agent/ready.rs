@@ -522,8 +522,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return false;
             }
         };
+        // Its guest runs whole while it comes up, at its shape's weight and
+        // booked so; a claim gives it the claimer's request.
         let config = SandboxConfig {
             image: shape.image,
+            cpu_request_millis: Some(u32::from(shape.cpu_weight()) * 10),
             ..SandboxConfig::new(
                 shape.vcpus,
                 shape.memory_mib,

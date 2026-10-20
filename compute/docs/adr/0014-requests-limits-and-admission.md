@@ -50,7 +50,8 @@ pick a VM.
   guaranteed while awake; above it, it may use idle processors up to
   `vcpus`, best effort. The requests of awake and waking sandboxes, and of
   VMs the agent does not manage that may run (a removed sandbox's until
-  its VM has ended, one found running at its request), stay within the
+  its VM has ended; one found running that it did not take back, at all
+  its processors, since an earlier agent set its weight), stay within the
   host's processor capacity: the processors its VMs' group may run on
   less a headroom for the agent and the rest of the host (a sixteenth, at
   least half a processor), or what the operator sets. Template builds and
@@ -318,8 +319,9 @@ pick a VM.
   requests counted, each sure of a share, and a sandbox that needs whole
   processors under contention asks for them. A burst above the request
   is never promised: next to busy neighbours a sandbox may get only its
-  request. Groups made beside the VMs' after the agent starts are not
-  counted in its weight until it restarts.
+  request. Groups made or woken beside the VMs' after the agent starts
+  are counted within 5 seconds, when it next reads the hierarchy; until
+  then the VMs' group may get less than the capacity it advertises.
 - Whether a sandbox waits, saved, for room after a pause for memory is kept
   in its holds file, written by the same writer as its holds whenever the
   core says the wait starts or ends. The core says it starts before the
