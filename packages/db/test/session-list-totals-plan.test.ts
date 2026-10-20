@@ -1,47 +1,43 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { sql, type SQL } from "drizzle-orm";
-import * as schema from "../src/schema";
 import {
   bootstrapWorkspace,
+  createDb,
   createSession,
   listSessionEntriesForSubject,
-  registerDbBinding,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
+  type Database,
 } from "../src";
-import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 let shared: SharedTestDatabase;
 let driver: postgres.Sql;
-let db: ReturnType<typeof drizzle<typeof schema>>;
+let client: ReturnType<typeof createDb>;
+let db: Database;
 let captured: { query: string; parameters: unknown[] } | undefined;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-list-totals-plan");
   if (!acquired) throw new Error("Application-role PostgreSQL plan fixture unavailable");
   shared = acquired;
-  driver = postgres(shared.appUrl, {
-    max: 1,
-    prepare: false,
-    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
-    debug: (_id, query, parameters) => {
-      if (query.includes("attention_roots as")) captured = { query, parameters };
-    },
-  });
-  db = drizzle(driver, { schema });
-  registerDbBinding(db, { rlsStrategy: "force" });
+  client = createDb(shared.appUrl, { max: 1 });
+  db = client.db;
+  driver = (db as unknown as { $client: postgres.Sql }).$client;
+  driver.options.debug = (_id, query, parameters) => {
+    if (query.includes("attention_roots as")) captured = { query, parameters };
+  };
 }, 180_000);
 
 afterAll(async () => {
-  await driver?.end();
+  await client?.close();
   await shared?.release();
 }, 60_000);
 
 type PlanNode = {
   "Relation Name"?: string;
+  "CTE Name"?: string;
   "Actual Rows": number;
   "Actual Loops": number;
   Plans?: PlanNode[];
@@ -61,16 +57,27 @@ test("complete totals keep base-table work bounded across deep trees and populat
   const grant = access.workspaceGrants[0]!;
   await shared.admin`update workspaces set settings=settings || jsonb_build_object('maxNestedAgentDepth',64)
     where id=${grant.workspaceId}`;
-  const root = await createSession(db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    initialMessage: "Synthetic deep tree",
-    resources: [],
-    metadata: {},
-    model: "test-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
+  const createRoot = () =>
+    createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Synthetic deep tree",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+  const root = await createRoot();
+  const cycleA = await createRoot();
+  const cycleB = await createRoot();
+  // Simulate disconnected corrupt legacy edges. Normal writers reject these;
+  // neither node is parentless, so UNION ALL must never enter their cycle.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role=replica`;
+    await tx`update sessions set parent_session_id=${cycleB.id} where id=${cycleA.id}`;
+    await tx`update sessions set parent_session_id=${cycleA.id} where id=${cycleB.id}`;
   });
   const generatedCount = 8192;
   await withWorkspaceSessionActivityRls(db, grant.workspaceId, async (tx) => {
@@ -101,7 +108,11 @@ test("complete totals keep base-table work bounded across deep trees and populat
   await shared.admin`analyze session_pins`;
   await shared.admin`analyze session_event_cursors`;
 
-  for (const scoped of [false, true]) {
+  const scopes =
+    process.env.OPENGENI_BENCH_SESSION_LIST === "1"
+      ? [false, true, false, true, false, true]
+      : [false, true];
+  for (const scoped of scopes) {
     const page = await listSessionEntriesForSubject(db, grant.workspaceId, {
       subjectId: grant.subjectId,
       parentSessionId: null,
@@ -143,15 +154,20 @@ test("complete totals keep base-table work bounded across deep trees and populat
       const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[] | undefined;
       const plan = plans?.[0]?.Plan;
       if (!plan) throw new Error("Exact totals query returned no execution plan");
-      const visits = { sessions: 0, session_pins: 0 };
+      const visits = { sessions: 0, session_pins: 0, personal_state: 0 };
       function walk(node: PlanNode) {
         const relation = node["Relation Name"];
         if (relation === "sessions" || relation === "session_pins") {
           visits[relation] += node["Actual Rows"] * node["Actual Loops"];
         }
+        if (node["CTE Name"] === "personal_state") {
+          visits.personal_state += node["Actual Rows"] * node["Actual Loops"];
+        }
         node.Plans?.forEach(walk);
       }
       walk(plan);
+      if (process.env.OPENGENI_BENCH_SESSION_LIST === "1")
+        console.log(JSON.stringify({ scoped, visits, plan: result[0]?.["QUERY PLAN"] }));
       // Bounds guard physical work rather than wall time or a preferred plan
       // shape. Scanning all sessions once per depth violates this by >10x.
       // Sessions are read for the roots, the descendant walk, and once per
@@ -159,13 +175,67 @@ test("complete totals keep base-table work bounded across deep trees and populat
       // event cursors), so a constant small multiple of the workspace.
       expect(visits.sessions).toBeLessThan((generatedCount + 1) * 4);
       expect(visits.session_pins).toBeLessThan((generatedCount + 1) * 3);
+      expect(visits.personal_state).toBeLessThan((generatedCount + 1) * 4);
     });
   }
+
+  const [attention] = await shared.admin`select id from sessions
+    where workspace_id=${grant.workspaceId} and status='requires_action'`;
+  const [leaf] = await shared.admin`select node.id from sessions node
+    where node.workspace_id=${grant.workspaceId} and node.parent_session_id=${root.id}
+      and not exists (select 1 from sessions child where child.parent_session_id=node.id)
+    limit 1`;
+  await shared.admin`update session_pins set pinned=true,pinned_at=now()
+    where session_id=${attention!.id} and subject_id=${grant.subjectId}`;
+  await shared.admin`update session_pins set manually_unread_through=0,actively_working=true
+    where session_id in (${root.id},${leaf!.id}) and subject_id=${grant.subjectId}`;
+  for (const scoped of [false, true]) {
+    const page = await listSessionEntriesForSubject(db, grant.workspaceId, {
+      subjectId: grant.subjectId,
+      parentSessionId: null,
+      limit: 1,
+      includeTotals: true,
+      includePinned: false,
+      ...(scoped
+        ? {
+            authorizationScope: {
+              kind: "scoped" as const,
+              rootSessionIds: [root.id],
+              sessionIds: [],
+            },
+          }
+        : {}),
+    });
+    // Pinned paths leave group summaries, but still count toward root attention.
+    expect(page.totals?.needsYouCount).toBe(1);
+    expect(page.totals?.groups[0]).toMatchObject({
+      total: scoped ? 4096 : generatedCount,
+      attention: 0,
+      unread: 2,
+      activeWork: 2,
+    });
+  }
+  await shared.admin`update session_pins set pinned=true,pinned_at=now()
+    where session_id=${root.id} and subject_id=${grant.subjectId}`;
+  const pinned = await listSessionEntriesForSubject(db, grant.workspaceId, {
+    subjectId: grant.subjectId,
+    parentSessionId: null,
+    limit: 1,
+    includeTotals: true,
+    includePinned: false,
+  });
+  expect(pinned.totals?.needsYouCount).toBe(1);
+  expect(pinned.totals?.groups[0]).toMatchObject({
+    total: 4096,
+    attention: 0,
+    unread: 0,
+    activeWork: 0,
+  });
 }, 180_000);
 
 function explainStatement(query: string, parameters: unknown[]): SQL {
   // Rebind captured parameters through Drizzle; never interpolate their bytes
-  // into SQL text. Exercise the same unprepared driver as production.
+  // into SQL text. Exercise the production driver's prepared-query settings.
   const fragments = query
     .split(/\$(\d+)/g)
     .map((part, index) => (index % 2 === 0 ? sql.raw(part) : sql`${parameters[Number(part) - 1]}`));
