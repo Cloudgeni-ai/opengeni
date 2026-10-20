@@ -1172,6 +1172,9 @@ Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentic
 Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
 shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
 destinations.
+Excel add-in pane: `apps/web/office/` (its own Vite entry), served with its manifest by the
+web server; its live-workbook relay and `excel_run` live in the API. See
+[`excel-addin.md`](excel-addin.md).
 
 ---
 
@@ -1250,6 +1253,26 @@ and the attempt keeps authority. Model-call admission, which runs before every
 model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
 `delivery: "steer"`, or a pending agent Steer instruction). When one exists,
 admission throws `ModelStepHandover` before the request leaves the worker.
+
+At the next claim, an already-queued leading run of plain, never-started Steers
+from the same initiating person shares one replacement attempt. Each message
+keeps its own accepted-time history item and goal snapshot; all but the last
+are settled as superseded without a worker attempt. The last turn alone owns
+execution settings, credentials and grants. Files, personal-resource attachments,
+scheduled or previously started work, realtime delegations, another initiator,
+and ordinary Sends stop the batch; grants and files are never combined.
+Pending machine inputs are delivered once against the final turn, after all
+batched user messages. This can move a pending update later than the former
+one-at-a-time claim order, but never changes an existing history prefix.
+Claim and pre-claim failure settlement share target selection, so rollback or
+failure cannot accidentally settle the first message for an error in the last.
+There is no debounce: a Steer accepted after claim still uses the next-step
+handover above. Batch supersession receipts carry `beforeAttempt: true`, so
+they do not create empty UI responses without hiding real handover text in a
+partial timeline. Conversation monitoring and search share the canonical prompt
+visibility predicate: the server-written batch supersession receipt proves its
+message was consumed, including after compaction or archival purges history.
+Queued, withdrawn and admission-rejected prompts remain hidden until consumed.
 
 The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
@@ -1578,6 +1601,15 @@ A file attached to a human prompt is eager model/compute input only for that
 accepted turn. Accepted private uploads gain session read grants; original ownership
 and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
+
+An app-shot is an image upload whose `files.app_shot` column records the captured
+window (app, title, capture time, accessibility text up to 32,000 characters, and the
+machine and window ids when that computer is connected, plus a browser window's page address
+and the browser profiles connected from that computer). It is written once with the
+upload and never changed. `renderAppShotForModel` (`packages/contracts/src/app-shot.ts`)
+appends it as untrusted data right after the screenshot, inside the user message it was
+sent with, so earlier request bytes never change. See
+[desktop app](design/desktop-app.md#app-shots).
 
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).

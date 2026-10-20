@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "0acf8359c6f61dfb08abe0e6377773ce8ef4a8303d1a563ecea390fded44b3ca"
+      "sha256": "ab5f8efc7a399d0561618a24c1a5090e3eb39467579d82614ed54b44b0b25788"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -54,7 +54,7 @@
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "7c61ecd027bc59bdcf196600364de9a706f6ae9cecb86185f5b376d9b4fe51b9"
+      "sha256": "95e967b74b5e74c0f6d51b67c6d080e58975994df4b600cf0dc699487cc0b906"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -945,7 +945,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "unit-shards",
       "step": "Install dependencies",
-      "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
+      "sha256": "e4fcbcf8dfa696270d7185fee7c21706af0a4b314368f407203418f3493dbeb2"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1251,7 +1251,7 @@
       "workflow": ".github/workflows/open-version-pr.yml",
       "job": "version",
       "step": "Install dependencies",
-      "sha256": "d49a8117b6f9103df4e23d9b163453bde1977e4bbf8b612304d7e3eab784cbae"
+      "sha256": "2f3cbebfa070c23adcaf5e3225846728d14008e1c2f007e5863805be2f78241c"
     },
     {
       "workflow": ".github/workflows/production-pr-heads.yml",

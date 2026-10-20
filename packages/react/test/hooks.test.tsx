@@ -931,48 +931,51 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
-  test("queue Steer stays bridged into chat until the replacement turn starts", async () => {
-    const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
-    let current = queueSnapshot([turn], { version: 5 });
-    const client = fakeClient({
-      getQueue: async () => current,
-      steerQueueItem: async () => {
-        current = queueSnapshot([], { version: 6 });
-        return {
-          receipt: promptReceipt(turn.id, "queue.steer"),
-          snapshot: current,
-        };
-      },
-    });
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
-      [] as SessionEvent[],
-    );
-    await flush();
+  test.each(["turn.started", "turn.superseded"])(
+    "queue Steer stays bridged into chat until %s",
+    async (terminalType) => {
+      const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
+      let current = queueSnapshot([turn], { version: 5 });
+      const client = fakeClient({
+        getQueue: async () => current,
+        steerQueueItem: async () => {
+          current = queueSnapshot([], { version: 6 });
+          return {
+            receipt: promptReceipt(turn.id, "queue.steer"),
+            snapshot: current,
+          };
+        },
+      });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
 
-    await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
-    expect(hook.result.current.acceptedSteers).toEqual([
-      expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
-    ]);
+      await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
+      expect(hook.result.current.acceptedSteers).toEqual([
+        expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
+      ]);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toHaveLength(1);
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toHaveLength(1);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-      {
-        ...makeEvent(11, "turn.started", { triggerEventId: turn.triggerEventId }),
-        turnId: turn.id,
-      },
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toEqual([]);
-    await hook.unmount();
-  });
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+        {
+          ...makeEvent(11, terminalType, { triggerEventId: turn.triggerEventId }),
+          turnId: turn.id,
+        },
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toEqual([]);
+      await hook.unmount();
+    },
+  );
 
   test("a delayed older GET cannot overwrite a newer mutation snapshot", async () => {
     const old = queueSnapshot([fakeTurn({ id: "old" })], { version: 1 });

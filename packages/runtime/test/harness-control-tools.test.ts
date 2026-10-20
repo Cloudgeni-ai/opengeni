@@ -138,11 +138,12 @@ const HARNESS_MODEL_NAMES = FIRST_PARTY_CATALOG.filter((name) =>
 ).map((name) => `opengeni__${name}`);
 
 describe("always-visible harness control tools", () => {
-  test("the harness set is exactly goal lifecycle, command polling, and wait_for_input", () => {
+  test("the set is exactly goal lifecycle, command polling, wait_for_input and excel_run", () => {
     expect([...HARNESS_CONTROL_FIRST_PARTY_TOOLS].sort()).toEqual(
       [
         "command_read",
         "command_wait",
+        "excel_run",
         "goal_complete",
         "goal_pause",
         "goal_resume",

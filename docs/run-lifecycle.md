@@ -428,9 +428,45 @@ same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
-`packages/sdk/src/gateway-realtime-transport.ts`,
+`packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
+
+Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
+one WebSocket path: `POST …/realtime/websocket` asks the provider registry in
+`apps/api/src/realtime-websocket.ts` for the model's provider, which mints a
+short-lived client secret and returns the socket URL, subprotocols, wire
+dialect (`openai` or `ai-gateway`), and the complete session update the browser
+sends unchanged. The browser transport only speaks the two wire dialects; it
+holds no provider-specific configuration. A new OpenAI-compatible provider is
+one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
+aliases of the same handler for older clients.
+
+Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
+and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
+API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The
+mint is authoritative: ElevenLabs applies the minted instructions, delegation
+tool and audio settings at `session.created`, so the entry returns no session
+update. ElevenLabs accepts only `semantic_vad` turn detection (we use high
+eagerness) and its transcription language defaults to English, which also
+steers the reply language; there is no automatic language detection. Its
+transcripts carry expressive audio tags such as `[calm]`, so the answer sets
+`transcriptAudioTags` and the browser strips them before ledger sync.
+
+Voice startup overlaps its waits. Starting voice from the new-chat page calls
+`prestartSessionRealtime` right after the session is created, so begin,
+negotiation and the socket open while the session page loads; that page's
+`useSessionRealtime` adopts the running controller (same workspace, session and
+model) and consumes its `?realtime=` autostart instead of starting a second
+call. The controller asks for the microphone alongside the begin request, and
+the WebSocket transport prepares capture while the server mints the provider
+session; audio is sent only once the socket is open and configured. Capture
+uses an AudioWorklet that sends 20 ms frames (a 4096-sample ScriptProcessor is
+the fallback where blob worklet modules are refused), so the provider hears the
+end of speech without waiting for a large capture block. A delegated turn's
+result is pulled as soon as the session reports the turn's outcome (agent
+message completed or a terminal turn event); the one-second ledger sync remains
+the fallback.
 
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or

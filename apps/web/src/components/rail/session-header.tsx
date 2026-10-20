@@ -194,7 +194,13 @@ export function SessionHeader({
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
-    displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
+    displayLatency === "fast"
+      ? "Fast"
+      : displayLatency === "ultrafast"
+        ? "Ultrafast"
+        : displayLatency === "priority"
+          ? "Priority"
+          : null,
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);

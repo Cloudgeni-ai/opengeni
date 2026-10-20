@@ -115,7 +115,7 @@ export type CodexRealtimeWebrtcResponse = {
   replay: boolean;
 };
 
-export type GatewayRealtimeConnectRequest = {
+export type SessionRealtimeWebsocketRequest = {
   realtimeId: string;
   operationId: string;
   browserInstanceId: string;
@@ -124,13 +124,28 @@ export type GatewayRealtimeConnectRequest = {
   expectedConnectionEpoch: number;
   rotate: boolean;
 };
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export type GatewayRealtimeInitialItem = {
+export type SessionRealtimeWebsocketInitialItem = {
   role: "user" | "developer" | "assistant";
   text: string;
 };
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export type GatewayRealtimeConnectResponse = {
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export type RealtimeWebsocketProtocol = "openai" | "ai-gateway";
+
+export type SessionRealtimeWebsocketResponse = {
+  protocol: RealtimeWebsocketProtocol;
+  /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+  protocols: string[];
+  /** First client event to send once the socket opens; null when the mint configured it. */
+  sessionUpdate: Record<string, unknown> | null;
   token: string;
   url: string;
   upstreamModelId: string;
@@ -139,10 +154,17 @@ export type GatewayRealtimeConnectResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
-  initialItems: GatewayRealtimeInitialItem[];
+  initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
+  /**
+   * Assistant transcripts carry inline delivery tags such as `[calm]`, which
+   * are spoken as tone, not words; clients drop them from transcripts.
+   */
+  transcriptAudioTags?: boolean | undefined;
   replay: false;
 };
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export type ToolGatewayIdentity = {
   serverId: string;
@@ -351,12 +373,19 @@ export type SessionRealtimeModel =
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
   | "workspace-gateway/openai/gpt-realtime-2.1"
   | "workspace-gateway/openai/gpt-realtime-mini"
-  | "workspace-gateway/xai/grok-voice-think-fast-2.0";
+  | "workspace-gateway/xai/grok-voice-think-fast-2.0"
+  | "workspace-elevenlabs/eleven_realtime_v1_max"
+  | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
+  provider:
+    | "OpenGeni"
+    | "Connected Codex"
+    | "Connected SuperGrok"
+    | "Your Gateway"
+    | "Your ElevenLabs";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -653,7 +682,7 @@ export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type LatencyMode = "standard" | "priority" | "fast";
+export type LatencyMode = "standard" | "priority" | "fast" | "ultrafast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
 export type GitRepositoryAccess = "read" | "write";
@@ -710,10 +739,13 @@ export type ToolRef = {
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
-   * Put this server's tool schemas on the first model request instead of behind
-   * `tool_search` progressive discovery. A startup choice only; grants nothing.
+   * Put tool schemas on the first model request instead of behind `tool_search`
+   * progressive discovery: `true` for every tool of this server, or the exact
+   * unprefixed names of its everyday tools (its other tools stay searchable).
+   * A startup choice only; grants nothing, and names the server does not
+   * authorize are ignored.
    */
-  eager?: boolean | undefined;
+  eager?: boolean | string[] | undefined;
 };
 
 export type SessionToolPolicy = {
@@ -779,6 +811,13 @@ export type SessionMcpServerInput = {
   name?: string | undefined;
   url: string;
   allowedTools?: string[] | undefined;
+  /**
+   * Tools the agent has from the first model request: `true` for every tool,
+   * or exact unprefixed tool names (the rest stay searchable). Same as listing
+   * this server in `tools` with `eager`, without turning an omitted `tools`
+   * list into an explicit allow-list.
+   */
+  eager?: boolean | string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
   /** Require human approval for every tool, or only the listed unprefixed tool names. */
@@ -3886,6 +3925,7 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "excel_run"
   | "secret_search"
   | "secret_save"
   | "secret_get"
@@ -4034,7 +4074,7 @@ export type ModelCapabilitiesV1 = {
       })
     | undefined;
   latencyModes: Array<{
-    id: "standard" | "priority" | "fast";
+    id: "standard" | "priority" | "fast" | "ultrafast";
     upstream: ModelCapabilitySupportV1;
     runnable: boolean;
     billingMultiplierBps?: number | undefined;
@@ -6393,10 +6433,14 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
+/** `office`: the Opengeni add-in for Excel, signed in from its task pane. */
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux" | "office";
 
 export type NativeAppAuthorizeInput = {
-  /** Exactly `<registered scheme>://auth/callback`. */
+  /**
+   * Exactly `<registered scheme>://auth/callback`, or for the Office add-in the
+   * deployment's own `<web origin>/office/auth-callback.html`.
+   */
   redirectUri: string;
   /** Base64url SHA-256 of the app's code verifier. */
   codeChallenge: string;
@@ -7658,6 +7702,42 @@ export type FileAccess = {
   whoCanOpen: string;
 };
 
+/**
+ * An app-shot: a screenshot of another app's window, sent from a desktop app,
+ * with the window it shows and the text the window exposed. Stored with the
+ * file once and never changed.
+ */
+export type AppShotCapture = {
+  /** The app's name as the system shows it. */
+  app: string;
+  /** The app's stable identifier, where the system has one (macOS bundle id). */
+  bundleId?: string | undefined;
+  /** The window title; empty when the window has none. */
+  title: string;
+  /** ISO timestamp. */
+  capturedAt: string;
+  platform: "macos" | "windows" | "linux";
+  /** Text read through accessibility, at most 32,000 characters. */
+  text?: string | undefined;
+  /** The window had more text than was kept. */
+  textTruncated?: boolean | undefined;
+  /** The window as the system identifies it. */
+  window?: { processId: number; windowId: number } | undefined;
+  /** The computer the window is on, when connected to this workspace. */
+  computer?: { name: string; sandboxId?: string | undefined } | undefined;
+  /**
+   * A web browser window's page address (http or https) and, when the computer
+   * is connected, the browser profiles connected from it (at most 10) by the
+   * attached browser device id browser tools use.
+   */
+  browser?:
+    | {
+        url: string;
+        profiles?: { deviceId: string; name: string }[] | undefined;
+      }
+    | undefined;
+};
+
 export type FileAsset = {
   /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
@@ -7677,6 +7757,8 @@ export type FileAsset = {
   updatedAt: string;
   /** Present on upload, publish and sharing results: who can open the file. */
   access?: FileAccess | undefined;
+  /** A screenshot sent as an app-shot: the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
@@ -7937,6 +8019,8 @@ export type CreateFileUploadRequest = {
   contentType: string;
   sizeBytes: number;
   sha256?: string | undefined;
+  /** The upload is an app-shot (images only). */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type CreateFileUploadResponse = {
@@ -7972,6 +8056,8 @@ export type UploadFileInput = {
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** The upload is an app-shot (images only): the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------

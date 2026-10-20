@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0874_elevenlabs_realtime_models.sql",
       "0873_mcp_binding_delegation_revocation.sql",
       "0872_agent_update_blockers.sql",
       "0867_member_teammate_permissions_backfill.sql",
@@ -2886,6 +2887,7 @@ describe("release schema contract", () => {
       "0869_personal_workspace_editable_artifacts.sql",
       "0870_invitation_binding_seat_scope.sql",
       "0871_explicit_workspace_recovery.sql",
+      "0872_file_app_shot.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

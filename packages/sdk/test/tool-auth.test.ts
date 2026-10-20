@@ -429,6 +429,29 @@ describe("session proxy toolServer", () => {
     expect(collision.writes()).toHaveLength(0);
   });
 
+  test("eager names everyday tools on the attachment without an explicit allow-list", async () => {
+    const { writes, browser } = proxySetup({
+      toolServer: {
+        url: TOOL_URL,
+        secret: SECRET,
+        eager: ["searchPosts", "getPost", "searchPosts"],
+      },
+    });
+    await browser.createSession(WORKSPACE_ID, { initialMessage: "hi" } as never);
+    const body = writes()[0]!.body;
+    expect(body.tools).toBeUndefined(); // workspace defaults preserved
+    expect(body.mcpServers[0]).toMatchObject({ id: "app", eager: ["searchPosts", "getPost"] });
+
+    const explicit = proxySetup({
+      createSession: ({ initialMessage }) => ({ initialMessage, tools: [] }),
+      toolServer: { url: TOOL_URL, secret: SECRET, eager: ["getPost"] },
+    });
+    await explicit.browser.createSession(WORKSPACE_ID, { initialMessage: "hi" } as never);
+    expect(explicit.writes()[0]!.body.tools).toEqual([
+      { kind: "mcp", id: "app", eager: ["getPost"] },
+    ]);
+  });
+
   test("send, steer, submit, approval, and answer each rotate a fresh token", async () => {
     const { writes, requests, browser } = proxySetup();
     await browser.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi" });
@@ -523,6 +546,8 @@ describe("session proxy toolServer", () => {
       { url: "/api/mcp", secret: SECRET },
       { url: TOOL_URL, secret: SECRET, id: "bad id" },
       { url: TOOL_URL, secret: SECRET, approvals: { ask: [""] } },
+      { url: TOOL_URL, secret: SECRET, eager: [""] },
+      { url: TOOL_URL, secret: SECRET, eager: "getPost" },
     ]) {
       expect(() =>
         createSessionProxyHandler(service, {

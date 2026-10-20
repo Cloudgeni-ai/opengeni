@@ -72,6 +72,8 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
   const [query, setQuery] = useState("");
   const view = modelPickerMenuView(t, props, query);
   const { messages, groups, thinking } = view;
+  const selectedSpeed =
+    thinking?.speeds?.find((speed) => speed.id === props.latencyMode) ?? thinking?.speeds?.[0];
   const close = () => {
     setQuery("");
     props.onClose();
@@ -335,119 +337,188 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
           ) : null}
           {thinking ? (
             <>
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  minHeight: 32,
-                }}
-              >
-                {thinking.showThinking ? (
-                  <Text style={{ ...muted, color: c["fg-subtle"] }}>{messages.thinking}</Text>
-                ) : (
-                  <View />
-                )}
-                {thinking.showFast ? (
-                  <Pressable
-                    accessibilityRole="switch"
-                    accessibilityLabel={`${messages.fast}, ${messages.fastRateHint}`}
-                    accessibilityState={{
-                      checked: props.latencyMode === "fast",
-                      disabled: Boolean(props.disabled || thinking.disabled),
-                    }}
-                    disabled={props.disabled || thinking.disabled}
-                    onPress={() => {
-                      props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast");
-                      props.onSelectionFeedback?.();
-                    }}
-                    style={({ pressed }) => ({
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 6,
-                      minHeight: 36,
-                      paddingHorizontal: 8,
-                      borderRadius: theme.radius.sm,
-                      backgroundColor: pressed ? c.hover : "transparent",
-                    })}
-                  >
-                    <Icon
-                      name="zap"
-                      size={14}
-                      color={c["fg-muted"]}
-                      fill={props.latencyMode === "fast" ? c["fg-muted"] : undefined}
-                    />
-                    <Text style={muted}>{messages.fast}</Text>
-                    <Text style={{ ...muted, color: c["fg-subtle"] }}>{messages.fastRateHint}</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-              {thinking.showThinking ? (
+              {thinking.showThinking || thinking.showFast ? (
                 <View
-                  accessibilityRole="radiogroup"
-                  accessibilityLabel={messages.thinkingEffort}
                   style={{
                     flexDirection: "row",
-                    gap: 2,
-                    padding: 2,
-                    borderRadius: theme.radius.md,
-                    backgroundColor: c["surface-2"],
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    minHeight: 32,
                   }}
                 >
-                  {thinking.efforts.map((effort) => {
-                    const checked = effort === thinking.value;
-                    const disabled = Boolean(props.disabled || thinking.disabled);
-                    return (
-                      <Pressable
-                        key={effort}
-                        accessibilityRole="radio"
-                        accessibilityLabel={labelReasoningEffort(t, effort)}
-                        accessibilityState={{ checked, disabled }}
-                        disabled={disabled}
-                        onPress={() => {
-                          if (checked) return;
-                          props.onEffortChange(effort);
-                          props.onSelectionFeedback?.();
-                        }}
-                        style={{
-                          flex: 1,
-                          minHeight: 36,
-                          alignItems: "center",
-                          justifyContent: "center",
-                          borderRadius: theme.radius.sm,
-                          backgroundColor: checked ? c["surface-1"] : "transparent",
-                          opacity: disabled ? 0.5 : 1,
-                          ...(checked
-                            ? {
-                                shadowColor: "#000",
-                                shadowOpacity: 0.06,
-                                shadowRadius: 2,
-                                shadowOffset: { width: 0, height: 1 },
-                                elevation: 1,
-                              }
-                            : null),
-                        }}
-                      >
-                        <Text
-                          numberOfLines={1}
-                          style={{
-                            ...fontStyle(theme),
-                            fontSize: 13,
-                            color: checked ? c.fg : c["fg-muted"],
-                          }}
-                        >
-                          {compactEffortLabel(t, effort, labelReasoningEffort(t, effort))}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+                  {thinking.showThinking ? (
+                    <Text style={{ ...muted, color: c["fg-subtle"] }}>{messages.thinking}</Text>
+                  ) : (
+                    <View />
+                  )}
+                  {thinking.showFast ? (
+                    <Pressable
+                      accessibilityRole="switch"
+                      accessibilityLabel={`${messages.fast}, ${messages.fastRateHint}`}
+                      accessibilityState={{
+                        checked: props.latencyMode === "fast",
+                        disabled: Boolean(props.disabled || thinking.disabled),
+                      }}
+                      disabled={props.disabled || thinking.disabled}
+                      onPress={() => {
+                        props.onLatencyModeChange(
+                          props.latencyMode === "fast" ? "standard" : "fast",
+                        );
+                        props.onSelectionFeedback?.();
+                      }}
+                      style={({ pressed }) => ({
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 6,
+                        minHeight: 36,
+                        paddingHorizontal: 8,
+                        borderRadius: theme.radius.sm,
+                        backgroundColor: pressed ? c.hover : "transparent",
+                      })}
+                    >
+                      <Icon
+                        name="zap"
+                        size={14}
+                        color={c["fg-muted"]}
+                        fill={props.latencyMode === "fast" ? c["fg-muted"] : undefined}
+                      />
+                      <Text style={muted}>{messages.fast}</Text>
+                      <Text style={{ ...muted, color: c["fg-subtle"] }}>
+                        {messages.fastRateHint}
+                      </Text>
+                    </Pressable>
+                  ) : null}
                 </View>
+              ) : null}
+              {thinking.showThinking ? (
+                <SegmentedChoice
+                  label={messages.thinkingEffort ?? messages.thinking}
+                  value={thinking.value}
+                  disabled={Boolean(props.disabled || thinking.disabled)}
+                  options={thinking.efforts.map((effort) => ({
+                    id: effort,
+                    label: compactEffortLabel(t, effort, labelReasoningEffort(t, effort)),
+                    accessibilityLabel: labelReasoningEffort(t, effort),
+                  }))}
+                  onChange={(effort) => {
+                    props.onEffortChange(effort);
+                    props.onSelectionFeedback?.();
+                  }}
+                />
+              ) : null}
+              {thinking.speeds ? (
+                <>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      minHeight: 32,
+                    }}
+                  >
+                    <Text style={{ ...muted, color: c["fg-subtle"] }}>{messages.speed}</Text>
+                    {selectedSpeed?.hint ? (
+                      <Text style={{ ...muted, color: c["fg-subtle"] }}>{selectedSpeed.hint}</Text>
+                    ) : null}
+                  </View>
+                  <SegmentedChoice
+                    label={messages.speed ?? messages.fast}
+                    value={selectedSpeed?.id ?? "standard"}
+                    disabled={Boolean(props.disabled || thinking.disabled)}
+                    options={thinking.speeds.map((speed) => ({
+                      id: speed.id,
+                      label: speed.label,
+                      accessibilityLabel: speed.hint
+                        ? `${speed.label}, ${speed.hint}`
+                        : speed.label,
+                      icon: speed.id === "standard" ? undefined : "zap",
+                    }))}
+                    onChange={(speed) => {
+                      props.onLatencyModeChange(speed);
+                      props.onSelectionFeedback?.();
+                    }}
+                  />
+                </>
               ) : null}
             </>
           ) : null}
         </View>
       ) : null}
     </BottomSheet>
+  );
+}
+
+/** A horizontal single-choice row, shared by the effort and speed choices. */
+function SegmentedChoice<T extends string>(props: {
+  label: string | undefined;
+  value: T;
+  disabled: boolean;
+  options: ReadonlyArray<{
+    id: T;
+    label: string;
+    accessibilityLabel: string;
+    icon?: NativeIconName | undefined;
+  }>;
+  onChange: (value: T) => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View
+      accessibilityRole="radiogroup"
+      accessibilityLabel={props.label}
+      style={{
+        flexDirection: "row",
+        gap: 2,
+        padding: 2,
+        borderRadius: theme.radius.md,
+        backgroundColor: c["surface-2"],
+      }}
+    >
+      {props.options.map((option) => {
+        const checked = option.id === props.value;
+        const color = checked ? c.fg : c["fg-muted"];
+        return (
+          <Pressable
+            key={option.id}
+            accessibilityRole="radio"
+            accessibilityLabel={option.accessibilityLabel}
+            accessibilityState={{ checked, disabled: props.disabled }}
+            disabled={props.disabled}
+            onPress={() => {
+              if (!checked) props.onChange(option.id);
+            }}
+            style={{
+              flex: 1,
+              flexDirection: "row",
+              gap: 4,
+              minHeight: 36,
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: theme.radius.sm,
+              backgroundColor: checked ? c["surface-1"] : "transparent",
+              opacity: props.disabled ? 0.5 : 1,
+              ...(checked
+                ? {
+                    shadowColor: "#000",
+                    shadowOpacity: 0.06,
+                    shadowRadius: 2,
+                    shadowOffset: { width: 0, height: 1 },
+                    elevation: 1,
+                  }
+                : null),
+            }}
+          >
+            {option.icon ? (
+              <Icon name={option.icon} size={13} color={color} fill={checked ? color : undefined} />
+            ) : null}
+            <Text numberOfLines={1} style={{ ...fontStyle(theme), fontSize: 13, color }}>
+              {option.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
   );
 }
 

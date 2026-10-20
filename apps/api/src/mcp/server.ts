@@ -16,6 +16,7 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
+import { registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   sessionChatUrl,
@@ -1123,6 +1124,18 @@ export function buildOpenGeniMcpServer(
       },
       attempt: () => exactAgentCommandContext(grant, sessionId),
       json,
+    });
+  }
+  // Office.js code in a workbook the person has open with the Opengeni add-in.
+  if (sessionId !== null) {
+    registerExcelTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
     });
   }
   // PolicyMcpServer applies each tool's own permission contract. Register this
@@ -2986,7 +2999,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is

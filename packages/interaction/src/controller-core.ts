@@ -516,7 +516,7 @@ export class InteractionControllerCore<
     if (!target) {
       throw new InteractionControllerError(
         "target_not_found",
-        `${this.adapter.resourceLabel} target does not exist`,
+        `${this.adapter.resourceLabel} target ${JSON.stringify(targetId)} does not exist; list the current targets and use one of their ids`,
       );
     }
     const parsed = this.adapter.parseTarget(target);

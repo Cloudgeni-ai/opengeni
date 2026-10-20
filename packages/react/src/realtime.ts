@@ -15,6 +15,7 @@ export {
   SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
+  prestartSessionRealtime,
   useRealtimeModelSelection,
   useSessionCodexRealtime,
   useSessionRealtime,

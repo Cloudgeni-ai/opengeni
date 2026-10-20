@@ -150,10 +150,16 @@ export function readableWorkStatus(
 
 /** Whether a readable turn's work fold starts expanded. */
 export function readableWorkDefaultOpen(group: ActivityGroup): true | undefined {
-  const phases = group.items.filter((item) => item.kind === "startup-phase");
   return timelineGroupContainsPresentedImage(group) ||
     group.outcome === "failed" ||
-    phases.some((item) => item.status === "failed" || item.status === "cancelled")
+    group.items.some(
+      (item) =>
+        item.kind === "startup-phase" &&
+        (item.status === "failed" ||
+          // A cancelled phase with a blocked reason is an expected wait (for
+          // example compacting the conversation first), not an interruption.
+          (item.status === "cancelled" && !item.blockedReason)),
+    )
     ? true
     : undefined;
 }

@@ -282,6 +282,7 @@ import {
   assertToolRefsSubset,
   availableToolRefs,
   mergeToolRefs,
+  mergeToolRefEager,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
@@ -996,7 +997,7 @@ export async function createAndStartSessionWithOutcome(input: {
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
-  latencyMode?: "standard" | "priority" | "fast";
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1912,7 +1913,7 @@ type PostUserMessageTurnInput = {
   composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
-  latencyMode?: "standard" | "priority" | "fast" | null;
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -3201,7 +3202,10 @@ async function createSessionForRequestInFileScope(
   if (!parentSession) {
     selectedTools = withSameRequestSessionMcpServerTools(
       selectedTools,
-      sessionMcpServers.runtimeServers,
+      sessionMcpServers.runtimeServers.map((server) => ({
+        id: server.id,
+        eager: payload.mcpServers.find((input) => input.id === server.id)?.eager,
+      })),
     );
   }
   if (payload.excludedMcpServerIds !== undefined) {
@@ -4209,7 +4213,7 @@ function sessionPromptBoundaryRequestHash(input: {
   composerDraftResources?: ResourceRef[];
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
-  latencyMode: "standard" | "priority" | "fast" | null;
+  latencyMode: "standard" | "priority" | "fast" | "ultrafast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
@@ -4266,7 +4270,7 @@ async function acceptSessionUserMessageInFileScope(
     composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
-    latencyMode?: "standard" | "priority" | "fast" | null;
+    latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
@@ -5830,13 +5834,31 @@ export async function readSessionLineage(
  */
 export function withSameRequestSessionMcpServerTools(
   tools: ToolRef[],
-  attachedServers: ReadonlyArray<{ id: string }>,
+  attachedServers: ReadonlyArray<{ id: string; eager?: ToolRef["eager"] }>,
 ): ToolRef[] {
-  const selectedIds = new Set(tools.map((tool) => tool.id));
+  const attachedEager = new Map(
+    attachedServers.flatMap((server) => {
+      const eager = mergeToolRefEager(server.eager, undefined);
+      return eager === undefined ? [] : [[server.id, eager] as const];
+    }),
+  );
+  // An attachment's eager marker joins an explicit ref's own marker; every
+  // other explicit marker (optional, allowedTools) is kept exactly.
+  const selected = attachedEager.size
+    ? tools.map((tool) => {
+        const eager = attachedEager.get(tool.id);
+        if (eager === undefined) return tool;
+        return { ...tool, eager: mergeToolRefEager(tool.eager, eager)! };
+      })
+    : tools;
+  const selectedIds = new Set(selected.map((tool) => tool.id));
   const missing = attachedServers
     .filter((server) => !selectedIds.has(server.id))
-    .map((server) => ({ kind: "mcp" as const, id: server.id }));
-  return missing.length === 0 ? tools : mergeToolRefs(tools, missing);
+    .map((server) => {
+      const eager = attachedEager.get(server.id);
+      return { kind: "mcp" as const, id: server.id, ...(eager !== undefined ? { eager } : {}) };
+    });
+  return missing.length === 0 ? selected : mergeToolRefs(selected, missing);
 }
 
 function withFirstPartyTools(

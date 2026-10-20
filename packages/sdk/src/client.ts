@@ -279,6 +279,8 @@ import type {
   CodexRealtimeWebrtcResponse,
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -2393,7 +2395,26 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  /**
+   * Open (or rotate) the provider WebSocket of an active realtime mode. The
+   * response carries a short-lived client secret and the provider session.
+   */
+  async negotiateRealtimeWebsocket(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRealtimeWebsocketRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeWebsocketResponse> {
+    return await this.requestJson<SessionRealtimeWebsocketResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/realtime/websocket`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateGatewayRealtime(
     workspaceId: string,
     sessionId: string,
@@ -2409,7 +2430,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token from a connected SuperGrok account. */
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateXaiSubscriptionRealtime(
     workspaceId: string,
     sessionId: string,
@@ -7545,6 +7566,7 @@ export class OpenGeniClient {
             ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
             sha256,
+            ...(input.appShot ? { appShot: input.appShot } : {}),
           },
           { signal },
         ),

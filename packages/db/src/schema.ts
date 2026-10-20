@@ -5697,7 +5697,9 @@ export const sessionRealtimeModes = pgTable(
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
         'workspace-gateway/openai/gpt-realtime-2.1',
         'workspace-gateway/openai/gpt-realtime-mini',
-        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+        'workspace-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-elevenlabs/eleven_realtime_v1_max',
+        'workspace-elevenlabs/eleven_realtime_v1_mini'
       )`,
     ),
     endReasonValid: check(
@@ -6226,6 +6228,8 @@ export const files = pgTable(
     sha256: text("sha256"),
     bucket: text("bucket").notNull(),
     objectKey: text("object_key").notNull(),
+    /** An app-shot's capture (AppShotCapture); written with the upload, never changed. */
+    appShot: jsonb("app_shot"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

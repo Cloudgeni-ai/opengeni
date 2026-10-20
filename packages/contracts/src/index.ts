@@ -17,6 +17,8 @@ export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./file-access";
 import { FileAccess } from "./file-access";
+export * from "./app-shot";
+import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -820,9 +822,18 @@ export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["standard", "priority", "fast"]),
+  z.enum(["standard", "priority", "fast", "ultrafast"]),
 );
 export type LatencyMode = z.infer<typeof LatencyMode>;
+
+/**
+ * A subscription account's observed model list records each model it offers
+ * at a service tier as `<slug>@<tier>` (for example `gpt-6-astra@ultrafast`),
+ * next to the plain slug. Slugs never contain `@`, so slug checks are unchanged.
+ */
+export function modelServiceTierCatalogEntry(slug: string, tierId: string): string {
+  return `${slug}@${tierId}`;
+}
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
@@ -1053,6 +1064,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "excel_run",
   "secret_search",
   "secret_save",
   "secret_get",
@@ -6446,6 +6458,8 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     updatedAt: z.string(),
     /** Present on upload, publish and sharing results: who can open the file. */
     access: FileAccess.optional(),
+    /** A screenshot sent as an app-shot: the window it shows and what it said. */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6480,6 +6494,12 @@ export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
     contentType: z.string().min(1),
     sizeBytes: z.number().int().positive(),
     sha256: z.string().min(1).optional(),
+    /**
+     * The upload is an app-shot: an image of another app's window plus what
+     * the window said. Stored with the file once and never changed. Only for
+     * images.
+     */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type CreateFileUploadRequest = z.infer<typeof CreateFileUploadRequest>;
@@ -7160,14 +7180,23 @@ export const WorkspaceMemorySearchResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
+/** Exact unprefixed MCP tool names that stay on the first model request. */
+export const McpEagerToolNames = /* @__PURE__ */ defineSchema(() =>
+  z.array(z.string().min(1).max(200)).max(2000),
+);
+export type McpEagerToolNames = z.infer<typeof McpEagerToolNames>;
+
 export const ToolRef = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.literal("mcp"),
     id: z.string().min(1),
     // Session-scoped startup choice. `true` prepares this server's authorized
     // schemas before the first model request; absent/false keeps it behind
-    // progressive discovery. This never grants a server or tool permission.
-    eager: z.boolean().optional(),
+    // progressive discovery. A list of exact unprefixed tool names prepares the
+    // server before the first request too, but puts only those tools on it; the
+    // server's other tools stay searchable. This never grants a server or tool
+    // permission: a listed name the server does not authorize is ignored.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     // Non-fatal-on-connect marker for MCP server refs that can degrade
     // gracefully. On new input, absent/false is STRICT: the id must be configured
     // and an unavailable registered server fails closed when its preparation is
@@ -7328,6 +7357,10 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     name: z.string().min(1).optional(),
     url: httpsUrl,
     allowedTools: z.array(z.string().min(1)).optional(),
+    // Seeds this server's selection `eager` marker (see ToolRef.eager) without
+    // turning an omitted `tools` list into an explicit allow-list: `true` or the
+    // exact unprefixed tool names the agent has from the first model request.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     timeoutMs: z.number().int().positive().optional(),
     cacheToolsList: z.boolean().optional(),
     // The caller resolves an approval pause with `user.approvalDecision`.
@@ -7491,7 +7524,7 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
 
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
-    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const eager = mergeToolRefEager(prior.eager, tool.eager);
     const allowedTools =
       prior.allowedTools === undefined
         ? tool.allowedTools
@@ -7502,11 +7535,34 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
-      ...(eager ? { eager } : {}),
+      ...(eager !== undefined ? { eager } : {}),
       ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
+}
+
+/**
+ * Combine two eager markers for the same server: `true` wins, otherwise the
+ * named tools are united in first-seen order. Undefined when neither asks for
+ * anything on the first request.
+ */
+export function mergeToolRefEager(
+  left: ToolRef["eager"],
+  right: ToolRef["eager"],
+): true | string[] | undefined {
+  if (left === true || right === true) return true;
+  const names = [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])];
+  return names.length > 0 ? [...new Set(names)] : undefined;
+}
+
+/**
+ * The exact tools a ref puts on the first model request: every tool (`true`),
+ * the named tools (a list), or none (absent/false).
+ */
+export function toolRefEagerToolNames(eager: ToolRef["eager"]): true | readonly string[] {
+  if (eager === true) return true;
+  return Array.isArray(eager) ? eager : [];
 }
 
 export function mergeResourceRefs(
@@ -8316,7 +8372,8 @@ export const CodexRealtimeWebrtcResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
 
-export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
+/** Open (or rotate) the provider WebSocket connection of an active realtime mode. */
+export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
     realtimeId: z.string().uuid(),
     operationId: z.string().uuid(),
@@ -8325,19 +8382,43 @@ export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
     rotate: z.boolean(),
   }).strict(),
 );
-export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export const GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export const GatewayRealtimeInitialItem = /* @__PURE__ */ defineSchema(() =>
+export const SessionRealtimeWebsocketInitialItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     role: z.enum(["user", "developer", "assistant"]),
     text: z.string().min(1).max(131_072),
   }),
 );
-export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+export type SessionRealtimeWebsocketInitialItem = z.infer<
+  typeof SessionRealtimeWebsocketInitialItem
+>;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export const GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export const RealtimeWebsocketProtocol = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["openai", "ai-gateway"]),
+);
+export type RealtimeWebsocketProtocol = z.infer<typeof RealtimeWebsocketProtocol>;
+
+export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      protocol: RealtimeWebsocketProtocol,
+      /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+      protocols: z.array(z.string().min(1).max(16_384)).min(1).max(8),
+      /** First client event to send once the socket opens; null when the mint configured it. */
+      sessionUpdate: z.record(z.string(), z.unknown()).nullable(),
       token: z.string().min(1).max(16_384),
       url: z.string().url(),
       upstreamModelId: z.string().min(1).max(256),
@@ -8346,13 +8427,22 @@ export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
-      initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+      initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
+      /**
+       * Assistant transcripts carry inline delivery tags such as `[calm]`,
+       * which are spoken as tone, not words; clients drop them from transcripts.
+       */
+      transcriptAudioTags: z.boolean().optional(),
       replay: z.literal(false),
     })
     .strict(),
 );
-export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+export type SessionRealtimeWebsocketResponse = z.infer<typeof SessionRealtimeWebsocketResponse>;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export const GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export const ActivateCodexRealtimeConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
@@ -8493,6 +8583,8 @@ export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
     "workspace-gateway/openai/gpt-realtime-2.1",
     "workspace-gateway/openai/gpt-realtime-mini",
     "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
   ]),
 );
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
@@ -8501,7 +8593,13 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
   z.object({
     id: SessionRealtimeModel,
     label: z.string().min(1),
-    provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
+    provider: z.enum([
+      "OpenGeni",
+      "Connected Codex",
+      "Connected SuperGrok",
+      "Your Gateway",
+      "Your ElevenLabs",
+    ]),
     description: z.string().min(1),
     available: z.boolean(),
     unavailableReason: z.string().nullable(),
@@ -21206,7 +21304,7 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
     }).optional(),
     latencyModes: z.array(
       z.object({
-        id: z.enum(["standard", "priority", "fast"]),
+        id: z.enum(["standard", "priority", "fast", "ultrafast"]),
         upstream: ModelCapabilitySupportV1,
         runnable: z.boolean(),
         billingMultiplierBps: z.number().int().positive().optional(),

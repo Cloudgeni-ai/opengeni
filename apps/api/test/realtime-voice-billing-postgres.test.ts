@@ -435,6 +435,11 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       }),
     });
     expect(minted.status).toBe(200);
+    // The mint settles the first minute without delaying the connection response.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ((await getBillingBalance(client.db, value.accountId)).balanceMicros === 0) break;
+      await Bun.sleep(20);
+    }
     expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
 
     const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {

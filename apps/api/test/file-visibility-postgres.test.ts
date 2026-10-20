@@ -228,3 +228,37 @@ test("an upload says who will be able to open it", async () => {
   expect(access.whoCanOpen).not.toMatch(/\byou\b/iu);
   expect(access.whoCanOpen).toContain("is told it is private");
 });
+
+test("an app-shot travels with its screenshot and only with an image", async () => {
+  const f = await fixture();
+  const appShot = {
+    app: "Safari",
+    bundleId: "com.apple.Safari",
+    title: "Example Domain",
+    capturedAt: "2026-10-20T09:15:00.000Z",
+    platform: "macos",
+    text: "Example Domain\nThis domain is for use in documentation examples.",
+    window: { processId: 812, windowId: 4211 },
+  };
+  const screenshot = await f.call(f.owner, "POST", "/files/uploads", {
+    filename: "Safari - Example Domain.png",
+    contentType: "image/png",
+    sizeBytes: 4,
+    appShot,
+  });
+  expect(screenshot.status, await screenshot.clone().text()).toBe(201);
+  const { fileId } = (await screenshot.json()) as { fileId: string };
+  const [row] = await shared.admin`select app_shot from files where id = ${fileId}`;
+  expect(row!.app_shot).toEqual(appShot);
+  const read = await f.call(f.owner, "GET", `/files/${fileId}`);
+  expect(read.status, await read.clone().text()).toBe(200);
+  expect(((await read.json()) as { appShot?: unknown }).appShot).toEqual(appShot);
+
+  const notAnImage = await f.call(f.owner, "POST", "/files/uploads", {
+    filename: "notes.txt",
+    contentType: "text/plain",
+    sizeBytes: 4,
+    appShot,
+  });
+  expect(notAnImage.status).toBe(422);
+});

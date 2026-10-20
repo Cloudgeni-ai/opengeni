@@ -1661,9 +1661,12 @@ export function buildTimeline(
 
       case "turn.superseded":
       case "turn.cancelled": {
-        // A retraction of a never-started queued turn is not a turn ending —
-        // the message was withdrawn before any work happened; show nothing.
-        // A null turnId proves nothing, so it keeps the legacy finalize path.
+        // Only an explicit batch receipt proves a supersession never ran:
+        // a partial history may omit a real handover's earlier execution.
+        if (event.type === "turn.superseded" && payload.beforeAttempt === true) {
+          break;
+        }
+        // A withdrawn queued turn must not manufacture an empty response.
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
@@ -3038,7 +3041,11 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
         fallbackSeqByTurn.set(turnId, event.sequence);
       }
     }
-    if (turnId && isTurnExecutionEvidence(event.type)) {
+    if (
+      turnId &&
+      isTurnExecutionEvidence(event.type) &&
+      !(event.type === "turn.superseded" && payload.beforeAttempt === true)
+    ) {
       startedTurnIds.add(turnId);
     }
   }

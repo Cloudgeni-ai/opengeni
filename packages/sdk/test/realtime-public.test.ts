@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { SessionRealtimeModel as SessionRealtimeModelSchema } from "@opengeni/contracts";
 import {
   createSessionRealtimeController,
   hasStoredSessionRealtimeOwnerProof,
+  isSessionRealtimeModel,
+  SESSION_REALTIME_MODELS,
   sessionRealtimeOwnerStorageKey,
   sessionRealtimeOwnerStorageNamespace,
   sessionRealtimeTransportKind,
@@ -12,17 +15,7 @@ import {
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
-const MODELS: readonly SessionRealtimeModel[] = [
-  "opengeni-azure/gpt-live-1",
-  "gpt-live-1-boulder-alpha",
-  "supergrok/grok-voice-think-fast-2.0",
-  "opengeni-gateway/openai/gpt-realtime-2.1",
-  "opengeni-gateway/openai/gpt-realtime-mini",
-  "opengeni-gateway/xai/grok-voice-think-fast-2.0",
-  "workspace-gateway/openai/gpt-realtime-2.1",
-  "workspace-gateway/openai/gpt-realtime-mini",
-  "workspace-gateway/xai/grok-voice-think-fast-2.0",
-];
+const MODELS: readonly SessionRealtimeModel[] = SESSION_REALTIME_MODELS;
 
 function storageFixture() {
   const values = new Map<string, string>();
@@ -34,6 +27,15 @@ function storageFixture() {
 }
 
 describe("@opengeni/sdk/realtime", () => {
+  test("lists exactly the realtime models the API accepts", () => {
+    expect([...SESSION_REALTIME_MODELS].sort()).toEqual(
+      [...SessionRealtimeModelSchema.options].sort(),
+    );
+    for (const model of SESSION_REALTIME_MODELS) expect(isSessionRealtimeModel(model)).toBe(true);
+    expect(isSessionRealtimeModel("workspace-elevenlabs/unknown")).toBe(false);
+    expect(isSessionRealtimeModel(null)).toBe(false);
+  });
+
   test("selects the exact transport and owner namespace for every public model", () => {
     for (const model of MODELS) {
       const expected =
@@ -41,16 +43,17 @@ describe("@opengeni/sdk/realtime", () => {
           ? "azure-live"
           : model === "gpt-live-1-boulder-alpha"
             ? "codex"
-            : model === "supergrok/grok-voice-think-fast-2.0"
-              ? "xai-subscription"
-              : "gateway";
+            : "websocket";
       expect(sessionRealtimeTransportKind(model)).toBe(expected);
+      // Persisted owner keys keep their historical per-provider namespaces.
       const namespace =
         expected === "azure-live"
           ? "azure-live-owner"
-          : expected === "xai-subscription"
-            ? "xai-realtime-owner"
-            : `${expected}-realtime-owner`;
+          : expected === "codex"
+            ? "codex-realtime-owner"
+            : model === "supergrok/grok-voice-think-fast-2.0"
+              ? "xai-realtime-owner"
+              : "gateway-realtime-owner";
       expect(sessionRealtimeOwnerStorageNamespace(model)).toBe(namespace);
       expect(sessionRealtimeOwnerStorageKey(WORKSPACE_ID, SESSION_ID, model)).toBe(
         `opengeni:${namespace}:${WORKSPACE_ID}:${SESSION_ID}`,
@@ -144,6 +147,7 @@ describe("@opengeni/sdk/realtime", () => {
       beginSessionRealtime: async () => ({}) as never,
       heartbeatSessionRealtime: async () => ({}) as never,
       negotiateCodexRealtimeWebrtc: async () => ({}) as never,
+      negotiateRealtimeWebsocket: async () => ({}) as never,
       negotiateGatewayRealtime: async () => ({}) as never,
       negotiateXaiSubscriptionRealtime: async () => ({}) as never,
       activateCodexRealtimeConnection: async () => ({}) as never,
@@ -159,6 +163,7 @@ describe("@opengeni/sdk/realtime", () => {
         "getWorkspaceRealtimeModelCatalog",
         "heartbeatSessionRealtime",
         "negotiateCodexRealtimeWebrtc",
+        "negotiateRealtimeWebsocket",
         "negotiateGatewayRealtime",
         "negotiateXaiSubscriptionRealtime",
         "syncSessionRealtimeLedger",

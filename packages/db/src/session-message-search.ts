@@ -8,6 +8,7 @@ import type {
 } from "@opengeni/contracts";
 import type { Database } from "./database";
 import * as schema from "./schema";
+import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibility";
 import { readSessionMessageSliceInScope } from "./session-event-slices";
 import { fromPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "./lossless-json";
 
@@ -163,11 +164,7 @@ export async function scanSessionMessages(
           sql`(${e.turnAssociation} is null or ${e.turnAssociation} = 'current')`,
           sql`${e.duplicateOfEventId} is null`,
           sql`jsonb_typeof(${e.payload}->'text') = 'string'`,
-          sql`(${e.type} <> 'user.message' or not exists (
-        select 1 from ${schema.sessionTurns} unclaimed
-        where unclaimed.workspace_id = ${workspaceId} and unclaimed.session_id = ${e.sessionId}
-          and unclaimed.trigger_event_id = ${e.id} and unclaimed.source in ('user', 'api')
-          and unclaimed.started_at is null))`,
+          excludeUnclaimedHumanPromptEventFilter(workspaceId),
           sql`(${e.type} <> 'agent.message.completed' or not exists (
         select 1 from ${schema.sessionEvents} other_message
         where other_message.workspace_id = ${workspaceId} and other_message.session_id = ${e.sessionId}

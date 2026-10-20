@@ -2226,6 +2226,64 @@ describe("Codex realtime browser controller", () => {
     });
   });
 
+  test("acquires the microphone while begin is in flight and releases it when begin is refused", async () => {
+    const stopped: string[] = [];
+    let resolveBegin: (() => void) | null = null;
+    let getUserMediaCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        getUserMediaCalls += 1;
+        const track = {
+          kind: "audio",
+          enabled: true,
+          readyState: "live",
+          stop: () => stopped.push("track"),
+        } as unknown as MediaStreamTrack;
+        return {
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        } as unknown as MediaStream;
+      },
+      client: {
+        beginSessionRealtime: async () => {
+          await new Promise<void>((resolve) => {
+            resolveBegin = resolve;
+          });
+          throw new Error("Voice is unavailable for this session");
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("negotiation must not start after a refused begin");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start after a refused begin");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: mode(), replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: false }),
+      },
+    });
+
+    const starting = controller.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The permission prompt overlaps the begin request instead of following it.
+    expect(getUserMediaCalls).toBe(1);
+    expect(resolveBegin).not.toBeNull();
+    resolveBegin!();
+    await expect(starting).rejects.toThrow("Voice is unavailable for this session");
+    expect(stopped).toEqual(["track"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      microphone: "inactive",
+      error: "Voice is unavailable for this session",
+    });
+  });
+
   test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {
     const browser = browserFixture({ initialEventsReadyState: "connecting" });
     const timers = timerFixture();

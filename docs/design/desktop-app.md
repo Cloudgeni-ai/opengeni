@@ -251,6 +251,78 @@ Considered and not chosen:
 - **Agent inside the installer.** Roughly doubles every download for a
   feature most people never turn on.
 
+## App-shots
+
+Added 2026-10-20. A person looking at another app (a browser showing an
+error, a form, a terminal) presses a shortcut, and that window arrives in the
+composer of the chat they are using: a screenshot plus the window's app,
+title and accessibility text, including text scrolled out of view. They add a
+sentence and send. Nothing is sent by itself.
+
+- **Off by default.** Settings → Machines → App-shots turns it on, picks the
+  shortcut and shows the Screen Recording and Accessibility permissions. On
+  macOS the default is both Command keys pressed together; any modifier pair
+  or an ordinary key combination works. Without Accessibility only the
+  screenshot is attached.
+- **Capture in the app's main process, with the system's own tools.**
+  `packages/desktop/src/main/app-shots/` runs `osascript` (JavaScript for
+  Automation) to find the frontmost window of another app and read its text,
+  and `screencapture -l` to take its picture while the text is read. No
+  native module or helper binary ships, and macOS attributes both to the
+  Opengeni app, so the permissions are the same ones "This computer" uses.
+  Electron cannot register a modifier-only shortcut, so a small `osascript`
+  helper polls the modifier flags (20 times a second) only while a
+  modifier-pair shortcut is on.
+- **Text budget.** Reading stops at 32,000 characters or after 3 seconds,
+  whichever comes first, and the capture says when text was cut.
+- **Into the composer.** The app brings its window forward and sends the
+  capture to the account on screen. The web app attaches it to the composer
+  last focused, or opens the last chat (or a new one) when no composer is on
+  screen. The chip shows the thumbnail, title and app and can be removed
+  before sending.
+- **Stored once, shown to the model the same way every turn.** The
+  screenshot is an ordinary image upload; the capture is stored with it in
+  `files.app_shot` and never changed. The model sees it as untrusted data
+  right after the screenshot in that user message only (see
+  [architecture](../architecture.md#56-files-knowledge-and-artifacts)).
+- **Keep working in that window.** When this computer is connected to the
+  workspace, the capture records its machine id and the window's
+  `cua:window:<pid>:<window>` id, so an agent can switch to that machine and
+  continue in the same window with computer tools. This computer counts as
+  connected when the app's own agent serves it; the app takes over a
+  separately installed agent on the same computer, so that case is covered
+  too. A computer the app has not connected gets a plain capture.
+- **Keep working in that page.** For a web browser window (known browsers by
+  bundle id; apps that merely embed web pages don't count) the capture keeps
+  the page's http or https address, read from the window's top web area.
+  When the browser is Chromium-based and the computer is connected, the web
+  app looks up the browser profiles connected to the workspace from this
+  computer through the Opengeni browser extension (same enrollment), and the
+  capture names them by attached browser device id. An agent opens that
+  profile with browser tools and continues in the tab at that address. The
+  extension reports every Chromium browser as Chrome, so when several
+  profiles are connected the capture lists them all (at most 10) and the
+  address picks the tab.
+
+Other platforms plug into `AppShotPlatform` (`platform.ts`): find the
+frontmost window, take its picture, read its text, and optionally watch a
+modifier pair. Key-combination shortcuts and everything after capture are
+shared. Not built yet:
+
+- Windows: `GetForegroundWindow`, `PrintWindow` or Windows.Graphics.Capture,
+  and UI Automation, from PowerShell.
+- Linux on X11: `_NET_ACTIVE_WINDOW`, `XGetImage` and AT-SPI.
+- Linux on Wayland: no app may read another's window, so it needs the
+  desktop's screenshot portal (the person picks the window) and AT-SPI where
+  the compositor allows it.
+- Browser extras through the Opengeni Chrome extension: the exact tab and
+  window (the extension would need to report which tab is in front of which
+  native window), and recent console messages.
+
+Considered and not chosen: capturing through the hosted agent's computer
+driver. The agent is optional, downloaded on first Connect and released on
+its own schedule; app-shots should work for anyone with the app.
+
 ## Packaging, signing and updates
 
 | Platform | Package | Signing | Update |

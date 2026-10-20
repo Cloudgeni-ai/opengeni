@@ -12,6 +12,7 @@ import {
   type Database,
   type SubscriptionCoreCodexServingConnection,
 } from "@opengeni/db";
+import { modelServiceTierCatalogEntry, type LatencyMode } from "@opengeni/contracts";
 import type { ModelAvailabilityObservation } from "./model-catalog";
 
 const CATALOG_CACHE_MS = SUBSCRIPTION_MODEL_CATALOG_TTL_MS;
@@ -89,6 +90,28 @@ function codexCatalogModels(settings: Settings) {
       model.credentialSource.kind === "connected_subscription" &&
       model.credentialSource.provider === "codex",
   );
+}
+
+/**
+ * Declared speeds that live account lists show as offered per model. Ultrafast
+ * is recorded as `<slug>@ultrafast`; it is unoffered only when every account
+ * that could serve the model is known and none lists it.
+ */
+function unofferedLatencyModes(
+  model: ReturnType<typeof codexCatalogModels>[number],
+  accounts: { reachable: ReadonlyArray<{ slugs: string[] }>; unknown: boolean },
+): LatencyMode[] {
+  if (accounts.unknown) return [];
+  const declared = model.capabilities.latencyModes.some(
+    (mode) => mode.id === "ultrafast" && mode.runnable,
+  );
+  if (!declared) return [];
+  const entry = modelServiceTierCatalogEntry(model.upstreamModelId, "ultrafast");
+  return accounts.reachable.some(
+    ({ slugs }) => slugs.includes(model.upstreamModelId) && slugs.includes(entry),
+  )
+    ? []
+    : ["ultrafast"];
 }
 
 /** One shared core connection's live model list (cached per refresh generation). */
@@ -285,10 +308,23 @@ export async function loadWorkspaceCodexCatalogReadiness(
     const reachable = permitted.filter(({ ok }) => ok);
     const supported = reachable.find(({ slugs }) => slugs.includes(model.upstreamModelId));
     if (supported) {
+      const unavailableLatencyModes = unofferedLatencyModes(model, {
+        reachable,
+        // An unreachable shared account or the person's own account (whose
+        // list is unknown here) may still offer the tier.
+        unknown:
+          permitted.some(({ ok }) => !ok) ||
+          personal.some(
+            (connection) =>
+              subscriptionCoreCodexConnectionAllowsModel(connection, model.id) &&
+              !connection.cooledDownModelIds.includes(model.id),
+          ),
+      });
       observations[model.definitionVersion] = {
         status: "available",
         reason: null,
         checkedAt: supported.checkedAt,
+        ...(unavailableLatencyModes.length ? { unavailableLatencyModes } : {}),
       };
       continue;
     }

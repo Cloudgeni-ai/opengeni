@@ -67,6 +67,8 @@ import {
 import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
+import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
@@ -505,6 +507,7 @@ export async function startApi(
   const webSocketUpgrades = [
     interactionFrameProxies,
     artifactWebSockets,
+    new OfficeWorkbookWebSocketTransport(officeWorkbookRelayFor(routeDeps)),
     ...(computeGateway ? [computeGateway.gateway] : []),
   ];
   const server = Bun.serve<ApiWebSocketConnection>({

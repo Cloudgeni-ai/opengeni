@@ -178,6 +178,11 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = await parseRequestJson(c, CreateFileUploadRequest);
+    // An app-shot describes a screenshot; on anything else it would be text
+    // the model reads about a file that shows something different.
+    if (payload.appShot && !payload.contentType.toLowerCase().startsWith("image/")) {
+      throw new HTTPException(422, { message: "An app-shot must be an image upload." });
+    }
     const authority = fileRequestAuthority.get(c.req.raw);
     const privateOwner = authority?.owner ?? null;
     const workspace = await requireWorkspace(db, workspaceId);
@@ -226,6 +231,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       bucket: objectStorage.bucket,
       objectKey,
       expiresAt: signed.expiresAt,
+      appShot: payload.appShot ?? null,
     });
     // Every principal-facing signed URL issuance is a
     // metadata-only audit fact. Awaited before the URL leaves the platform:

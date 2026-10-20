@@ -27,6 +27,7 @@ const NATIVE_APP_PLATFORM_NAMES: ReadonlySet<unknown> = new Set<NativeAppPlatfor
   "macos",
   "windows",
   "linux",
+  "office",
 ]);
 
 export function isNativeAppPlatform(value: unknown): value is NativeAppPlatform {

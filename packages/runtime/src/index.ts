@@ -1103,7 +1103,7 @@ export type GenerateSessionTitleOptions = {
   provider?: ResolvedModelProvider;
   model?: Model;
   modelName?: string;
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Reasoning effort for the title request only. Callers pass the model's
    * lowest runnable effort to leave room in the output budget for the title.
@@ -2180,7 +2180,7 @@ export type BuildAgentOptions = {
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Responses `text.verbosity`, set only for routes and models that accept it.
    * Hosts must keep it constant for a session: like reasoning effort, a
@@ -3536,6 +3536,14 @@ function maybeInstallLazyToolTransport(
         )
         .map((server) => mcpServerRegistryId(server)),
     ),
+    () => {
+      const names = new Set<string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer)) continue;
+        for (const name of server.firstRequestModelToolNames()) names.add(name);
+      }
+      return names;
+    },
   );
 }
 
@@ -5259,6 +5267,12 @@ export async function prepareAgentTools(
         if (!registeredConfig) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
         }
+        // `eager: true` puts every schema on the first request. A list keeps the
+        // server deferred but prepares it before the first request, so exactly
+        // the named tools are in it and the rest stay searchable.
+        const eagerToolNames =
+          Array.isArray(tool.eager) && tool.eager.length > 0 ? tool.eager : undefined;
+        const firstRequestTools = tool.eager === true || eagerToolNames !== undefined;
         const config =
           tool.allowedTools === undefined
             ? registeredConfig
@@ -5308,6 +5322,8 @@ export async function prepareAgentTools(
                 options.mcpAccountLabels?.get(config.id),
                 undefined,
                 local.effectAuthority,
+                false,
+                eagerToolNames,
               ),
               config,
               options,
@@ -5316,8 +5332,8 @@ export async function prepareAgentTools(
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
-            eager: tool.eager === true,
-            joinsFirstRequestBarrier: tool.eager === true,
+            eager: firstRequestTools,
+            joinsFirstRequestBarrier: firstRequestTools,
             timeoutMs: mcpSetupTimeoutMs(config),
           };
         }
@@ -5512,6 +5528,7 @@ export async function prepareAgentTools(
             options.runMcpCredentials,
             undefined,
             firstParty,
+            eagerToolNames,
           ),
           config,
           options,
@@ -5522,9 +5539,9 @@ export async function prepareAgentTools(
           server,
           bestEffort,
           optional,
-          eager: tool.eager === true,
+          eager: firstRequestTools,
           joinsFirstRequestBarrier:
-            tool.eager === true ||
+            firstRequestTools ||
             (firstParty &&
               config.id === HARNESS_CONTROL_MCP_SERVER_ID &&
               harnessControlToolsPossible),
@@ -5539,7 +5556,10 @@ export async function prepareAgentTools(
   // preparation promise as every other deferred server. Required eager MCPs
   // retain their fail-closed pre-inference contract. The first-party server
   // that lists the always-visible harness control tools also joins, so their
-  // schemas are in the first request; its other schemas stay deferred.
+  // schemas are in the first request; its other schemas stay deferred. A
+  // ToolRef.eager tool list follows the same rule as `eager: true` (`eager`
+  // below): its required server joins so exactly the named tools are in the
+  // first request, and its other schemas stay deferred.
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
@@ -8509,6 +8529,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
+  private readonly eagerToolNames: ReadonlySet<string>;
+  private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
@@ -8519,6 +8541,14 @@ export class PrefixedMcpServer implements MCPServer {
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {
     return this.originalToolNames.keys();
+  }
+  /**
+   * Model names of the listed tools that stay on the first request although
+   * this server's other schemas are deferred: the harness control tools and
+   * the session's exact eager tool list.
+   */
+  firstRequestModelToolNames(): ReadonlySet<string> {
+    return this.firstRequestModelNames;
   }
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
@@ -8549,7 +8579,13 @@ export class PrefixedMcpServer implements MCPServer {
      * then may a catalog tool name become a metric label.
      */
     private readonly firstPartyCatalog = false,
+    /**
+     * Exact unprefixed names (ToolRef.eager list) that stay on the first model
+     * request while this server's other schemas are deferred behind search.
+     */
+    eagerToolNames?: readonly string[],
   ) {
+    this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
     // Keep it unique per prepared registry server while never including URLs,
@@ -8777,9 +8813,13 @@ export class PrefixedMcpServer implements MCPServer {
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
-      const alwaysVisible = bounded.filter((tool) =>
-        isHarnessControlMcpToolName(this.registryId, tool.name),
+      const alwaysVisible = bounded.filter(
+        (tool) =>
+          isHarnessControlMcpToolName(this.registryId, tool.name) ||
+          this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? ""),
       );
+      this.firstRequestModelNames.clear();
+      for (const tool of alwaysVisible) this.firstRequestModelNames.add(tool.name);
       this.alwaysVisibleToolSchemaTokens =
         alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;

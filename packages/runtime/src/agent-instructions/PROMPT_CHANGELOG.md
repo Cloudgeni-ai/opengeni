@@ -11,6 +11,14 @@ description and its routing paragraph, and the goal continuation's report
 clause, say the same. Both compositions change identically; legacy prompt
 digests are refreshed for this reviewed change.
 
+The `goal_set` tool description now opens with when a goal is warranted: a
+long-running objective that needs several turns or continued autonomous work,
+while a short or single-step request is answered directly. The old opening,
+"Create a goal when this session has none", read as a rule to create a goal
+whenever none existed, so agents wrapped one-step edits in goal_set and
+goal_complete. The rest of the description, the goals instruction module and
+both compositions are unchanged.
+
 Agent-facing text no longer names the product, so an embedding product's agent
 only ever sees and repeats its own product's name. Bundled Skills take neutral
 names (`documents`, `spreadsheets`, `presentations`, `sites`, `visualize`,

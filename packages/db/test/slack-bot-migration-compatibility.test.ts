@@ -235,6 +235,20 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         'opengeni_private.read_slack_bot_workspace_access(uuid,uuid,uuid)'::regprocedure
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
+    // At the historical 0864 boundary, the current runtime still needs the
+    // withheld usage-history routines. The previous runtime remains ready.
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual(ABSENT_USAGE_HISTORY_POSTURE);
+    expect(
+      previous.evaluateRuntimeDatabasePosture(
+        await previous.inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual([]);
     // The current binary's posture is checked after the rest of the upgrade:
     // later migrations add routines it requires, so apply them and provision
     // again, as a deployment does before starting the current runtime.
@@ -244,11 +258,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     await migrate(owned.ownerUrl, DATA_SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
     await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
-    // Only 0864 was applied. Current readiness still requires the deliberately
-    // withheld 0871/0872, while the immutable previous runtime stays ready.
-    expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual(
-      ABSENT_USAGE_HISTORY_POSTURE,
-    );
+    expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
         await previous.inspectRuntimeDatabasePosture(client.db, options),
