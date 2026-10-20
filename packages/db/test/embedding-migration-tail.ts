@@ -341,5 +341,7 @@ export const embeddingMigrationTail = [
   // Replaces the Slack message routine and alters the access table created by
   // withheld 0622; replay after it.
   "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
