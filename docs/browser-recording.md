@@ -98,18 +98,22 @@ coordinates or accessible name, and typed text as given.
 
 ### Encoding: on the server, at stop
 
-At stop, browserd packs the spool (frames plus index) into one uncompressed
-tar and uploads it straight to object storage through a scoped signed URL,
-the same way retained browser downloads are exported. The API then:
+At stop, browserd packs the spool into one bundle (a JSON header with the
+frame index and action log, then the JPEG frames) and uploads it straight to
+object storage through a scoped signed URL, the same way retained browser
+downloads are exported. The API then:
 
 1. Runs ffmpeg (already in the API and worker images) over the frames with
    their real timestamps, as variable frame rate H.264 MP4 (libx264
    ultrafast, stillimage tune, `+faststart`). Only distinct frames are
    encoded, so cost follows how much the page changed, not how long the
    recording ran.
-2. Stores the MP4 and the action log as workspace files at the agent's chosen
-   path (default `recordings/<time>.mp4` and `recordings/<time>.actions.json`).
-3. Deletes the frame archive.
+2. Imports the MP4 and the action log into the source session's workspace at
+   the agent's chosen path (default `recordings/browser-<time>.mp4` and
+   `recordings/browser-<time>.actions.json`), so the agent can edit them.
+3. Publishes the MP4 exactly as `sandbox_file_publish` would, so it is a
+   retained artifact with the chat's audience that plays in the chat.
+4. Deletes the bundle and the temporary objects.
 
 Why not encode on the browser host: that needs an ffmpeg on every Linux,
 macOS and Windows machine and in every sandbox image, built, licensed and
@@ -122,16 +126,24 @@ CPU-second per 15 s of video on our side.
 
 ### Agent surface
 
-One tool, `browser_record`, with `operation: "start" | "stop" | "status"` and
-the browser session. Stop returns the video file, the action log file, the
-duration and size. The agent publishes the video to show it in chat, or edits
-it first. Code Mode exposes the same operations on a browser session.
+One tool, `browser_record`, with `operation: "start" | "stop"`, the browser
+session and tab (both default to the ones used last). Stop takes the
+`recordingId` start returned and returns the video's workspace path,
+`artifactId`, duration, size and frame count, plus the action log path. The
+agent shows the video with `![...](artifact:<artifactId>)`, or edits it with
+ffmpeg first and publishes the result. Code Mode exposes the same tool as
+`interaction.browser.record`.
 
-The browser tool description gains one sentence saying flows can be recorded
-as video proof. A bundled Skill covers recording well: start before the flow,
-keep the agent's pace natural, stop, publish, and use the action log with
-ffmpeg to speed up waits or cut dead time. Agents may install other editing
-tools, such as Remotion, when a task needs them.
+The tool description itself says when to use it and how to edit, so no
+separate Skill is needed to start; one can grow from observed failures.
+Agents may install other editing tools, such as Remotion, when a task needs
+them; nothing is bundled.
+
+### End-to-end check
+
+A 26 s Wikipedia flow on a headed Linux Chromium (search, open an article,
+scroll, an 8 s idle stretch, scroll back) gave 45 distinct frames, a 5.1 MB
+bundle and a 1.4 MB 990x800 H.264 MP4. Encoding took 0.29 s wall time.
 
 ## Later
 

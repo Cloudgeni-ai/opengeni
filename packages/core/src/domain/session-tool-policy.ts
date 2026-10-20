@@ -548,7 +548,8 @@ export function sessionEffectiveToolProjectionInput(
       ].includes(name);
       if (
         permissionAllowed(readOnly ? "sessions:read" : "sessions:control") &&
-        (name !== "browser_download_save" || permissionAllowed("files:upload"))
+        ((name !== "browser_download_save" && name !== "browser_record") ||
+          permissionAllowed("files:upload"))
       ) {
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (

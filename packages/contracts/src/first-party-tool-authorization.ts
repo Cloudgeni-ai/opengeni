@@ -145,6 +145,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["sessions:control", "files:upload"],
   },
+  browser_record: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "files:upload"],
+  },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: {
     sessionRequired: true,

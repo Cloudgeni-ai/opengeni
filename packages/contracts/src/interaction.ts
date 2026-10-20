@@ -1815,9 +1815,7 @@ export const BrowserRecordingSummary = /* @__PURE__ */ defineSchema(() =>
       state: z.enum(["recording", "stopped"]),
       startedAt: z.string().datetime({ offset: true }),
       stoppedAt: z.string().datetime({ offset: true }).nullable(),
-      stopReason: z
-        .enum(["requested", "duration_limit", "size_limit", "session_ended"])
-        .nullable(),
+      stopReason: z.enum(["requested", "duration_limit", "size_limit", "session_ended"]).nullable(),
       durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       frameCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       frameBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -1868,6 +1866,40 @@ export const BrowserRecordingExportReceipt = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type BrowserRecordingExportReceipt = z.infer<typeof BrowserRecordingExportReceipt>;
+
+/** Stops a recording and saves it as an MP4 (plus its action log) in the
+ * browser's source session workspace, published as a retained artifact. */
+export const BrowserRecordingSaveRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      /** Where the MP4 goes; the action log is saved beside it as .actions.json. */
+      destinationPath: workspaceRelativeFilePath.optional(),
+    })
+    .strict(),
+);
+export type BrowserRecordingSaveRequest = z.infer<typeof BrowserRecordingSaveRequest>;
+
+export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recording: BrowserRecordingSummary,
+      video: z
+        .object({
+          path: workspaceRelativeFilePath,
+          artifactId: z.string().uuid(),
+          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+          width: z.number().int().positive().max(100_000),
+          height: z.number().int().positive().max(100_000),
+          frameCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        })
+        .strict(),
+      actionLogPath: workspaceRelativeFilePath,
+    })
+    .strict(),
+);
+export type BrowserRecordingSaveResponse = z.infer<typeof BrowserRecordingSaveResponse>;
 
 export const InteractionRect = /* @__PURE__ */ defineSchema(() =>
   z

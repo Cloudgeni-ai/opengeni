@@ -21,6 +21,10 @@ import {
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
@@ -51,6 +55,9 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
+  type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
+  type BrowserRecordingSummary as BrowserRecordingSummaryValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDomReadRequest as BrowserDomReadRequestValue,
@@ -1894,6 +1901,58 @@ export class BrowserControlSessionClient {
     );
     if (receipt.operationId !== request.operationId || receipt.downloadId !== id) {
       throw new BrowserControlProtocolError("browser controller returned another export receipt");
+    }
+    return receipt;
+  }
+
+  async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("recordings"),
+        token: this.controlToken,
+        body: BrowserRecordingStartRequest.parse({ targetId }),
+      }),
+    );
+  }
+
+  async recording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`recordings/${id}`),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async stopRecording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${id}/stop`),
+        token: this.controlToken,
+        body: {},
+      }),
+    );
+  }
+
+  async exportRecording(
+    requestInput: BrowserRecordingExportRequestValue,
+  ): Promise<BrowserRecordingExportReceiptValue> {
+    const request = BrowserRecordingExportRequest.parse(requestInput);
+    const receipt = BrowserRecordingExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/exports`),
+        token: this.controlToken,
+        body: request,
+      }),
+    );
+    if (receipt.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
     }
     return receipt;
   }
