@@ -121,6 +121,10 @@ const withheldMigrations = [
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
   "0846_independent_session_titles.sql",
+  // Usage history routines live in the subscription schema the withheld 0688
+  // creates; the seed reads them. Replay both after it.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
   // Patches the account-binding fence withheld 0494 installs.
   "0873_mcp_binding_delegation_revocation.sql",
 ];
