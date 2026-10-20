@@ -217,6 +217,17 @@ pick a VM.
   When `MemAvailable` reads zero it is zero: the kernel clamps a negative
   estimate there, and the per-CPU pages may cover only part of it. On
   huge-page hosts it is no more than the free huge-page pool.
+- What a VM holds, which a running sandbox above its request is booked
+  at and relief compares with its request, is on bare-metal hosts its
+  group's `memory.current` less the page cache in it that is clean and
+  mapped by no process. The kernel charges a VMM's group with the page
+  cache of its disk's reads and writes and of the images it saves, which
+  is never guest memory: the host drops it whenever memory is short, and
+  `MemAvailable` already counts it as free. Counting it as held as well
+  booked a paused sandbox whose 8 GiB image had just been saved at
+  8 GiB while its VM held 336 MiB, and would have had relief balloon,
+  pause and save a sandbox for writing to its disk. Shared memory, mapped
+  files and cache still to be written stay held.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents

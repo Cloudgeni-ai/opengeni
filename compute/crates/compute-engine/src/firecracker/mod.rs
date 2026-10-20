@@ -1121,9 +1121,11 @@ impl Engine for Firecracker {
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
-        // With huge pages, what counts is what the VM takes from the pool.
+        // With huge pages, what counts is what the VM takes from the pool;
+        // with base pages, what the VMM's group holds less the page cache
+        // its disk and saved images left there, which the host can drop.
         match self.memory.pages {
-            PageSize::Base => vm.cgroup.memory_current(),
+            PageSize::Base => vm.cgroup.memory_held(),
             PageSize::Huge => vm.cgroup.huge_page_bytes(),
         }
         .map_err(|error| EngineError::io("resident_bytes", error))

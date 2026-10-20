@@ -63,6 +63,23 @@ impl Cgroup {
         read_u64(&self.path.join("memory.current"))
     }
 
+    /// Bytes of memory charged to the group that the kernel cannot drop
+    /// at once: [`Self::memory_current`] less the page cache that is clean
+    /// and mapped by no process (`file` less `shmem`, `file_mapped`,
+    /// `file_dirty` and `file_writeback` in `memory.stat`).
+    ///
+    /// A VMM's page cache is what its block devices read and write and the
+    /// images it saves, never guest memory, which is anonymous or mapped.
+    /// The kernel charges it to the group that touched it first, yet drops
+    /// it whenever memory is short, and `MemAvailable` already counts it
+    /// as free: counting it as held as well would count it twice. Without
+    /// the fields (an older kernel), nothing is left out.
+    pub fn memory_held(&self) -> io::Result<u64> {
+        let current = self.memory_current()?;
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        Ok(current.saturating_sub(droppable_cache(&stat)))
+    }
+
     /// Bytes of huge pages the group's processes map. The kernel charges
     /// huge pages to a group's `memory.current` only on a cgroup v2 mount
     /// with `memory_hugetlb_accounting`; counting them by process works on
@@ -440,6 +457,31 @@ fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
     stats
 }
 
+/// Bytes of a group's page cache that is clean and mapped by no process,
+/// from its `memory.stat`: what the kernel can drop without writing or
+/// unmapping anything. Shared memory (tmpfs) is in `file` but cannot be
+/// dropped; a page that is both mapped and shared may be left out twice,
+/// which only counts more as held.
+fn droppable_cache(stat: &str) -> u64 {
+    let (mut file, mut kept) = (0_u64, 0_u64);
+    for line in stat.lines() {
+        let Some((name, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<u64>() else {
+            continue;
+        };
+        match name {
+            "file" => file = value,
+            "shmem" | "file_mapped" | "file_dirty" | "file_writeback" => {
+                kept = kept.saturating_add(value);
+            }
+            _ => {}
+        }
+    }
+    file.saturating_sub(kept)
+}
+
 /// Bytes of huge pages a process maps, from its `/proc/<pid>/status`.
 fn parse_hugetlb_bytes(status: &str) -> u64 {
     status
@@ -692,6 +734,39 @@ mod tests {
         assert_eq!(
             parse_memory_stats("anon 4096\n", None),
             MemoryStats::default()
+        );
+    }
+
+    #[test]
+    fn page_cache_the_host_can_drop_is_not_held() {
+        // A paused VM just after its 8 GiB image was saved: 330 MB of guest
+        // memory, and the image's page cache charged to its group.
+        let stat = "anon 329879552\nfile 8237420544\nkernel 22253568\nshmem 8192\n\
+                    file_mapped 40960\nfile_dirty 0\nfile_writeback 0\n\
+                    active_file 8235515904\ninactive_file 1896448\n";
+        assert_eq!(droppable_cache(stat), 8_237_420_544 - 8192 - 40960);
+        let group = tempfile::tempdir().unwrap();
+        fs::write(group.path().join("memory.current"), "8589553664\n").unwrap();
+        fs::write(group.path().join("memory.stat"), stat).unwrap();
+        assert_eq!(
+            Cgroup::at(group.path()).memory_held().unwrap(),
+            8_589_553_664 - (8_237_420_544 - 8192 - 40960)
+        );
+        // Cache still to be written, shared memory (tmpfs) and mapped files
+        // stay held.
+        let busy = "file 3000\nshmem 1000\nfile_mapped 500\nfile_dirty 700\nfile_writeback 300\n";
+        assert_eq!(droppable_cache(busy), 500);
+        // More kept than cached (a page both mapped and dirty) drops nothing.
+        assert_eq!(
+            droppable_cache("file 100\nfile_mapped 80\nfile_dirty 80\n"),
+            0
+        );
+        // An older kernel's file without the fields leaves everything held.
+        assert_eq!(droppable_cache("anon 4096\n"), 0);
+        fs::write(group.path().join("memory.stat"), "anon 4096\n").unwrap();
+        assert_eq!(
+            Cgroup::at(group.path()).memory_held().unwrap(),
+            8_589_553_664
         );
     }
 
