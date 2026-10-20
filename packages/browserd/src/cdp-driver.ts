@@ -452,7 +452,11 @@ export type AgentBrowserDriverOptions = {
   downloadEvents?: {
     begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
     progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
-    reject(guid: string, failureCode: string): Promise<void>;
+    reject(
+      guid: string,
+      failureCode: string,
+      cancellation: "confirmed" | "uncertain",
+    ): Promise<void>;
   };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
@@ -2045,14 +2049,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
               filePath,
+              // Browser events and replies share this connection in order, so
+              // a reply proves every earlier download event was delivered.
+              ...(state === "completed"
+                ? {
+                    eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
+                  }
+                : {}),
             })
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection
+              const cancelled = await connection
                 .send("Browser.cancelDownload", { guid, ...this.contextScope() })
-                .catch(() => undefined);
-              await this.downloadEvents?.reject(guid, cancelReason);
+                .then(
+                  () => true,
+                  () => false,
+                );
+              await this.downloadEvents?.reject(
+                guid,
+                cancelReason,
+                cancelled ? "confirmed" : "uncertain",
+              );
             })
             .catch(() => undefined);
         }),

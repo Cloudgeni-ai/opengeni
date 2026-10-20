@@ -2759,7 +2759,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
-| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
+| Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
@@ -2885,3 +2885,25 @@ organization or explicit user authority independently of the current browser
 user. Execution rechecks that frozen authority, live owner authority and the exact
 serving account generation before every physical request. See the native Claude
 section in model-providers.md and the maintenance activation in deployment.md.
+
+### Slack connection and schedule authority
+
+Slack bot availability is independent of incoming channel routing. The Slack
+capability page exposes the same authorized installation inventory from each
+workspace; detail requests retain the installation home scope and normal grants.
+Organization sharing may cover all or selected same-organization workspaces.
+Schedules and interactive turns use the same selected bot tools; a saved legacy
+destination is a default, never a grant to add excluded tools. Bot preparation and
+physical delivery retain exact attempt, connection/version, workspace and sharing
+generation checks. Personal Slack Add and Reconnect use distinct creation and
+exact-identity replacement semantics. See [Slack](slack-bot.md).
+
+Workspace `defaultExecutionTarget` selects the placement of new root chats.
+Explicit session placement and child inheritance take precedence. Schedules
+opt into following it through `agentConfig.executionTarget: workspace_default`;
+each accepted occurrence freezes its resolved machine in the execution snapshot.
+Recovery never resolves a different default, and reusable/existing chats retain
+their established placement. Removed targets fail without choosing another
+computer. Workspace defaults may name only shared or organization machines;
+ordinary live machine authority still applies. See
+[Connected Machines](connected-machines.md).

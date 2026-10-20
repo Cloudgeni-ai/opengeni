@@ -516,8 +516,11 @@ before users move to compute from Modal:
 - **The network.** Each sandbox has its own namespace and nftables rules:
   internet through NAT, nothing else; no host, no other sandbox, no
   private or shared ranges, no metadata service
-  ([ADR 11](adr/0011-fixed-guest-network.md)). The production units do
-  not pass `--trusted`.
+  ([ADR 11](adr/0011-fixed-guest-network.md)), but for the exact
+  destinations and TCP ports a host lists with `--reach`. Guests resolve
+  names through the host's answer at their gateway, which asks public
+  name servers and never the host's own; the review should confirm that
+  each listed destination is one sandboxes are meant to reach.
 - **Hosts.** Hosts hold their sandboxes' disks and memory, encrypted at
   rest by the provider, and the host account can read and write every
   archived sandbox in the bucket. A host is as trusted as every sandbox
@@ -575,7 +578,10 @@ before users move to compute from Modal:
      files beyond KVM, the TAP device and the vsock);
   2. the per-sandbox nftables rules on a running host, from inside a
      guest: host addresses, the metadata address, other sandboxes, the
-     VPC, IPv6, and the cloud's public-to-private mapping (`--block`);
+     VPC, IPv6, the cloud's public-to-private mapping (`--block`), each
+     `--reach` destination's other ports, and the sandbox's name server
+     (its gateway's port 53, the one thing in the namespace a guest
+     reaches), which parses guests' queries;
   3. the guest-to-host channels, whose input from guests is untrusted:
      the vsock ports the host serves (guest ports it forwards, and the
      agent link of ADR 21) and the pagers' and gateway's replies;
@@ -783,6 +789,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   cloud maps a public address onto the host, the host can also be reached
   through that address: pass it with `--block`, and check from a guest that
   it is refused.
+- **Private destinations sandboxes need.** Where sandboxes must reach
+  something only a private or overlay network serves, such as an
+  Opengeni whose API, object storage and relay are private, list each
+  one with the ports needed: `--reach api.internal:443,9443,9445` in
+  `COMPUTE_HOST_ARGS` (the GCP root's `host_args`), repeated per
+  destination. A name is resolved by the host when its agent starts, so
+  the host's own resolver must know it, and the sandboxes' name server
+  answers it with those addresses; restart the agent if it moves.
+  Nothing else on the network opens, and the agent refuses an entry in a
+  range sandboxes may never reach. `--dns` names the upstream name
+  servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
+  default); keep them public, as sandboxes can look up whatever they
+  know.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with
@@ -792,9 +811,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   Secret Manager and list it in `host_readable_secrets` rather than in the
   prelude, which is instance metadata. Overlay addresses in the shared
   range (100.64.0.0/10) are blocked to sandboxes like any local network,
-  unless the host is trusted; do not accept routes or use an exit node on
-  hosts, and give hosts an overlay identity that may reach only the
-  service's host endpoint and Opengeni's agent gateway.
+  but for what `--reach` lists, and the overlay's name server is never
+  asked for them; do not accept routes or use an exit node on hosts, and
+  give hosts an overlay identity that may reach only the service's host
+  endpoint and Opengeni's endpoints.
 
 ## Capacity and cost
 

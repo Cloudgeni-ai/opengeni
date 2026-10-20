@@ -21,10 +21,15 @@
 //! Guest traffic may go to the internet. It may not reach the host, any
 //! private, shared, link-local (so not the cloud metadata service at
 //! 169.254.169.254), loopback, multicast or reserved range, or any other
-//! sandbox. A host marked `trusted` also lets guests reach the private and
-//! shared ranges, its local network. The rules are enforced twice: inside
-//! the namespace, which the VMM joins without the privilege to change it,
-//! and again on the host.
+//! sandbox. A host may list exact destinations and TCP ports beyond the
+//! internet that guests may open, such as a private Opengeni's API
+//! ([`reach`]); nothing else private is reachable. The rules are enforced
+//! twice: inside the namespace, which the VMM joins without the privilege
+//! to change it, and again on the host.
+//!
+//! Every guest's name server is its gateway, where the host answers inside
+//! the namespace ([`dns`]): names the host lists, with their addresses, and
+//! the rest through public name servers, never through the host's own.
 //!
 //! Setting up a namespace takes two `ip` runs and one `nft` run, a few
 //! milliseconds each, when a sandbox is created; when the agent restarts,
@@ -43,6 +48,12 @@ use compute_engine::Network;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::Id;
+
+mod dns;
+pub mod reach;
+
+use reach::Allowed;
+pub use reach::Reach;
 
 /// The guest's address, the same in every sandbox.
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 21);
@@ -87,7 +98,8 @@ const ALWAYS_BLOCKED: &[&str] = &[
 ];
 
 /// The local network: private (RFC 1918) and shared carrier-grade NAT
-/// (RFC 6598) ranges. Blocked unless the host is trusted.
+/// (RFC 6598) ranges, which overlay networks use too. Blocked but for what
+/// [`NetworkConfig::reach`] opens.
 const LOCAL_NETWORK: &[&str] = &[
     "10.0.0.0/8",
     "100.64.0.0/10",
@@ -148,14 +160,15 @@ pub struct NetworkConfig {
     /// Addresses for the links between the host and each sandbox's
     /// namespace, two per sandbox. Must not be used for anything else.
     pub pool: Ipv4Net,
-    /// Lets guests reach the host's local network (the private and shared
-    /// ranges). The host itself, metadata services and other sandboxes stay
-    /// blocked.
-    pub trusted: bool,
+    /// Destinations beyond the internet that guests may open TCP
+    /// connections to, with their ports; none may lie in what is always
+    /// blocked, the pool or `blocked`.
+    pub reach: Vec<Reach>,
     /// More ranges guests may not reach, such as the host's public address
     /// where a cloud maps it onto a private one.
     pub blocked: Vec<Ipv4Net>,
-    /// Name servers given to guests on the kernel command line.
+    /// The name servers the host asks for guests, in turn: public ones, so
+    /// that guests learn no private name but those `reach` gives.
     pub dns: Vec<Ipv4Addr>,
 }
 
@@ -166,7 +179,7 @@ impl Default for NetworkConfig {
                 address: Ipv4Addr::new(198, 18, 0, 0),
                 prefix: 15,
             },
-            trusted: false,
+            reach: Vec::new(),
             blocked: Vec::new(),
             dns: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
         }
@@ -203,30 +216,48 @@ impl NetworkConfig {
     }
 
     /// The kernel command line arguments that configure the guest's
-    /// interface at boot.
+    /// interface at boot, with its gateway as its name server: the same on
+    /// every host.
     #[must_use]
-    pub fn boot_args(&self) -> String {
-        let mut args = format!("ip={GUEST_IP}::{GATEWAY_IP}:{LINK_MASK}::eth0:off");
-        for server in self.dns.iter().take(2) {
-            let _ = write!(args, ":{server}");
-        }
-        args
+    pub fn boot_args() -> String {
+        format!("ip={GUEST_IP}::{GATEWAY_IP}:{LINK_MASK}::eth0:off:{GATEWAY_IP}")
     }
 
-    /// Every range guests may not reach.
+    /// Every range guests may not reach but for what `reach` opens.
     fn blocked(&self) -> Vec<String> {
         let mut blocked: Vec<String> = ALWAYS_BLOCKED.iter().map(|&net| net.to_owned()).collect();
-        if !self.trusted {
-            blocked.extend(LOCAL_NETWORK.iter().map(|&net| net.to_owned()));
-        }
+        blocked.extend(LOCAL_NETWORK.iter().map(|&net| net.to_owned()));
         blocked.push(self.pool.to_string());
         blocked.extend(self.blocked.iter().map(ToString::to_string));
         blocked
     }
 
+    /// The ranges `reach` may not open: everything blocked but the local
+    /// network.
+    fn never(&self) -> Vec<Ipv4Net> {
+        let mut never: Vec<Ipv4Net> = ALWAYS_BLOCKED
+            .iter()
+            .filter_map(|net| net.parse().ok())
+            .collect();
+        never.push(self.pool);
+        never.extend(&self.blocked);
+        never
+    }
+
+    /// `reach` with every name resolved by the host.
+    fn allowed(&self) -> Result<Allowed, NetError> {
+        let allowed = Allowed::resolve(&self.reach, &self.never(), look_up)
+            .map_err(|error| NetError::new("--reach", error))?;
+        if !allowed.open.is_empty() {
+            tracing::info!(reach = %allowed.describe(), "sandboxes may also reach");
+        }
+        Ok(allowed)
+    }
+
     /// The host's own rules, replacing any earlier version atomically.
-    fn host_rules(&self) -> String {
+    fn host_rules(&self, allowed: &Allowed) -> String {
         let blocked = self.blocked().join(", ");
+        let reach = allowed.accept_rules(&format!("iifname \"{PREFIX}*\""));
         let pool = self.pool;
         format!(
             "table inet {HOST_TABLE}
@@ -240,7 +271,7 @@ table inet {HOST_TABLE} {{
     chain forward {{
         type filter hook forward priority filter - 10; policy accept;
         iifname \"{PREFIX}*\" oifname \"{PREFIX}*\" drop
-        iifname \"{PREFIX}*\" ip daddr {{ {blocked} }} drop
+{reach}        iifname \"{PREFIX}*\" ip daddr {{ {blocked} }} drop
         iifname \"{PREFIX}*\" meta nfproto != ipv4 drop
         oifname \"{PREFIX}*\" ct state != {{ established, related }} drop
     }}
@@ -259,9 +290,14 @@ table inet {HOST_TABLE} {{
     ///
     /// Refused TCP connections get a reset, which the kernel sends without
     /// any rate limit, so a guest learns at once even when it probes many
-    /// blocked addresses; everything else gets ICMP admin-prohibited.
-    fn sandbox_rules(&self, mtu: u32) -> String {
+    /// blocked addresses; everything else gets ICMP admin-prohibited. The
+    /// guest may reach the namespace itself only for its name server.
+    fn sandbox_rules(&self, mtu: u32, allowed: &Allowed) -> String {
         let blocked = self.blocked().join(", ");
+        let reach = allowed.accept_rules(&format!(
+            "iifname \"{TAP}\" oifname \"{UPLINK}\" ip saddr {GUEST_IP}"
+        ));
+        let dns = dns::PORT;
         let mss = mtu.saturating_sub(40);
         format!(
             "table inet {SANDBOX_TABLE}
@@ -270,6 +306,8 @@ table inet {SANDBOX_TABLE} {{
     chain input {{
         type filter hook input priority filter; policy drop;
         iifname \"lo\" accept
+        iifname \"{TAP}\" ip saddr {GUEST_IP} ip daddr {GATEWAY_IP} udp dport {dns} accept
+        iifname \"{TAP}\" ip saddr {GUEST_IP} ip daddr {GATEWAY_IP} tcp dport {dns} accept
         iifname \"{TAP}\" meta l4proto tcp reject with tcp reset
         iifname \"{TAP}\" reject with icmpx type admin-prohibited
     }}
@@ -277,13 +315,14 @@ table inet {SANDBOX_TABLE} {{
         type filter hook forward priority filter; policy drop;
         tcp flags syn / syn,rst tcp option maxseg size > {mss} tcp option maxseg size set {mss}
         ct state {{ established, related }} accept
-        iifname \"{TAP}\" oifname \"{UPLINK}\" ip saddr {GUEST_IP} ip daddr != {{ {blocked} }} accept
+{reach}        iifname \"{TAP}\" oifname \"{UPLINK}\" ip saddr {GUEST_IP} ip daddr != {{ {blocked} }} accept
         iifname \"{TAP}\" meta l4proto tcp reject with tcp reset
         iifname \"{TAP}\" reject with icmpx type admin-prohibited
     }}
     chain output {{
         type filter hook output priority filter; policy drop;
         ct state related accept
+        oifname \"{TAP}\" ip saddr {GATEWAY_IP} ct state established accept
         oifname \"{TAP}\" tcp flags rst accept
         oifname \"{TAP}\" ip protocol icmp accept
         oifname \"lo\" accept
@@ -555,30 +594,37 @@ pub(crate) struct Networks {
     /// The MTU of the host's route to the internet.
     mtu: u32,
     sandbox_rules: String,
+    names: dns::NameServer,
 }
 
 impl Networks {
-    /// Turns on forwarding, installs the host's rules and measures the
-    /// host's uplink MTU.
-    pub fn prepare(config: &NetworkConfig) -> Result<Self, NetError> {
+    /// Resolves what sandboxes may reach, turns on forwarding, installs
+    /// the host's rules and measures the host's uplink MTU. The sandboxes'
+    /// name servers run on `runtime`.
+    pub fn prepare(
+        config: &NetworkConfig,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, NetError> {
+        let allowed = config.allowed()?;
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .map_err(|error| NetError::new("enable forwarding", error))?;
-        run("nft", &["-f", "-"], Some(&config.host_rules()))?;
+        run("nft", &["-f", "-"], Some(&config.host_rules(&allowed)))?;
         warn_of_foreign_forward_drops();
         let mtu = uplink_mtu().unwrap_or_else(|error| {
             tracing::warn!(%error, "could not find the host's uplink MTU; assuming 1500");
             1500
         });
         Ok(Self {
-            sandbox_rules: config.sandbox_rules(mtu),
+            sandbox_rules: config.sandbox_rules(mtu, &allowed),
             mtu,
+            names: dns::NameServer::new(allowed.names, &config.dns, runtime),
         })
     }
 
-    /// Makes sure `link` exists, complete, with the current rules: what is
-    /// missing is added and every setting set, whatever an earlier attempt
-    /// cut short left. Nothing that exists is replaced, so a VM using the
-    /// network keeps running.
+    /// Makes sure `link` exists, complete, with the current rules and its
+    /// name server: what is missing is added and every setting set,
+    /// whatever an earlier attempt cut short left. Nothing that exists is
+    /// replaced, so a VM using the network keeps running.
     pub fn ensure(&self, link: &Link) -> Result<(), NetError> {
         let path = link.namespace_path();
         let namespace_exists = path.exists();
@@ -589,7 +635,8 @@ impl Networks {
             let inner = link.namespace_commands(Tap::find(link.uid, link.gid)?);
             run("ip", &["-batch", "-"], Some(&inner))
         })?;
-        self.configure(link)
+        self.configure(link)?;
+        self.names.serve(&link.namespace, &path)
     }
 
     /// Whether `link`'s pair exists whole: its host end and its namespace's
@@ -662,9 +709,11 @@ impl Networks {
     /// is deleted if it is still there. Nothing is left to the kernel's
     /// teardown of the namespace, which runs in the background and never
     /// while a process is still inside it.
-    #[allow(clippy::unused_self)]
+    ///
+    /// Its name server stops first: its sockets would keep the namespace.
     pub fn remove(&self, id: Id, ordinal: Option<u32>) -> Result<(), NetError> {
         let namespace = namespace_name(id);
+        self.names.stop(&namespace);
         let path = Path::new(NETNS_DIR).join(&namespace);
         if path.exists() {
             in_namespace(&path, || delete_link(UPLINK))?;
@@ -694,6 +743,41 @@ fn uplink_mtu() -> Result<u32, NetError> {
         .trim()
         .parse()
         .map_err(|error| NetError::new(&path, error))
+}
+
+/// The IPv4 addresses the host's own resolver gives `name`. As the agent
+/// may start while the network it reaches the name over is still coming
+/// up, a lookup that fails or finds nothing is tried again for a minute.
+fn look_up(name: &str) -> Result<Vec<Ipv4Addr>, String> {
+    use std::net::{SocketAddr, ToSocketAddrs as _};
+
+    const TRIES: u32 = 12;
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut tried = 1;
+    loop {
+        let found = (name, 0).to_socket_addrs().map(|addresses| {
+            addresses
+                .filter_map(|address| match address {
+                    SocketAddr::V4(address) => Some(*address.ip()),
+                    SocketAddr::V6(_) => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        match found {
+            Ok(addresses) if !addresses.is_empty() => return Ok(addresses),
+            Ok(_) | Err(_) if tried < TRIES => {
+                tracing::warn!(
+                    name,
+                    tried,
+                    "could not resolve a name sandboxes may reach yet"
+                );
+                std::thread::sleep(EVERY);
+                tried += 1;
+            }
+            Ok(addresses) => return Ok(addresses),
+            Err(error) => return Err(format!("could not resolve {name}: {error}")),
+        }
+    }
 }
 
 /// Warns of each chain [`foreign_forward_drops`] finds. Never fails: such
@@ -929,386 +1013,4 @@ impl From<NetError> for io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Mutex, MutexGuard, PoisonError};
-
-    use compute_core::SandboxId;
-
-    use super::*;
-    use crate::layout::tests::FAILPOINTS;
-
-    /// Held by each test that changes the host's networking, which share
-    /// failpoints on interface names.
-    static LAB: Mutex<()> = Mutex::new(());
-
-    /// The lab and its prepared networking, or `None` without root and
-    /// `COMPUTE_TEST_LAB`: a skip, or a failure where
-    /// `COMPUTE_TEST_REQUIRE` lists `lab`, as on a gate.
-    fn lab() -> Option<(MutexGuard<'static, ()>, NetworkConfig, Networks)> {
-        if std::env::var_os("COMPUTE_TEST_LAB").is_none() || !rustix::process::geteuid().is_root() {
-            let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
-            assert!(
-                !required.split(',').any(|listed| listed.trim() == "lab"),
-                "a required test cannot run: it needs root and COMPUTE_TEST_LAB"
-            );
-            eprintln!("skipped: needs root and COMPUTE_TEST_LAB");
-            return None;
-        }
-        let guard = LAB.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = NetworkConfig::default();
-        let networks = Networks::prepare(&config).unwrap();
-        Some((guard, config, networks))
-    }
-
-    fn fail_at(name: &str, point: &'static str) {
-        FAILPOINTS
-            .lock()
-            .unwrap()
-            .push((PathBuf::from(name), point));
-    }
-
-    fn heal(name: &str) {
-        FAILPOINTS
-            .lock()
-            .unwrap()
-            .retain(|(path, _)| path != Path::new(name));
-    }
-
-    fn id() -> Id {
-        Id(SandboxId(0xab))
-    }
-
-    #[test]
-    fn pools_parse_and_reject_nonsense() {
-        let pool: Ipv4Net = "198.18.0.0/15".parse().unwrap();
-        assert_eq!(pool.size(), 1 << 17);
-        assert_eq!(pool.to_string(), "198.18.0.0/15");
-        assert!("198.18.0.1/15".parse::<Ipv4Net>().is_err());
-        assert!("198.18.0.0".parse::<Ipv4Net>().is_err());
-        assert!("198.18.0.0/33".parse::<Ipv4Net>().is_err());
-        // Single hosts and everything are valid ranges to block.
-        let everything: Ipv4Net = "0.0.0.0/0".parse().unwrap();
-        assert_eq!(everything.size(), 1 << 32);
-        assert!("1.0.0.0/0".parse::<Ipv4Net>().is_err());
-        let host: Ipv4Net = "203.0.113.7/32".parse().unwrap();
-        assert_eq!(host.size(), 1);
-        let pair: Ipv4Net = "203.0.113.6/31".parse().unwrap();
-        assert!("203.0.113.7/31".parse::<Ipv4Net>().is_err());
-        // A pool needs room for one sandbox's pair.
-        let pool_of = |pool| NetworkConfig {
-            pool,
-            ..NetworkConfig::default()
-        };
-        assert!(pool_of(host).check().is_err());
-        pool_of(pair).check().unwrap();
-        assert!(pool_of(pair).addresses(0).is_ok());
-        assert_eq!(pool_of(pair).addresses(1), Err(PoolFull));
-    }
-
-    #[test]
-    fn each_sandbox_gets_its_own_pair_of_link_addresses() {
-        let config = NetworkConfig::default();
-        let link = |ordinal| Link::new(id(), ordinal, config.addresses(ordinal).unwrap(), 7, 7);
-        let first = link(0);
-        assert_eq!(first.host, "ogc0");
-        assert_eq!(first.host_ip, Ipv4Addr::new(198, 18, 0, 0));
-        assert_eq!(first.inner_ip, Ipv4Addr::new(198, 18, 0, 1));
-        let later = link(300);
-        assert_eq!(later.host_ip, Ipv4Addr::new(198, 18, 2, 88));
-        assert_eq!(later.inner_ip, Ipv4Addr::new(198, 18, 2, 89));
-        let last = link((1 << 16) - 1);
-        assert_eq!(last.inner_ip, Ipv4Addr::new(198, 19, 255, 255));
-        assert_eq!(config.addresses(1 << 16), Err(PoolFull));
-        assert_eq!(
-            first.namespace_path(),
-            Path::new("/run/netns/ogc-000000000000000000000000000000ab")
-        );
-        assert!(
-            first.host.len() <= 15 && last.host.len() <= 15,
-            "interface names fit"
-        );
-    }
-
-    #[test]
-    fn guests_boot_with_the_fixed_address() {
-        assert_eq!(
-            NetworkConfig::default().boot_args(),
-            "ip=169.254.0.21::169.254.0.22:255.255.255.252::eth0:off:1.1.1.1:8.8.8.8"
-        );
-    }
-
-    #[test]
-    fn other_firewalls_that_drop_forwarded_traffic_are_found() {
-        // Docker's chains as `nft -j list chains` lists them, with
-        // firewalld's, an input chain and the agent's own.
-        let listing = r#"{"nftables": [
-            {"metainfo": {"version": "1.0.9", "json_schema_version": 1}},
-            {"chain": {"family": "ip", "table": "filter", "name": "FORWARD", "handle": 2,
-                "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
-            {"chain": {"family": "ip", "table": "filter", "name": "DOCKER-USER", "handle": 9}},
-            {"chain": {"family": "ip6", "table": "filter", "name": "FORWARD", "handle": 2,
-                "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
-            {"chain": {"family": "ip", "table": "filter", "name": "INPUT", "handle": 1,
-                "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}},
-            {"chain": {"family": "inet", "table": "firewalld", "name": "filter_FORWARD",
-                "handle": 4, "type": "filter", "hook": "forward", "prio": 10,
-                "policy": "accept"}},
-            {"chain": {"family": "inet", "table": "opengeni_compute", "name": "forward",
-                "handle": 3, "type": "filter", "hook": "forward", "prio": -10,
-                "policy": "accept"}}
-        ]}"#;
-        assert_eq!(
-            foreign_forward_drops(listing).unwrap(),
-            ["table ip filter chain FORWARD"]
-        );
-        let only_ours = r#"{"nftables": [{"chain": {"family": "inet",
-            "table": "opengeni_compute", "name": "forward", "type": "filter",
-            "hook": "forward", "prio": -10, "policy": "accept"}}]}"#;
-        let none: [&str; 0] = [];
-        assert_eq!(foreign_forward_drops(only_ours).unwrap(), none);
-        assert_eq!(foreign_forward_drops(r#"{"nftables": []}"#).unwrap(), none);
-        assert!(foreign_forward_drops("not json").is_err());
-    }
-
-    #[test]
-    fn untrusted_hosts_block_the_local_network_and_trusted_ones_do_not() {
-        let untrusted = NetworkConfig::default();
-        let trusted = NetworkConfig {
-            trusted: true,
-            blocked: vec!["93.184.216.0/24".parse().unwrap()],
-            ..NetworkConfig::default()
-        };
-        for config in [&untrusted, &trusted] {
-            let blocked = config.blocked();
-            for always in [
-                "169.254.0.0/16",
-                "127.0.0.0/8",
-                "198.18.0.0/15",
-                "224.0.0.0/4",
-            ] {
-                assert!(blocked.iter().any(|net| net == always), "{always}");
-            }
-        }
-        for local in LOCAL_NETWORK {
-            assert!(untrusted.blocked().iter().any(|net| net == local));
-            assert!(!trusted.blocked().iter().any(|net| net == local));
-        }
-        assert!(trusted.blocked().iter().any(|net| net == "93.184.216.0/24"));
-        let rules = untrusted.sandbox_rules(1460);
-        assert!(rules.contains("policy drop"));
-        assert!(rules.contains("meta l4proto tcp reject with tcp reset"));
-        assert!(rules.contains("10.0.0.0/8"));
-        assert!(rules.contains("maxseg size set 1420"));
-        assert!(rules.contains("oifname \"uplink\" masquerade"));
-        let host = untrusted.host_rules();
-        assert!(host.contains("iifname \"ogc*\" oifname \"ogc*\" drop"));
-        // The host refuses its sandboxes at once rather than letting their
-        // connections time out.
-        assert!(host.contains("iifname \"ogc*\" meta l4proto tcp reject with tcp reset"));
-        assert!(host.contains("ip saddr 198.18.0.0/15 oifname != \"ogc*\" masquerade"));
-    }
-
-    #[test]
-    fn setup_names_the_namespace_link_and_tap() {
-        let addresses = NetworkConfig::default().addresses(2).unwrap();
-        let link = Link::new(id(), 2, addresses, 1002, 1002);
-        let host = link.host_commands(1460, false, false);
-        assert!(host.contains("netns add ogc-"));
-        assert!(
-            host.contains("link add ogc2 mtu 1460 type veth peer name uplink mtu 1460 netns ogc-")
-        );
-        assert!(host.contains("addr replace 198.18.0.4/31 dev ogc2"));
-        let inner = link.namespace_commands(Tap::Missing);
-        assert!(inner.contains("route replace default via 198.18.0.4 dev uplink"));
-        assert!(inner.contains("tuntap add dev tap0 mode tap user 1002 group 1002"));
-        assert!(inner.contains("neigh replace 169.254.0.21 lladdr 06:00:a9:fe:00:15"));
-
-        // Repairing a network adds only what is missing and sets the rest.
-        let host = link.host_commands(1460, true, true);
-        assert!(!host.contains("netns add") && !host.contains("link add"));
-        assert!(host.contains("link set dev ogc2 up"));
-        let inner = link.namespace_commands(Tap::Fits);
-        assert!(!inner.contains("tuntap"), "a live tap is never replaced");
-        assert!(inner.contains("addr replace 169.254.0.22/30 dev tap0"));
-        assert!(inner.contains("link set dev tap0 address 06:00:a9:fe:00:16"));
-
-        // A tap someone else owns is replaced by one the VM may open.
-        let inner = link.namespace_commands(Tap::Foreign);
-        let replaced =
-            "tuntap del dev tap0 mode tap\ntuntap add dev tap0 mode tap user 1002 group 1002";
-        assert!(inner.contains(replaced), "{inner}");
-    }
-
-    #[test]
-    fn a_taps_owner_is_read_from_its_details() {
-        let details = "3: tap0: <BROADCAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default qlen 1000\\    link/ether 06:00:a9:fe:00:16 brd ff:ff:ff:ff:ff:ff \\    tun type tap pi off vnet_hdr on persist on user 1073741843 group 1073741843 addrgenmode eui64";
-        assert_eq!(
-            tap_owner(details),
-            (Some(1_073_741_843), Some(1_073_741_843))
-        );
-        assert_eq!(tap_owner("3: tap0: tun type tap persist on"), (None, None));
-    }
-
-    /// A sandbox's link is removed and another's, on the same ordinal and
-    /// so under the same host name, made at once, many times over, while
-    /// the kernel is still taking the old namespaces apart. Needs root and
-    /// a lab host: runs only when `COMPUTE_TEST_LAB` is set.
-    #[test]
-    fn a_link_name_is_free_again_as_soon_as_its_sandbox_is_removed() {
-        const ORDINAL: u32 = 4000;
-        let Some((_lab, config, networks)) = lab() else {
-            return;
-        };
-        let addresses = config.addresses(ORDINAL).unwrap();
-        let link = |n: u128| {
-            let id = Id(SandboxId(0x00c0_ffee_0000 + n));
-            (id, Link::new(id, ORDINAL, addresses, 1_000_000, 1_000_000))
-        };
-        let (mut id, first) = link(0);
-        networks.ensure(&first).unwrap();
-        for n in 1..=50 {
-            let (next, made) = link(n % 2);
-            networks.remove(id, Some(ORDINAL)).unwrap();
-            assert!(
-                !has_interface(&made.host).unwrap(),
-                "round {n}: the old link is still there"
-            );
-            networks
-                .ensure(&made)
-                .unwrap_or_else(|error| panic!("round {n}: {error}"));
-            id = next;
-        }
-        // A host end left by a namespace deleted behind the agent's back,
-        // which may still be going away when the next sandbox is made.
-        for n in 0..10 {
-            let (_, gone) = link(n % 2);
-            let (next, made) = link((n + 1) % 2);
-            assert_eq!(gone.namespace, namespace_name(id));
-            run("ip", &["netns", "del", &gone.namespace], None).unwrap();
-            networks
-                .ensure(&made)
-                .unwrap_or_else(|error| panic!("leftover {n}: {error}"));
-            id = next;
-        }
-        networks.remove(id, Some(ORDINAL)).unwrap();
-        assert!(!has_interface(&first.host).unwrap());
-
-        // Left over from an earlier run with other ordinals: sandbox `a`'s
-        // namespace is paired with the next ordinal's host end, and this
-        // ordinal's host end with sandbox `b`'s namespace. Making `a`'s
-        // link on this ordinal clears both and pairs it right.
-        let next = config.addresses(ORDINAL + 1).unwrap();
-        let (a, b) = (
-            Id(SandboxId(0x00c0_ffee_1000)),
-            Id(SandboxId(0x00c0_ffee_1001)),
-        );
-        let cross = Link::new(a, ORDINAL + 1, next, 1_000_000, 1_000_000);
-        networks.ensure(&cross).unwrap();
-        networks
-            .ensure(&Link::new(b, ORDINAL, addresses, 1_000_000, 1_000_000))
-            .unwrap();
-        let right = Link::new(a, ORDINAL, addresses, 1_000_000, 1_000_000);
-        assert!(!paired(&right));
-        networks.ensure(&right).unwrap();
-        assert!(paired(&right), "the leftover pairs were not cleared");
-        assert!(
-            !has_interface(&cross.host).unwrap(),
-            "a stale host end was left"
-        );
-        networks.ensure(&right).unwrap();
-        assert!(paired(&right), "a whole pair was replaced");
-        // `b` no longer holds the ordinal: only `a` may delete its host end.
-        networks.remove(a, Some(ORDINAL)).unwrap();
-        networks.remove(b, None).unwrap();
-        assert!(!has_interface(&right.host).unwrap());
-    }
-
-    /// Failing to look at either end of a whole pair never deletes it.
-    #[test]
-    fn a_pair_that_cannot_be_looked_at_is_left_alone() {
-        const ORDINAL: u32 = 4002;
-        let Some((_lab, config, networks)) = lab() else {
-            return;
-        };
-        let id = Id(SandboxId(0x00c0_ffee_2000));
-        let link = Link::new(
-            id,
-            ORDINAL,
-            config.addresses(ORDINAL).unwrap(),
-            1_000_000,
-            1_000_000,
-        );
-        networks.ensure(&link).unwrap();
-        let before = veth_ends(&link.host).unwrap();
-        for end in [link.host.as_str(), UPLINK] {
-            fail_at(end, "inspect");
-            let ensured = networks.ensure(&link);
-            heal(end);
-            assert!(ensured.is_err(), "{end} was not looked at");
-            assert_eq!(
-                veth_ends(&link.host).unwrap(),
-                before,
-                "the pair was replaced"
-            );
-            assert!(paired(&link));
-        }
-        networks.remove(id, Some(ORDINAL)).unwrap();
-        assert!(!has_interface(&link.host).unwrap());
-    }
-
-    /// A process still inside a removed sandbox's namespace keeps the
-    /// namespace alive, but not its link. A removal that failed after the
-    /// namespace's name went still knows the host end, so a retry deletes
-    /// it, and the name is free for the next sandbox at once.
-    #[test]
-    fn a_retried_removal_finishes_while_the_namespace_lives_on() {
-        const ORDINAL: u32 = 4004;
-        let Some((_lab, config, networks)) = lab() else {
-            return;
-        };
-        let addresses = config.addresses(ORDINAL).unwrap();
-        let (id, next) = (
-            Id(SandboxId(0x00c0_ffee_3000)),
-            Id(SandboxId(0x00c0_ffee_3001)),
-        );
-        let link = Link::new(id, ORDINAL, addresses, 1_000_000, 1_000_000);
-        // The record's ordinal, another one the namespace was not paired
-        // with, and none, as for a sandbox without a record.
-        for known in [Some(ORDINAL), Some(ORDINAL + 1), None] {
-            networks.ensure(&link).unwrap();
-            let holder = File::open(link.namespace_path()).unwrap();
-
-            fail_at(UPLINK, "delete");
-            let removed = networks.remove(id, known);
-            heal(UPLINK);
-            assert!(
-                removed.is_err(),
-                "{known:?}: a removal with a link left succeeded"
-            );
-            assert!(
-                link.namespace_path().exists(),
-                "{known:?}: the namespace's name went before its link"
-            );
-            assert!(has_interface(&link.host).unwrap(), "{known:?}");
-
-            networks.remove(id, known).unwrap();
-            assert!(
-                !has_interface(&link.host).unwrap(),
-                "{known:?}: the retry forgot the host end"
-            );
-            assert!(!link.namespace_path().exists(), "{known:?}");
-            let made = Link::new(next, ORDINAL, addresses, 1_000_000, 1_000_000);
-            networks.ensure(&made).unwrap();
-            assert!(paired(&made), "{known:?}");
-            drop(holder);
-            networks.remove(next, Some(ORDINAL)).unwrap();
-            assert!(!has_interface(&made.host).unwrap(), "{known:?}");
-        }
-    }
-
-    /// Whether `link`'s host end and its namespace's uplink are one pair.
-    fn paired(link: &Link) -> bool {
-        let uplink = in_namespace(&link.namespace_path(), || veth_ends(UPLINK)).unwrap();
-        matches!((veth_ends(&link.host).unwrap(), uplink), (Some(host), Some(uplink)) if host.paired_with(uplink))
-    }
-}
+mod tests;

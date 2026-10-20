@@ -426,6 +426,10 @@ import {
   sandboxCommandStillRunning,
   sandboxCommandStdout,
 } from "./sandbox/command-result";
+import {
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+} from "./sandbox/operation-purpose";
 import { shellCodemodePath } from "./sandbox/codemode-token";
 import {
   installManagedCodemodeClient,
@@ -10569,6 +10573,16 @@ export async function materializeSandboxFileDownloads(
   downloads: SandboxFileDownload[],
   context: SandboxFileDownloadMaterializationContext = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
+  return await withSandboxOperationPurpose("file_resources", () =>
+    materializeSandboxFileDownloadsUnscoped(session, downloads, context),
+  );
+}
+
+async function materializeSandboxFileDownloadsUnscoped(
+  session: SandboxSessionLike,
+  downloads: SandboxFileDownload[],
+  context: SandboxFileDownloadMaterializationContext,
+): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
     return { failures: [] };
@@ -11197,7 +11211,9 @@ export async function runBeforeAgentStartHooks(
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
   for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
-    await hook.run(session, context);
+    await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+      hook.run(session, context),
+    );
   }
 }
 
@@ -11214,7 +11230,9 @@ export function withSandboxLifecycleHooks(
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
       for (const hook of beforeAgentStartHooks) {
-        await hook.run(session, context);
+        await withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+          hook.run(session, context),
+        );
       }
       seen.add(session);
     }
@@ -12855,22 +12873,25 @@ export async function runManagedCodemodeClientHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  await installManagedCodemodeClient(
-    session,
-    await loadManagedCodemodeClient(),
-    async (cmd) =>
-      await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd,
-          workdir: "/workspace",
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 1_000,
-        },
-        context.commandRunner,
-      ),
-    context.runAs,
+  const client = await loadManagedCodemodeClient();
+  await withSandboxOperationPurpose("hook.codemode-client", () =>
+    installManagedCodemodeClient(
+      session,
+      client,
+      async (cmd) =>
+        await runSandboxLifecycleCommand(
+          session,
+          {
+            cmd,
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 1_000,
+          },
+          context.commandRunner,
+        ),
+      context.runAs,
+    ),
   );
 }
 

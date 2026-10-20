@@ -1085,8 +1085,15 @@ export type AvailableOpenGeniSlackBots = {
   connections: ConnectionMetadata[];
   organizationSharedConnectionIds: string[];
 };
-export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
-export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
+export type UpdateOpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  workspaceIds?: string[] | null;
+};
+export type OpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  generation: number;
+  workspaceIds?: string[] | null;
+};
 
 export type FikenInstallRequest = {
   apiToken: string;
@@ -3379,6 +3386,8 @@ export type ScheduledTaskAgentConfig = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
@@ -5833,6 +5842,10 @@ export type Workspace = {
   updatedAt: string;
 };
 
+export type WorkspaceDefaultExecutionTarget =
+  | { kind: "managed" }
+  | { kind: "machine"; targetSandboxId: string };
+
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
   modelCompactionThresholds?: unknown;
@@ -5845,6 +5858,8 @@ export type WorkspaceSettings = {
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -5963,6 +5978,8 @@ export type UpdateWorkspaceSettingsRequest = {
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   /** Agent defaults for new sessions; null clears. Requires the admission switch. */
   sessionAgentDefaults?: WorkspaceAgentDefaults | null | undefined;
   /**
@@ -7094,6 +7111,8 @@ export type ScheduledTaskAgentConfigInput = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;

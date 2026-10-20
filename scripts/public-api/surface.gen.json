@@ -13306,49 +13306,27 @@
         "$.updatedAt": "string! null"
       }
     },
-    "ComputerAction": {
+    "ComputerActionBatch": {
       "io": [
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
-        "$|type=semantic": "object",
-        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
-        "$|type=semantic.locator": "ref(ComputerLocator)!",
-        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
-        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
-        "$|type=semantic.value|0": "string",
-        "$|type=semantic.value|1": "number",
-        "$|type=semantic.value|2": "boolean",
-        "$|type=pointer": "object",
-        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
-        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
-        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
-        "$|type=pointer.clickCount|0": "const=[\"1\"]",
-        "$|type=pointer.clickCount|1": "const=[\"2\"]",
-        "$|type=pointer.continuationOfOperationId": "string?",
-        "$|type=pointer.deltaX": "number?",
-        "$|type=pointer.deltaY": "number?",
-        "$|type=pointer.endX": "number?",
-        "$|type=pointer.endY": "number?",
-        "$|type=pointer.frameId": "string!",
-        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
-        "$|type=pointer.x": "number!",
-        "$|type=pointer.y": "number!",
-        "$|type=keyboard": "object",
-        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
-        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
-        "$|type=keyboard.value": "string!",
-        "$|type=clipboard": "object",
-        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
-        "$|type=clipboard.text": "string?",
-        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
-        "$|type=focus": "object",
-        "$|type=focus.targetId": "string!",
-        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
-        "$|type=launch": "object",
-        "$|type=launch.applicationId": "string!",
-        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]"
+        "$": "object",
+        "$.actions": "array!",
+        "$.actions[]": "union=[\"type=keyboard\",\"type=semantic\"]",
+        "$.actions[]|type=semantic": "object",
+        "$.actions[]|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$.actions[]|type=semantic.locator": "ref(ComputerLocator)!",
+        "$.actions[]|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$.actions[]|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$.actions[]|type=semantic.value|0": "string",
+        "$.actions[]|type=semantic.value|1": "number",
+        "$.actions[]|type=semantic.value|2": "boolean",
+        "$.actions[]|type=keyboard": "object",
+        "$.actions[]|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$.actions[]|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$.actions[]|type=keyboard.value": "string!",
+        "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
     "ComputerActionReceipt": {
@@ -13398,12 +13376,58 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "ref(ComputerAction)!",
+        "$.action": "ref(ComputerActionRequestAction)!",
         "$.expectedFrameId": "string! null",
         "$.expectedObservationId": "string! null",
         "$.expectedTargetGeneration": "string!",
         "$.operationId": "string!",
         "$.targetId": "string!"
+      }
+    },
+    "ComputerActionRequestAction": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"type=batch\",\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
+        "$|type=semantic": "object",
+        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$|type=semantic.locator": "ref(ComputerLocator)!",
+        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$|type=semantic.value|0": "string",
+        "$|type=semantic.value|1": "number",
+        "$|type=semantic.value|2": "boolean",
+        "$|type=pointer": "object",
+        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
+        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
+        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
+        "$|type=pointer.clickCount|0": "const=[\"1\"]",
+        "$|type=pointer.clickCount|1": "const=[\"2\"]",
+        "$|type=pointer.continuationOfOperationId": "string?",
+        "$|type=pointer.deltaX": "number?",
+        "$|type=pointer.deltaY": "number?",
+        "$|type=pointer.endX": "number?",
+        "$|type=pointer.endY": "number?",
+        "$|type=pointer.frameId": "string!",
+        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
+        "$|type=pointer.x": "number!",
+        "$|type=pointer.y": "number!",
+        "$|type=keyboard": "object",
+        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$|type=keyboard.value": "string!",
+        "$|type=clipboard": "object",
+        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
+        "$|type=clipboard.text": "string?",
+        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
+        "$|type=focus": "object",
+        "$|type=focus.targetId": "string!",
+        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
+        "$|type=launch": "object",
+        "$|type=launch.applicationId": "string!",
+        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]",
+        "$|type=batch": "ref(ComputerActionBatch)"
       }
     },
     "ComputerClipboard": {
@@ -13618,6 +13642,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.actionBatches": "boolean?",
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
@@ -20632,7 +20657,9 @@
       "shape": {
         "$": "object",
         "$.enabled": "boolean!",
-        "$.generation": "integer!"
+        "$.generation": "integer!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "OpenMachinePrivacySettingsRequest": {
@@ -23479,6 +23506,7 @@
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -23515,6 +23543,7 @@
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -27577,7 +27606,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.enabled": "boolean!"
+        "$.enabled": "boolean!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "UpdateOrganizationAgentAdminAccessRequest": {
@@ -28149,6 +28180,7 @@
         "$.busySend": "ref(WorkspaceBusySend)?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
+        "$.defaultExecutionTarget": "ref(WorkspaceDefaultExecutionTarget)? null",
         "$.defaultSandboxImage": "string? null",
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
@@ -29297,6 +29329,19 @@
         "$.expiresAt": "string! null",
         "$.operationId": "string!",
         "$.remaining": "integer!"
+      }
+    },
+    "WorkspaceDefaultExecutionTarget": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=machine\",\"kind=managed\"]",
+        "$|kind=managed": "object",
+        "$|kind=managed.kind": "const!=[\"\\\"managed\\\"\"]",
+        "$|kind=machine": "object",
+        "$|kind=machine.kind": "const!=[\"\\\"machine\\\"\"]",
+        "$|kind=machine.targetSandboxId": "string!"
       }
     },
     "WorkspaceGatewayCustomModel": {
@@ -30738,6 +30783,7 @@
       "ComposerDraft": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",
@@ -32854,6 +32900,7 @@
       "BrowserWorkingCopyRefusal": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",

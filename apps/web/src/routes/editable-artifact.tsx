@@ -23,7 +23,7 @@ import {
   resolveConsoleEditableArtifactWorkerUrl,
 } from "@/lib/editable-artifact-browser";
 import { editableArtifactClient } from "@/lib/editable-artifact-client";
-import { downloadSpreadsheet } from "@/lib/editable-spreadsheet-download";
+import { downloadEditableArtifact } from "@/lib/editable-artifact-download";
 
 const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 
@@ -73,8 +73,8 @@ function EditableArtifactContent({
           context.accessContext,
         ])}
         showHeader={!embedded}
-        downloadSpreadsheet={(opened, signal) =>
-          downloadSpreadsheet(editableArtifactClient, workspaceId, opened, signal)
+        downloadArtifact={(opened, signal) =>
+          downloadEditableArtifact(editableArtifactClient, workspaceId, opened, signal)
         }
         describeError={(error): ArtifactLoadErrorView =>
           isArtifactReadDenied(error, context.accessContext, workspaceId)

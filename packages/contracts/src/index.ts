@@ -2950,6 +2950,28 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** Placement inherited by new top-level chats and schedules that follow the workspace. */
+export const WorkspaceDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("managed") }).strict(),
+    z.object({ kind: z.literal("machine"), targetSandboxId: z.string().uuid() }).strict(),
+  ]),
+);
+export type WorkspaceDefaultExecutionTarget = z.infer<typeof WorkspaceDefaultExecutionTarget>;
+
+/** Invalid configured placement fails closed; it must never select another computer. */
+export function resolveWorkspaceDefaultExecutionTarget(
+  settings: unknown,
+): WorkspaceDefaultExecutionTarget | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { defaultExecutionTarget?: unknown }).defaultExecutionTarget
+      : undefined;
+  return value === undefined || value === null
+    ? null
+    : WorkspaceDefaultExecutionTarget.parse(value);
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -2991,6 +3013,7 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
       // null uses the deployment image.
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent configuration defaults for new sessions ("Defaults for new
       // sessions"). Validated leniently here and resolved by
       // resolveWorkspaceAgentDefaults, so a value written by a newer release can
@@ -3196,6 +3219,7 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
       slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent defaults for new sessions; null clears them.
       sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
       // False blocks every model billed in Opengeni credits in this workspace.
@@ -11756,6 +11780,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
+    // Resolve once when a new run chat is accepted; recovery keeps that exact target.
+    executionTarget: z.literal("workspace_default").optional(),
     // Connected Machines are a concrete execution target, not a generic
     // sandbox backend. Persist the exact machine + optional cwd so every
     // generated session can seed its active route before its first turn.
@@ -11865,6 +11891,13 @@ export function knowledgeSourceAgentConfig(
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
+    if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["executionTarget"],
+        message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
+      });
+    }
     if (value.machineTarget && value.sandboxBackend !== undefined) {
       context.addIssue({
         code: "custom",
@@ -12183,6 +12216,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       turnExecutionPolicy: z.unknown().optional(),
       resolvedSandboxBackend: SandboxBackend,
       resolvedSandboxOs: SandboxOs,
+      // Absent is a historical receipt: recover its task's explicit target.
+      // Null is an accepted managed placement, never a request to resolve again.
+      resolvedMachineTarget: z
+        .object({
+          targetSandboxId: z.string().uuid(),
+          workingDir: z.string().min(1).optional(),
+        })
+        .strict()
+        .nullable()
+        .optional(),
       resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
       resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
       resolvedFirstPartyMcpPermissions: z.array(Permission),
@@ -12723,6 +12766,13 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       message: "agentConfig.goal cannot be used with an existing-session target",
     });
   }
+  if (value.runMode === "existing_session" && value.agentConfig.executionTarget) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "executionTarget"],
+      message: "executionTarget cannot be used with an existing-session target",
+    });
+  }
   if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
     context.addIssue({
       code: "custom",
@@ -12935,6 +12985,16 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["agentConfig", "goal"],
         message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+    if (
+      value.agentConfig?.executionTarget &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "executionTarget"],
+        message: "executionTarget cannot be used with an existing-session target",
       });
     }
     if (
@@ -13895,7 +13955,12 @@ export const AvailableOpenGeniSlackBots = /* @__PURE__ */ defineSchema(() =>
 );
 export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
 export const UpdateOpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
-  z.object({ enabled: z.boolean() }).strict(),
+  z
+    .object({
+      enabled: z.boolean(),
+      workspaceIds: z.array(z.string().uuid()).max(1000).nullable().optional(),
+    })
+    .strict(),
 );
 export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
   typeof UpdateOpenGeniSlackBotOrganizationAccess
@@ -13903,6 +13968,7 @@ export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
 export const OpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     enabled: z.boolean(),
+    workspaceIds: z.array(z.string().uuid()).nullable().optional(),
     generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }),
 );

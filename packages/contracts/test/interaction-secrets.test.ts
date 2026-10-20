@@ -246,6 +246,28 @@ describe("redactInteractionSecretValues", () => {
     });
   });
 
+  test("hides values a tool trimmed, cut at a line, or clipped before a truncation mark", () => {
+    const typed = { key: "  synthetic-secret-value  ", pem: "first-line-key\nsecond-line-key" };
+    const result = redactInteractionSecretValues(
+      {
+        // Clipped, marked and followed by more text, as CUA's batch steps are.
+        marked: "Typed synthetic-secr... To run it, send the batch again.",
+        ellipsis: "Typed synthetic-secr\u2026",
+        trimmed: "synthetic-secret-value was typed",
+        firstLine: "Typed first-line-key",
+        loading: "Loading... done",
+      },
+      typed,
+    );
+    expect(result).toEqual({
+      marked: `Typed ${INTERACTION_REDACTED_SECRET}... To run it, send the batch again.`,
+      ellipsis: `Typed ${INTERACTION_REDACTED_SECRET}\u2026`,
+      trimmed: `${INTERACTION_REDACTED_SECRET} was typed`,
+      firstLine: `Typed ${INTERACTION_REDACTED_SECRET}`,
+      loading: "Loading... done",
+    });
+  });
+
   test("hides values in form-encoded addresses that escape punctuation", () => {
     const typed = { key: "review!synthetic token(1)*'~" };
     const form = new URLSearchParams({ q: typed.key }).toString();
