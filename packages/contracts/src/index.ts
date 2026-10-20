@@ -146,6 +146,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./desktop-app";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
