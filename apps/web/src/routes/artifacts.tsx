@@ -315,14 +315,23 @@ export function ArtifactDetailRoute({
   embedded?: boolean;
   /** In the session workbench: the Site itself, or its Settings. */
   embeddedView?: "site" | "settings";
+  /** The workbench header's reload and full screen, which replace the frame toolbar. */
+  embeddedControls?: EmbeddedSiteControls;
 }) {
-  if (!embedded) return <ArtifactDetailPage {...props} />;
+  const { embeddedControls, ...route } = props;
+  if (!embedded) return <ArtifactDetailPage {...route} />;
   return embeddedView === "settings" ? (
-    <EmbeddedSiteSettings {...props} />
+    <EmbeddedSiteSettings {...route} />
   ) : (
-    <EmbeddedSiteDetail {...props} />
+    <EmbeddedSiteDetail {...route} controls={embeddedControls} />
   );
 }
+
+export type EmbeddedSiteControls = {
+  reloadToken: number;
+  fullScreen: boolean;
+  onFullScreenChange: (fullScreen: boolean) => void;
+};
 
 /**
  * The session dock's Site Settings: the Site page's Settings tab, so the Site
@@ -399,9 +408,11 @@ function EmbeddedSiteSettings({
 function EmbeddedSiteDetail({
   workspaceId,
   artifactId,
+  controls,
 }: {
   workspaceId: string;
   artifactId: string;
+  controls?: EmbeddedSiteControls | undefined;
 }) {
   const { client } = useAppContext();
   const viewer = useConsoleSiteViewer();
@@ -427,7 +438,15 @@ function EmbeddedSiteDetail({
       toolBridge={toolBridge}
       viewer={viewer}
       showTitle={false}
-      archivedMessage="This Site is archived. Open it full-page to restore it."
+      {...(controls
+        ? {
+            showToolbar: false,
+            reloadToken: controls.reloadToken,
+            fullScreen: controls.fullScreen,
+            onFullScreenChange: controls.onFullScreenChange,
+          }
+        : {})}
+      archivedMessage="This Site is archived. Restore it from its settings."
     />
   );
 }

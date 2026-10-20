@@ -447,6 +447,9 @@ export function WorkspaceDock({
       tabs={tabs}
       current={current}
       onTab={setTab}
+      // On the desktop dock the status and window controls sit under the
+      // panel tabs, so every panel starts at the top with its own header.
+      chromePlacement="rail"
       accessory={headerAccessory}
       controls={
         <>
@@ -584,6 +587,7 @@ function DockChrome({
   current,
   onTab,
   leading,
+  chromePlacement = "header",
   accessory,
   controls,
 }: {
@@ -592,6 +596,11 @@ function DockChrome({
   onTab: (id: string) => void;
   /** Host navigation at the start of mobile overlay chrome. */
   leading?: ReactNode | undefined;
+  /**
+   * `header`: a row above the panels (the phone overlay, with its title and
+   * close). `rail`: under the panel tabs, so no row is spent on it.
+   */
+  chromePlacement?: "header" | "rail" | undefined;
   /** A status accessory (machine chip) between the tab strip and the controls. */
   accessory?: ReactNode | undefined;
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
@@ -666,76 +675,99 @@ function DockChrome({
       data-compact={compact ? "true" : undefined}
       className="flex h-full min-h-0 min-w-0 flex-col"
     >
-      <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 max-[1023px]:min-h-12">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {leading ?? (
-            <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
-              {msg("workspaceDock.workspace")}
-            </span>
-          )}
+      {chromePlacement === "header" ? (
+        <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 max-[1023px]:min-h-12">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {leading ?? (
+              <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
+                {msg("workspaceDock.workspace")}
+              </span>
+            )}
+          </div>
+          <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
+          <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
         </div>
-        <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
-        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
-      </div>
+      ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">
         <div
           className={cn(
-            "flex shrink-0 flex-col gap-1 overflow-x-hidden overflow-y-auto border-r border-og-border bg-og-surface-1/45 p-1.5",
+            "flex shrink-0 flex-col border-r border-og-border bg-og-surface-1/45",
             compact ? "w-12" : "w-32 max-[1023px]:w-36",
           )}
-          role="tablist"
-          aria-label={msg("workspaceDock.workspacePanels")}
-          aria-orientation="vertical"
         >
-          {tabs.map((tab, index) => {
-            const tabName = tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
-            return (
-              <button
-                key={tab.id}
-                ref={(node) => {
-                  tabRefs.current[index] = node;
-                }}
-                id={`${tabsetId}-tab-${index}`}
-                type="button"
-                role="tab"
-                aria-label={compact && tab.icon ? tabName : undefined}
-                title={compact && tab.icon ? tabName : undefined}
-                aria-selected={tab.id === current}
-                aria-controls={`${tabsetId}-panel-${index}`}
-                tabIndex={tab.id === current ? 0 : -1}
-                onClick={() => onTab(tab.id)}
-                onKeyDown={(event) => onTabKeyDown(event, index)}
-                className={cn(
-                  "group relative flex min-h-9 w-full items-center gap-2 rounded-og-md px-2 text-left text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                  compact && "justify-center px-1",
-                  tab.id === current
-                    ? "bg-og-accent-soft text-og-fg shadow-[inset_2px_0_0_var(--og-color-accent)]"
-                    : "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg",
-                )}
-              >
-                {tab.icon ? (
-                  <span
-                    className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4"
-                    aria-hidden
-                  >
-                    {tab.icon}
-                  </span>
-                ) : null}
-                {!compact || !tab.icon ? (
-                  <span data-contrast-audited className="min-w-0 flex-1 truncate">
-                    {tab.label}
-                  </span>
-                ) : null}
-                {tab.badge ? (
-                  <span
-                    className={cn("shrink-0", compact && "absolute -right-0.5 -top-0.5 scale-90")}
-                  >
-                    {tab.badge}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+          <div
+            className="flex min-h-0 flex-1 flex-col gap-1 overflow-x-hidden overflow-y-auto p-1.5"
+            role="tablist"
+            aria-label={msg("workspaceDock.workspacePanels")}
+            aria-orientation="vertical"
+          >
+            {tabs.map((tab, index) => {
+              const tabName = tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
+              return (
+                <button
+                  key={tab.id}
+                  ref={(node) => {
+                    tabRefs.current[index] = node;
+                  }}
+                  id={`${tabsetId}-tab-${index}`}
+                  type="button"
+                  role="tab"
+                  aria-label={compact && tab.icon ? tabName : undefined}
+                  title={compact && tab.icon ? tabName : undefined}
+                  aria-selected={tab.id === current}
+                  aria-controls={`${tabsetId}-panel-${index}`}
+                  tabIndex={tab.id === current ? 0 : -1}
+                  onClick={() => onTab(tab.id)}
+                  onKeyDown={(event) => onTabKeyDown(event, index)}
+                  className={cn(
+                    "group relative flex min-h-9 w-full items-center gap-2 rounded-og-md px-2 text-left text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                    compact && "justify-center px-1",
+                    tab.id === current
+                      ? "bg-og-accent-soft text-og-fg shadow-[inset_2px_0_0_var(--og-color-accent)]"
+                      : "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg",
+                  )}
+                >
+                  {tab.icon ? (
+                    <span
+                      className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4"
+                      aria-hidden
+                    >
+                      {tab.icon}
+                    </span>
+                  ) : null}
+                  {!compact || !tab.icon ? (
+                    <span data-contrast-audited className="min-w-0 flex-1 truncate">
+                      {tab.label}
+                    </span>
+                  ) : null}
+                  {tab.badge ? (
+                    <span
+                      className={cn("shrink-0", compact && "absolute -right-0.5 -top-0.5 scale-90")}
+                    >
+                      {tab.badge}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          {chromePlacement === "rail" ? (
+            <div
+              data-dock-rail-footer
+              className={cn(
+                "flex shrink-0 border-t border-og-border p-1.5 text-og-fg-subtle",
+                compact
+                  ? // Only the status dot fits; its label stays for assistive tech.
+                    "flex-col items-center gap-0.5 [&_[role=status]]:px-0 [&_[role=status]>span:last-child]:sr-only"
+                  : "flex-wrap items-center justify-between gap-0.5",
+              )}
+            >
+              {accessory ? <div className="min-w-0 text-og-fg-muted">{accessory}</div> : null}
+              <div className={cn("flex shrink-0 items-center gap-0.5", compact && "flex-col")}>
+                {controls}
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {tabs.length > 0 ? (
