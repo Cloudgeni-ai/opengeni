@@ -2,9 +2,10 @@ import type {
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 
 import { useAppContext } from "@/context";
+import { sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    The model defaults every workspace in an organization follows until it sets
@@ -28,48 +29,24 @@ export function useOrganizationModelDefaults(
   enabled: boolean,
 ): OrganizationModelDefaultsState {
   const client = useAppContext().client;
-  const [defaults, setDefaults] = useState<OrganizationModelDefaults | null>(null);
-  const [loading, setLoading] = useState(enabled && Boolean(organizationId));
-  const [error, setError] = useState<Error | null>(null);
-  const generation = useRef(0);
-
-  const reload = useCallback(async () => {
-    const current = ++generation.current;
-    if (!enabled || !organizationId) {
-      setDefaults(null);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const loaded = await client.getOrganizationModelDefaults(organizationId);
-      if (current === generation.current) setDefaults(loaded);
-    } catch (caught) {
-      if (current !== generation.current) return;
-      setDefaults(null);
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-    } finally {
-      if (current === generation.current) setLoading(false);
-    }
-  }, [client, enabled, organizationId]);
-
-  useEffect(() => {
-    void reload();
-    return () => {
-      generation.current += 1;
-    };
-  }, [reload]);
+  const {
+    data: defaults,
+    loading,
+    error,
+    refresh: reload,
+  } = useSharedQuery(
+    client,
+    ["model-settings", "organization-defaults", organizationId ?? null],
+    () => client.getOrganizationModelDefaults(organizationId!),
+    { enabled: enabled && Boolean(organizationId), staleTimeMs: 300_000 },
+  );
 
   const update = useCallback(
     async (request: UpdateOrganizationModelDefaultsRequest) => {
       if (!organizationId) throw new Error("This workspace has no organization.");
+      const write = sharedQueryWriter(client);
       const saved = await client.updateOrganizationModelDefaults(organizationId, request);
-      generation.current += 1;
-      setDefaults(saved);
-      setError(null);
-      setLoading(false);
+      write(["model-settings", "organization-defaults", organizationId], saved);
       // Workspace catalogs resolve defaults and limits from these.
       window.dispatchEvent(new Event("model-connections-changed"));
       return saved;

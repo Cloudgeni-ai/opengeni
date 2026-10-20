@@ -11,6 +11,11 @@ import type {
 } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  clearSharedQueries,
+  invalidateSharedQueries,
+  retainSharedQueries,
+} from "@/lib/shared-query";
 
 const listConnections = mock(async (_workspaceId: string): Promise<ConnectionMetadata[]> => []);
 const listWorkspaceGatewayCustomModels = mock(
@@ -514,6 +519,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  clearSharedQueries(context.client);
   listConnections.mockClear();
   getWorkspaceModelCatalog.mockClear();
   createConnection.mockClear();
@@ -559,6 +565,43 @@ beforeEach(() => {
 });
 
 describe("AiGatewayConnectionCard custom models", () => {
+  test("retains supporting reads on revisits and refreshes them through the Models prefix", async () => {
+    const release = retainSharedQueries(context.client);
+    const first = await renderCard();
+    await act(async () => first.root.unmount());
+    first.container.remove();
+    const second = await renderCard();
+    try {
+      expect(listConnections).toHaveBeenCalledTimes(1);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await invalidateSharedQueries(context.client, ["model-settings"]);
+      });
+      expect(listConnections).toHaveBeenCalledTimes(2);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => second.root.unmount());
+      second.container.remove();
+      release();
+    }
+  });
+
+  test("shares one connection read across readers of the same workspace provider", async () => {
+    const gateway = await renderCard();
+    const other = await renderCard();
+    try {
+      expect(listConnections).toHaveBeenCalledTimes(1);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => {
+        gateway.root.unmount();
+        other.root.unmount();
+      });
+      gateway.container.remove();
+      other.container.remove();
+    }
+  });
+
   test("lets an admin preconfigure one exact Gateway slug before connecting", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
     listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
@@ -1156,7 +1199,9 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(
         container.querySelector('button[aria-label="Remove deepseek/deepseek-v3.2"]'),
       ).not.toBeNull();
-      expect(getWorkspaceModelCatalog).toHaveBeenCalledWith("workspace-a");
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledWith("workspace-a", {
+        signal: expect.any(AbortSignal),
+      });
       expect(listConnections).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
