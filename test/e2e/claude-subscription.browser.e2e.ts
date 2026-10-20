@@ -104,7 +104,8 @@ for (const theme of ["dark", "light"] as const) {
           expect(receipt).toMatchObject({ action: "connect", scope, tokenOnly: true });
           expect(await page.locator('[data-slot="usage-meter-group"]').count()).toBe(1);
           expect(await page.getByText(/Resets /).count()).toBeGreaterThanOrEqual(2);
-          await page.getByRole("button", { name: "Check usage now" }).click();
+          // A manager's usage read is a live check, so a token that cannot
+          // check usage is known at once: the button is unavailable without a click.
           await page
             .locator('button[aria-label="Check usage now"][aria-disabled="true"]')
             .waitFor();
