@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(default_value(&key).expect("read missing"), None);
 
         let manifest =
-            r"C:\Users\Jørgen\AppData\Local\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json";
+            r"C:\Users\Zoë\AppData\Local\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json";
         set_default_value(&key, manifest).expect("write");
         assert!(key_exists(&key).expect("query"));
         assert_eq!(
