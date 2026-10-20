@@ -27,7 +27,14 @@ import {
 } from "./wire";
 import { locate, projectElements, unindexedTextByElement } from "./projection";
 
-type Target = { native: ComputerBackendTarget; pid: number; windowId: number };
+type Target = {
+  native: ComputerBackendTarget;
+  pid: number;
+  windowId: number;
+  /** The window's own title and app, as CUA names them in its reports. */
+  title: string;
+  appName: string;
+};
 type Frame = {
   targetId: string;
   width: number;
@@ -250,10 +257,12 @@ export class CuaComputerBackend implements ComputerBackend {
       this.observations.delete(command.targetId);
       const acted = await this.target(command.targetId);
       const known = new Set(this.targetsById.keys());
+      let report = "";
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
         try {
-          await callDesktop(this.runtime, operation.name, operation.args, true);
+          const { result } = await callDesktop(this.runtime, operation.name, operation.args, true);
+          report += openedWindowsReport(result.text);
         } catch (error) {
           if (index > 0)
             throw new ComputerBackendError(
@@ -282,22 +291,25 @@ export class CuaComputerBackend implements ComputerBackend {
       // Post-action observation failure cannot turn a delivered action into a
       // pre-dispatch rejection. The controller retains its completed receipt.
       try {
-        const openedReading = async () => {
-          const opened = await this.openedWindow(acted, known).catch(() => null);
+        const openedReading = async (reported: string | null) => {
+          const opened = await this.openedWindow(acted, known, reported).catch(() => null);
           return opened ? await this.observeTarget(opened).catch(() => null) : null;
         };
-        const opened = await openedReading();
+        // CUA names the windows it saw the action open.
+        const opened = report ? await openedReading(report) : null;
         if (opened) return opened;
         try {
           return await this.observeTarget(command.targetId);
         } catch (error) {
           // The acted window closed or can no longer be read, as an Open
-          // panel does when its app makes a new document: the window the
-          // action opened can appear a moment after the action returns.
+          // panel does when its app makes a new document from a key
+          // equivalent CUA ran as a menu command, which it reports nothing
+          // for. The action replaced its window, so a new window of the app
+          // is the one it opened; it can appear a moment after the action.
           const deadline = Date.now() + OPENED_WINDOW_WAIT_MS;
           while (Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, OPENED_WINDOW_POLL_MS));
-            const reading = await openedReading();
+            const reading = await openedReading(null);
             if (reading) return reading;
           }
           throw error;
@@ -378,6 +390,8 @@ export class CuaComputerBackend implements ComputerBackend {
       this.targetsById.set(id, {
         pid: window.pid,
         windowId: window.window_id,
+        title: window.title,
+        appName: window.app_name,
         native: {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
@@ -418,20 +432,28 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** The window an action opened, such as a new document or a dialog: the
-   * one window of the acted window's app not listed before the action. CUA's
-   * own report of new windows misses some, such as a key equivalent it ran as
-   * a menu command, so the windows are listed after every action. A window
-   * lying within another window of its app is a sheet or part of a panel,
-   * read through that window, so it never counts. Two candidates are never
-   * guessed between. */
-  private async openedWindow(acted: Target, known: ReadonlySet<string>): Promise<string | null> {
-    const opened = (await this.discover()).filter(
-      (target) =>
-        !known.has(target.id) &&
-        target.processId === acted.pid &&
-        this.sheetHosts(this.targetsById.get(target.id)!).length === 0,
-    );
-    return opened.length === 1 ? opened[0]!.id : null;
+   * one window of the acted window's app not listed before the action, and,
+   * given CUA's report of the windows the action opened, one that report
+   * names. A window that merely appeared meanwhile is not the action's. A
+   * window lying within another window of its app is a sheet or part of a
+   * panel, read through that window, so it never counts. Two candidates are
+   * never guessed between. */
+  private async openedWindow(
+    acted: Target,
+    known: ReadonlySet<string>,
+    report: string | null,
+  ): Promise<string | null> {
+    await this.discover();
+    const opened = [...this.targetsById.entries()]
+      .filter(
+        ([id, target]) =>
+          !known.has(id) &&
+          target.pid === acted.pid &&
+          (report === null || reportNames(report, target)) &&
+          this.sheetHosts(target).length === 0,
+      )
+      .map(([id]) => id);
+    return opened.length === 1 ? opened[0]! : null;
   }
 
   /** Other windows of the same macOS app that a window lies within: where a
@@ -1118,6 +1140,22 @@ function procParentPid(pid: number): number | null {
 /** How long a launch waits for the app's first window: up to a second. */
 const LAUNCH_WINDOW_RETRIES = 4;
 const LAUNCH_WINDOW_RETRY_MS = 250;
+
+/** The part of a CUA action result naming the windows it saw the action
+ * open, as `App ("Title", …); Other` (an untitled window by its app only).
+ * A window the previous action opened late is reported separately and is
+ * not this action's. */
+function openedWindowsReport(text: string): string {
+  const match = /(?:^|\n)🪟 Action opened new window\(s\): (.*)\.$/mu.exec(text);
+  return match ? `${match[1]}; ` : "";
+}
+
+/** Whether CUA's report names a window: by its quoted title, or, untitled,
+ * by its app. */
+function reportNames(report: string, target: Target): boolean {
+  if (target.title) return report.includes(`"${target.title}"`);
+  return report.split("; ").includes(target.appName);
+}
 
 /** How long an action whose window can no longer be read waits for the
  * window it opened. */

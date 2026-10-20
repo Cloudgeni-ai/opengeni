@@ -1258,25 +1258,30 @@ describe("CUA desktop boundary", () => {
   });
 
   test("an action that opens one window of its app observes that window", async () => {
-    // After the action, list_windows adds the windows in `opens`.
-    // With `closes`, the acted window closes and the new one is listed only
-    // from the second listing after the action.
+    // After the action, list_windows adds the windows in `opens`, and the
+    // action's result carries CUA's `report` of the windows it opened. With
+    // `closes`, the acted window closes and the new one is listed only from
+    // the second listing after the action.
+    type Opened = { pid: number; window_id: number; title: string; bounds: Record<string, number> };
     class OpeningFixture extends Fixture {
       acted = false;
       closes = false;
       listingsAfter = 0;
-      opens: Array<{ pid: number; window_id: number; bounds: Record<string, number> }> = [];
+      report = "";
+      opens: Opened[] = [];
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "get_window_state" && args.window_id === 1 && !this.live)
+          return { ...result({}, true), structuredJson: null, text: "window 1 is gone" } as never;
         const response = await super.callTool(name, argumentsJson);
         if (name === "click") {
           this.acted = true;
           if (this.closes) this.live = false;
+          return { ...response, text: `Clicked.${this.report}` };
         }
         if (name === "list_windows" && this.acted && (!this.closes || ++this.listingsAfter > 1)) {
           const data = JSON.parse(response.structuredJson!);
-          for (const window of this.opens)
-            data.windows.push({ ...window, title: "Untitled", app_name: "Fixture" });
+          for (const window of this.opens) data.windows.push({ ...window, app_name: "Fixture" });
           response.structuredJson = JSON.stringify(data);
         }
         if (name === "get_window_state" && args.window_id !== 1) {
@@ -1287,40 +1292,62 @@ describe("CUA desktop boundary", () => {
         return response;
       }
     }
+    const opened = (title: string) => `\n\n🪟 Action opened new window(s): Fixture ("${title}").`;
     const beside = { x: 300, y: 50, width: 200, height: 100 };
     const within = { x: 60, y: 60, width: 100, height: 50 };
-    for (const { opens, observed } of [
-      // A new document window of the app.
-      { opens: [{ pid: 42, window_id: 2, bounds: beside }], observed: 2 },
-      // Two candidates are never guessed between.
+    const document = { pid: 42, window_id: 2, title: "Untitled", bounds: beside };
+    for (const { opens, report, observed } of [
+      // A new document window of the app, named by CUA's report.
+      { opens: [document], report: opened("Untitled"), observed: 2 },
+      // An untitled window is named by its app.
       {
-        opens: [
-          { pid: 42, window_id: 2, bounds: beside },
-          { pid: 42, window_id: 3, bounds: beside },
-        ],
+        opens: [{ ...document, title: "" }],
+        report: "\n\n🪟 Action opened new window(s): Fixture.",
+        observed: 2,
+      },
+      // A window that appeared without CUA reporting it is not the action's.
+      { opens: [document], report: "", observed: 1 },
+      // Nor is one CUA's report does not name.
+      { opens: [{ ...document, title: "Unrelated" }], report: opened("Untitled"), observed: 1 },
+      // A window the previous action opened late is not this action's.
+      {
+        opens: [document],
+        report:
+          '\n\n🪟 After the previous action returned, it opened new window(s): Fixture ("Untitled").',
         observed: 1,
       },
-      // A sheet is read through the window it is attached to.
-      { opens: [{ pid: 42, window_id: 2, bounds: within }], observed: 1 },
+      // A sheet is read through the window it is attached to, and a window
+      // appearing beside it is not the action's.
+      {
+        opens: [
+          { pid: 42, window_id: 2, title: "Save", bounds: within },
+          { ...document, window_id: 3, title: "Unrelated" },
+        ],
+        report: opened("Save"),
+        observed: 1,
+      },
+      // Two candidates are never guessed between.
+      {
+        opens: [document, { ...document, window_id: 3 }],
+        report: opened("Untitled"),
+        observed: 1,
+      },
       // Another app's window is not this target's.
-      { opens: [{ pid: 43, window_id: 2, bounds: beside }], observed: 1 },
-      // Nothing opened.
-      { opens: [], observed: 1 },
+      { opens: [{ ...document, pid: 43 }], report: opened("Untitled"), observed: 1 },
     ]) {
       const fixture = new OpeningFixture();
       fixture.opens = opens;
+      fixture.report = report;
       const backend = await CuaComputerBackend.open(fixture);
       try {
         const target = (await backend.targets())[0]!;
         const observation = await backend.observe(target.id);
         const listings = fixture.calls.filter((call) => call.name === "list_windows").length;
         const after = await backend.dispatch(command(observation));
-        expect(after?.target.id).toBe(
-          `cua:window:${observed === 1 ? 42 : opens[0]!.pid}:${observed}`,
-        );
-        // One listing after the action.
+        expect(after?.target.id).toBe(`cua:window:42:${observed}`);
+        // Windows are listed again only for a reported new window.
         expect(fixture.calls.filter((call) => call.name === "list_windows").length).toBe(
-          listings + 1,
+          listings + (report.includes("Action opened") ? 1 : 0),
         );
       } finally {
         await backend.close();
@@ -1328,10 +1355,11 @@ describe("CUA desktop boundary", () => {
     }
 
     // The acted window closes, and the window it opened appears a moment
-    // after the action returns.
+    // after the action returns, unreported (CUA ran a key equivalent as a
+    // menu command).
     {
       const fixture = new OpeningFixture();
-      fixture.opens = [{ pid: 42, window_id: 2, bounds: beside }];
+      fixture.opens = [document];
       fixture.closes = true;
       const backend = await CuaComputerBackend.open(fixture);
       try {
@@ -1346,7 +1374,8 @@ describe("CUA desktop boundary", () => {
 
     // The controller records the opened window's observation in the receipt.
     const fixture = new OpeningFixture();
-    fixture.opens = [{ pid: 42, window_id: 2, bounds: beside }];
+    fixture.opens = [document];
+    fixture.report = opened("Untitled");
     const backend = await CuaComputerBackend.open(fixture);
     try {
       const computerSessionId = crypto.randomUUID();
