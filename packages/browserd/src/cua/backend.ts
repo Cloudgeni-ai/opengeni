@@ -20,6 +20,7 @@ import {
 import {
   callDesktop,
   CuaFailure,
+  runSteps,
   walkIncompleteness,
   Windows,
   WindowState,
@@ -100,6 +101,8 @@ export class CuaComputerBackend implements ComputerBackend {
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
+      // CUA runs a batch as one run_steps call.
+      actionBatches: true,
       parallelApps: false,
     };
   }
@@ -212,12 +215,17 @@ export class CuaComputerBackend implements ComputerBackend {
         await this.target(command.targetId);
         return;
       }
+      if (command.action.type === "batch") {
+        await this.batchSteps(command);
+        return;
+      }
       await this.operations(command);
     });
   }
 
   dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
     return this.run(async () => {
+      if (command.action.type === "batch") return await this.dispatchBatch(command);
       if (command.action.type === "launch") {
         await this.target(command.targetId);
         const launched = await this.launch(command.action.applicationId);
@@ -290,23 +298,97 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      // Post-action observation failure cannot turn a delivered action into a
-      // pre-dispatch rejection. The controller retains its completed receipt.
-      try {
-        // CUA names the windows it saw the action open. Nothing else proves
-        // that a window appearing meanwhile is the action's.
-        const opened = report
-          ? await this.openedWindow(acted, known, report).catch(() => null)
-          : null;
-        if (opened) {
-          const reading = await this.observeTarget(opened).catch(() => null);
-          if (reading) return reading;
-        }
-        return await this.observeTarget(command.targetId);
-      } catch {
-        return null;
-      }
+      return await this.observeAfter(command.targetId, acted, known, report);
     });
+  }
+
+  /** The window an action left in front: the one CUA reports it opened, or
+   * its own. A failed read cannot turn a delivered action into a pre-dispatch
+   * rejection, so it observes nothing and the receipt still completes. */
+  private async observeAfter(
+    targetId: string,
+    acted: Target,
+    known: Set<string>,
+    report: string,
+  ): Promise<ComputerBackendObservation | null> {
+    try {
+      // CUA names the windows it saw the action open. Nothing else proves
+      // that a window appearing meanwhile is the action's.
+      const opened = report
+        ? await this.openedWindow(acted, known, report).catch(() => null)
+        : null;
+      if (opened) {
+        const reading = await this.observeTarget(opened).catch(() => null);
+        if (reading) return reading;
+      }
+      return await this.observeTarget(targetId);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Each action of a batch as its CUA step. Every one is checked against the
+   * observation the batch names, the only state its refs come from, before
+   * any of them runs. */
+  private async batchSteps(command: ComputerBackendActionCommand): Promise<Operation[]> {
+    if (command.action.type !== "batch") throw new Error("not a batch");
+    const { actions } = command.action;
+    const steps: Operation[] = [];
+    for (const [index, action] of actions.entries()) {
+      try {
+        const operations = await this.operations({ ...command, action }, index > 0);
+        if (operations.length !== 1)
+          throw unsupported("This action cannot run as one step of a batch");
+        steps.push(operations[0]!);
+      } catch (error) {
+        if (!(error instanceof ComputerBackendError) || actions.length === 1) throw error;
+        const refused = new ComputerBackendError(
+          error.code,
+          `Action ${index + 1} of the batch: ${error.message}. No action of the batch ran.`,
+          error.retryable,
+          false,
+        );
+        throw refused;
+      }
+    }
+    return steps;
+  }
+
+  /** A batch runs as one CUA run_steps call: CUA paces the steps for a batch
+   * and the window is observed once, after the last one. A batch CUA stopped
+   * part way says how many actions completed, so the caller can report each. */
+  private async dispatchBatch(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
+    const steps = await this.batchSteps(command);
+    this.observations.delete(command.targetId);
+    const acted = await this.target(command.targetId);
+    const known = new Set(this.targetsById.keys());
+    const outcome = await runSteps(this.runtime, {
+      ...this.args(acted),
+      steps: steps.map((step) => ({ tool: step.name, args: step.args })),
+    });
+    if (outcome.kind === "completed")
+      return await this.observeAfter(
+        command.targetId,
+        acted,
+        known,
+        openedWindowsReport(outcome.windowChanges),
+      );
+    const message = `CUA stopped the batch at action ${outcome.completed + 1}: ${outcome.message}`;
+    if (outcome.completed === 0 && outcome.definite)
+      throw new ComputerBackendError(outcome.code ?? "driver_failed", message, false, false);
+    const stopped = new ComputerBackendError(
+      outcome.definite ? (outcome.code ?? "driver_failed") : "outcome_unknown",
+      message,
+      false,
+      true,
+    );
+    stopped.details = {
+      batchActionsCompleted: outcome.completed,
+      batchStoppedActionState: outcome.definite ? "failed" : "outcome_unknown",
+    };
+    throw stopped;
   }
 
   close(): Promise<void> {
@@ -767,7 +849,14 @@ export class CuaComputerBackend implements ComputerBackend {
     };
   }
 
-  private async operations(command: ComputerBackendActionCommand): Promise<Operation[]> {
+  /** The CUA calls for one action. `laterInBatch` marks an action that runs
+   * after earlier actions of its batch changed the window: the observation
+   * still names its element, but not the element's state or the focus. */
+  private async operations(
+    command: ComputerBackendActionCommand,
+    laterInBatch = false,
+  ): Promise<Operation[]> {
+    if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
       throw unsupported("CUA click continuation is unavailable");
     }
@@ -930,7 +1019,8 @@ export class CuaComputerBackend implements ComputerBackend {
       const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))
         throw unsupported("CUA element does not advertise this semantic action");
-      if (node.states.includes("disabled"))
+      // An earlier action of the batch can enable it; CUA refuses it if not.
+      if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
       if (action.action === "set_value") {
         if (action.value === undefined)
@@ -968,8 +1058,10 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     // Window-scoped delivery never falls back to the foreground desktop. An
     // observed focused element is carried when CUA supplies that information.
+    // After earlier actions of a batch the focus may have moved (clicking a
+    // field focuses it), so the keys go to whatever has the focus then.
     const focused =
-      observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
+      !laterInBatch && observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
         ? { element_token: observed.focusedRef }
         : {};
     if (action.action === "type")

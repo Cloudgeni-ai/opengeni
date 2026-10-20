@@ -1768,4 +1768,259 @@ describe("CUA desktop boundary", () => {
     expect(fixture.calls.filter((call) => call.name === "end_session")).toHaveLength(1);
     expect(fixture.stopped).toBe(true);
   });
+
+  describe("a batch runs as one run_steps call", () => {
+    class BatchFixture extends Fixture {
+      /** What run_steps answers; null runs every step. */
+      reply: Record<string, unknown> | null = null;
+      /** Window-change lines of the last step. */
+      windowChanges: string[] = [];
+      opens: { pid: number; window_id: number; title: string }[] = [];
+      ran = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "run_steps") {
+          this.calls.push({ name, args });
+          this.ran = true;
+          const steps = args.steps as unknown[];
+          if (this.reply) return result(this.reply, true);
+          return result({
+            ok: true,
+            total: steps.length,
+            executed: steps.length,
+            failed_step: null,
+            steps: steps.map((_, index) => ({
+              index,
+              ok: true,
+              message: "done",
+              ...(index === steps.length - 1 && this.windowChanges.length
+                ? { window_changes: this.windowChanges }
+                : {}),
+            })),
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows" && this.ran) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens)
+            data.windows.push({
+              ...window,
+              app_name: "Fixture",
+              bounds: { x: 300, y: 50, width: 200, height: 100 },
+            });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const batch = (observation: ComputerBackendObservation): ComputerBackendActionCommand => ({
+      ...command(observation),
+      action: {
+        type: "batch",
+        actions: [
+          {
+            type: "semantic",
+            locator: { kind: "ref", ref: observation.roots[0]!.ref },
+            action: "invoke",
+          },
+          { type: "keyboard", action: "type", value: "hello" },
+          { type: "keyboard", action: "press", value: "enter" },
+        ],
+      },
+    });
+    const open = async (fixture: BatchFixture) => {
+      const backend = await CuaComputerBackend.open(fixture);
+      const target = (await backend.targets())[0]!;
+      return { backend, observation: await backend.observe(target.id) };
+    };
+    const mutations = (fixture: Fixture) =>
+      fixture.calls.filter((call) =>
+        ["click", "type_text", "press_key", "hotkey", "set_value"].includes(call.name),
+      );
+
+    test("every action is checked against the batch's observation and sent at once", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        expect(backend.initialCapabilities.actionBatches).toBe(true);
+        expect((await backend.capabilities()).actionBatches).toBe(true);
+        await backend.validate(batch(observation));
+        const after = await backend.dispatch(batch(observation));
+        expect(after?.target.id).toBe("cua:window:42:1");
+        const calls = fixture.calls.filter((call) => call.name === "run_steps");
+        expect(calls).toHaveLength(1);
+        expect(mutations(fixture)).toHaveLength(0);
+        const { steps, ...window } = calls[0]!.args as {
+          steps: { tool: string; args: Record<string, unknown> }[];
+        };
+        expect(window).toMatchObject({ pid: 42, window_id: 1 });
+        expect(steps.map((step) => step.tool)).toEqual(["click", "type_text", "press_key"]);
+        expect(steps[0]!.args.element_token).toBe(observation.roots[0]!.ref);
+        // Earlier actions may have moved the focus: later keys go where it is.
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+        expect(steps[1]!.args.text).toBe("hello");
+        expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a batch whose last action opened a window observes that window", async () => {
+      const fixture = new BatchFixture();
+      fixture.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      fixture.windowChanges = ['🪟 Action opened new window(s): Fixture ("Untitled").'];
+      const { backend, observation } = await open(fixture);
+      try {
+        expect((await backend.dispatch(batch(observation)))?.target.id).toBe("cua:window:42:2");
+      } finally {
+        await backend.close();
+      }
+      // Without CUA's report, a window that appeared is not the batch's.
+      const unreported = new BatchFixture();
+      unreported.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      const second = await open(unreported);
+      try {
+        expect((await second.backend.dispatch(batch(second.observation)))?.target.id).toBe(
+          "cua:window:42:1",
+        );
+      } finally {
+        await second.backend.close();
+      }
+    });
+
+    test("an action that fails the batch's checks sends nothing", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const invalid = batch(observation);
+        if (invalid.action.type !== "batch") throw new Error("not a batch");
+        invalid.action.actions[1] = {
+          type: "semantic",
+          locator: { kind: "ref", ref: "s404:404" },
+          action: "invoke",
+        };
+        const failure = await backend.dispatch(invalid).catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toStartWith("Action 2 of the batch: ");
+        expect(fixture.ran).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a batch CUA stopped says how far it got", async () => {
+      const step = (index: number, fields: Record<string, unknown>) => ({
+        ok: true,
+        total: 3,
+        executed: index + 1,
+        failed_step: index,
+        steps: [
+          ...Array.from({ length: index }, (_, done) => ({ index: done, ok: true, message: "ok" })),
+          { index, ok: false, ...fields },
+        ],
+      });
+      for (const { reply, expected, details } of [
+        // Nothing ran: refused before the first step.
+        {
+          reply: { ok: false, code: "invalid_batch", executed: 0, failed_step: 1, detail: "bad" },
+          expected: { code: "invalid_action", dispatched: false },
+          details: undefined,
+        },
+        // The first step's element was never found: nothing ran.
+        {
+          reply: step(0, { phase: "find", code: "not_found", message: "no such element" }),
+          expected: { code: "driver_failed", dispatched: false },
+          details: undefined,
+        },
+        // The first step was refused with a refusal code: nothing ran.
+        {
+          reply: step(0, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: false },
+          details: undefined,
+        },
+        // A later action failed without proof it did nothing.
+        {
+          reply: step(1, { phase: "action", message: "did not confirm" }),
+          expected: { code: "outcome_unknown", dispatched: true },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        },
+        // A later action was refused: the earlier ones still ran.
+        {
+          reply: step(2, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: true },
+          details: { batchActionsCompleted: 2, batchStoppedActionState: "failed" },
+        },
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.reply = reply;
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend.dispatch(batch(observation)).catch((error) => error);
+          expect(failure).toMatchObject(expected);
+          expect(failure.details).toEqual(details);
+        } finally {
+          await backend.close();
+        }
+      }
+    });
+
+    test("the receipt of a stopped batch keeps how many actions completed", async () => {
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 3,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message: "did not confirm" },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: "hello" },
+              { type: "keyboard", action: "press", value: "enter" },
+            ],
+          },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error).toMatchObject({
+          code: "outcome_unknown",
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        });
+      } finally {
+        await backend.close();
+      }
+    });
+  });
 });

@@ -3239,6 +3239,8 @@ export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
       backgroundActions: z.boolean(),
       /** Raw window input stays in the background. Absent means foreground-only. */
       backgroundInput: z.boolean().optional(),
+      /** Accepts a ComputerActionBatch as one operation. */
+      actionBatches: z.boolean().optional(),
       parallelApps: z.boolean(),
     })
     .strict(),
@@ -3360,37 +3362,51 @@ export const ComputerObservation = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerObservation = z.infer<typeof ComputerObservation>;
 
+export const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("semantic"),
+      locator: ComputerLocator,
+      action: z.enum([
+        "invoke",
+        "focus",
+        "set_value",
+        "increment",
+        "decrement",
+        "select",
+        "deselect",
+        "expand",
+        "collapse",
+        "show_menu",
+        "scroll_into_view",
+      ]),
+      value: z.union([z.string().max(1_000_000), z.number().finite(), z.boolean()]).optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if ((action.action === "set_value") !== (action.value !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["value"],
+          message: "value is required exactly for set_value",
+        });
+      }
+    }),
+);
+
+export const ComputerKeyboardAction = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("keyboard"),
+      action: z.enum(["type", "press"]),
+      value: z.string().max(1_000_000),
+    })
+    .strict(),
+);
+
 export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("type", [
-    z
-      .object({
-        type: z.literal("semantic"),
-        locator: ComputerLocator,
-        action: z.enum([
-          "invoke",
-          "focus",
-          "set_value",
-          "increment",
-          "decrement",
-          "select",
-          "deselect",
-          "expand",
-          "collapse",
-          "show_menu",
-          "scroll_into_view",
-        ]),
-        value: z.union([z.string().max(1_000_000), z.number().finite(), z.boolean()]).optional(),
-      })
-      .strict()
-      .superRefine((action, context) => {
-        if ((action.action === "set_value") !== (action.value !== undefined)) {
-          context.addIssue({
-            code: "custom",
-            path: ["value"],
-            message: "value is required exactly for set_value",
-          });
-        }
-      }),
+    ComputerSemanticAction,
     z
       .object({
         type: z.literal("pointer"),
@@ -3452,13 +3468,7 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           });
         }
       }),
-    z
-      .object({
-        type: z.literal("keyboard"),
-        action: z.enum(["type", "press"]),
-        value: z.string().max(1_000_000),
-      })
-      .strict(),
+    ComputerKeyboardAction,
     z
       .object({
         type: z.literal("clipboard"),
@@ -3494,6 +3504,24 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerAction = z.infer<typeof ComputerAction>;
 
+/** Semantic and keyboard actions run in order on one target as one
+ * operation: each acts on the state the one before it left, the batch stops at
+ * the first failure, and the receipt observes the target once, after the last
+ * action. Pointer actions need one exact screenshot's pixels, so they are not
+ * batched. Sent only to a session whose capabilities include actionBatches. */
+export const ComputerActionBatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("batch"),
+      actions: z
+        .array(z.discriminatedUnion("type", [ComputerSemanticAction, ComputerKeyboardAction]))
+        .min(1)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    })
+    .strict(),
+);
+export type ComputerActionBatch = z.infer<typeof ComputerActionBatch>;
+
 export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3506,15 +3534,16 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
       expectedObservationId: boundedOpaqueId.nullable(),
       expectedFrameId: opaqueGeneration.nullable(),
       actor: InteractionActor,
-      action: ComputerAction,
+      action: z.union([ComputerAction, ComputerActionBatch]),
       /** Controller-private; see BrowserActionCommand.secretValues. */
       secretValues: InteractionSecretValues.optional(),
     })
     .strict()
     .superRefine((command, context) => {
       if (
-        command.action.type === "semantic" &&
-        command.action.locator.kind === "ref" &&
+        (command.action.type === "batch" ? command.action.actions : [command.action]).some(
+          (action) => action.type === "semantic" && action.locator.kind === "ref",
+        ) &&
         command.expectedObservationId === null
       ) {
         context.addIssue({
@@ -3698,13 +3727,14 @@ export const ComputerActionRequest = /* @__PURE__ */ defineSchema(() =>
       expectedTargetGeneration: opaqueGeneration,
       expectedObservationId: boundedOpaqueId.nullable(),
       expectedFrameId: opaqueGeneration.nullable(),
-      action: ComputerAction,
+      action: z.union([ComputerAction, ComputerActionBatch]),
     })
     .strict()
     .superRefine((request, context) => {
       if (
-        request.action.type === "semantic" &&
-        request.action.locator.kind === "ref" &&
+        (request.action.type === "batch" ? request.action.actions : [request.action]).some(
+          (action) => action.type === "semantic" && action.locator.kind === "ref",
+        ) &&
         request.expectedObservationId === null
       ) {
         context.addIssue({
@@ -3910,8 +3940,10 @@ export function materializeBrowserActionSecrets(
 }
 
 /** The text fields of a computer action that may carry secret references. */
-export function computerActionSecretTexts(action: ComputerAction): string[] {
+export function computerActionSecretTexts(action: ComputerAction | ComputerActionBatch): string[] {
   switch (action.type) {
+    case "batch":
+      return action.actions.flatMap((entry) => computerActionSecretTexts(entry));
     case "keyboard":
       return action.action === "type" ? [action.value] : [];
     case "semantic":
@@ -3927,11 +3959,22 @@ export function computerActionSecretTexts(action: ComputerAction): string[] {
 
 export function materializeComputerActionSecrets(
   command: Pick<ComputerActionCommand, "action" | "secretValues">,
-): ComputerAction {
+): ComputerAction | ComputerActionBatch {
   const values = command.secretValues;
   const action = command.action;
   if (values === undefined) return action;
   switch (action.type) {
+    case "batch":
+      return {
+        ...action,
+        actions: action.actions.map(
+          (entry) =>
+            materializeComputerActionSecrets({
+              action: entry,
+              secretValues: values,
+            }) as (typeof action.actions)[number],
+        ),
+      };
     case "keyboard":
       return action.action === "type"
         ? { ...action, value: substituteSecretText(action.value, values) }

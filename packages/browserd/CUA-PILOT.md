@@ -1,9 +1,10 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`39d06ca98e45c3fbf106458f7d8de782f60526c8`: upstream `cua-driver-rs-v0.37.0`
-(`2d2f9922`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
-fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`), including its non-invalidating
+`2f53f77b39f47ef86dde76dbf7d593b174706a62`: upstream `cua-driver-rs-v0.37.0`
+(`2d2f9922`) plus two Linux X11 coordinate fixes, a macOS per-action overhead
+fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`)
+and `run_steps` step reports that keep the windows each step opened, including its non-invalidating
 preview capture and cursor support. `@trycua/cua-driver` 0.37.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. Windows uses
 the published SDK's native runtime in process. CUA is the default on macOS, on
@@ -108,7 +109,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/39d06ca98e45c3fbf106458f7d8de782f60526c8/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/2f53f77b39f47ef86dde76dbf7d593b174706a62/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
@@ -139,6 +140,14 @@ No tool-enable UI or separate permission system is added.
 final observation diff; `run_script` runs upstream's sandboxed script engine, whose
 only API is the same CUA session, with no filesystem, network or process access;
 `get_window_state` retains compact Markdown, query limits and diff reads.
+
+A `computer_act` batch (semantic and keyboard actions on one window) is one
+operation on CUA: the adapter checks every action against the observation the
+batch names, sends them as one `run_steps` call, which paces all but the last
+step for a batch, and observes the window once at the end, or the window CUA
+reports the last action opened. A batch CUA stops part way records how many
+actions completed in its receipt's error details. A keyboard action after the
+first carries no element token, since earlier actions may have moved the focus.
 MCP content, structured results and images survive the journal. Responses larger
 than 12 MiB carry an explicit bounded projection, retained operation status and
 no-replay guidance; the original stays in the controller journal. Failed

@@ -2714,6 +2714,111 @@ describe("interaction attempt tools", () => {
     expect(retried.structuredContent).toEqual(result.structuredContent);
   });
 
+  test("a computer that runs batches gets the whole batch as one operation", async () => {
+    const target = computerTarget();
+    const initial = computerObservation(target);
+    const after = { ...initial, observationId: "after-batch" };
+    const requests: ComputerActionRequest[] = [];
+    let stopAfter: number | null = null;
+    let sessionReads = 0;
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => {
+          sessionReads += 1;
+          return { capabilities: { actionBatches: true } } as never;
+        },
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => {
+          observed += 1;
+          return after;
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          if (stopAfter === null) return computerReceipt(value.operationId, after);
+          return {
+            ...computerReceipt(value.operationId, after),
+            state: "outcome_unknown",
+            observation: null,
+            error: {
+              code: "outcome_unknown",
+              message: "CUA stopped the batch at action 2: did not confirm",
+              retryable: false,
+              details: { batchActionsCompleted: stopAfter, batchStoppedActionState: "failed" },
+            },
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const actions = [
+      { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
+      { type: "keyboard", action: "type", value: "12" },
+      { type: "keyboard", action: "press", value: "enter" },
+    ];
+    const run = async () =>
+      await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          expectedObservationId: initial.observationId,
+          action: { type: "batch", actions },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+
+    const result = await run();
+    expect(requests).toHaveLength(1);
+    // The batch's own observation is its fence: the window is not read again,
+    // which would retire its refs, and the target list gives the generation.
+    expect(observed).toBe(0);
+    expect(requests[0]).toMatchObject({
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: initial.observationId,
+      expectedFrameId: null,
+      action: { type: "batch", actions },
+    });
+    const batchOperationId = requests[0]!.operationId;
+    expect(result.structuredContent).toMatchObject({
+      type: "batch",
+      actionCount: 3,
+      steps: actions.map(() => ({ operationId: batchOperationId, state: "completed" })),
+      observation: { observationId: "after-batch" },
+      observationPrecedesStop: false,
+    });
+    expect((result.content[0] as { text: string }).text).toStartWith(
+      `Batch completed on ${target.id}: 3 actions.\n`,
+    );
+
+    // A batch stopped part way reports each action as it would one at a
+    // time, and shows the state the batch left.
+    stopAfter = 1;
+    const stopped = await run();
+    expect(observed).toBe(1);
+    expect(stopped.structuredContent).toMatchObject({
+      steps: [
+        { state: "completed", error: null },
+        {
+          state: "failed",
+          error: {
+            code: "outcome_unknown",
+            message: "CUA stopped the batch at action 2: did not confirm",
+          },
+        },
+      ],
+      observation: { observationId: "after-batch" },
+    });
+    const text = (stopped.content[0] as { text: string }).text;
+    expect(text).toStartWith(`Batch stopped on ${target.id} at action 2 of 3: action 2 failed`);
+    // The bookkeeping that says how far the batch got is not shown again.
+    expect(text).not.toContain("batchActionsCompleted");
+    // Support is read once for the session.
+    expect(sessionReads).toBe(1);
+  });
+
   test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
