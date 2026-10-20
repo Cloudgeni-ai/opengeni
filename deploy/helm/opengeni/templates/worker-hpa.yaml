@@ -76,7 +76,7 @@ spec:
       "scaleDown" (dict "stabilizationWindowSeconds" 600 "selectPolicy" "Disabled" "policies" (list (dict "type" "Pods" "value" 1 "periodSeconds" 300)))
     }}
   behavior:
-    {{- mergeOverwrite $queueBehavior (deepCopy $config.autoscaling.behavior) | toYaml | nindent 4 }}
+    {{- mergeOverwrite $queueBehavior (deepCopy (default dict $config.autoscaling.behavior)) | toYaml | nindent 4 }}
     {{- else }}
     {{- with $config.autoscaling.customMetrics }}
     {{- toYaml . | nindent 4 }}

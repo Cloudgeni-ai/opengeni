@@ -99,6 +99,20 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
     }
   }, 180_000);
+  test("null queue behavior preserves the conservative defaults", async () => {
+    const result = await render({
+      ...enabled,
+      worker: {
+        turns: { autoscaling: { enabled: true, queueDemand: { enabled: true }, behavior: null } },
+      },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    const hpa = find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns");
+    expect(hpa.spec.behavior.scaleDown.selectPolicy).toBe("Disabled");
+    expect(hpa.spec.behavior.scaleDown.policies).toEqual([
+      { type: "Pods", value: 1, periodSeconds: 300 },
+    ]);
+  }, 180_000);
   test("observability retains kube-state-metrics inputs used by rendered queue rules", async () => {
     const values = Bun.YAML.parse(
       await Bun.file(resolve(chart, "../../observability/values.yaml")).text(),
