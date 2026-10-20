@@ -235,16 +235,42 @@ fn install_panic_logging() {
 
 /// The Native Messaging host's stdout is Chrome's message channel: a log line
 /// there is read as a frame length and Chrome drops the connection. Its logs go
-/// to stderr, which Chrome leaves to the host, without terminal colors.
+/// to stderr without terminal colors, and, because Chrome discards a host's
+/// stderr, also to the size-bounded `<config>/logs/browser-native-host.log`.
 fn init_native_host_tracing() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_ansi(false)
-        .with_writer(std::io::stderr)
-        .try_init();
+    let log = config::config_dir().ok().and_then(|dir| {
+        log_file::RotatingLogFile::open(
+            &log_file::log_directory(&dir),
+            log_file::NATIVE_HOST_LOG,
+            log_file::MAX_NATIVE_HOST_LOG_BYTES,
+        )
+        .ok()
+    });
+    let file = log.map(|log| {
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(log)
+    });
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
+        .with(file)
+        .try_init()
+        .is_ok();
+    if installed {
+        install_panic_logging();
+    }
 }
 
 /// Routes a parsed CLI to its handler.
