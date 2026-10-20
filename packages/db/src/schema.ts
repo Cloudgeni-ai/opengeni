@@ -11761,6 +11761,10 @@ export const enrollments = pgTable(
     agentUpdateTargetVersion: text("agent_update_target_version"),
     agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
     agentUpdateErrorCode: text("agent_update_error_code"),
+    agentUpdateBlockers: jsonb("agent_update_blockers")
+      .$type<Array<{ kind: string; count: number }>>()
+      .notNull()
+      .default([]),
     agentUpdateRetryable: boolean("agent_update_retryable").notNull().default(false),
     agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
     agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),

@@ -1277,6 +1277,7 @@ describe("Connected Machine signed self-update orchestration", () => {
           event: {
             $case: "agentUpdateProgress",
             agentUpdateProgress: {
+              blockers: [],
               operationId,
               targetVersion: "0.1.16",
               expectedBinarySha256: targetDigest,
@@ -1424,6 +1425,44 @@ describe("Connected Machine signed self-update orchestration", () => {
       "accepted",
     );
 
+    const privateSessionId = crypto.randomUUID();
+    await bus.emitAgentEvent(
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              operationId: body.operationId,
+              targetVersion: "0.1.16",
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE,
+              errorCode: "update_busy_interactions",
+              blockers: [
+                { kind: "browser_action", resourceId: privateSessionId, count: 2 },
+                { kind: "browser_action", resourceId: crypto.randomUUID(), count: 1 },
+                ...Array.from({ length: 100 }, (_, index) => ({
+                  kind: `future_${index}`,
+                  count: 1,
+                })),
+                { kind: "invalid path /private", count: 1 },
+              ],
+            },
+          },
+        }),
+      ).finish(),
+    );
+    const waiting = await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (value) => value?.status === "waiting_for_idle",
+      `waiting update ${body.operationId}`,
+    );
+    expect(waiting?.blockers?.length).toBeLessThanOrEqual(33);
+    expect(waiting?.blockers).toContainEqual({ kind: "browser_action", count: 3 });
+    expect(waiting?.blockers?.reduce((sum, blocker) => sum + blocker.count, 0)).toBe(103);
+    expect(JSON.stringify(waiting)).not.toContain(privateSessionId);
+    expect(JSON.stringify(waiting)).not.toContain("resourceId");
+
     await bus.emitAgentEvent(
       `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
       AgentEvent.encode({
@@ -1431,6 +1470,7 @@ describe("Connected Machine signed self-update orchestration", () => {
         event: {
           $case: "agentUpdateProgress",
           agentUpdateProgress: {
+            blockers: [],
             operationId: body.operationId,
             targetVersion: "0.1.16",
             expectedBinarySha256: targetDigest,
@@ -1776,6 +1816,7 @@ describe("Connected Machine signed self-update orchestration", () => {
           event: {
             $case: "agentUpdateProgress",
             agentUpdateProgress: {
+              blockers: [],
               operationId: first!.operationId,
               stage: AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED,
               errorCode: "update_busy_work",

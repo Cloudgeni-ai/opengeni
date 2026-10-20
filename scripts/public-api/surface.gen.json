@@ -19498,12 +19498,24 @@
         "$": "enum=[\"\\\"consent_required\\\"\",\"\\\"display_unavailable\\\"\",\"\\\"enrolling\\\"\",\"\\\"offline\\\"\",\"\\\"online\\\"\",\"\\\"reconnecting\\\"\"]"
       }
     },
+    "MachineUpdateBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.count": "integer!",
+        "$.kind": "string!"
+      }
+    },
     "MachineUpdateState": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "object",
+        "$.blockers": "array?",
+        "$.blockers[]": "ref(MachineUpdateBlocker)",
         "$.completedAt": "string! null",
         "$.errorCode": "string! null",
         "$.expectedBinarySha256": "string! null",

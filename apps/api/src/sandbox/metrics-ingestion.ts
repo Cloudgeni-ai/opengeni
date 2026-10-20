@@ -58,6 +58,7 @@ import {
 import {
   AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndContract,
   AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContract,
+  MachineUpdateBlocker,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContractValue,
   type AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndValue,
 } from "@opengeni/contracts";
@@ -699,6 +700,21 @@ export async function handleAgentEventPayload(
       }
     })();
     if (!status) return;
+    // Enrollment viewers need not have access to every controller on this
+    // physical host. Persist categories only, never private session identities.
+    const blockerCounts = new Map<string, number>();
+    for (const blocker of progress.blockers) {
+      const parsed = MachineUpdateBlocker.safeParse(blocker);
+      if (!parsed.success) continue;
+      const kind =
+        blockerCounts.has(parsed.data.kind) || blockerCounts.size < 32
+          ? parsed.data.kind
+          : "other_work";
+      blockerCounts.set(
+        kind,
+        Math.min(0xffff_ffff, (blockerCounts.get(kind) ?? 0) + parsed.data.count),
+      );
+    }
     try {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: enrollment.accountId,
@@ -712,6 +728,7 @@ export async function handleAgentEventPayload(
           ? progress.expectedBinarySha256
           : null,
         errorCode: progress.errorCode || null,
+        blockers: [...blockerCounts].map(([kind, count]) => ({ kind, count })),
         retryable: progress.retryable,
         rolledBack: progress.rolledBack,
       });

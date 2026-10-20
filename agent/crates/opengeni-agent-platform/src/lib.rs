@@ -131,11 +131,31 @@ pub struct BrowserControlEndpoint {
     pub sidecar_generation: String,
 }
 
-/// Host-owned lifecycle seam for browserd.
-///
-/// The agent binary implements this because it owns installation paths,
-/// configuration storage, and child-process shutdown. The platform and relay
-/// crates depend only on this narrow capability, never on Bun/browserd details.
+/// Content-free evidence about work that must survive or finish before update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBlocker {
+    /// Stable category; never command text, URLs or filesystem paths.
+    pub kind: String,
+    /// Opaque session/operation identity, when known.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Number of retained owners in this category.
+    pub count: u32,
+}
+
+/// One atomic controller admission proof and its retained owners.
+#[derive(Debug, Clone)]
+pub struct UpdateAdmission {
+    /// True only when restart preserves all owned work.
+    pub idle: bool,
+    /// Diagnostic evidence, not authorization to end the named work.
+    pub blockers: Vec<UpdateBlocker>,
+}
+
+/// Host-owned lifecycle seam for browserd. The agent binary owns installation,
+/// configuration and child-process shutdown; platform/relay crates depend only
+/// on this boundary, never on Bun/browserd details.
 #[async_trait]
 pub trait BrowserControlBackend: Send + Sync {
     /// Proves every owned browser/computer controller is idle before restart.
@@ -144,7 +164,7 @@ pub trait BrowserControlBackend: Send + Sync {
 
     /// Atomically fence new controller requests and prove existing work ended.
     /// Older controllers cannot provide this proof and must fail closed.
-    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
         let _ = operation_id;
         Err(PlatformError::Unsupported(
             "controller update admission is unavailable".into(),

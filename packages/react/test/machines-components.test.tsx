@@ -379,7 +379,13 @@ describe("MachineCard — attach/swap affordance", () => {
         },
       },
     });
-    const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
+    const r = await renderComponent(
+      <MachineCard
+        machine={m}
+        onUpdateAgent={() => {}}
+        now={Date.parse("2026-08-13T12:01:00.000Z")}
+      />,
+    );
     await flush();
     expect(r.container.textContent).toContain("Updates to v0.1.16 when current work finishes");
     expect(r.container.querySelector("[data-update-agent]")).toBeNull();

@@ -1159,6 +1159,15 @@ message AgentUpdateProgress {
   string error_code = 5;
   bool retryable = 6;
   bool rolled_back = 7;
+  // Content-free blockers from this idle proof, not permission to stop work.
+  repeated AgentUpdateBlocker blockers = 8;
+}
+
+message AgentUpdateBlocker {
+  string kind = 1;
+  // Unused: enrollment-wide diagnostics must never carry private session IDs.
+  string resource_id = 2;
+  uint32 count = 3;
 }
 
 // =============================================================================

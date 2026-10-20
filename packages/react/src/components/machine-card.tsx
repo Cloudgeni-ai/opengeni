@@ -12,6 +12,7 @@ import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
 import { machineScopeLabel } from "../sandbox-label-model";
 import type { MachineView, MetricSample } from "../types/machines";
+import { connectionStatusForState } from "../types/machines";
 import { MachineHealthPill } from "./machine-health-pill";
 import { MachineMetrics } from "./machine-metrics";
 import { AgentStatusIcon } from "./machines/agent-status-icon";
@@ -73,7 +74,14 @@ export function MachineCard({
   const cpuPts = (series ?? []).map((s) => ({ t: new Date(s.sampledAt).getTime(), v: s.cpuPct }));
   const openable = Boolean(onOpenDetail);
   const runtime = machine.runtime;
-  const agent = runtime ? describeAgentRuntime(msg, runtime, clockNow) : null;
+  const agent = runtime
+    ? describeAgentRuntime(
+        msg,
+        runtime,
+        clockNow,
+        connectionStatusForState(machine.state) === "online",
+      )
+    : null;
   const updateAction =
     agent?.action && machine.enrollmentId && onUpdateAgent && !offline ? agent.action : null;
   const conflict = runnerConflict(machine.connectionAuthority, clockNow);

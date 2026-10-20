@@ -705,6 +705,12 @@ before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result
 retention and consumer-generation acknowledgments remain engine-owned.
+The same admission proof produces bounded category/count update-blocker
+snapshots. Private controller/session identities never cross into enrollment-wide
+diagnostics. Exact-operation/process-fenced progress persists the snapshot on the
+enrollment, clears it on advancement or process replacement, and projects its
+age and elapsed hold into Machines/fleet. This is evidence, not cancellation or
+permission to relax admission; older generic busy receipts remain unspecified.
 Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
