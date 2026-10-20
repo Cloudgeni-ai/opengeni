@@ -110,29 +110,38 @@ type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META = (
   t: OpenGeniText,
-): Record<RealtimeModelProvider, { billingClass: BillingClass; label: string; hint: string }> => ({
+): Record<
+  RealtimeModelProvider,
+  // `key` is unique per provider; several providers can share a billing class.
+  { key: string; billingClass: BillingClass; label: string; hint: string }
+> => ({
   // The wire value keeps its historical spelling; the product name is Opengeni.
   OpenGeni: {
+    key: "opengeni",
     billingClass: "opengeni_credits",
     label: t("realtime.realtimeControl.opengeni"),
     hint: t("realtime.realtimeControl.usesOpengeniCredits"),
   },
   "Connected Codex": {
+    key: "codex",
     billingClass: "codex_subscription",
     label: t("realtime.realtimeControl.connectedCodex"),
     hint: t("realtime.realtimeControl.chatgptCodexPlan"),
   },
   "Connected SuperGrok": {
+    key: "supergrok",
     billingClass: "supergrok_subscription",
     label: t("realtime.realtimeControl.connectedSupergrok"),
     hint: t("realtime.realtimeControl.supergrokXaiPlan"),
   },
   "Your Gateway": {
+    key: "gateway",
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourGateway"),
     hint: t("realtime.realtimeControl.billedToYourAiGateway"),
   },
   "Your ElevenLabs": {
+    key: "elevenlabs",
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourElevenlabs"),
     hint: t("realtime.realtimeControl.billedToYourElevenlabs"),
@@ -1029,7 +1038,7 @@ export function RealtimeModelPickerMenu(props: {
               hint={meta.hint}
               icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
               active={props.selectedModel.provider === provider}
-              testId={`realtime-model-provider-${meta.billingClass}`}
+              testId={`realtime-model-provider-${meta.key}`}
               onClick={() => changeProvider(provider, 1)}
             />
           );
