@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BrowserDownloadStore } from "../src";
 
@@ -77,7 +77,9 @@ describe("BrowserDownloadStore", () => {
       totalBytes: 10,
       filePath: path,
     });
-    expect((await store.completedFile(firstDownloadId)).path).toBe(path);
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "%PDF bytes",
+    );
     expect((await store.get(firstDownloadId))?.filename).toBe("report.pdf");
     await store.close();
     // An orphan Chromium left behind is swept; the named file is retained.
@@ -87,6 +89,103 @@ describe("BrowserDownloadStore", () => {
       "%PDF bytes",
     );
     await expect(readFile(join(reopened.filesDirectory, "stray.pdf.crdownload"))).rejects.toThrow();
+    await reopened.close();
+  });
+
+  test("keeps each download's bytes when a later one replaces its name", async () => {
+    const rootDirectory = await newRoot();
+    let next = 0;
+    const ids = [firstDownloadId, secondDownloadId];
+    const open = async () =>
+      await BrowserDownloadStore.open({
+        rootDirectory,
+        browserSessionId,
+        controllerGeneration,
+        createId: () => ids[next++]!,
+      });
+    const store = await open();
+    const path = join(store.filesDirectory, "report.pdf");
+    const save = async (guid: string, bytes: string) => {
+      await store.begin({ guid, targetId: null, suggestedFilename: "report.pdf" });
+      // Chromium writes a partial file and renames it over the final name.
+      const partial = join(store.filesDirectory, `Unconfirmed ${guid}.crdownload`);
+      await writeFile(partial, bytes);
+      await rename(partial, path);
+      await store.progress({
+        guid,
+        state: "completed",
+        receivedBytes: bytes.length,
+        totalBytes: bytes.length,
+        filePath: path,
+      });
+    };
+    await save("first-guid", "first report");
+    await save("second-guid", "second, longer report");
+    const read = async (current: BrowserDownloadStore, id: string) =>
+      await readFile((await current.completedFile(id)).path, "utf8");
+    expect(await read(store, firstDownloadId)).toBe("first report");
+    expect(await read(store, secondDownloadId)).toBe("second, longer report");
+    expect(await readFile(path, "utf8")).toBe("second, longer report");
+    await store.close();
+
+    const reopened = await open();
+    expect(await reopened.get(firstDownloadId)).toMatchObject({ status: "completed" });
+    expect(await read(reopened, firstDownloadId)).toBe("first report");
+    expect(await read(reopened, secondDownloadId)).toBe("second, longer report");
+    expect(await readFile(path, "utf8")).toBe("second, longer report");
+    await reopened.close();
+  });
+
+  test("refuses bytes that replaced a download before they were kept", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.pdf");
+    await store.begin({ guid: "early", targetId: null, suggestedFilename: "report.pdf" });
+    // Another download with the same name finished first and replaced the file.
+    await writeFile(path, "someone else's longer bytes");
+    await store.progress({
+      guid: "early",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    // The other download's file is left in place.
+    expect(await readFile(path, "utf8")).toBe("someone else's longer bytes");
+    await store.close();
+  });
+
+  test("adopts a named download completed before downloads were kept apart", async () => {
+    const rootDirectory = await newRoot();
+    const open = async () =>
+      await BrowserDownloadStore.open({
+        rootDirectory,
+        browserSessionId,
+        controllerGeneration,
+        createId: () => firstDownloadId,
+      });
+    const store = await open();
+    const path = join(store.filesDirectory, "notes.txt");
+    await store.begin({ guid: "older", targetId: null, suggestedFilename: "notes.txt" });
+    await writeFile(path, "older bytes");
+    await store.progress({
+      guid: "older",
+      state: "completed",
+      receivedBytes: 11,
+      totalBytes: 11,
+      filePath: path,
+    });
+    await store.close();
+    // An earlier version kept only Chromium's file.
+    await rm(join(rootDirectory, "stored"), { recursive: true, force: true });
+    const reopened = await open();
+    expect(await readFile((await reopened.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "older bytes",
+    );
+    expect(await readFile(path, "utf8")).toBe("older bytes");
     await reopened.close();
   });
 

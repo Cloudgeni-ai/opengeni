@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { chmod, lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { chmod, copyFile, link, lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   BrowserDownload,
@@ -83,13 +83,17 @@ export type CompletedBrowserDownloadFile = {
 /** Placement-private download authority. Chromium saves files into `files/`
  * under the names it gives them, as it would in any downloads folder, and
  * reports each completed file's path; downloads from before that were saved
- * under their GUID. SQLite retains only bounded metadata and the file's name
- * in `files/`, never a source URL or a public local path. All event and
- * export work is serialized so a completion, cancellation, and caller read
- * cannot observe half-settled state. */
+ * under their GUID. A later download with the same name replaces the earlier
+ * file there, so each completed download is also kept as its own hard link in
+ * `stored/<guid>`, which is what reads, exports and integrity checks use.
+ * SQLite retains only bounded metadata and the file's name in `files/`, never
+ * a source URL or a public local path. All event and export work is serialized
+ * so a completion, cancellation, and caller read cannot observe half-settled
+ * state. */
 export class BrowserDownloadStore {
   readonly rootDirectory: string;
   readonly filesDirectory: string;
+  private readonly storedDirectory: string;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly now: () => Date;
@@ -105,6 +109,7 @@ export class BrowserDownloadStore {
   private constructor(options: BrowserDownloadStoreOptions, database: Database) {
     this.rootDirectory = resolve(options.rootDirectory);
     this.filesDirectory = join(this.rootDirectory, "files");
+    this.storedDirectory = join(this.rootDirectory, "stored");
     this.browserSessionId = requireUuid(options.browserSessionId, "browserSessionId");
     this.controllerGeneration = requireGeneration(options.controllerGeneration);
     this.now = options.now ?? (() => new Date());
@@ -130,9 +135,12 @@ export class BrowserDownloadStore {
   static async open(options: BrowserDownloadStoreOptions): Promise<BrowserDownloadStore> {
     const rootDirectory = resolve(options.rootDirectory);
     const filesDirectory = join(rootDirectory, "files");
+    const storedDirectory = join(rootDirectory, "stored");
     await mkdir(filesDirectory, { recursive: true, mode: 0o700 });
+    await mkdir(storedDirectory, { recursive: true, mode: 0o700 });
     await chmod(rootDirectory, 0o700);
     await chmod(filesDirectory, 0o700);
+    await chmod(storedDirectory, 0o700);
     const database = new Database(join(rootDirectory, "downloads.sqlite"), {
       create: true,
       readwrite: true,
@@ -472,25 +480,34 @@ export class BrowserDownloadStore {
         "SELECT * FROM browser_downloads WHERE status = 'completed' ORDER BY sequence",
       )
       .all();
-    const retained = new Set<string>();
+    const retainedFiles = new Set<string>();
+    const retainedStored = new Set<string>();
     for (const row of completed) {
-      const name = row.file_name ?? row.guid;
-      retained.add(name);
+      const stored = this.filePath(row);
       try {
-        const facts = await exactRegularFile(this.filePath(row));
+        // A download completed before downloads were kept in `stored/` is
+        // adopted from the file Chromium saved, provided it still holds the
+        // exact bytes that completed.
+        if (!(await pathExists(stored))) await keepFile(this.chromiumPath(row), stored);
+        const facts = await exactRegularFile(stored);
         if (facts.size !== row.received_bytes) throw new Error("download size changed");
-        if ((await sha256File(this.filePath(row))) !== row.sha256) {
+        if ((await sha256File(stored)) !== row.sha256) {
           throw new Error("download digest changed");
         }
+        retainedFiles.add(row.file_name ?? row.guid);
+        retainedStored.add(row.guid);
       } catch {
         this.settleExistingCompletedAsUnavailable(row.guid, "download_storage_lost");
-        retained.delete(name);
-        await this.removePhysicalFiles(row.guid, row.file_name);
+        await rm(stored, { force: true });
       }
     }
     for (const entry of await readdir(this.filesDirectory)) {
-      if (!retained.has(entry))
+      if (!retainedFiles.has(entry))
         await rm(join(this.filesDirectory, entry), { recursive: true, force: true });
+    }
+    for (const entry of await readdir(this.storedDirectory)) {
+      if (!retainedStored.has(entry))
+        await rm(join(this.storedDirectory, entry), { recursive: true, force: true });
     }
   }
 
@@ -506,14 +523,19 @@ export class BrowserDownloadStore {
     try {
       if (reportedPath !== null && fileName === null)
         throw new Error("download was saved outside its folder");
-      const path = this.filePath({ guid: row.guid, file_name: fileName });
+      const saved = this.chromiumPath({ guid: row.guid, file_name: fileName });
+      const path = this.filePath(row);
+      // Keep these bytes before a later download with the same name can
+      // replace the file Chromium saved.
+      await exactRegularFile(saved);
+      await keepFile(saved, path);
       const facts = await exactRegularFile(path);
       const sizeBytes = facts.size;
       if (
         sizeBytes > this.maxFileBytes ||
         this.otherActiveBytes(row.guid) + sizeBytes > this.maxSessionBytes
       ) {
-        await this.removePhysicalFiles(row.guid, fileName);
+        await this.discardCompletion(row.guid, fileName);
         this.settle(
           row.guid,
           "failed",
@@ -524,11 +546,29 @@ export class BrowserDownloadStore {
         );
         return;
       }
+      // The bytes Chromium reports writing are this download's; a file of
+      // any other size is another download's that replaced it before it
+      // could be kept, so Chromium's file stays for that download.
+      if (sizeBytes !== eventReceivedBytes) {
+        await this.removePhysicalFiles(row.guid);
+        this.settle(
+          row.guid,
+          "failed",
+          eventReceivedBytes,
+          eventTotalBytes,
+          null,
+          "download_integrity_failed",
+        );
+        return;
+      }
       const sha256 = await sha256File(path);
-      await chmod(path, 0o400);
+      // The kept link shares the file Chromium saved. On Windows a read-only
+      // file cannot be replaced, which would fail a later download with the
+      // same name, so the read-only mode is applied elsewhere only.
+      if (process.platform !== "win32") await chmod(path, 0o400);
       this.settle(row.guid, "completed", sizeBytes, sizeBytes, sha256, null, fileName);
     } catch {
-      await this.removePhysicalFiles(row.guid, fileName);
+      await this.discardCompletion(row.guid, fileName);
       this.settle(
         row.guid,
         "failed",
@@ -692,16 +732,44 @@ export class BrowserDownloadStore {
     });
   }
 
-  private filePath(row: Pick<DownloadRow, "guid" | "file_name">): string {
+  /** The download's own bytes, kept apart from Chromium's folder. */
+  private filePath(row: Pick<DownloadRow, "guid">): string {
+    return join(this.storedDirectory, requireGuid(row.guid));
+  }
+
+  /** The file as Chromium saved it in its downloads folder. */
+  private chromiumPath(row: Pick<DownloadRow, "guid" | "file_name">): string {
     return join(this.filesDirectory, row.file_name ?? requireGuid(row.guid));
+  }
+
+  /** Remove a completion that is not accepted. Chromium's file is removed
+   * only while it is still this download's own bytes: a later download with
+   * the same name may already have replaced it. */
+  private async discardCompletion(guid: string, fileName: string | null): Promise<void> {
+    if (fileName !== null) {
+      const saved = join(this.filesDirectory, fileName);
+      const [savedFacts, keptFacts] = await Promise.all([
+        lstat(saved).catch(() => null),
+        lstat(this.filePath({ guid })).catch(() => null),
+      ]);
+      if (
+        savedFacts &&
+        keptFacts &&
+        savedFacts.dev === keptFacts.dev &&
+        savedFacts.ino === keptFacts.ino
+      )
+        await rm(saved, { force: true });
+    }
+    await this.removePhysicalFiles(guid);
   }
 
   /** Remove what is known of a download's bytes. Chromium removes the partial
    * file of a download it cancels or fails itself; recovery removes every
    * entry of `files/` that no completed download owns. */
   private async removePhysicalFiles(guid: string, fileName: string | null = null): Promise<void> {
-    const path = this.filePath({ guid, file_name: null });
+    const path = this.chromiumPath({ guid, file_name: null });
     await Promise.all([
+      rm(this.filePath({ guid }), { force: true }),
       rm(path, { force: true }),
       rm(`${path}.crdownload`, { force: true }),
       ...(fileName ? [rm(join(this.filesDirectory, fileName), { force: true })] : []),
@@ -806,6 +874,31 @@ async function exactRegularFile(path: string): Promise<{ size: number }> {
   const facts = await lstat(path);
   if (!facts.isFile() || facts.isSymbolicLink()) throw new Error("download is not a regular file");
   return { size: nonnegativeSafeInteger(facts.size, "download size") };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+/** Keep `source`'s current bytes at `target`: a hard link shares them without
+ * copying and survives the source name being replaced; a file system without
+ * hard links gets an exclusive copy. */
+async function keepFile(source: string, target: string): Promise<void> {
+  await rm(target, { force: true });
+  try {
+    await link(source, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EXDEV" && code !== "EOPNOTSUPP")
+      throw error;
+    await copyFile(source, target, fsConstants.COPYFILE_EXCL);
+  }
 }
 
 async function sha256File(path: string): Promise<string> {
