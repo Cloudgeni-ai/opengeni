@@ -86,6 +86,7 @@ export class CuaComputerBackend implements ComputerBackend {
     permissions: { accessibility: boolean; screen_recording: boolean },
     platform: "macos" | "windows" | "linux",
     private readonly parentPid: (pid: number) => number | null,
+    actionBatches: boolean,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -101,8 +102,9 @@ export class CuaComputerBackend implements ComputerBackend {
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
-      // CUA runs a batch as one run_steps call.
-      actionBatches: true,
+      // CUA runs a batch as one run_steps call where that call can stop at a
+      // stale token (see dispatchBatch); elsewhere each action is its own.
+      actionBatches,
       parallelApps: false,
     };
   }
@@ -123,6 +125,7 @@ export class CuaComputerBackend implements ComputerBackend {
         permissions,
         platform,
         options.parentPid ?? procParentPid,
+        await runStepsStopsAtStaleTokens(runtime),
       );
       await backend.startSession(backend.session);
       return backend;
@@ -366,6 +369,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const known = new Set(this.targetsById.keys());
     const outcome = await runSteps(this.runtime, {
       ...this.args(acted),
+      // Each step was checked against the batch's observation. A token CUA
+      // finds stale names an element of a window that changed since: the
+      // batch stops there instead of acting on a lookalike CUA finds again.
+      refind_stale: false,
       steps: steps.map((step) => ({ tool: step.name, args: step.args })),
     });
     if (outcome.kind === "completed")
@@ -1388,4 +1395,16 @@ async function readPermissions(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** Whether this CUA's run_steps can be told to stop at a stale element token
+ * rather than act on a lookalike it finds again by role and label. */
+async function runStepsStopsAtStaleTokens(runtime: CuaDesktopRuntime): Promise<boolean> {
+  if (!runtime.listToolsJson) return false;
+  const { tools } = JSON.parse(await runtime.listToolsJson()) as {
+    tools: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[];
+  };
+  return tools.some(
+    (tool) => tool.name === "run_steps" && tool.inputSchema?.properties?.refind_stale !== undefined,
+  );
 }

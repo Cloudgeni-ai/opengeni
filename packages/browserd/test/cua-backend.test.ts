@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CUA_DESKTOP_TOOLS } from "@opengeni/contracts";
+import { CUA_DESKTOP_TOOLS, parseSecretReference, referenceKey } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { CuaComputerBackend } from "../src/cua/backend";
@@ -1858,7 +1858,8 @@ describe("CUA desktop boundary", () => {
         const { steps, ...window } = calls[0]!.args as {
           steps: { tool: string; args: Record<string, unknown> }[];
         };
-        expect(window).toMatchObject({ pid: 42, window_id: 1 });
+        // A stale token stops the batch: CUA does not act on a lookalike.
+        expect(window).toMatchObject({ pid: 42, window_id: 1, refind_stale: false });
         expect(steps.map((step) => step.tool)).toEqual(["click", "type_text", "press_key"]);
         expect(steps[0]!.args.element_token).toBe(observation.roots[0]!.ref);
         // Earlier actions may have moved the focus: later keys go where it is.
@@ -2018,6 +2019,65 @@ describe("CUA desktop boundary", () => {
           code: "outcome_unknown",
           details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
         });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a stopped batch's message does not show a typed secret CUA clipped", async () => {
+      const secret = `synthetic-${"0123456789".repeat(44)}`;
+      // CUA keeps the first 300 characters of a step's text, marks the cut
+      // and adds its own advice after it.
+      const message = `${`Typed ${secret}`.slice(0, 300)}... To run it, send the batch again.`;
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 2,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message, hint: `Check ${secret}` },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const raw = "{{secret:Desk/token}}";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: raw },
+            ],
+          },
+          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.message).toBe(
+          "CUA stopped the batch at action 2: Typed [secret]... To run it, send the batch again. Check [secret]",
+        );
+        expect(JSON.stringify(receipt)).not.toContain(secret.slice(0, 12));
       } finally {
         await backend.close();
       }

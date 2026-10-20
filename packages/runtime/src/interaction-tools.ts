@@ -994,7 +994,10 @@ export function createInteractionAttemptToolDefinitions(
   };
   // Whether a ComputerSession runs a computer_act batch as one operation.
   // Support comes with the computer's agent version, so a yes is kept; a no
-  // (or a session whose controller has not reported yet) is asked again.
+  // (or a session whose controller has not reported yet) is asked again. An
+  // unreadable answer runs the batch one action at a time, which every
+  // computer supports; a retried batch runs the way its first try did
+  // whatever the answer (see actInComputerBatch).
   const actionBatchSupport = new Map<string, Promise<boolean>>();
   const supportsActionBatches = (computerSessionId: string): Promise<boolean> => {
     let known = actionBatchSupport.get(computerSessionId);
@@ -2644,9 +2647,27 @@ async function actInComputerBatch(
     }
   };
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // A retried call runs its batch the way its first try did. Whether the
+  // computer runs batches as one operation can change between tries (its
+  // controller reports late, or its agent is updated), and the two ways derive
+  // different operation IDs, so running the other way would send the actions
+  // again. Both first receipts are read together before anything is sent.
+  const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
+  const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
+  const [nativePrior, firstStepPrior] = await Promise.all([
+    recorded(nativeOperationId),
+    recorded(firstStepOperationId),
+  ]);
+  if (typeof nativePrior === "object") nativeBatch = true;
+  else if (typeof firstStepPrior === "object") nativeBatch = false;
+  else if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
+    throw new Error(
+      "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
+    );
   if (nativeBatch)
     return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
-      operationId: derivedOperationId("computer-batch", operationId, "all"),
+      operationId: nativeOperationId,
+      prior: nativePrior,
       observe,
       recorded,
     });
@@ -2658,10 +2679,12 @@ async function actInComputerBatch(
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
-    if (generation === undefined || observationId == null) {
+    if (index === 0 && typeof firstStepPrior === "object") {
+      receipt = firstStepPrior;
+    } else if (generation === undefined || observationId == null) {
       // Read the recorded receipt first: a fresh read replaces the latest
       // observation, which would make a recovered receipt's fence stale.
-      const prior = await recorded(stepOperationId);
+      const prior = index === 0 ? firstStepPrior : await recorded(stepOperationId);
       if (typeof prior === "object") {
         receipt = prior;
       } else {
@@ -2787,6 +2810,8 @@ async function actInComputerNativeBatch(
   actions: ComputerAction[],
   batch: {
     operationId: string;
+    /** The batch's recorded receipt, read before this call sends anything. */
+    prior: z.output<typeof ComputerActionReceipt> | "absent" | "unknown";
     observe: () => Promise<z.output<typeof ComputerObservation>>;
     recorded: (
       operationId: string,
@@ -2798,16 +2823,13 @@ async function actInComputerNativeBatch(
       throw new Error(`a batch runs semantic and keyboard actions, not ${action.type}`);
     return action;
   });
-  let receipt: z.output<typeof ComputerActionReceipt> | null = null;
+  let receipt = typeof batch.prior === "object" ? batch.prior : null;
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId ?? null;
-  if (generation === undefined || observationId === null) {
-    // Read the recorded receipt first: a fresh read replaces the latest
+  if (!receipt && (generation === undefined || observationId === null)) {
+    // The recorded receipt was read first: a fresh read replaces the latest
     // observation, which would make a recovered receipt's fence stale.
-    const prior = await batch.recorded(batch.operationId);
-    if (typeof prior === "object") {
-      receipt = prior;
-    } else if (observationId !== null) {
+    if (observationId !== null) {
       // The batch names its observation: the target list gives the
       // generation without reading the window again, which would retire the
       // refs the caller holds.
@@ -2815,7 +2837,7 @@ async function actInComputerNativeBatch(
         await transport.listComputerTargets(workspaceId, value.computerSessionId)
       ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
     }
-    if (!receipt && (generation === undefined || observationId === null)) {
+    if (generation === undefined || observationId === null) {
       const current = await batch.observe();
       generation ??= current.target.targetGeneration;
       observationId ??= current.observationId;

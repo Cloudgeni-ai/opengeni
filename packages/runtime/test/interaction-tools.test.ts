@@ -2724,6 +2724,7 @@ describe("interaction attempt tools", () => {
     let observed = 0;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
         getComputerSession: async () => {
           sessionReads += 1;
           return { capabilities: { actionBatches: true } } as never;
@@ -2819,6 +2820,111 @@ describe("interaction attempt tools", () => {
     expect(sessionReads).toBe(1);
   });
 
+  test("a retried Computer batch runs the way its first try did when the computer's batch support changes", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const journal = new Map<string, ComputerActionReceipt>();
+    const sent: ComputerActionRequest[] = [];
+    // Each try is a fresh process that asks the computer whether it runs
+    // batches: the answer changes between tries, or cannot be read.
+    const tryOnce = async (operationId: string, support: boolean | "unreadable") =>
+      await createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getComputerSession: async () => {
+            if (support === "unreadable") throw new Error("api unavailable");
+            return { capabilities: { actionBatches: support } } as never;
+          },
+          listComputerTargets: async () => ({ targets: [target] }) as never,
+          observeComputerTarget: async () => observation,
+          actInComputer: async (_workspaceId, _computerSessionId, value) => {
+            const existing = journal.get(value.operationId);
+            if (existing) return existing;
+            sent.push(value);
+            const receipt = computerReceipt(value.operationId, observation);
+            journal.set(value.operationId, receipt);
+            return receipt;
+          },
+          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) =>
+            journal.get(id) ?? (await noRecordedReceipt()),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_act"],
+        permissions: ["sessions:control"],
+      })[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          expectedObservationId: observation.observationId,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "5" },
+              { type: "keyboard", action: "press", value: "6" },
+            ],
+          },
+        },
+        { operationId, caller: { kind: "model", subjectId: "model:test" } },
+      );
+
+    // Run one action at a time, then retried on a computer that now runs
+    // batches: the recorded actions are reported, and nothing is sent again.
+    const sequential = randomUUID();
+    const first = await tryOnce(sequential, "unreadable");
+    expect(sent.map((request) => request.action.type)).toEqual(["keyboard", "keyboard"]);
+    sent.length = 0;
+    const retried = await tryOnce(sequential, true);
+    expect(sent).toEqual([]);
+    expect(retried.structuredContent).toEqual(first.structuredContent);
+
+    // Run as one operation, then retried where support cannot be read.
+    const native = randomUUID();
+    const whole = await tryOnce(native, true);
+    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
+    sent.length = 0;
+    for (const support of ["unreadable", false] as const) {
+      const again = await tryOnce(native, support);
+      expect(sent).toEqual([]);
+      expect(again.structuredContent).toEqual(whole.structuredContent);
+    }
+  });
+
+  test("does not send a retried Computer batch when an earlier try's other way cannot be read", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    let sent = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => observation,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          sent += 1;
+          return computerReceipt(value.operationId, observation);
+        },
+        getComputerActionReceipt: async () => {
+          throw new Error("controller unreachable");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          expectedObservationId: observation.observationId,
+          action: { type: "batch", actions: [{ type: "keyboard", action: "press", value: "5" }] },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("whether an earlier try of this batch already ran could not be read");
+    expect(sent).toBe(0);
+  });
+
   test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -2894,7 +3000,9 @@ describe("interaction attempt tools", () => {
           sent += 1;
           return { ...computerReceipt(value.operationId, observation), observation: null };
         },
+        // The controller stops answering after the first action is sent.
         getComputerActionReceipt: async () => {
+          if (sent === 0) return await noRecordedReceipt();
           throw new Error("controller unreachable");
         },
       }),
@@ -3002,6 +3110,7 @@ describe("interaction attempt tools", () => {
     const requests: ComputerActionRequest[] = [];
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
         observeComputerTarget: async () => observation,
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           requests.push(value);
@@ -3061,6 +3170,7 @@ describe("interaction attempt tools", () => {
     const requests: ComputerActionRequest[] = [];
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
         observeComputerTarget: async () => observation,
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           requests.push(value);
@@ -3121,7 +3231,7 @@ describe("interaction attempt tools", () => {
     const observation = computerObservation(target);
     const run = async (transport: Parameters<typeof partialTransport>[0]) => {
       const definitions = createInteractionAttemptToolDefinitions({
-        transport: partialTransport(transport),
+        transport: partialTransport({ getComputerActionReceipt: noRecordedReceipt, ...transport }),
         workspaceId,
         sessionId,
         selectedTools: ["computer_act"],
@@ -5094,6 +5204,11 @@ function externalAuthRun(): AuthRun {
     updatedAt: now,
     settledAt: null,
   };
+}
+
+/** A controller that has nothing recorded under the operation ID asked for. */
+async function noRecordedReceipt(): Promise<never> {
+  throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
 }
 
 function partialTransport(value: Partial<InteractionTransport>): InteractionTransport {

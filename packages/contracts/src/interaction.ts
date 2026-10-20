@@ -4034,6 +4034,10 @@ function secretNeedles(secretValues: InteractionSecretValues): string[] {
   for (const value of Object.values(secretValues)) {
     if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
     needles.add(value);
+    // Tools trim the text they report and keep its first line, so a value's
+    // trimmed form and each line of a multi-line value are searched too.
+    for (const part of [value.trim(), ...value.split(/\r?\n|\r/u).map((line) => line.trim())])
+      if (part.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS) needles.add(part);
     try {
       needles.add(encodeURIComponent(value));
       needles.add(encodeURIComponent(value).replaceAll("%20", "+"));
@@ -4062,11 +4066,16 @@ function clippedSecretTail(text: string, needle: string): number {
   return best;
 }
 
+/** Where text may have been cut: its end, and each truncation mark a tool
+ * leaves where it clipped a longer text before adding more after it. */
+const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
+
 /** Deep copy with every occurrence of a supplied secret value in a text
  * string (raw or percent-encoded) replaced by `[secret]`, including a value's
- * start left at the end of a clipped string. Used on results a driver returns
- * after dispatching materialized values (CUA tools echo typed text; desktop
- * accessibility trees and page fields expose values). */
+ * start left at the end of a clipped string or before a truncation mark.
+ * Used on results a driver returns after dispatching materialized values (CUA
+ * tools echo typed text; desktop accessibility trees and page fields expose
+ * values). */
 export function redactInteractionSecretValues<T>(
   value: T,
   secretValues: InteractionSecretValues | undefined,
@@ -4079,9 +4088,15 @@ export function redactInteractionSecretValues<T>(
     for (const needle of needles) {
       if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
     }
-    let tail = 0;
-    for (const needle of needles) tail = Math.max(tail, clippedSecretTail(out, needle));
-    if (tail > 0) out = out.slice(0, out.length - tail) + INTERACTION_REDACTED_SECRET;
+    const cuts = [...out.matchAll(TRUNCATION_MARK)].map((match) => match.index);
+    // From the last cut back, so the earlier positions stay valid.
+    for (const cut of [out.length, ...cuts.reverse()]) {
+      const before = out.slice(0, cut);
+      let tail = 0;
+      for (const needle of needles) tail = Math.max(tail, clippedSecretTail(before, needle));
+      if (tail > 0)
+        out = before.slice(0, cut - tail) + INTERACTION_REDACTED_SECRET + out.slice(cut);
+    }
     return out;
   };
   const visit = (entry: unknown, key: string | null): unknown => {
