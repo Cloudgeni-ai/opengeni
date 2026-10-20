@@ -1,6 +1,7 @@
 import {
   useSubscriptionAccountPool,
   subscriptionAccountName,
+  subscriptionPoolQueryPrefix,
 } from "./models/use-subscription-account-pool";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { trackModelConnection } from "@/lib/analytics-observer";
@@ -13,6 +14,7 @@ import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-co
 
 import { userErrorText } from "@/lib/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
+import { invalidateSharedQueries } from "@/lib/shared-query";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
 // organization scope: the data and every mutation. Rows, the account page and
@@ -97,7 +99,6 @@ export function useSuperGrokSubscriptions({
     enabled: readEnabled,
     relatedQueryPrefixes: SUPERGROK_RELATED_QUERIES,
   });
-  const { refresh } = pool;
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingDeviceCode | null>(null);
   const connectEpoch = useRef({
@@ -180,6 +181,15 @@ export function useSuperGrokSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
+            // An observed sign-in changes this client's retained reads before
+            // checking whether navigation has retired the page's UI.
+            if (result?.status === "connected") {
+              await Promise.all([
+                invalidateSharedQueries(client, subscriptionPoolQueryPrefix("SuperGrok")),
+                invalidateSharedQueries(client, ["supergrok-accounts"]),
+                invalidateSharedQueries(client, ["model-settings"]),
+              ]);
+            }
             if (!result || controller.signal.aborted || !live()) return;
             setPending(null);
             if (result.status === "connected") {
@@ -191,7 +201,6 @@ export function useSuperGrokSubscriptions({
                     ? "SuperGrok connected for the workspace"
                     : "Your private SuperGrok account is connected",
               );
-              await refresh();
               if (live()) options?.onConnected?.(result.accountId ?? null);
               return;
             }
@@ -223,7 +232,7 @@ export function useSuperGrokSubscriptions({
         if (live()) setBusy(false);
       }
     },
-    [client, refresh, workspaceId, organizationId, epoch, canManage, readEnabled],
+    [client, workspaceId, organizationId, epoch, canManage, readEnabled],
   );
 
   return {

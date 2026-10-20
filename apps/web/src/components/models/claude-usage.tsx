@@ -1,6 +1,6 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
@@ -13,8 +13,8 @@ import {
 import {
   invalidateSharedQueries,
   isSharedQueryAccessRefusal,
-  peekSharedQuery,
   sharedQueryWriter,
+  useSharedQuery,
   type SharedQueryKey,
 } from "@/lib/shared-query";
 
@@ -28,8 +28,8 @@ export type ClaudeUsageState = {
 };
 
 // The last successful reading per exact scope + reading kind + credential +
-// version, retained per client so a revisit renders it at once while the page
-// re-reads it. Only a reading whose credential id and version are both known is
+// version, retained per client so a revisit within five minutes needs no read.
+// Only a reading whose credential id and version are both known is
 // retained: without them (people who can't manage the connection) a replaced
 // credential could not be told apart, so those readers always start cold.
 function claudeUsageQueryKey(input: {
@@ -42,6 +42,7 @@ function claudeUsageQueryKey(input: {
   if (!input.credentialId || input.credentialVersion === undefined) return null;
   if (input.credentialVersion === null) return null;
   return [
+    "model-settings",
     "claude-usage",
     input.scope,
     input.scopeId,
@@ -50,15 +51,6 @@ function claudeUsageQueryKey(input: {
     input.credentialVersion,
   ];
 }
-function retainedClaudeUsage(
-  client: object,
-  queryKey: SharedQueryKey | null,
-  readable: boolean,
-): ClaudeSubscriptionUsage | null {
-  if (!readable || !queryKey) return null;
-  return peekSharedQuery<ClaudeSubscriptionUsage>(client, queryKey)?.data ?? null;
-}
-
 export function useClaudeUsage({
   client,
   scope,
@@ -82,151 +74,124 @@ export function useClaudeUsage({
   accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
-  const key = `${scope}:${scopeId}:${accountPool ? "pool-account" : "connection"}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
-  const queryKey = claudeUsageQueryKey({
+  const readerId = useId();
+  const retainedKey = claudeUsageQueryKey({
     scope,
     scopeId,
     accountPool,
     credentialId,
     credentialVersion,
   });
-  const queryKeyId = queryKey ? JSON.stringify(queryKey) : null;
-  const currentKey = useRef(key);
-  currentKey.current = key;
+  // Unknown credentials still use the shared read machinery, but never reuse
+  // another mount's reading: a replacement cannot be identified reliably.
+  const queryKey = retainedKey ?? [
+    "model-settings",
+    "claude-usage",
+    scope,
+    scopeId,
+    accountPool ? "pool-account" : "connection",
+    credentialId ?? null,
+    credentialVersion ?? null,
+    "reader",
+    readerId,
+  ];
+  const key = JSON.stringify(queryKey);
+  const readable = enabled && connected;
+  const epochRef = useRef({ client, key, readable, active: true });
+  if (
+    epochRef.current.client !== client ||
+    epochRef.current.key !== key ||
+    epochRef.current.readable !== readable
+  ) {
+    epochRef.current.active = false;
+    epochRef.current = { client, key, readable, active: true };
+  }
+  const epoch = epochRef.current;
   const credentialChanged = useRef(onCredentialChanged);
   credentialChanged.current = onCredentialChanged;
-  const generation = useRef(0);
-  const refreshingKey = useRef<{ key: string; request: number } | null>(null);
-  const reconnectNotified = useRef<string | null>(null);
-  const [state, setState] = useState<{
-    key: string;
-    value: ClaudeSubscriptionUsage | null;
-    error: boolean;
-    loading: boolean;
-    refreshing: boolean;
-  }>(() => {
-    const retained = retainedClaudeUsage(client, queryKey, enabled && connected);
-    return {
-      key,
-      value: retained,
-      error: false,
-      loading: enabled && connected && !retained,
-      refreshing: false,
-    };
-  });
   const load = useCallback(
-    async (refresh: boolean) => {
-      if (!enabled || !connected || (refresh && !canManage)) return;
-      if (refreshingKey.current?.key === key) return;
-      const request = ++generation.current;
-      if (refresh) {
-        refreshingKey.current = { key, request };
-        setState((previous) => ({ ...previous, key, refreshing: true }));
-      }
-      const retainedKey = queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null;
-      // Created before the read: a clear (identity change) meanwhile refuses it.
-      const write = sharedQueryWriter(client);
-      try {
-        const result =
-          accountPool && credentialId
-            ? scope === "workspace"
-              ? await (refresh
-                  ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
-                  : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
-              : await (refresh
-                  ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
-                  : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
-            : scope === "workspace"
-              ? await (refresh
-                  ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
-                  : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
-              : await (refresh
-                  ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
-                  : client.getOrganizationClaudeSubscriptionUsage(scopeId));
-        if (currentKey.current !== key || generation.current !== request) return;
-        if (
-          !result.connected ||
-          (credentialVersion !== undefined &&
-            credentialVersion !== null &&
-            result.credentialVersion !== credentialVersion)
-        ) {
-          setState({ key, value: null, error: true, loading: false, refreshing: false });
-          if (retainedKey) void invalidateSharedQueries(client, retainedKey);
-          await credentialChanged.current?.();
-          return;
-        }
-        setState({ key, value: result, error: false, loading: false, refreshing: false });
-        if (retainedKey) write(retainedKey, result);
-        if (result.refreshStatus === "reconnect") {
-          if (reconnectNotified.current !== key) {
-            reconnectNotified.current = key;
-            await credentialChanged.current?.();
-          }
-        } else if (reconnectNotified.current === key) reconnectNotified.current = null;
-      } catch (error) {
-        if (currentKey.current !== key || generation.current !== request) return;
-        // A refusal means this person can no longer see the reading at all:
-        // drop the retained one instead of showing it beside the error.
-        const refused = isSharedQueryAccessRefusal(error);
-        if (refused && retainedKey) void invalidateSharedQueries(client, retainedKey);
-        setState((previous) => ({
-          key,
-          value: !refused && previous.key === key ? previous.value : null,
-          error: true,
-          loading: false,
-          refreshing: false,
-        }));
-      } finally {
-        if (refresh && refreshingKey.current?.request === request) refreshingKey.current = null;
-      }
-    },
-    [
-      client,
-      scope,
-      scopeId,
-      key,
-      enabled,
-      connected,
-      canManage,
-      credentialVersion,
-      credentialId,
-      accountPool,
-      queryKeyId,
-    ],
+    async (refresh: boolean) =>
+      accountPool && credentialId
+        ? scope === "workspace"
+          ? await (refresh
+              ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
+        : scope === "workspace"
+          ? await (refresh
+              ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
+              : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
+              : client.getOrganizationClaudeSubscriptionUsage(scopeId)),
+    [client, scope, scopeId, credentialId, accountPool],
   );
+  const query = useSharedQuery(client, queryKey, () => load(false), {
+    enabled: readable,
+    staleTimeMs: 5 * 60_000,
+    pollIntervalMs: 5 * 60_000,
+    ...(retainedKey ? {} : { retainMs: 0 }),
+  });
+  const [refreshState, setRefreshState] = useState<{
+    epoch: typeof epoch;
+    refreshing: boolean;
+    error: boolean;
+    refused: boolean;
+  } | null>(null);
+  const pending = useRef<typeof epoch | null>(null);
   useEffect(() => {
-    const retained = retainedClaudeUsage(
-      client,
-      queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null,
-      enabled && connected,
-    );
-    setState({
-      key,
-      value: retained,
-      error: false,
-      loading: enabled && connected && !retained,
-      refreshing: false,
-    });
-    void load(false);
-    const poll = () => {
-      if (document.visibilityState !== "hidden") void load(false);
-    };
-    const timer = enabled && connected ? setInterval(poll, 30_000) : null;
-    if (enabled && connected) document.addEventListener("visibilitychange", poll);
+    epoch.active = true;
     return () => {
-      generation.current += 1;
-      if (refreshingKey.current?.key === key) refreshingKey.current = null;
-      if (timer) clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
+      epoch.active = false;
     };
-  }, [client, key, queryKeyId, load, enabled, connected]);
+  }, [epoch]);
+  const mismatch = Boolean(
+    query.data &&
+    (!query.data.connected ||
+      (credentialVersion != null && query.data.credentialVersion !== credentialVersion)),
+  );
+  const needsMetadata = mismatch || query.data?.refreshStatus === "reconnect";
+  useEffect(() => {
+    if (epoch.active && needsMetadata) void credentialChanged.current?.();
+  }, [epoch, needsMetadata]);
+  // A successful subsequent GET also clears a previous explicit-check error.
+  useEffect(() => {
+    if (query.updatedAt !== null) setRefreshState(null);
+  }, [epoch, query.updatedAt]);
+  const refresh = useCallback(async () => {
+    if (!epoch.active || !readable || !canManage || pending.current === epoch) return;
+    pending.current = epoch;
+    setRefreshState({ epoch, refreshing: true, error: false, refused: false });
+    // Capture before the provider call, never after: a cleared client scope
+    // must reject this response even if the hook is still mounted.
+    const write = sharedQueryWriter(client);
+    try {
+      const result = await load(true);
+      if (!epoch.active) return;
+      write(JSON.parse(key) as SharedQueryKey, result);
+    } catch (error) {
+      if (!epoch.active) return;
+      const refused = isSharedQueryAccessRefusal(error);
+      if (refused) void invalidateSharedQueries(client, JSON.parse(key) as SharedQueryKey);
+      setRefreshState({ epoch, refreshing: false, error: true, refused });
+    } finally {
+      if (pending.current === epoch) pending.current = null;
+      if (epoch.active)
+        setRefreshState((previous) =>
+          previous?.epoch === epoch ? { ...previous, refreshing: false } : previous,
+        );
+    }
+  }, [epoch, client, readable, canManage, load, key]);
+  const local = refreshState?.epoch === epoch ? refreshState : null;
   return {
-    value: state.key === key ? state.value : null,
-    error: state.key === key && state.error,
-    loading: state.key !== key ? enabled && connected : state.loading,
-    refreshing: state.key === key && state.refreshing,
-    canRefresh: canManage && enabled && connected,
-    refresh: () => load(true),
+    value: mismatch || local?.refused ? null : query.data,
+    error: Boolean(query.error || local?.error || mismatch),
+    loading: query.loading,
+    refreshing: Boolean(local?.refreshing),
+    canRefresh: canManage && readable,
+    refresh,
   };
 }
 
