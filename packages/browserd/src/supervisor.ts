@@ -141,6 +141,7 @@ import {
   validateUploadAuthority,
   type BrowserStateUploadAuthority,
 } from "./state-upload";
+import { BROWSER_WINDOW_PARK_IDLE_MS } from "./window-parking";
 
 const DEFAULT_MAX_SESSIONS = 64;
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -154,6 +155,40 @@ function aggregateFailure(
   cause: unknown,
 ): AggregateError {
   return new AggregateError(errors, message, { cause });
+}
+
+/** The same frame subscription, calling `release` once it is closed or its
+ * frames end. */
+function releaseOnClose(
+  subscription: BrowserFrameSubscription,
+  release: () => void,
+): BrowserFrameSubscription {
+  return {
+    async close() {
+      try {
+        await subscription.close();
+      } finally {
+        release();
+      }
+    },
+    [Symbol.asyncIterator]() {
+      const frames = subscription[Symbol.asyncIterator]();
+      return {
+        async next() {
+          const result = await frames.next();
+          if (result.done) release();
+          return result;
+        },
+        async return(value?: unknown) {
+          try {
+            return (await frames.return?.(value)) ?? { done: true as const, value: undefined };
+          } finally {
+            release();
+          }
+        },
+      };
+    },
+  };
 }
 
 export type BrowserSessionReference = {
@@ -270,6 +305,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ): Promise<BrowserDiagnosticBatch>;
   readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
+  /** Keeps the browser's windows presented until the returned release is
+   * called (drivers that park idle windows). */
+  acquirePresence?(): Promise<() => void>;
   /** Private state capture adjunct, never part of runtimeSnapshot/public JSON. */
   captureSessionCookies?(): Promise<HeadlessSessionCookies | null>;
   readonly requiresExplicitProfileRestore?: boolean;
@@ -379,8 +417,13 @@ type Runtime = {
   creationObservation: BrowserObservation | null;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
+  /** Outstanding uses that keep the browser's windows presented. Each is
+   * bound to the current driver and moves to its replacement on recovery. */
+  presence: Set<PresenceHold>;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
+
+type PresenceHold = { driver: BrowserSupervisorDriver | null; release: () => void };
 
 type BrowserRuntimeOptions = Omit<
   BrowserSupervisorSessionOptions,
@@ -1133,7 +1176,10 @@ export class BrowserSupervisor {
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
-    const receipt = await runtime.controller.run(command);
+    const receipt = await this.presented(
+      runtime,
+      async () => await runtime.controller.run(command),
+    );
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -1178,7 +1224,10 @@ export class BrowserSupervisor {
       controllerGeneration: command.controllerGeneration,
     });
     const previous = runtime.externalAuthTail ?? Promise.resolve();
-    const operation = previous.then(async () => await this.performExternalAuth(runtime, command));
+    const operation = previous.then(
+      async () =>
+        await this.presented(runtime, async () => await this.performExternalAuth(runtime, command)),
+    );
     const tail = operation.then(
       () => undefined,
       () => undefined,
@@ -1211,9 +1260,17 @@ export class BrowserSupervisor {
     options?: BrowserFrameStreamOptions,
   ): Promise<BrowserFrameSubscription> {
     const runtime = this.requireActive(reference);
-    return await this.readWithRecovery(runtime, async () => {
-      return await runtime.driver.subscribeFrames(targetId, options);
-    });
+    // A live view keeps the windows presented for as long as it is open.
+    const release = await this.acquirePresence(runtime);
+    try {
+      const subscription = await this.readWithRecovery(runtime, async () => {
+        return await runtime.driver.subscribeFrames(targetId, options);
+      });
+      return releaseOnClose(subscription, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   async debug(
@@ -1849,24 +1906,32 @@ export class BrowserSupervisor {
         lastTargets: [],
         creationObservation: null,
         recovery: null,
+        presence: new Set(),
       };
       runtime.controller = this.createController(runtime, driver);
-      if (restoredManifest) {
-        await restoreTabs(
-          driver,
-          options.initialUrl
-            ? [{ url: options.initialUrl, selected: true }]
-            : restoredManifest.tabs,
-        );
-        runtime.lastSnapshot = await driver.runtimeSnapshot();
-        assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
-        runtime.lastTargets = await driver.listTargets();
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
-      } else {
-        const observation = await driver.start(options.initialUrl);
-        runtime.creationObservation = observation;
-        runtime.lastTargets = [observation.target];
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+      // Startup and tab restoration are a use of the browser: nothing may park
+      // its windows before they finish.
+      const startupPresence = await this.acquirePresence(runtime);
+      try {
+        if (restoredManifest) {
+          await restoreTabs(
+            driver,
+            options.initialUrl
+              ? [{ url: options.initialUrl, selected: true }]
+              : restoredManifest.tabs,
+          );
+          runtime.lastSnapshot = await driver.runtimeSnapshot();
+          assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
+          runtime.lastTargets = await driver.listTargets();
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        } else {
+          const observation = await driver.start(options.initialUrl);
+          runtime.creationObservation = observation;
+          runtime.lastTargets = [observation.target];
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        }
+      } finally {
+        startupPresence();
       }
       delete driverContext.headlessSessionCookies;
       if (workingJournal && workingReceipt) {
@@ -2168,11 +2233,15 @@ export class BrowserSupervisor {
           })
         : null;
     const driver = await this.createDriver(runtime.driverContext);
+    // The replacement stays presented while it restores tabs and until every
+    // outstanding use has moved to it.
+    const restorePresence = (await driver.acquirePresence?.()) ?? (() => undefined);
     try {
       await restoreTabs(driver, snapshot.tabs);
       const currentSnapshot = await driver.runtimeSnapshot();
       const currentTargets = await driver.listTargets();
       runtime.driver = driver;
+      for (const hold of runtime.presence) await this.bindPresence(runtime, hold);
       runtime.controller = this.createController(runtime, driver);
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
@@ -2200,6 +2269,8 @@ export class BrowserSupervisor {
         );
       }
       throw error;
+    } finally {
+      restorePresence();
     }
   }
 
@@ -2246,31 +2317,80 @@ export class BrowserSupervisor {
   }
 
   private async readWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
-    try {
-      return await operation();
-    } catch (error) {
-      if (error instanceof InteractionDefiniteDriverError) throw error;
-      if (!(await this.recoverIfUnavailable(runtime))) throw error;
-      return await operation();
-    }
+    return await this.presented(runtime, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof InteractionDefiniteDriverError) throw error;
+        if (!(await this.recoverIfUnavailable(runtime))) throw error;
+        return await operation();
+      }
+    });
   }
 
   private async mutateWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    return await this.presented(runtime, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        try {
+          await this.recoverIfUnavailable(runtime);
+        } catch (recoveryError) {
+          throw aggregateFailure(
+            [error, recoveryError],
+            "browser mutation failed and its runtime could not recover",
+            error,
+          );
+        }
+        // Never replay a mutation whose dispatch boundary is not represented by
+        // the durable action journal. Recovery only makes later calls usable.
+        throw error;
+      }
+    });
+  }
+
+  /** Runs one use of the browser with its windows presented. Idle windowed
+   * browsers park their windows so pages nobody uses stop rendering. */
+  private async presented<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquirePresence(runtime);
     try {
       return await operation();
-    } catch (error) {
+    } finally {
+      release();
+    }
+  }
+
+  private async acquirePresence(runtime: Runtime): Promise<() => void> {
+    const hold: PresenceHold = { driver: null, release: () => undefined };
+    runtime.presence.add(hold);
+    await this.bindPresence(runtime, hold);
+    return () => {
+      if (!runtime.presence.delete(hold)) return;
+      hold.driver = null;
+      hold.release();
+    };
+  }
+
+  /** Moves a presence hold onto the runtime's current driver. Presenting is
+   * best effort, so this never fails an operation. */
+  private async bindPresence(runtime: Runtime, hold: PresenceHold): Promise<void> {
+    while (runtime.presence.has(hold) && hold.driver !== runtime.driver) {
+      const driver = runtime.driver;
+      let release: () => void = () => undefined;
       try {
-        await this.recoverIfUnavailable(runtime);
-      } catch (recoveryError) {
-        throw aggregateFailure(
-          [error, recoveryError],
-          "browser mutation failed and its runtime could not recover",
-          error,
-        );
+        release = (await driver.acquirePresence?.()) ?? release;
+      } catch {
+        /* Best effort. */
       }
-      // Never replay a mutation whose dispatch boundary is not represented by
-      // the durable action journal. Recovery only makes later calls usable.
-      throw error;
+      // Released, or recovery replaced the driver, while acquiring.
+      if (!runtime.presence.has(hold) || runtime.driver !== driver) {
+        release();
+        continue;
+      }
+      const previous = hold.release;
+      hold.driver = driver;
+      hold.release = release;
+      previous();
     }
   }
 
@@ -3025,6 +3145,13 @@ async function createBrowserDriver(
         }
       : {}),
     focusEmulation: true,
+    // Linux has no window occlusion tracking: every window of a windowed
+    // browser counts as visible and its animated pages render continuously.
+    // Park idle windows so browsers nobody is using stop drawing frames. A
+    // linked ComputerSession works on the native window itself, so it stays.
+    ...(process.platform === "linux" && context.headed && !offscreen && !context.linkedComputer
+      ? { parkIdleWindowsAfterMs: BROWSER_WINDOW_PARK_IDLE_MS }
+      : {}),
     // Headless and offscreen Chrome on this machine launch with an ordinary
     // User-Agent switch, which empties their high-entropy Client Hints.
     ...((process.platform === "darwin" || process.platform === "linux") &&
