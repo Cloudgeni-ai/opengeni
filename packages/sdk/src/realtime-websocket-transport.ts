@@ -3,6 +3,7 @@ import type {
   CodexRealtimeControllerClient,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+import { withoutAudioTags } from "./realtime-transcript";
 import type { RealtimeWebsocketProtocol } from "./types";
 type RealtimeClientEvent = Record<string, unknown> & { type: string };
 type RealtimeServerEvent = Record<string, unknown> & { type: string };
@@ -120,6 +121,7 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
       handleRealtimeEvent({
         event: parsed as RealtimeServerEvent,
         codec,
+        transcriptAudioTags: answer.transcriptAudioTags === true,
         channel,
         websocket,
         audio,
@@ -202,6 +204,7 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
 function handleRealtimeEvent(input: {
   event: RealtimeServerEvent;
   codec: RealtimeWireCodec;
+  transcriptAudioTags: boolean;
   channel: RealtimeWebsocketDataChannel;
   websocket: WebSocket;
   audio: RealtimeWebsocketAudio;
@@ -267,7 +270,8 @@ function handleRealtimeEvent(input: {
     event.type === "response.output_text.done"
   ) {
     const itemId = stringValue(event.itemId) ?? stringValue(event.item_id) ?? crypto.randomUUID();
-    const transcript = stringValue(event.transcript) ?? stringValue(event.text) ?? "";
+    const spoken = stringValue(event.transcript) ?? stringValue(event.text) ?? "";
+    const transcript = input.transcriptAudioTags ? withoutAudioTags(spoken) : spoken;
     if (transcript.trim() && !input.finalizedAssistantItems.has(itemId)) {
       input.finalizedAssistantItems.add(itemId);
       input.channel.providerEvent({

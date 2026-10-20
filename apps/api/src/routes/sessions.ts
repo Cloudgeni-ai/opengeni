@@ -2029,7 +2029,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         sessionId,
         model: claim.mode.model,
-        fetchImpls: { "ai-gateway": deps.codexFetch, supergrok: deps.xaiFetch },
+        fetchImpls: {
+          "ai-gateway": deps.codexFetch,
+          supergrok: deps.xaiFetch,
+          elevenlabs: deps.codexFetch,
+        },
       });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>

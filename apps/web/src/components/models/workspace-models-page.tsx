@@ -14,6 +14,7 @@ import {
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
 import type {
   ModelAccountSettingValues,
   OrganizationModelProviderKind,
@@ -1301,6 +1302,19 @@ export function WorkspaceModelsPageBody({
                       key={workspaceId}
                       workspaceId={workspaceId}
                       canManage={canManageConnections && organizationAdmin}
+                      onConnectionChange={connectionChanged}
+                    />
+                  </Section>
+                ) : null}
+                {workspacePage ? (
+                  <Section
+                    title="Voice"
+                    description="Use your own ElevenLabs key for Eleven Realtime voices in this workspace."
+                  >
+                    <ElevenLabsVoiceConnection
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageWorkspaceKeys}
                       onConnectionChange={connectionChanged}
                     />
                   </Section>

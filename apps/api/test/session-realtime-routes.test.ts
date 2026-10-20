@@ -48,6 +48,7 @@ let app: Hono;
 let bus: MemoryEventBus;
 const wakes: Array<{ sessionId: string; wakeRevision: number }> = [];
 let providerCalls = 0;
+const elevenLabsMints: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
 
 setDefaultTimeout(30_000);
 
@@ -94,6 +95,13 @@ beforeAll(async () => {
         });
       }
       providerCalls += 1;
+      if (request.url === "https://api.elevenlabs.io/v1/convai/realtime/client_secrets") {
+        elevenLabsMints.push({
+          headers: request.headers,
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        return Response.json({ value: "ek_test_secret", expires_at: 2_000_000_000 });
+      }
       if (request.url === "https://voice.example.test/openai/v1/live/sessions") {
         expect(request.headers.get("api-key")).toBe("synthetic-azure-key");
         return Response.json({
@@ -781,6 +789,119 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       },
     );
     expect(activated.status).toBe(200);
+  });
+
+  test("mints an Eleven Realtime client secret with the workspace ElevenLabs key", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "workspace-elevenlabs/eleven_realtime_v1_max",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    expect(startedResponse.status).toBe(201);
+    const started = (await startedResponse.json()) as {
+      mode: { id: string; version: number; connectionEpoch: number };
+    };
+    const request = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: started.mode.connectionEpoch,
+      rotate: false,
+    };
+
+    // Without a workspace key the broker refuses before calling ElevenLabs.
+    const mintsBefore = elevenLabsMints.length;
+    const missing = await app.request(`${base}/websocket`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(missing.status).toBeGreaterThanOrEqual(400);
+    expect(elevenLabsMints.length).toBe(mintsBefore);
+
+    const [workspace] =
+      await shared.admin`select account_id from workspaces where id = ${value.workspaceId}`;
+    await createConnection(client.db, {
+      accountId: workspace!.account_id as string,
+      workspaceId: value.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "elevenlabs-test-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: value.subjectId,
+    });
+
+    const response = await app.request(`${base}/websocket`, {
+      method: "POST",
+      headers: value.headers,
+      // The refused attempt durably failed epoch 1, so the client rotates.
+      body: JSON.stringify({
+        ...request,
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: 1,
+        rotate: true,
+      }),
+    });
+    expect(response.status).toBe(200);
+    const connected = (await response.json()) as {
+      provider: string;
+      token: string;
+      url: string;
+      upstreamModelId: string;
+      instructions: string;
+      protocol: string;
+      protocols: string[];
+      sessionUpdate: Record<string, unknown> | null;
+      transcriptAudioTags?: boolean;
+    };
+    expect(connected).toMatchObject({
+      token: "ek_test_secret",
+      upstreamModelId: "eleven_realtime_v1_max",
+      protocol: "openai",
+      protocols: ["realtime", "openai-insecure-api-key.ek_test_secret"],
+      sessionUpdate: null,
+      transcriptAudioTags: true,
+    });
+    expect(connected.url).toBe(
+      "wss://api.elevenlabs.io/v1/convai/realtime?model=eleven_realtime_v1_max",
+    );
+
+    // The mint carries the whole session: ElevenLabs applies it at session.created.
+    expect(elevenLabsMints.length).toBe(mintsBefore + 1);
+    const mint = elevenLabsMints.at(-1)!;
+    expect(mint.headers.get("xi-api-key")).toBe("elevenlabs-test-key");
+    expect(mint.body).toMatchObject({
+      session: {
+        type: "realtime",
+        model: "eleven_realtime_v1_max",
+        instructions: connected.instructions,
+        output_modalities: ["audio"],
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24_000 },
+            transcription: {},
+            turn_detection: { type: "semantic_vad", eagerness: "high" },
+          },
+          output: { format: { type: "audio/pcm" } },
+        },
+        tools: [{ type: "function", name: "delegate_to_session" }],
+        max_duration_seconds: 3600,
+      },
+    });
   });
 
   test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {

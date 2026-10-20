@@ -930,6 +930,8 @@ import {
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN,
+  WORKSPACE_ELEVENLABS_CONNECTION_ROLE,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -11660,7 +11662,8 @@ export type WorkspaceProviderApiKeyConnectionKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  | "elevenlabs";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -11680,6 +11683,15 @@ export function workspaceProviderApiKeyConnectionSpec(
       operationIdMetadataKey: `${providerKind}CredentialOperationId`,
       operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
       label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
+  if (providerKind === "elevenlabs") {
+    return {
+      providerDomain: WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN,
+      credentialRole: WORKSPACE_ELEVENLABS_CONNECTION_ROLE,
+      operationIdMetadataKey: "elevenlabsCredentialOperationId",
+      operationDigestMetadataKey: "elevenlabsCredentialOperationDigest",
+      label: "ElevenLabs",
     };
   }
   if (providerKind === "opper") {

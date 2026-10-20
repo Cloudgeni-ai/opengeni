@@ -5697,7 +5697,9 @@ export const sessionRealtimeModes = pgTable(
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
         'workspace-gateway/openai/gpt-realtime-2.1',
         'workspace-gateway/openai/gpt-realtime-mini',
-        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+        'workspace-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-elevenlabs/eleven_realtime_v1_max',
+        'workspace-elevenlabs/eleven_realtime_v1_mini'
       )`,
     ),
     endReasonValid: check(

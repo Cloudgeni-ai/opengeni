@@ -8382,6 +8382,11 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       modeVersion: z.number().int().positive(),
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
+      /**
+       * Assistant transcripts carry inline delivery tags such as `[calm]`,
+       * which are spoken as tone, not words; clients drop them from transcripts.
+       */
+      transcriptAudioTags: z.boolean().optional(),
       replay: z.literal(false),
     })
     .strict(),
@@ -8531,6 +8536,8 @@ export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
     "workspace-gateway/openai/gpt-realtime-2.1",
     "workspace-gateway/openai/gpt-realtime-mini",
     "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
   ]),
 );
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
@@ -8539,7 +8546,13 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
   z.object({
     id: SessionRealtimeModel,
     label: z.string().min(1),
-    provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
+    provider: z.enum([
+      "OpenGeni",
+      "Connected Codex",
+      "Connected SuperGrok",
+      "Your Gateway",
+      "Your ElevenLabs",
+    ]),
     description: z.string().min(1),
     available: z.boolean(),
     unavailableReason: z.string().nullable(),

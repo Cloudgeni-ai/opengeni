@@ -1,4 +1,5 @@
 import {
+  resolveElevenLabsRealtimeModel,
   SUPERGROK_REALTIME_MODEL_ID,
   VERCEL_AI_GATEWAY_AI_SDK_BASE_URL,
   VERCEL_AI_GATEWAY_BASE_URL,
@@ -13,6 +14,7 @@ import type {
 import {
   getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
+  loadWorkspaceProviderApiKey,
   loadWorkspaceVercelAiGatewayApiKey,
   readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
@@ -43,7 +45,7 @@ import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
  * runs one transport for all of them; adding an OpenAI-compatible provider is
  * one entry in `REALTIME_WEBSOCKET_PROVIDERS`.
  */
-export type RealtimeWebsocketProviderId = "ai-gateway" | "supergrok";
+export type RealtimeWebsocketProviderId = "ai-gateway" | "supergrok" | "elevenlabs";
 
 export type RealtimeWebsocketBrokerErrorCode =
   | "model_unavailable"
@@ -73,6 +75,8 @@ export type RealtimeWebsocketConnection = {
   expiresAt: number | null;
   /** First client event after the socket opens, or null when the mint already configured it. */
   sessionUpdate: Record<string, unknown> | null;
+  /** Assistant transcripts carry inline delivery tags such as `[calm]`. */
+  transcriptAudioTags?: boolean;
   instructions: string;
   initialItems: SessionRealtimeWebsocketInitialItem[];
 };
@@ -422,9 +426,134 @@ function normalizeExpiry(value: unknown): number | null {
   return null;
 }
 
+const ELEVENLABS_API_BASE_URL = "https://api.elevenlabs.io";
+// ElevenLabs closes a session after 600 seconds unless asked for longer. Opengeni
+// rotates provider connections well before an hour, so the session never ends early.
+const ELEVENLABS_MAX_SESSION_SECONDS = 3_600;
+
+/**
+ * Eleven Realtime with the workspace's own ElevenLabs key. The client-secret
+ * request carries the whole session, so the browser sends no session update.
+ * ElevenLabs accepts only semantic turn detection; `high` eagerness answers as
+ * soon as the speaker is done.
+ */
+const elevenLabsProvider: RealtimeWebsocketProvider = {
+  id: "elevenlabs",
+  errorCodePrefix: "ELEVENLABS_REALTIME",
+  matches: (model) => resolveElevenLabsRealtimeModel(model) !== null,
+  async connect(input, loadHistory) {
+    const upstreamModelId = resolveElevenLabsRealtimeModel(input.model);
+    if (!upstreamModelId) {
+      throw new RealtimeWebsocketBrokerError(
+        "model_unavailable",
+        "The selected model is not an Eleven Realtime model",
+      );
+    }
+    const apiKey = await loadWorkspaceProviderApiKey(
+      input.db,
+      input.settings,
+      input.workspaceId,
+      "elevenlabs",
+    );
+    if (!apiKey) {
+      throw new RealtimeWebsocketBrokerError(
+        "credential_unavailable",
+        "Connect an ElevenLabs API key to use this voice model",
+      );
+    }
+    const [history, secret] = await Promise.all([
+      loadHistory(),
+      mintElevenLabsClientSecret({
+        apiKey,
+        fetchImpl: input.fetchImpl,
+        session: {
+          type: "realtime",
+          model: upstreamModelId,
+          instructions: input.instructions,
+          output_modalities: ["audio"],
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+              transcription: {},
+              turn_detection: { type: "semantic_vad", eagerness: "high" },
+            },
+            output: { format: { type: "audio/pcm" } },
+          },
+          tools: [realtimeDelegationTool()],
+          max_duration_seconds: ELEVENLABS_MAX_SESSION_SECONDS,
+        },
+      }),
+    ]);
+    const url = new URL("wss://api.elevenlabs.io/v1/convai/realtime");
+    url.searchParams.set("model", upstreamModelId);
+    return {
+      history,
+      minted: {
+        provider: "elevenlabs",
+        protocol: "openai",
+        url: url.toString(),
+        protocols: ["realtime", `openai-insecure-api-key.${secret.token}`],
+        token: secret.token,
+        upstreamModelId,
+        expiresAt: secret.expiresAt,
+        sessionUpdate: null,
+        transcriptAudioTags: true,
+      },
+    };
+  },
+};
+
+async function mintElevenLabsClientSecret(input: {
+  apiKey: string;
+  session: Record<string, unknown>;
+  fetchImpl: typeof fetch;
+}): Promise<{ token: string; expiresAt: number | null }> {
+  let response: Response;
+  try {
+    response = await input.fetchImpl(
+      `${ELEVENLABS_API_BASE_URL}/v1/convai/realtime/client_secrets`,
+      {
+        method: "POST",
+        headers: { "xi-api-key": input.apiKey, "content-type": "application/json" },
+        body: JSON.stringify({
+          session: input.session,
+          expires_after: { seconds: CLIENT_SECRET_TTL_SECONDS },
+        }),
+      },
+    );
+  } catch {
+    throw new RealtimeWebsocketBrokerError(
+      "provider_error",
+      "ElevenLabs could not be reached. Try again.",
+    );
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    const rejected = response.status === 401 || response.status === 403;
+    throw new RealtimeWebsocketBrokerError(
+      rejected ? "credential_unavailable" : "provider_error",
+      rejected
+        ? "ElevenLabs rejected the workspace API key. Replace it in the workspace's models settings."
+        : "ElevenLabs could not start the voice session. Try again.",
+      response.status,
+    );
+  }
+  const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const token = body?.value;
+  if (typeof token !== "string" || token.length === 0) {
+    throw new RealtimeWebsocketBrokerError(
+      "invalid_provider_response",
+      "ElevenLabs returned an invalid realtime token",
+      response.status,
+    );
+  }
+  return { token, expiresAt: normalizeExpiry(body?.expires_at) };
+}
+
 const REALTIME_WEBSOCKET_PROVIDERS: readonly RealtimeWebsocketProvider[] = [
   aiGatewayProvider,
   supergrokProvider,
+  elevenLabsProvider,
 ];
 
 /** The WebSocket provider for a realtime model, or null when the model uses WebRTC. */

@@ -442,6 +442,17 @@ holds no provider-specific configuration. A new OpenAI-compatible provider is
 one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
 aliases of the same handler for older clients.
 
+Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
+and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
+API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The
+mint is authoritative: ElevenLabs applies the minted instructions, delegation
+tool and audio settings at `session.created`, so the entry returns no session
+update. ElevenLabs accepts only `semantic_vad` turn detection (we use high
+eagerness) and its transcription language defaults to English, which also
+steers the reply language; there is no automatic language detection. Its
+transcripts carry expressive audio tags such as `[calm]`, so the answer sets
+`transcriptAudioTags` and the browser strips them before ledger sync.
+
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or
 disconnected peer, the controller reuses a healthy microphone stream and

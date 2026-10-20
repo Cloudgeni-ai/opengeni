@@ -468,7 +468,11 @@ export {
   createRealtimeWebsocketTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
 } from "./gateway-realtime-transport";
-export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
+export {
+  isSessionRealtimeModel,
+  projectSessionRealtimeLifecycle,
+  SESSION_REALTIME_MODELS,
+} from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Provider-neutral Browser/Computer resource client + bounded frame protocol.
 export * from "./interaction";
