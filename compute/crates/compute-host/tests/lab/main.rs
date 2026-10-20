@@ -1156,15 +1156,17 @@ const PRIVATE_NAME_SERVER: &str = "100.100.100.100";
 async fn check_names(client: &Client, service: &LocalService, listed: bool) {
     let [name, hidden] = &service.names;
     let private = PRIVATE_NAME_SERVER;
+    // Each change to the guest's resolver file prints a line only once it
+    // took, so one that failed fails the test rather than leaving libc on
+    // the gateway, where it would give the same answers.
     let script = format!(
         "cat /etc/resolv.conf
 python3 -c '{RESOLVE}' 169.254.0.22 {name} {hidden} example.com
-cp -P /etc/resolv.conf /tmp/resolv.conf.kept
-rm -f /etc/resolv.conf
-echo nameserver {private} > /etc/resolv.conf
+cp -P /etc/resolv.conf /tmp/resolv.conf.kept && rm -f /etc/resolv.conf && \
+echo nameserver {private} > /etc/resolv.conf && echo \"resolver now $(cat /etc/resolv.conf)\"
 python3 -c '{RESOLVE}' {private} {name} {hidden} example.com
-rm -f /etc/resolv.conf
-cp -P /tmp/resolv.conf.kept /etc/resolv.conf
+rm -f /etc/resolv.conf && cp -P /tmp/resolv.conf.kept /etc/resolv.conf && \
+echo \"resolver back to $(cat /etc/resolv.conf)\"
 python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
     );
     let (output, _) = exec(client, id(0), &script).await;
@@ -1174,6 +1176,15 @@ python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
             .any(|line| line.trim() == "nameserver 169.254.0.22"),
         "the guest's resolver is not its gateway: {output}"
     );
+    for changed in [
+        format!("resolver now nameserver {private}"),
+        "resolver back to nameserver 169.254.0.22".to_owned(),
+    ] {
+        assert!(
+            output.lines().any(|line| line.trim() == changed),
+            "the guest's resolver file did not change ({changed}): {output}"
+        );
+    }
     let row = |server: &str, name: &str| {
         output
             .lines()
