@@ -584,7 +584,25 @@ Switching projects or machines restores the matching nested choice. Absolute
 host paths remain tied to the exact machine id and are never reused on another
 machine.
 
-Scheduled agent tasks use the same explicit targeting rule. A generated-session
+Workspace settings can choose `defaultExecutionTarget` as managed compute or an
+exact shared Connected Machine. New top-level chats with no explicit placement
+inherit that default. Child and existing chats retain their existing placement;
+a removed or unavailable configured machine fails visibly and never selects a
+different computer. Personal machines cannot be workspace defaults.
+
+A schedule can save `agentConfig.executionTarget: "workspace_default"` instead
+of an explicit backend or machine. The worker resolves the current workspace
+choice only when accepting a new run chat, freezes it in
+`resolvedMachineTarget` (including an explicit null for managed compute), and
+re-proves live machine access before attaching. Recovery uses that receipt even
+if the workspace default changed. Reusable schedules resolve once for their
+first chat; later occurrences keep that chat's machine. Schedules following the
+workspace do not implicitly pin a managed Sandbox Environment, since a future
+run may use a Connected Machine. Explicit environment selections retain their
+normal authority checks. Old schedules without `executionTarget` keep their
+previous behavior.
+
+Scheduled agent tasks also support the explicit targeting rule. A generated-session
 schedule persists a `machineTarget` containing the exact `targetSandboxId` and
 optional `workingDir`; the worker proves that machine is still available and
 seeds the generated session's active pointer before its first turn. A deployment

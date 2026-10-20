@@ -880,6 +880,59 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(noDefault.options).toMatchObject({ rigId: noDefault.chosen.id });
   });
 
+  test("a workspace machine default supersedes only the consumed draft's next compute seed", async () => {
+    for (const defaultExecutionTarget of [
+      { kind: "managed" },
+      { kind: "machine", targetSandboxId: crypto.randomUUID() },
+      { kind: "invalid-configured-target" },
+      null,
+      undefined,
+    ]) {
+      const context = await fixture();
+      const workspaceId = context.grant.workspaceId!;
+      const channelId = crypto.randomUUID();
+      const targetSandboxId = crypto.randomUUID();
+      const workingDir = "/workspace/explicit-project";
+      const options = {
+        visibility: "private" as const,
+        sandboxBackend: "selfhosted" as const,
+        targetSandboxId,
+        workingDir,
+      };
+      await saveDraft(context, 0, {
+        text: "Still editing this exact selection",
+        selectedProjectChannelId: channelId,
+        options,
+      });
+      if (defaultExecutionTarget !== undefined) {
+        await shared.admin`update workspaces set settings = settings || ${shared.admin.json({ defaultExecutionTarget })} where id = ${workspaceId}`;
+      }
+      // Configuring the workspace must not replace an unfinished draft.
+      const editing = await readDraft(workspaceId, context.subjectId);
+      expect(editing?.text).toBe("Still editing this exact selection");
+      expect(publicNewSessionDraftOptions(editing!)).toEqual(options);
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, 1, context.subjectId, {
+        channelId,
+        targetSandboxId,
+        workingDir,
+      });
+      const seeded = await readDraft(workspaceId, context.subjectId);
+      const followsDefault = defaultExecutionTarget != null;
+      expect(publicNewSessionDraftOptions(seeded!)).toEqual(
+        followsDefault ? { visibility: "private" } : options,
+      );
+      expect(seeded?.selectedProjectComputeSnapshot).toEqual(
+        followsDefault ? {} : { sandboxBackend: "selfhosted", targetSandboxId, workingDir },
+      );
+      expect(seeded?.sessionOptions.selectionHistory).toEqual({
+        projects: [
+          { channelId, targetSandboxId, machines: [{ sandboxId: targetSandboxId, workingDir }] },
+        ],
+      });
+    }
+  });
+
   test("creates a realtime-first idle shell without a user event, turn, or workflow wake", async () => {
     const context = await fixture();
     await saveDraft(context, 0, { text: "private pre-session draft" });

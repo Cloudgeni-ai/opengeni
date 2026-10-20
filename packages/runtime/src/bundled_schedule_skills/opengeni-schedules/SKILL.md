@@ -22,6 +22,13 @@ Use `reusable_session` or `new_session_per_run` with `agentConfig` only when the
 user requests separate-agent work. Sessionless calls require an explicit
 destination or a separate-agent mode.
 
+For separate-agent work, use `agentConfig.executionTarget: "workspace_default"`
+unless the user chose a specific machine or backend. Each new run chat resolves
+the current workspace default; a reusable chat keeps its first machine. Explicit
+`machineTarget` or `sandboxBackend` pins placement and cannot be combined with
+`executionTarget`. An unavailable machine is a blocker, never permission to
+switch computers.
+
 ## Discover what the task needs
 
 - Use `scheduled_tasks_list` to avoid duplicating an existing schedule. Follow

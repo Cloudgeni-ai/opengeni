@@ -23458,6 +23458,7 @@
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -23494,6 +23495,7 @@
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -28130,6 +28132,7 @@
         "$.busySend": "ref(WorkspaceBusySend)?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
+        "$.defaultExecutionTarget": "ref(WorkspaceDefaultExecutionTarget)? null",
         "$.defaultSandboxImage": "string? null",
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
@@ -29278,6 +29281,19 @@
         "$.expiresAt": "string! null",
         "$.operationId": "string!",
         "$.remaining": "integer!"
+      }
+    },
+    "WorkspaceDefaultExecutionTarget": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=machine\",\"kind=managed\"]",
+        "$|kind=managed": "object",
+        "$|kind=managed.kind": "const!=[\"\\\"managed\\\"\"]",
+        "$|kind=machine": "object",
+        "$|kind=machine.kind": "const!=[\"\\\"machine\\\"\"]",
+        "$|kind=machine.targetSandboxId": "string!"
       }
     },
     "WorkspaceGatewayCustomModel": {

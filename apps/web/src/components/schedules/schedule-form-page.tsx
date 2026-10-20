@@ -1,3 +1,4 @@
+import { workspaceDefaultMachine } from "@/lib/workspace-default-machine";
 import { Link } from "@tanstack/react-router";
 /**
  * New schedule, Edit schedule and Duplicate: one full page with a back link
@@ -708,7 +709,11 @@ function AgentScheduleForm({
     isMachineComputeSelectable(machine.state),
   );
   const cantRunHere =
-    machineOnly && !inheritsChatSettings && !fleet.loading && selectableMachines.length === 0;
+    machineOnly &&
+    !inheritsChatSettings &&
+    draft.executionTarget !== "workspace_default" &&
+    !fleet.loading &&
+    selectableMachines.length === 0;
   // Editing a schedule whose compute is unchanged stays possible (a rename, a
   // new cadence); only a new or changed target has to be one that can run.
   const computeChanged =
@@ -716,9 +721,45 @@ function AgentScheduleForm({
     draft.runMode !== initial.runMode ||
     draft.executionTarget !== initial.executionTarget ||
     draft.machineSandboxId !== initial.machineSandboxId;
+  const workspaceTarget = workspaceDefaultMachine(
+    context.workspaces.find((item) => item.id === workspaceId)?.settings,
+  );
+  const workspaceMachine =
+    workspaceTarget?.kind === "machine"
+      ? scheduledMachines.find((item) => item.sandboxId === workspaceTarget.targetSandboxId)
+      : null;
+  const defaultMachineLabel =
+    workspaceTarget?.kind === "machine"
+      ? (workspaceMachine?.name ?? "Machine unavailable")
+      : machineOnly
+        ? "Choose a workspace default in Settings"
+        : noManagedSandbox
+          ? "No computer"
+          : "Managed sandbox";
+  const selectedComputeUnavailable =
+    !inheritsChatSettings &&
+    !fleet.loading &&
+    (draft.executionTarget === "workspace_default"
+      ? workspaceTarget?.kind === "machine"
+        ? !workspaceMachine || !isMachineComputeSelectable(workspaceMachine.state)
+        : machineOnly
+      : draft.executionTarget === "machine" &&
+        !scheduledMachines.some(
+          (item) =>
+            item.sandboxId === draft.machineSandboxId && isMachineComputeSelectable(item.state),
+        ));
   const whereValue =
-    draft.executionTarget === "managed" ? "managed" : draft.machineSandboxId || null;
+    draft.executionTarget === "workspace_default"
+      ? "workspace_default"
+      : draft.executionTarget === "managed"
+        ? "managed"
+        : draft.machineSandboxId || null;
   const whereOptions: SelectOption[] = [
+    {
+      value: "workspace_default",
+      label: "Workspace default",
+      description: defaultMachineLabel,
+    },
     {
       value: "managed",
       label: noManagedSandbox ? "No computer" : "Managed sandbox",
@@ -759,12 +800,14 @@ function AgentScheduleForm({
       : []),
   ];
   const whereLabel =
-    draft.executionTarget === "managed"
-      ? noManagedSandbox
-        ? "No computer"
-        : "Managed sandbox"
-      : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)?.name ??
-        "Connected machine");
+    draft.executionTarget === "workspace_default"
+      ? `Workspace default · ${defaultMachineLabel}`
+      : draft.executionTarget === "managed"
+        ? noManagedSandbox
+          ? "No computer"
+          : "Managed sandbox"
+        : (scheduledMachines.find((machine) => machine.sandboxId === draft.machineSandboxId)
+            ?.name ?? "Connected machine");
 
   /* ----- summaries */
   const eachRun = draft.runMode as EachRun;
@@ -929,7 +972,7 @@ function AgentScheduleForm({
     : !access.canManage;
   const submitBlocked =
     noAccess ||
-    (cantRunHere && computeChanged) ||
+    ((cantRunHere || selectedComputeUnavailable) && computeChanged) ||
     (draft.runMode !== "existing_session" && learningLoading) ||
     (draft.runMode === "existing_session" &&
       (!sessions.some((session) => session.id === draft.targetSessionId) ||
@@ -941,25 +984,27 @@ function AgentScheduleForm({
     ? editing && task && !ownsSchedule(task, access.viewerSubjectId)
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
-    : cantRunHere && computeChanged
-      ? "Connect a machine first. This Opengeni server can't run schedules without one."
-      : pinningAccounts && requiresAccountChoice
-        ? (accountChoiceMessage ?? "Pick an account for each tool.")
-        : (draft.runMode !== "existing_session" && learningLoading) ||
-            (pinningAccounts && connectionAccounts.loading)
-          ? "Loading this schedule's settings…"
-          : pinningAccounts && connectionAccounts.error
-            ? connectionAccounts.accessDenied
-              ? "You can't see this workspace's connected accounts. Ask a workspace admin."
-              : "Connected accounts couldn't load. Try again."
-            : draft.runMode === "existing_session" &&
-                !sessions.some((session) => session.id === draft.targetSessionId)
-              ? "Choose an available chat."
-              : pinsNeedChat
-                ? "Chat settings couldn't load. Reload before changing accounts."
-                : accessChange && !adoptSessionSettings
-                  ? "Review the destination chat’s attachments before saving."
-                  : undefined;
+    : selectedComputeUnavailable && computeChanged
+      ? "Machine unavailable. Choose another machine or update the workspace default."
+      : cantRunHere && computeChanged
+        ? "Connect a machine first. This Opengeni server can't run schedules without one."
+        : pinningAccounts && requiresAccountChoice
+          ? (accountChoiceMessage ?? "Pick an account for each tool.")
+          : (draft.runMode !== "existing_session" && learningLoading) ||
+              (pinningAccounts && connectionAccounts.loading)
+            ? "Loading this schedule's settings…"
+            : pinningAccounts && connectionAccounts.error
+              ? connectionAccounts.accessDenied
+                ? "You can't see this workspace's connected accounts. Ask a workspace admin."
+                : "Connected accounts couldn't load. Try again."
+              : draft.runMode === "existing_session" &&
+                  !sessions.some((session) => session.id === draft.targetSessionId)
+                ? "Choose an available chat."
+                : pinsNeedChat
+                  ? "Chat settings couldn't load. Reload before changing accounts."
+                  : accessChange && !adoptSessionSettings
+                    ? "Review the destination chat’s attachments before saving."
+                    : undefined;
 
   const selectedSession = sessions.find((session) => session.id === draft.targetSessionId);
   const sessionOptions: SelectOption[] = [
@@ -1200,6 +1245,28 @@ function AgentScheduleForm({
               inheritsChatSettings={inheritsChatSettings}
             />
           </Field>
+          {inheritsChatSettings ? (
+            <Disclosure
+              title="Uses this chat’s settings"
+              summary="Model, tools, accounts and machine"
+            >
+              <p className="text-sm text-fg-muted">
+                Scheduled messages use the chat’s current model, tools, accounts and machine.
+                Changes apply to the chat and its scheduled runs.
+              </p>
+              {targetSessionId ? (
+                <Link
+                  className="og-link text-sm"
+                  to="/workspaces/$workspaceId/sessions/$sessionId"
+                  params={{ workspaceId, sessionId: targetSessionId }}
+                >
+                  Open chat settings
+                </Link>
+              ) : (
+                <p className="text-sm text-fg-muted">Choose a chat to view its settings.</p>
+              )}
+            </Disclosure>
+          ) : null}
           <div className="min-w-0">
             <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
               When
@@ -1332,17 +1399,35 @@ function AgentScheduleForm({
                 </Field>
               ) : null}
               {!inheritsChatSettings ? (
-                <Field label="Where it runs" error={errors.machine}>
+                <Field
+                  label="Where it runs"
+                  error={errors.machine}
+                  hint={
+                    selectedComputeUnavailable
+                      ? "Machine unavailable. Choose a replacement or reconnect it."
+                      : draft.executionTarget === "workspace_default"
+                        ? `Currently: ${defaultMachineLabel}. Follows changes to the workspace default.`
+                        : undefined
+                  }
+                >
                   <SelectMenu
                     options={whereOptions}
                     value={whereValue}
                     onValueChange={(value) =>
-                      value === "managed"
-                        ? update({ executionTarget: "managed" })
-                        : update({
-                            executionTarget: "machine",
-                            machineSandboxId: value,
-                          })
+                      value === "workspace_default"
+                        ? update({ executionTarget: "workspace_default" })
+                        : value === "managed"
+                          ? update({
+                              executionTarget: "managed",
+                              sandboxBackend:
+                                context.clientConfig.defaultSandboxBackend === "selfhosted"
+                                  ? ""
+                                  : (context.clientConfig.defaultSandboxBackend ?? ""),
+                            })
+                          : update({
+                              executionTarget: "machine",
+                              machineSandboxId: value,
+                            })
                     }
                     placeholder={fleet.loading ? "Loading machines…" : "Pick where it runs"}
                     loading={fleet.loading && scheduledMachines.length === 0 && machineOnly}

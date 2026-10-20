@@ -358,6 +358,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
       model: inheritsSessionSettings ? null : (model?.value ?? null),
       reasoningEffort: inheritsSessionSettings ? null : (task.agentConfig.reasoningEffort ?? null),
       sandboxBackend: inheritsSessionSettings ? null : (task.agentConfig.sandboxBackend ?? null),
+      executionTarget: inheritsSessionSettings ? null : (task.agentConfig.executionTarget ?? null),
       hasGoal: task.agentConfig.goal !== undefined,
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,
@@ -475,6 +476,7 @@ function buildScheduledTaskDetailMcp(
           : null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,
@@ -578,6 +580,7 @@ export function boundScheduledTaskDetailMcp(task: ScheduledTask) {
         model: null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,

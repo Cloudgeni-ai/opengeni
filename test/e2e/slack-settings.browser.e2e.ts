@@ -202,12 +202,130 @@ test("schedule keeps the task and timing visible with secondary settings collaps
     expect((await new AxeBuilder({ page }).include("form").analyze()).violations).toEqual([]);
     await page.screenshot({ path: `${evidence}/schedule.png` });
     await settings.click();
+    expect(await page.getByRole("combobox", { name: "Where it runs" }).textContent()).toContain(
+      "Workspace default",
+    );
+    expect(
+      await page
+        .getByText("Currently: Managed sandbox. Follows changes to the workspace default.")
+        .count(),
+    ).toBe(1);
+    await page.screenshot({ path: `${evidence}/schedule-machine-default.png` });
     expect(await page.getByText("Post to Slack", { exact: true }).count()).toBe(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
     await page.screenshot({ path: `${evidence}/schedule-mobile.png` });
+  } finally {
+    await context.close();
+  }
+}, 60_000);
+
+test("workspace default machine saves once and schedules show its current name", async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+  const page = await context.newPage();
+  const machineId = "00000000-0000-4000-8000-000000000831";
+  const state: SlackFixtureState = {
+    installed: true,
+    routingSaves: 0,
+    disconnects: 0,
+    machines: [
+      {
+        sandboxId: machineId,
+        enrollmentId: "shared-build",
+        workspaceId: siblingId,
+        kind: "selfhosted",
+        scope: "workspace",
+        name: "Build Mac",
+        state: "online",
+        os: "macos",
+        arch: "arm64",
+      },
+      {
+        sandboxId: "personal",
+        enrollmentId: "personal",
+        workspaceId: siblingId,
+        kind: "selfhosted",
+        scope: "user",
+        name: "Personal laptop",
+        state: "online",
+        os: "macos",
+        arch: "arm64",
+      },
+    ],
+  };
+  try {
+    await installApi(page, state);
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/settings?section=general`);
+    const picker = page.getByRole("combobox", { name: "Default machine", exact: true });
+    await picker.click();
+    await page.getByRole("option", { name: "Build Mac", exact: true }).waitFor();
+    expect(await page.getByRole("option", { name: "Personal laptop" }).count()).toBe(0);
+    await page.getByRole("option", { name: "Build Mac", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector('[role="combobox"]')?.textContent?.includes("Build Mac"),
+    );
+    expect(state.defaultExecutionTarget).toEqual({ kind: "machine", targetSandboxId: machineId });
+    await page.screenshot({ path: `${evidence}/workspace-default-machine.png` });
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/sessions`);
+    await page.getByRole("textbox", { name: "Message the agent" }).waitFor();
+    const savedDraft = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/new-session-draft") && response.request().method() === "PUT",
+    );
+    await page
+      .getByRole("textbox", { name: "Message the agent" })
+      .fill("Check the workspace default machine.");
+    await savedDraft;
+    await page.getByRole("button", { name: "More composer actions" }).click();
+    await page.getByRole("menuitem", { name: /Runs on.*Build Mac/ }).waitFor();
+    expect(state.draft?.options).toMatchObject({ targetSandboxId: machineId });
+    await page.screenshot({ path: `${evidence}/new-chat-default-machine.png` });
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/schedules/new`);
+    await page.getByRole("button", { name: /^Settings / }).click();
+    await page
+      .getByText("Currently: Build Mac. Follows changes to the workspace default.")
+      .waitFor();
+    await page
+      .getByRole("combobox", { name: "Where it runs" })
+      .evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: `${evidence}/schedule-shared-machine.png` });
+    state.machines = [];
+    await page.reload();
+    await page.getByRole("button", { name: /^Settings / }).click();
+    await page.getByText("Machine unavailable. Choose a replacement or reconnect it.").waitFor();
+    expect(
+      await page.getByRole("button", { name: "Create schedule", exact: true }).isDisabled(),
+    ).toBe(true);
+    state.sessions = [
+      {
+        id: "00000000-0000-4000-8000-000000000841",
+        workspaceId: siblingId,
+        title: "Customer conversation analysis",
+        status: "idle",
+        resources: [],
+        tools: [],
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: [],
+        visibility: "workspace",
+        model: "gpt-5.6-sol",
+        createdAt: "2026-10-20T00:00:00Z",
+        updatedAt: "2026-10-20T00:00:00Z",
+      },
+    ];
+    await page.reload();
+    await page.getByRole("combobox", { name: "Chat", exact: true }).click();
+    await page.getByRole("option", { name: /Use an existing chat/ }).click();
+    await page.getByRole("combobox", { name: "Send to", exact: true }).click();
+    await page.getByRole("option", { name: /Customer conversation analysis/ }).click();
+    await page.getByRole("button", { name: /Uses this chat’s settings/ }).click();
+    await page.getByRole("link", { name: "Open chat settings" }).waitFor();
+    await page
+      .getByRole("link", { name: "Open chat settings" })
+      .evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await page.screenshot({ path: `${evidence}/schedule-inherited-settings.png` });
   } finally {
     await context.close();
   }

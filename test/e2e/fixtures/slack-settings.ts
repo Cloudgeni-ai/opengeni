@@ -9,6 +9,10 @@ export type SlackFixtureState = {
   installed: boolean; routingSaves: number; disconnects: number; connectionsReady?: Promise<void>; multiple?: boolean;
   access?: Record<string, { enabled: boolean; generation: number; workspaceIds: string[] | null }>;
   routes?: Record<string, unknown[]>;
+  machines?: unknown[];
+  sessions?: Array<Record<string, unknown>>;
+  draft?: Record<string, unknown>;
+  defaultExecutionTarget?: { kind: "managed" } | { kind: "machine"; targetSandboxId: string };
 };
 export async function slackFixtureResponse(request: Request, state: SlackFixtureState): Promise<Response> {
     const url = new URL(request.url);
@@ -24,6 +28,7 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
         deploymentRevision: "slack-settings-test",
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         defaultModel: "gpt-5.6-sol",
+        defaultSandboxBackend: "docker",
         allowedModels: ["gpt-5.6-sol"],
         models: [],
         defaultReasoningEffort: "low",
@@ -45,7 +50,7 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
           accountId,
           subjectId: "slack-test",
           permissions: [
-            "workspace:admin",
+            "workspace:admin", "enrollments:read", "workspace:read",
             "connections:read",
             "connections:write",
             "capabilities:read",
@@ -56,7 +61,12 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
         defaultWorkspaceId: workspaceId,
       });
     if (path === "/v1/workspaces")
-      return json([workspace(workspaceId, "Cloudgeni"), workspace(siblingId, "Analytics")]);
+      return json([workspace(workspaceId, "Cloudgeni"), { ...workspace(siblingId, "Analytics"), settings: { defaultExecutionTarget: state.defaultExecutionTarget ?? { kind: "managed" } } }]);
+    if (path.endsWith("/settings") && request.method === "PATCH") {
+      const body = await request.json() as { defaultExecutionTarget?: SlackFixtureState["defaultExecutionTarget"] };
+      if (body.defaultExecutionTarget) state.defaultExecutionTarget = body.defaultExecutionTarget;
+      return json({ ...workspace(siblingId, "Analytics"), settings: { defaultExecutionTarget: state.defaultExecutionTarget } });
+    }
     // Keep provider readiness independent of the connection lookup held during reload.
     if (path.endsWith("/connect/catalog"))
       return json([
@@ -70,12 +80,24 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
         },
       ]);
     if (path.endsWith("/session-tenancy/capabilities")) return json({ activated: true, canCreatePrivate: false, reason: "not_activated", defaultVisibility: "workspace" });
+    if (path.endsWith("/usage/me")) return json({ error: { code: "not_found", message: "Usage is not configured in this preview." } }, 404);
+    if (path.endsWith("/new-session-draft")) {
+      state.draft ??= { revision: 0, text: "", resources: [], tools: [], toolsProvided: false, model: "gpt-5.6-sol", reasoningEffort: "low", latencyMode: "standard", options: {}, selectionHistory: { projects: [{ channelId: null, targetSandboxId: "00000000-0000-4000-8000-000000000839", machines: [] }] }, updatedAt: null };
+      if (request.method === "PUT") state.draft = { ...state.draft, ...await request.json() as object, revision: Number(state.draft.revision) + 1, updatedAt: now };
+      return json(state.draft);
+    }
+    if (path.endsWith("/sessions")) return json(url.searchParams.get("view") === "page" ? { sessions: state.sessions ?? [], pinned: [], nextCursor: null } : state.sessions ?? []);
+    const sampleSession = state.sessions?.find((item) => path.endsWith(`/sessions/${item.id}`));
+    if (sampleSession) return json(sampleSession);
+    if (path.endsWith("/realtime-model-catalog")) return json({ models: [] });
     if (path.endsWith("/model-catalog")) return json({ models: [], defaultSelection: null, creditsSelection: null });
     if (path.endsWith("/agent-learning/read")) return json({ settings: {}, version: 1, ownerKey: `workspace:${workspaceId}` });
     if (path.endsWith("/scheduled-tasks/private-summaries")) return json({ items: [], nextCursor: null });
     if (path.endsWith("/scheduled-tasks/attention")) return json({ items: [] });
     if (path.endsWith("/scheduled-tasks")) return json([]);
-    if (path.endsWith("/machines")) return json({ machines: [] });
+    if (path.endsWith("/video-generation")) return json({ policy: { enabledModelIds: [], fundingSource: "workspace_gateway", revision: 1 }, fundingOptions: [], availableModels: [] });
+    if (path.endsWith("/sandbox-images")) return json({ images: [], selected: null });
+    if (path.endsWith("/machines")) return json({ machines: state.machines ?? [] });
     if (path.endsWith("/vaults")) return json([]);
     if (path.endsWith("/connections/accounts")) return json({ connections: state.multiple ? [personalAccount()] : [] });
     if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
