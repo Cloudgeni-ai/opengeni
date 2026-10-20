@@ -8,7 +8,7 @@ import { createDb, managedPersonalWorkspacePermissions, withRlsContext } from ".
 import { rawRows } from "../src/database";
 
 // The owner of a personal workspace creates, opens and edits documents,
-// spreadsheets and presentations there (0867). A personal workspace has no
+// spreadsheets and presentations there (0869). A personal workspace has no
 // workspace_memberships row; its owner's authority is the active organization
 // membership's personal workspace pointer. Run as the restricted application
 // role in the deployed posture, with a NOBYPASSRLS and a BYPASSRLS owner.
@@ -83,7 +83,7 @@ async function allowed(
   return row?.allowed === true;
 }
 
-test("the personal workspace projection holds what 0867 grants without checking the permission", () => {
+test("the personal workspace projection holds what 0869 grants without checking the permission", () => {
   expect(managedPersonalWorkspacePermissions).toContain("artifacts:read");
   expect(managedPersonalWorkspacePermissions).toContain("artifacts:publish");
 });

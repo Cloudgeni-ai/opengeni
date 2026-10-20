@@ -31,7 +31,7 @@ DECLARE definition text;
   END IF;$old$;
   replacement text := $new$      INTO principal_allowed
       USING p_account_id, p_workspace_id, p_actor_subject_id, required_permission;
-    -- A person's own personal workspace has no membership row (0867).
+    -- A person's own personal workspace has no membership row (0869).
     IF NOT coalesce(principal_allowed, false) AND p_actor_kind = 'human'
       AND p_actor_subject_id ~ '^(user|external_user):'
     THEN

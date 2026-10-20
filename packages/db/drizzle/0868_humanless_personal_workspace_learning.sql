@@ -27,7 +27,7 @@ DECLARE definition text; routine text;
   anchor text := $old$OR get_workspace_kind(p_account,p_workspace)='personal'$old$;
   replacement text := $new$OR (subject IS NOT NULL AND get_workspace_kind(p_account,p_workspace)='personal')$new$;
   snapshot_anchor text := $old$result:=result||jsonb_build_object('defaultScope',destination,'subjectId',subject,'acceptedAt',accepted_at);$old$;
-  snapshot_replacement text := $new$-- Human-less work in a personal workspace reads but never saves (0865).
+  snapshot_replacement text := $new$-- Human-less work in a personal workspace reads but never saves (0868).
   IF destination='workspace' AND get_workspace_kind(p_account,p_workspace)='personal' THEN
     result:=jsonb_set(result,'{effective}','{"knowledge":"off","instructions":"off","skills":"off"}'::jsonb);
   END IF;

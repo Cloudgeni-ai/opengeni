@@ -2878,8 +2878,8 @@ describe("release schema contract", () => {
       "0855_session_fork_agent_parity.sql",
       "0856_session_fork_workflow_identity.sql",
       "0857_connection_origin_workspace_cascade.sql",
-      "0865_humanless_personal_workspace_learning.sql",
-      "0867_personal_workspace_editable_artifacts.sql",
+      "0868_humanless_personal_workspace_learning.sql",
+      "0869_personal_workspace_editable_artifacts.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
