@@ -123,8 +123,7 @@ describe("searchToolPool named tools", () => {
   const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
 
   test("puts a tool named by its short name first", () => {
-    // BM25 alone prefers goal_set: its short description repeats "goal" and "complete".
-    expect(names(bm25RankTools(GOALS, "goal_complete", 1))).toEqual(["opengeni__goal_set"]);
+    // Exact naming takes precedence independently of changes to lexical ranking.
     expect(names(searchToolPool(GOALS, { query: "goal_complete", limit: 1 }))).toEqual([
       "opengeni__goal_complete",
     ]);
@@ -560,7 +559,9 @@ describe("tool_search tool wiring", () => {
     });
 
     const tools = await agent.getAllTools(new RunContext());
-    const searchTool = tools.find((tool) => (tool as { name?: string }).name === "tool_search");
+    const searchTool = tools.find(
+      (tool) => tool.type === "hosted_tool" && tool.name === "tool_search",
+    );
     expect(searchTool).toBeDefined();
     const executor = getClientToolSearchExecutor(searchTool as never);
     const result = await executor!({

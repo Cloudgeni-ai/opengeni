@@ -314,6 +314,8 @@ disabled tools or grant execution outside the current catalog.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+- **Discovery is compact and history is append-only.** `tool_search` uses field-aware ranking, with optional configured decision-model selection; exact `names` bypass inference. Compact candidates are not loaded schemas. Freeze selected definitions on the originating call and append their declaration after its results; never reread today's catalog to reconstruct old discovery. All transports use stable search/list/invoke controls. `tool_list({view: "groups"})` is the directory; never prepend a changing directory to an earlier prompt. See `scripts/tool-discovery-eval/README.md` for the eval and provider limitations.
+
 Session creation reserves an idle shell, not queued work. Initial admission
 commits the first turn, status and wake atomically. Never reconstruct accepted
 work from a shell's initial-message field. An empty stale queued projection

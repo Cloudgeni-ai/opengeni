@@ -1,6 +1,7 @@
 // Shared tool classification and bounded search ranking for lazy-tool-transport.ts.
 import { type Tool } from "@openai/agents";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { ToolSearchIndex } from "./tool-discovery-ranking";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
@@ -207,128 +208,9 @@ export function isHarnessControlMcpFunctionTool(
   );
 }
 
-// Minimal English stopword set: query phrasings like "send an email to someone"
-// should match on capability words, not drown in glue words (parity with
-// codex-rs, whose search normalizes tokens server-side).
-const STOPWORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "of",
-  "to",
-  "in",
-  "on",
-  "for",
-  "with",
-  "by",
-  "at",
-  "is",
-  "are",
-  "be",
-  "do",
-  "does",
-  "my",
-  "me",
-  "your",
-  "you",
-  "it",
-  "its",
-  "this",
-  "that",
-  "from",
-  "as",
-  "up",
-  "out",
-  "all",
-  "some",
-  "any",
-  "can",
-  "will",
-  "would",
-  "should",
-  "want",
-  "need",
-  "please",
-  "user",
-  "users",
-]);
-
-/** Light suffix stemmer so "emails"/"email", "creating"/"create" co-match (min-stem guards, no over-stripping). */
-function stem(token: string): string {
-  if (token.length > 5 && token.endsWith("ing")) return token.slice(0, -3);
-  if (token.length > 4 && token.endsWith("ed")) return token.slice(0, -2);
-  if (token.length > 4 && token.endsWith("es")) return token.slice(0, -2);
-  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
-  return token;
-}
-
-/** Split snake_case/camelCase/dotted text into stemmed lowercase word tokens (len ≥ 2, stopwords removed). */
-function tokenize(text: string): string[] {
-  return text
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 1 && !STOPWORDS.has(t))
-    .map(stem);
-}
-
-/** The searchable text of a connector tool: name (weighted ×2) + description + param names. */
-function toolSearchText(tool: Tool): string {
-  const raw = (tool as { name?: string }).name ?? "";
-  const name = raw.startsWith(CODEX_APPS_TOOL_PREFIX)
-    ? raw.slice(CODEX_APPS_TOOL_PREFIX.length)
-    : raw;
-  const description =
-    typeof (tool as { description?: unknown }).description === "string"
-      ? (tool as { description: string }).description
-      : "";
-  const params = (tool as { parameters?: { properties?: Record<string, unknown> } }).parameters
-    ?.properties;
-  const paramNames = params && typeof params === "object" ? Object.keys(params).join(" ") : "";
-  return `${name} ${name} ${description} ${paramNames}`;
-}
-
-/**
- * Rank connector tools against a plain-language query with BM25 (Okapi, k1=1.5,
- * b=0.75) over tokenized name+description+params. Returns the top `limit` tools
- * with a positive score, most-relevant first. An empty or no-match query returns
- * [] — matching codex-rs, whose search returns empty rather than arbitrary tools;
- * disclosing unrelated (and thereby CALLABLE) tools on a miss feeds the model
- * noise. The SDK normalizes an empty executor result into an empty
- * tool_search_output, which the model reads as "nothing matched — rephrase".
- */
+/** Field-aware lexical ranking; an empty or unmatched query returns no tools. */
 export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool[] {
-  const qTokens = Array.from(new Set(tokenize(query)));
-  if (tools.length === 0 || qTokens.length === 0) return [];
-
-  const docs = tools.map((tool) => {
-    const tokens = tokenize(toolSearchText(tool));
-    const tf = new Map<string, number>();
-    for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-    return { tool, len: tokens.length, tf };
-  });
-  const N = docs.length;
-  const avgdl = Math.max(1, docs.reduce((s, d) => s + d.len, 0) / N);
-  const df = new Map<string, number>();
-  for (const d of docs) for (const t of d.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
-
-  const k1 = 1.5;
-  const b = 0.75;
-  const scored = docs.map((d) => {
-    let score = 0;
-    for (const qt of qTokens) {
-      const n = df.get(qt);
-      const f = d.tf.get(qt);
-      if (!n || !f) continue;
-      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
-      score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.len) / avgdl)));
-    }
-    return { tool: d.tool, score };
-  });
-  const hits = scored.filter((s) => s.score > 0).sort((a, b2) => b2.score - a.score);
-  return hits.slice(0, limit).map((s) => s.tool); // no hits ⇒ [] (codex-rs parity; see doc)
+  return new ToolSearchIndex(tools).rank(query, limit);
 }
 
 /**
@@ -367,7 +249,7 @@ export function toolsNamedInQuery<T extends Tool & { name: string }>(
 }
 
 /** Parse ranked or exact-name discovery arguments (string or object). */
-function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
+export function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
   let obj: Record<string, unknown> = {};
   try {
     obj =
@@ -402,7 +284,11 @@ function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: 
  * the origin-classified lazy set (deferred MCP plus every non-MCP function
  * tool outside the always-visible base names).
  */
-export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
+export function rankToolPool(
+  availableTools: Tool[],
+  rawArguments: unknown,
+  index?: ToolSearchIndex,
+): Tool[] {
   // The Agents SDK can present the same configured tool reference more than once
   // while resolving multiple client tool_search calls from one model response.
   // Collapse only referential duplicates here: distinct objects with the same
@@ -418,19 +304,48 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
   if (names) {
     // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
     // search or another executor registry. Keep the SDK's original references.
-    ranked = searchable.filter((tool) => names.includes(tool.name));
+    ranked = [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name));
+    limit = names.length;
   } else {
     // Every tool the query names comes first, even beyond the requested limit;
     // BM25 fills any remaining places.
     const named = toolsNamedInQuery(searchable, query);
     ranked = [
       ...named,
-      ...bm25RankTools(searchable, query, searchable.length).filter(
-        (tool) => !named.includes(tool as Tool & { name: string }),
-      ),
+      ...(index ?? new ToolSearchIndex(searchable))
+        .rank(query, searchable.length)
+        .filter(
+          (tool) =>
+            searchable.includes(tool as Tool & { name: string }) &&
+            !named.includes(tool as Tool & { name: string }),
+        ),
     ];
     limit = Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
   }
+  return ranked.slice(0, limit);
+}
+
+/** Full-schema disclosure is separate from compact ranking; original SDK objects only. */
+export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
+  const searchable = [...new Set(availableTools)].filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
+  const { query, names, limit: requestedLimit } = parseSearchArgs(rawArguments);
+  // Rank the entire pool before applying existing schema budgets, so an oversize
+  // definition cannot displace later candidates that fit.
+  const named = names ? [] : toolsNamedInQuery(searchable, query);
+  const ranked = names
+    ? [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name))
+    : [
+        ...named,
+        ...new ToolSearchIndex(searchable)
+          .rank(query, searchable.length)
+          .filter((tool) => !named.includes(tool as Tool & { name: string })),
+      ];
+  const limit = names
+    ? names.length
+    : Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
   const bounded: Tool[] = [];
   let disclosedBytes = 0;
   for (const tool of ranked) {

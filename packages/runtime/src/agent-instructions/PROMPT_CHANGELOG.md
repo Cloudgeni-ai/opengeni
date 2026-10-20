@@ -177,11 +177,22 @@ rule turned one search into several sequential round trips, so the rule now
 says a found tool stays callable by name and that several capabilities can be
 searched in one response or loaded together through `names`.
 
+Compact discovery. Ranked hits are descriptors, not schemas. An explicitly
+configured decision model selects and loads the relevant definitions in the
+same search; without it, exact-name loading is a separate step. The instructions
+make that distinction and use the existing list tool for an on-demand group
+directory. Definitions and receipts are frozen after the originating result,
+never inserted into a changing earlier prompt or top-level tool block.
+
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.
++ Describe the action, resource and useful context in `tool_search`; a configured decision model selects and loads relevant tools.
++ When the result says `schemasLoaded: false`, it contains compact candidates only: load chosen exact names with `tool_search({query: '', names: [...]})` before calling them.
++ Known exact names bypass ranking and the decision model.
++ Once its schema is in context, call the tool by name or through `tool_invoke`; do not rediscover it unless its schema is no longer in context.
 + When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.
-+ If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
++ Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`.
++ If search misses, browse the relevant groups and follow `nextCursor` until covered, then load chosen exact names with `tool_search`.
 + `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
 + Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
 + Use an attached image-generation tool when the user requests generated images or edits.

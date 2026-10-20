@@ -1049,6 +1049,10 @@ const SettingsSchema = z.object({
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
   // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
   lazyToolSearchEnabled: EnvBoolean.default(true),
+  // Optional deployment-owned model for selecting tools from compact candidates.
+  // Uses the ordinary provider registry; no separate provider credential or SDK.
+  // Unset/unavailable keeps compact lexical discovery and exact schema loading.
+  toolSearchDecisionModelId: z.string().min(1).optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -5189,6 +5193,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
     openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
+    toolSearchDecisionModelId: optional("OPENGENI_TOOL_SEARCH_DECISION_MODEL_ID"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(

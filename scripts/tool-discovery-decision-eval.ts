@@ -1,0 +1,204 @@
+#!/usr/bin/env bun
+/**
+ * Live decision-model comparison on a frozen catalog and query set. No tools execute.
+ * DECISION_MODEL_API_KEY=... bun scripts/tool-discovery-decision-eval.ts \
+ *   --catalog catalog.json --out results.json --model provider/model \
+ *   [--candidates all|40] [--queries queries.json]
+ * Uses a configured OpenAI-compatible provider. Never commits catalogs/results.
+ */
+import { createHash } from "node:crypto";
+import type { Tool } from "@openai/agents";
+import { ToolSearchIndex } from "../packages/runtime/src/tool-discovery-ranking";
+import { LazyToolRuntime } from "../packages/runtime/src/lazy-tool-transport";
+import {
+  TOOL_DECISION_INSTRUCTIONS,
+  decisionCandidate,
+  toolDecisionRequest,
+  parseToolDecision,
+} from "../packages/runtime/src/tool-discovery-decision";
+
+function option(name: string): string | undefined {
+  const index = process.argv.indexOf(`--${name}`);
+  return index < 0 ? undefined : process.argv[index + 1];
+}
+const catalogPath = option("catalog"),
+  outputPath = option("out"),
+  model = option("model");
+if (!catalogPath || !outputPath || !model)
+  throw new Error("Required: --catalog, --out and --model");
+const apiKey = process.env.DECISION_MODEL_API_KEY;
+if (!apiKey) throw new Error("DECISION_MODEL_API_KEY is not configured");
+const baseUrl = process.env.DECISION_MODEL_BASE_URL;
+if (!baseUrl) throw new Error("DECISION_MODEL_BASE_URL is not configured");
+const text = await Bun.file(catalogPath).text();
+const parsed = JSON.parse(text);
+const entries = (Array.isArray(parsed) ? parsed : parsed.tools) as Array<{
+  name: string;
+  description: string;
+  parameters?: unknown;
+  inputSchema?: unknown;
+  identity?: { serverId?: string };
+}>;
+const catalogTools = entries.map(
+  (t) =>
+    ({
+      type: "function",
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters ?? t.inputSchema,
+      strict: false,
+    }) as Tool,
+);
+const servers = new Map(
+  entries.flatMap((t) => (t.identity?.serverId ? [[t.name, t.identity.serverId] as const] : [])),
+);
+const runtime = new LazyToolRuntime(
+  "generic_dispatch",
+  new Set(servers.values()),
+  undefined,
+  new Set(servers.values()),
+  new Set(),
+  () => servers,
+);
+runtime.refresh(catalogTools);
+const pool = runtime.inspectSearchableTools().map((t) => ({ ...t, type: "function" }) as Tool);
+const index = new ToolSearchIndex(pool);
+const cases = (await Bun.file(
+  option("queries") ?? new URL("./fixtures/tool-discovery-queries.json", import.meta.url),
+).json()) as Array<{
+  id: string;
+  source: string;
+  query: string;
+  expected: string[];
+  multiIntent?: boolean;
+}>;
+const candidateCount = option("candidates") ?? "40";
+if (candidateCount !== "all" && (!/^\d+$/.test(candidateCount) || Number(candidateCount) < 1))
+  throw new Error("candidates must be all or a positive integer");
+const instruction = TOOL_DECISION_INSTRUCTIONS;
+const provider = option("provider");
+const effort = option("reasoning") ?? "none";
+const metadata = {
+  requestVersion: 2,
+  catalogSha256: createHash("sha256").update(text).digest("hex"),
+  deferredTools: pool.length,
+  candidates: candidateCount,
+  querySha256: createHash("sha256").update(JSON.stringify(cases)).digest("hex"),
+  model,
+  instruction,
+  provider: provider ?? null,
+  effort,
+};
+const existing = (await Bun.file(outputPath).exists())
+  ? await Bun.file(outputPath).json()
+  : { metadata, rows: [] };
+if (JSON.stringify(existing.metadata) !== JSON.stringify(metadata))
+  throw new Error("Output belongs to a different experiment");
+const rows = existing.rows as Array<Record<string, unknown>>;
+for (const c of cases) {
+  if (rows.some((row) => row.id === c.id)) continue;
+  const candidates = (
+    candidateCount === "all" ? pool : index.rank(c.query, Number(candidateCount))
+  ) as Array<
+    Tool & {
+      name: string;
+      description: string;
+      parameters: { properties?: Record<string, unknown> };
+    }
+  >;
+  const started = performance.now();
+  const request = toolDecisionRequest({
+    query: c.query,
+    candidates: candidates.map(decisionCandidate),
+  });
+  const format = request.outputFormat as {
+    name: string;
+    schema: Record<string, unknown>;
+    strict: boolean;
+  };
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      reasoning: { effort },
+      ...(provider ? { provider: { order: [provider], allow_fallbacks: false } } : {}),
+      messages: request.messages,
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: format.name, schema: format.schema, strict: format.strict },
+      },
+    }),
+  });
+  if (!response.ok)
+    throw new Error(
+      `Decision model HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`,
+    );
+  const result = (await response.json()) as {
+    choices: Array<{ message: { content: string } }>;
+    usage: { prompt_tokens: number; completion_tokens: number; cost?: number };
+    model: string;
+    provider?: string;
+  };
+  let selected: string[] = [],
+    invalid = false;
+  try {
+    selected = parseToolDecision(
+      result.choices[0]!.message.content,
+      candidates.map(decisionCandidate),
+    );
+  } catch {
+    invalid = true;
+  }
+  const row = {
+    id: c.id,
+    source: c.source,
+    query: c.query,
+    expected: c.expected,
+    candidateCount: candidates.length,
+    candidateRecall:
+      c.expected.filter((n) => candidates.some((t) => t.name === n)).length / c.expected.length,
+    top1: c.expected.includes(selected[0] ?? ""),
+    top3: selected.slice(0, 3).some((t) => c.expected.includes(t)),
+    wronglyIncluded: selected.filter((t) => !c.expected.includes(t)).length,
+    selected,
+    invalid,
+    ms: performance.now() - started,
+    inputTokens: result.usage.prompt_tokens,
+    outputTokens: result.usage.completion_tokens,
+    costUsd: result.usage.cost,
+    model: result.model,
+    provider: result.provider,
+  };
+  rows.push(row);
+  await Bun.write(outputPath, JSON.stringify({ metadata, rows }, null, 2));
+  console.log(
+    JSON.stringify({
+      id: c.id,
+      top1: row.top1,
+      top3: row.top3,
+      selected: selected.length,
+      wronglyIncluded: row.wronglyIncluded,
+      ms: row.ms,
+      costUsd: row.costUsd,
+    }),
+  );
+}
+const mean = (key: string) => rows.reduce((sum, row) => sum + Number(row[key]), 0) / rows.length;
+const sortedLatency = rows.map((r) => Number(r.ms)).sort((a, b) => a - b);
+console.log(
+  JSON.stringify(
+    {
+      queries: rows.length,
+      top1: mean("top1"),
+      top3: mean("top3"),
+      meanWronglyIncluded: mean("wronglyIncluded"),
+      meanMs: mean("ms"),
+      p95Ms: sortedLatency[Math.ceil(rows.length * 0.95) - 1],
+      meanCostUsd: mean("costUsd"),
+      totalCostUsd: rows.reduce((s, r) => s + Number(r.costUsd), 0),
+    },
+    null,
+    2,
+  ),
+);

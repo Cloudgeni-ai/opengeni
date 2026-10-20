@@ -1296,19 +1296,33 @@ always-visible base set) so the model can discover them without preloading
 every schema. It does not search the public web and must not be presented as a
 fallback for native `web_search`.
 
-Progressive disclosure is selected explicitly per resolved provider:
+All three progressive-disclosure transports (`codex_native`, `openai_native`,
+`generic_dispatch`) expose the same stable ordinary `tool_search`, `tool_list`
+and `tool_invoke` functions. Ranked discovery returns compact descriptors, not
+every candidate's schema. Exact `names` loads complete schemas. With a configured
+decision model, search first retrieves a wider candidate set, asks that model
+which tools directly satisfy the request, and loads only those selected schemas.
+The original SDK tool objects remain in the execution registry; remembered names
+bind through `resolveMissingFunctionTool`, with approvals unchanged.
 
-- **Codex subscription — `codex_native`:** native client `tool_search`; deferred
-  schemas stay off the first-request tool block. A remembered authorized name
-  binds through `resolveMissingFunctionTool` without requiring another search.
-- **Built-in direct OpenAI/Azure Responses — `openai_native`:** the runtime keeps
-  the original tool objects available to that same hook with the SDK deferred
-  gate disabled, removes lazy schemas only from the provider request, and
-  returns those same objects from native client `tool_search`.
-- **Other ordinary function-calling providers — `generic_dispatch`:** the model
-  receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
-  protocol extension is required. This includes an OpenAI-compatible custom base
-  URL: configuring the built-in OpenAI slot does not prove native-search support.
+Selected definitions are frozen on the search call and appended after its result.
+The verified Codex Responses route projects them as `additional_tools`; other
+routes use inline declarations and `tool_invoke`. There is no claim that direct
+OpenAI/Azure or an arbitrary gateway accepts `additional_tools`. An execution-only
+native-search registration completes interrupted historical native calls, but
+is never advertised in a new request. Historical results are never rerun.
+
+`OPENGENI_TOOL_SEARCH_DECISION_MODEL_ID` optionally names an ordinary configured,
+deployment-owned provider model. It reuses the normal single-model-call client,
+minimal supported reasoning effort, cancellation and provider retries. No new
+timeout, concurrency quota or request cap is added. Internal inference is
+deployment-paid; `tool_discovery.*` usage events retain input, cached input,
+output and provider-cost estimates per workspace/session/turn. It never silently
+borrows a customer's key or subscription. Embedders may instead pass an admitted
+`BuildAgentOptions.toolSearchDecisionModel` callback or use `createToolDecisionModel`
+with their own usage hook. Unset, failed or invalid model selection falls back to
+compact candidates; `schemasLoaded:false` explicitly requires exact-name loading.
+Cancellation propagates rather than being mistaken for an outage.
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
@@ -1347,8 +1361,11 @@ descriptions, and ordering are constant, so adding, removing, or changing a
 deferred MCP tool does not change the request's top-level tool block. The live
 DeepSeek V4 Flash 0731 probe on 2026-08-07 reused 7,680 cached input tokens on
 both post-search requests while completing search → invoke → final output.
-Generic search results are also bounded before they enter ordinary tool-output
-handling, so schema JSON is never silently middle-truncated.
+Compact receipts and detached full-schema snapshots bypass ordinary output
+truncation during replay; the existing definition/disclosure byte budgets still
+apply. Catalog changes never rewrite earlier receipts or declarations. The
+group directory is an explicit `tool_list({view:"groups"})` result, never a
+catalog-dependent prefix inserted before earlier conversation items.
 
 The native tool uses the Agents SDK's bounded `medium` search-context setting
 and preserves provider URL-citation annotations in structured conversation
