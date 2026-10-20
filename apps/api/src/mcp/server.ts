@@ -18,6 +18,11 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
+  sessionChatUrl,
+  withMachinePermissionCard,
+  type MachinePermissionCardPost,
+} from "./machine-permission-card";
+import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
   workspaceArtifactDownloads,
@@ -111,6 +116,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
+  appendTurnCapabilityCardOnce,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -4297,6 +4303,52 @@ function registerFleetTools(
     };
   };
 
+  // A refusal that only the owner's permission can resolve posts the Connected
+  // Machine card right away, in the agent's own turn, so the person can allow
+  // the machine without the agent having to find and call the card tool. Only
+  // exact agent attempts post it. A repeated machine refusal in the same turn
+  // reuses that turn's machine card (it lists every machine); the lookup and
+  // append run atomically under the attempt fence so parallel refusals cannot
+  // stack copies. Cards for every other capability are never limited.
+  const machinePermissionCard =
+    (toolName: string): MachinePermissionCardPost =>
+    async () => {
+      if (!exactAgentAttemptClaims(grant)) return null;
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+        (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+      )!;
+      const appended = await appendTurnCapabilityCardOnce(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        item.id,
+        {
+          type: "tool.auth_needed",
+          payload: capabilityCardPayload(item, {
+            action: "connect",
+            rationale: "Allow this chat to use your computer.",
+            toolName,
+          }),
+        },
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the machine card committed.");
+      }
+      return {
+        eventId: appended.existingEventId ?? appended.events[0]?.id ?? null,
+        chatUrl: sessionChatUrl(
+          deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+          grant.workspaceId,
+          sessionId,
+        ),
+      };
+    };
+
   server.registerTool(
     "sandboxes_list",
     {
@@ -4318,7 +4370,13 @@ function registerFleetTools(
         'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: the platform checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_attach"),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -4328,7 +4386,13 @@ function registerFleetTools(
         'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: the platform checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_swap"),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -4368,10 +4432,13 @@ function registerFleetTools(
             )
           : null;
       return json(
-        await runOnSandbox(services, await fleetContext(), target, typedOp, {
-          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-          ...(secretResolver ? { secretResolver } : {}),
-        }),
+        await withMachinePermissionCard(
+          await runOnSandbox(services, await fleetContext(), target, typedOp, {
+            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+            ...(secretResolver ? { secretResolver } : {}),
+          }),
+          machinePermissionCard("run_on"),
+        ),
       );
     },
   );
@@ -7108,21 +7175,7 @@ async function appendCapabilityCardEvent(
 ): Promise<string | null> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
-  const payload = ToolAuthNeededPayload.parse({
-    serverId: item.runtime.mcpServerId ?? "opengeni",
-    toolName: input.toolName ?? "capability_authorization_request",
-    providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
-    capability: {
-      id: item.id,
-      name: item.name,
-      kind: item.kind,
-      source: item.source,
-      action: input.action,
-      rationale: input.rationale,
-      requiredVariables: capabilityRequiredVariables(item),
-    },
-  });
+  const payload = capabilityCardPayload(item, input);
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -7137,6 +7190,32 @@ async function appendCapabilityCardEvent(
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
   return appended.events[0]?.id ?? null;
+}
+
+/** The `tool.auth_needed` payload that renders a capability card in the chat. */
+function capabilityCardPayload(
+  item: CapabilityCatalogItem,
+  input: {
+    action: "connect" | "add_credentials" | "enable";
+    rationale: string;
+    toolName?: string;
+  },
+): ToolAuthNeededPayload {
+  return ToolAuthNeededPayload.parse({
+    serverId: item.runtime.mcpServerId ?? "opengeni",
+    toolName: input.toolName ?? "capability_authorization_request",
+    providerDomain: capabilityProviderDomain(item),
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: input.action,
+      rationale: input.rationale,
+      requiredVariables: capabilityRequiredVariables(item),
+    },
+  });
 }
 
 function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {

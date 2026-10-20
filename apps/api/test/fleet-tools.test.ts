@@ -558,6 +558,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(refusedRun.ok).toBe(false);
     expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    expect(refusedRun.code).toBe("personal_machine_permission_required");
     await allowThisChat();
     const withoutAttempt: FleetContext = {
       accountId: ctx.accountId,
