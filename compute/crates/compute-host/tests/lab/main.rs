@@ -1078,9 +1078,10 @@ impl Drop for LocalService {
     }
 }
 
-/// Asks the guest's name server about each name given, over UDP and over
-/// TCP, and the guest's own resolver too, printing `name udp=A tcp=A
-/// libc=A`: the first IPv4 address each found, or `none`.
+/// Asks the name server at the first argument about each name after it,
+/// over UDP and over TCP, and the guest's own resolver too, printing
+/// `server name udp=A tcp=A libc=A`: the first IPv4 address each found, or
+/// `none`.
 const RESOLVE: &str = r#"
 import socket, struct, sys
 def query(name):
@@ -1109,36 +1110,63 @@ def first_a(answer):
             return socket.inet_ntoa(answer[at:at + 4])
         at += length
     return "none"
-for name in sys.argv[1:]:
+server = sys.argv[1]
+for name in sys.argv[2:]:
     u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     u.settimeout(5)
-    u.sendto(query(name), ("169.254.0.22", 53))
-    udp = first_a(u.recv(4096))
-    t = socket.create_connection(("169.254.0.22", 53), 5)
-    q = query(name)
-    t.sendall(struct.pack(">H", len(q)) + q)
-    data = b""
-    while len(data) < 2 or len(data) < 2 + struct.unpack(">H", data[:2])[0]:
-        chunk = t.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-    tcp = first_a(data[2:])
+    u.sendto(query(name), (server, 53))
+    try:
+        answer, source = u.recvfrom(4096)
+        udp = first_a(answer) if source[0] == server else "wrong-source"
+    except OSError:
+        udp = "unanswered"
+    try:
+        t = socket.create_connection((server, 53), 5)
+        q = query(name)
+        t.sendall(struct.pack(">H", len(q)) + q)
+        data = b""
+        while len(data) < 2 or len(data) < 2 + struct.unpack(">H", data[:2])[0]:
+            chunk = t.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        tcp = first_a(data[2:])
+    except OSError:
+        tcp = "unanswered"
     try:
         libc = socket.gethostbyname(name)
     except OSError:
         libc = "none"
-    print(name, "udp=" + udp, "tcp=" + tcp, "libc=" + libc, flush=True)
+    print(server, name, "udp=" + udp, "tcp=" + tcp, "libc=" + libc, flush=True)
 "#;
+
+/// A private name server, as an overlay network's, that an older host
+/// could have told a guest about: sandboxes may not reach it.
+const PRIVATE_NAME_SERVER: &str = "100.100.100.100";
 
 /// The first sandbox's names: its resolver uses its gateway; a public
 /// name resolves through the public name servers; the name only the host
 /// knows never does; and the listed name resolves to the service, by every
 /// path, exactly when `listed`.
+///
+/// A guest still told a private name server, as one booted under an older
+/// host is, gets the same answers from it, by every path, since its
+/// queries are answered by its own name server; a public name server it
+/// asks directly answers for itself, so knows no listed name.
 async fn check_names(client: &Client, service: &LocalService, listed: bool) {
     let [name, hidden] = &service.names;
-    let script =
-        format!("cat /etc/resolv.conf\npython3 -c '{RESOLVE}' {name} {hidden} example.com");
+    let private = PRIVATE_NAME_SERVER;
+    let script = format!(
+        "cat /etc/resolv.conf
+python3 -c '{RESOLVE}' 169.254.0.22 {name} {hidden} example.com
+cp -P /etc/resolv.conf /tmp/resolv.conf.kept
+rm -f /etc/resolv.conf
+echo nameserver {private} > /etc/resolv.conf
+python3 -c '{RESOLVE}' {private} {name} {hidden} example.com
+rm -f /etc/resolv.conf
+cp -P /tmp/resolv.conf.kept /etc/resolv.conf
+python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
+    );
     let (output, _) = exec(client, id(0), &script).await;
     assert!(
         output
@@ -1146,21 +1174,38 @@ async fn check_names(client: &Client, service: &LocalService, listed: bool) {
             .any(|line| line.trim() == "nameserver 169.254.0.22"),
         "the guest's resolver is not its gateway: {output}"
     );
-    let row = |name: &str| {
+    let row = |server: &str, name: &str| {
         output
             .lines()
-            .find(|line| line.starts_with(&format!("{name} ")))
-            .unwrap_or_else(|| panic!("no answer for {name}: {output}"))
+            .find(|line| line.starts_with(&format!("{server} {name} ")))
+            .unwrap_or_else(|| panic!("no answer for {name} from {server}: {output}"))
             .to_owned()
     };
     let found = if listed { SERVICE } else { "none" };
-    assert_eq!(
-        row(name),
-        format!("{name} udp={found} tcp={found} libc={found}")
+    for server in ["169.254.0.22", private] {
+        assert_eq!(
+            row(server, name),
+            format!("{server} {name} udp={found} tcp={found} libc={found}")
+        );
+        assert_eq!(
+            row(server, hidden),
+            format!("{server} {hidden} udp=none tcp=none libc=none")
+        );
+        let public = row(server, "example.com");
+        assert!(
+            !public.contains("=none") && !public.contains("=unanswered"),
+            "a public name: {public}"
+        );
+    }
+    assert!(
+        row("8.8.8.8", name).starts_with(&format!("8.8.8.8 {name} udp=none tcp=none ")),
+        "a public name server answers for itself: {output}"
     );
-    assert_eq!(row(hidden), format!("{hidden} udp=none tcp=none libc=none"));
-    let public = row("example.com");
-    assert!(!public.contains("=none"), "a public name: {public}");
+    let public = row("8.8.8.8", "example.com");
+    assert!(
+        !public.contains("=none") && !public.contains("=unanswered"),
+        "a public name server: {public}"
+    );
 }
 
 /// Guests reach the host's local network only where its `--reach` entries

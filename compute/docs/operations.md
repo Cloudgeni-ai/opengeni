@@ -525,8 +525,10 @@ before users move to compute from Modal:
   ([ADR 11](adr/0011-fixed-guest-network.md)), but for the exact
   destinations and TCP ports a host lists with `--reach`. Guests resolve
   names through the host's answer at their gateway, which asks public
-  name servers and never the host's own; the review should confirm that
-  each listed destination is one sandboxes are meant to reach.
+  name servers and never the host's own; a query a guest sends to a name
+  server it may not reach is answered there too. The review should
+  confirm that each listed destination is one sandboxes are meant to
+  reach.
 - **Hosts.** Hosts hold their sandboxes' disks and memory, encrypted at
   rest by the provider, and the host account can read and write every
   archived sandbox in the bucket. A host is as trusted as every sandbox
@@ -587,7 +589,8 @@ before users move to compute from Modal:
      VPC, IPv6, the cloud's public-to-private mapping (`--block`), each
      `--reach` destination's other ports, and the sandbox's name server
      (its gateway's port 53, the one thing in the namespace a guest
-     reaches), which parses guests' queries;
+     reaches, and where its queries to unreachable name servers are
+     sent), which parses guests' queries;
   3. the guest-to-host channels, whose input from guests is untrusted:
      the vsock ports the host serves (guest ports it forwards, and the
      agent link of ADR 21) and the pagers' and gateway's replies;
