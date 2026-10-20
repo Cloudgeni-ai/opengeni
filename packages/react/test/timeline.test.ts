@@ -1021,6 +1021,40 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a prompt queued behind running work does not count the wait as its turn's work", () => {
+    // Queued at second 20 while turn-a runs; turn-a is superseded at 200 by a
+    // steer and turn-b starts one second later.
+    const items = buildTimeline(englishText, [
+      eventAt(2, "user.message", { text: "Start" }, { turnId: null }),
+      eventAt(
+        3,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", routing: "accepted_for_execution" },
+        { turnId: "turn-a" },
+      ),
+      eventAt(4, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(10, "agent.message.delta", { text: "Working." }, { turnId: "turn-a" }),
+      eventAt(20, "user.message", { text: "Queued for later" }, { turnId: null }),
+      eventAt(
+        21,
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "evt-20", routing: "queued" },
+        { turnId: "turn-b" },
+      ),
+      eventAt(200, "turn.superseded", {}, { turnId: "turn-a" }),
+      eventAt(201, "turn.started", { triggerEventId: "evt-20" }, { turnId: "turn-b" }),
+      eventAt(203, "turn.superseded", {}, { turnId: "turn-b" }),
+    ]);
+    const queue = items.find(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === "queue" && item.turnId === "turn-b",
+    );
+    expect(queue).toMatchObject({
+      startedAt: new Date(1718000000000 + 200 * 1000).toISOString(),
+      durationMs: 1_000,
+    });
+  });
+
   test("a recovered turn keeps its prompt anchored at the first attempt start", () => {
     const items = buildTimeline(englishText, [
       eventAt(2, "user.message", { text: "Recover this work" }, { turnId: null }),

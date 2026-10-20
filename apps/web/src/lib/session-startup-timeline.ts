@@ -51,8 +51,16 @@ export function sessionStartupTimeline(items: TimelineItem[], input: StartupInpu
   let queueVersion = session.queueVersion;
   let newerProgress = false;
   let observedActiveTurn: string | null = null;
+  // A prompt that waited behind earlier work starts its queue span when that
+  // work ended, not when the person queued it.
+  let previousTurnEndedAt: string | null = null;
   for (const event of currentEvents(input.events)) {
     const payload = payloadOf(event);
+    if (
+      event.turnId &&
+      ["turn.completed", "turn.failed", "turn.cancelled", "turn.superseded"].includes(event.type)
+    )
+      previousTurnEndedAt = event.occurredAt;
     if (
       event.sequence > session.lastSequence &&
       ([
@@ -114,7 +122,12 @@ export function sessionStartupTimeline(items: TimelineItem[], input: StartupInpu
   // authoritative first item may become the next startup; replay order is not priority.
   const head = input.queue && input.queue.version >= queueVersion ? input.queue.items[0] : null;
   if (session.status === "queued" && !session.activeTurnId && head && !pending.has(head.id))
-    pending.set(head.id, head.createdAt);
+    pending.set(
+      head.id,
+      previousTurnEndedAt && previousTurnEndedAt > head.createdAt
+        ? previousTurnEndedAt
+        : head.createdAt,
+    );
   const candidate = [...pending].find(
     ([turnId]) =>
       !claimed.has(turnId) &&

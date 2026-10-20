@@ -275,6 +275,10 @@ export function buildTimeline(
     });
   };
   const queuedAtByTurn = new Map<string, string>();
+  // When the session's previous turn ended. A prompt queued behind running
+  // work waits for that turn by the person's choice, so its queue span starts
+  // only once the session was free to run it.
+  let previousTurnEndedAt: string | null = null;
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
   let startupEvent: SessionEvent;
@@ -520,6 +524,16 @@ export function buildTimeline(
         blockedReason,
       );
       continue;
+    }
+
+    if (
+      event.turnId &&
+      (event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.superseded")
+    ) {
+      previousTurnEndedAt = event.occurredAt;
     }
 
     switch (event.type) {
@@ -1003,14 +1017,20 @@ export function buildTimeline(
         // the first admission only, so consume the queued timestamp after its
         // first projection instead of manufacturing another queue span.
         queuedAtByTurn.delete(turnId);
+        const queueStart =
+          previousTurnEndedAt &&
+          Date.parse(previousTurnEndedAt) > Date.parse(queuedAt) &&
+          Date.parse(previousTurnEndedAt) <= Date.parse(event.occurredAt)
+            ? previousTurnEndedAt
+            : queuedAt;
         closeStreamingTail();
         settleStartupPhase(
           "queue",
           "complete",
-          elapsedDurationMs(queuedAt, event.occurredAt),
+          elapsedDurationMs(queueStart, event.occurredAt),
           null,
           0,
-          queuedAt,
+          queueStart,
           `${turnId}-queue`,
         );
         break;
