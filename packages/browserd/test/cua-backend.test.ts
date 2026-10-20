@@ -1232,6 +1232,39 @@ describe("CUA desktop boundary", () => {
       }
     }
 
+    // A macOS app that keeps running without a window is launched once more,
+    // which CUA sends as a reopen, and the window that answers is observed.
+    {
+      class ReopenFixture extends LaunchFixture {
+        override listingsBeforeWindow = Number.POSITIVE_INFINITY;
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const launches = this.calls.filter((call) => call.name === "launch_app").length;
+          const response = await super.callTool(name, argumentsJson);
+          // The window answers the second launch, the reopen.
+          if (name === "launch_app" && launches === 1) this.listingsBeforeWindow = this.listings;
+          return response;
+        }
+      }
+      const fixture = new ReopenFixture();
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(fixture.calls.filter((call) => call.name === "launch_app")).toHaveLength(2);
+        // The reopen waits for a slow first window, and then answers at once.
+        expect(performance.now() - started).toBeGreaterThanOrEqual(2_000);
+        expect(performance.now() - started).toBeLessThan(4_000);
+      } finally {
+        await backend.close();
+      }
+    }
+
     // An app that opens no window leaves the action's own target observed.
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

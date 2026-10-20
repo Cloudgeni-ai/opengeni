@@ -1143,20 +1143,30 @@ export class CuaComputerBackend implements ComputerBackend {
    * can take seconds to show its first window, so its windows are searched
    * until one appears or the wait runs out. Each search is its own step in the
    * serialized queue, so previews, human input and close are not held up
-   * between searches. */
+   * between searches. A macOS document app launched in the background may
+   * stay running without any window; one that still shows none after a while
+   * is launched once more, which CUA delivers as a reopen, the way a Dock
+   * click asks a running app for its window (or Open panel), still without
+   * taking focus. */
   private async dispatchLaunch(
     command: ComputerBackendActionCommand,
     applicationId: string,
   ): Promise<ComputerBackendObservation | null> {
-    const launched = await this.run(async () => {
+    let launched = await this.run(async () => {
       await this.target(command.targetId);
       return await this.launch(applicationId);
     });
     try {
-      const deadline = performance.now() + this.launchWindowWaitMs;
+      const started = performance.now();
+      const deadline = started + this.launchWindowWaitMs;
+      let reopenAt =
+        this.identity.platform === "macos" && launched.pid !== null
+          ? started + MACOS_LAUNCH_REOPEN_AFTER_MS
+          : Number.POSITIVE_INFINITY;
       for (let attempt = 0; ; attempt++) {
+        const current = launched;
         const found = await this.run(async () => {
-          const windows = await this.launchedWindows(launched);
+          const windows = await this.launchedWindows(current);
           for (const windowTarget of windows) {
             const reading = await this.observeTarget(windowTarget).catch(() => null);
             if (reading) return { windows: windows.length, reading };
@@ -1167,11 +1177,21 @@ export class CuaComputerBackend implements ComputerBackend {
         // A window that exists but cannot be read will not become readable by
         // waiting for it.
         if (found.windows > 0) break;
-        const remaining = deadline - performance.now();
+        const now = performance.now();
+        const remaining = deadline - now;
         if (remaining <= 0 || this.closing) break;
+        if (now >= reopenAt) {
+          reopenAt = Number.POSITIVE_INFINITY;
+          const reopened = await this.run(() => this.launch(applicationId)).catch(() => null);
+          if (reopened)
+            launched = { ...launched, windows: [...launched.windows, ...reopened.windows] };
+          continue;
+        }
         // Poll quickly at first, when most windows appear, then less often.
         const pause = attempt < 4 ? LAUNCH_WINDOW_FAST_POLL_MS : LAUNCH_WINDOW_SLOW_POLL_MS;
-        await new Promise((resolve) => setTimeout(resolve, Math.min(pause, remaining)));
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pause, remaining, Math.max(0, reopenAt - now))),
+        );
       }
       return await this.run(() => this.observeTarget(command.targetId));
     } catch {
@@ -1307,6 +1327,8 @@ function procParentPid(pid: number): number | null {
  * activation, a single-instance app, a stub executable), so a longer wait
  * would mostly be spent on windows it can never find. */
 const MACOS_LAUNCH_WINDOW_WAIT_MS = 6_000;
+/** How long a launched macOS app may show no window before it is reopened. */
+const MACOS_LAUNCH_REOPEN_AFTER_MS = 2_000;
 const LAUNCH_WINDOW_WAIT_MS = 1_000;
 const LAUNCH_WINDOW_FAST_POLL_MS = 250;
 const LAUNCH_WINDOW_SLOW_POLL_MS = 500;

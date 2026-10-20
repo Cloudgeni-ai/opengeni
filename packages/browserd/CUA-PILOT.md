@@ -1,14 +1,17 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`51dd11773e5567d99a05c0c3b9e2ccef8455f454`: upstream `cua-driver-rs-v0.37.0`
+`ffae8ecee2999a7c650c6b3fb7398b40919a8eb9`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
 step reports that keep the windows each step opened, and a `run_steps` option
 (`refind_stale:false`) that stops a batch at a stale element token instead of
 acting on a lookalike found again by role and label, or re-sending a refused
-menu-bar token click as `invoke_menu`. `@trycua/cua-driver` 0.37.0
+menu-bar token click as `invoke_menu`, and a macOS launch of an app that is
+already running that sends a reopen (`aevt/rapp`) instead of a second open
+event, so a running document app with no window shows its window or Open panel
+again, in the background. `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
 A `computer_act` batch runs as one `run_steps` call only where the worker offers
@@ -115,7 +118,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/51dd11773e5567d99a05c0c3b9e2ccef8455f454/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ffae8ecee2999a7c650c6b3fb7398b40919a8eb9/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
