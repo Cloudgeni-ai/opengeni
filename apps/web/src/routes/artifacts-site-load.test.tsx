@@ -14,6 +14,7 @@ import { createRoot } from "react-dom/client";
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
 const siteId = "dc24100a-e408-4713-9c12-ef41e3964f6a";
 const versionId = "11111111-1111-4111-8111-111111111111";
+const copyId = "22222222-2222-4222-8222-222222222222";
 
 let loadError: unknown = null;
 let withoutContent = false;
@@ -50,6 +51,9 @@ const snapshot = {
 
 const siteClient = {
   tools: { forWorkspace: () => ({}) },
+  duplicateWorkspaceArtifact: mock(async (..._args: unknown[]) => ({
+    artifact: { ...snapshot.detail.artifact, id: copyId, title: "Café menu (copy)" },
+  })),
   getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
 };
 const accessContext = {
@@ -147,9 +151,11 @@ async function renderDetail(initialEntry = "/") {
   return { container, root, router };
 }
 
-/** Archive lives in the page's ⋯ menu. */
+// Archive lives in the Site's Settings tab.
 function hasArchive(container: HTMLElement) {
-  return container.querySelector('button[aria-label^="More actions for"]') !== null;
+  return [...container.querySelectorAll('[role="tab"]')].some(
+    (tab) => tab.textContent?.trim() === "Settings",
+  );
 }
 
 function hasAction(container: HTMLElement, label: string) {
@@ -330,6 +336,29 @@ test("Site without an openable version shows a final state instead of loading fo
     expect(hasAction(container, "Retry")).toBe(true);
   } finally {
     withoutContent = false;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Duplicate in Settings copies the Site and opens the copy", async () => {
+  loadError = null;
+  withoutContent = false;
+  siteClient.duplicateWorkspaceArtifact.mockClear();
+  const { container, root, router } = await renderDetail("/?tab=settings");
+  try {
+    const duplicate = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Duplicate",
+    );
+    expect(duplicate).toBeDefined();
+    await act(async () => duplicate!.click());
+    expect(siteClient.duplicateWorkspaceArtifact).toHaveBeenCalledTimes(1);
+    const [calledWorkspace, calledSite, request] = siteClient.duplicateWorkspaceArtifact.mock
+      .calls[0] as [string, string, { idempotencyKey: string }];
+    expect([calledWorkspace, calledSite]).toEqual([workspaceId, siteId]);
+    expect(request.idempotencyKey).toBeString();
+    expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/artifacts/${copyId}`);
+  } finally {
     await act(async () => root.unmount());
     container.remove();
   }

@@ -2,7 +2,13 @@
 // and archiving. One panel, shown in the Site page's Settings tab and in the
 // session workbench, so a Site is managed the same way from either place.
 import type { WorkspaceArtifact } from "@opengeni/sdk";
-import { ArchiveIcon, ArchiveRestoreIcon, LockKeyholeIcon, UsersIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  CopyIcon,
+  LockKeyholeIcon,
+  UsersIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -18,6 +24,7 @@ import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { sitesClientConfig } from "@/lib/site-publishing";
+import { useDuplicateSite } from "@/lib/use-duplicate-site";
 
 // Stands in for the Site while it loads so the audience hook keeps its order.
 const PLACEHOLDER_SITE: WorkspaceArtifact = {
@@ -137,13 +144,17 @@ export function SiteSettings({
   workspaceId,
   artifact,
   management,
+  openCopy = true,
 }: {
   workspaceId: string;
   artifact: WorkspaceArtifact;
   management: SiteManagement;
+  /** Whether a duplicate opens on its own page; the workbench keeps the person in the session. */
+  openCopy?: boolean;
 }) {
   const { client, clientConfig, accessContext } = useAppContext();
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const copies = useDuplicateSite(workspaceId);
   const { publication, audience } = management;
   const archived = artifact.status === "archived";
   const owner = Boolean(
@@ -207,6 +218,28 @@ export function SiteSettings({
                     Limit to me
                   </Button>
                 ) : undefined
+              }
+            />
+          </SettingRowGroup>
+        </Section>
+      ) : null}
+      {management.canPublish && artifact.currentVersion ? (
+        <Section title="Duplicate" variant="group">
+          <SettingRowGroup>
+            <SettingRow
+              label="Duplicate Site"
+              description="Makes a new Site from this version, owned by you. Its web address, data and history aren't copied."
+              control={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={copies.busy}
+                  onClick={() => void copies.duplicate(artifact, { open: openCopy })}
+                >
+                  <CopyIcon aria-hidden="true" />
+                  {copies.busy ? "Duplicating…" : "Duplicate"}
+                </Button>
               }
             />
           </SettingRowGroup>

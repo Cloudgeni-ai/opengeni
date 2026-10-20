@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
+  WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListQuery,
@@ -141,6 +143,12 @@ function provenance(subjectId: string, idempotencyKey: string) {
     sourceExecutionGeneration: null,
     sourceToolName: null,
   };
+}
+
+/** "Board (copy)", kept within the title limit. */
+function copyTitle(title: string): string {
+  const suffix = " (copy)";
+  return `${title.slice(0, WORKSPACE_ARTIFACT_TITLE_MAX_CHARS - suffix.length).trimEnd()}${suffix}`;
 }
 
 async function canReadProvenanceSession(
@@ -505,6 +513,82 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             true,
           ),
         ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // A new Site from this Site's current version: the same HTML, source and
+  // requested tools, owned by the caller, with the original's visibility. Its
+  // publication, Site Data and history stay with the original.
+  app.post(`${base}/:artifactId/duplicate`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
+    const request = await body(context, DuplicateWorkspaceArtifactRequest);
+    const sourceId = artifactId(context);
+    if (!deps.objectStorage)
+      throw new HTTPException(503, {
+        message: "Object storage is not configured",
+      });
+    try {
+      const viewer = await siteViewerForGrant(deps.db, grant);
+      const { artifact: original } = await getWorkspaceArtifact(
+        deps.db,
+        workspaceId,
+        viewer,
+        sourceId,
+      );
+      const ref = await getWorkspaceArtifactContentRef(deps.db, workspaceId, viewer, sourceId);
+      let source: Awaited<ReturnType<typeof readWorkspaceArtifactContent>>;
+      try {
+        source = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+      } catch (error) {
+        throw new HTTPException(503, {
+          message: error instanceof Error ? error.message : "Artifact content is unavailable",
+          cause: error,
+        });
+      }
+      const title = request.title ?? copyTitle(original.title);
+      const id = crypto.randomUUID();
+      const slugBase = normalizeWorkspaceArtifactSlug(title) || "artifact";
+      const audience = await resolveNewSiteAudience({
+        db: deps.db,
+        settings: deps.settings,
+        grant,
+        viewer,
+        requested: original.visibility,
+        sourceSessionId: null,
+      });
+      const content = await prepareContent(deps, grant, {
+        html: source.html,
+        source: source.source,
+        requestedTools: source.requestedTools,
+      });
+      return context.json(
+        await mutationResponse(
+          deps,
+          grant,
+          await createWorkspaceArtifact(deps.db, {
+            ...audience,
+            accountId: grant.accountId,
+            workspaceId,
+            artifactId: id,
+            slug: `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`,
+            requestedSlug: null,
+            title,
+            description: original.description,
+            ...content,
+            ...provenance(grant.subjectId, request.idempotencyKey),
+          }),
+        ),
+        201,
       );
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);

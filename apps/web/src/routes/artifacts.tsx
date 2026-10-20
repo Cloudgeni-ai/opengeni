@@ -66,6 +66,9 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
+import { readyNewChat } from "@/lib/ready-new-chat";
+import { userErrorText } from "@/lib/api-error";
+import { newArtifactPrompt, siteEditPrompt } from "@/lib/site-edit-prompt";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 import {
   artifactLibraryFilters,
@@ -224,24 +227,25 @@ function ArtifactListRoute({
     workspaceId,
     "artifacts:read",
   );
+  // Readies a new chat in the composer; the person says what to make and sends it.
+  const [preparingNew, setPreparingNew] = useState(false);
   const startSession = async () => {
-    const created = await context.startSession(workspaceId, {
-      text:
-        filters.kind === "all" || filters.kind === "file"
-          ? "Help me create a workspace artifact. Ask what I want to make before creating it."
-          : `Help me create a workspace ${filters.kind}. Ask what it should contain before creating it.`,
-    });
-    if (created)
-      await navigate({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId, sessionId: created.id },
-      });
+    if (preparingNew) return;
+    setPreparingNew(true);
+    try {
+      await readyNewChat(context.client, workspaceId, newArtifactPrompt(filters.kind));
+      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
+    } catch (nextError) {
+      toast.error("Couldn't open a new chat", { description: userErrorText(nextError) });
+    } finally {
+      setPreparingNew(false);
+    }
   };
   const newArtifact = canCreate ? (
     <Button
       type="button"
       onClick={() => void startSession()}
-      disabled={context.busy}
+      disabled={context.busy || preparingNew}
       className="pointer-coarse:h-11"
     >
       <PlusIcon aria-hidden="true" />
@@ -396,7 +400,12 @@ function EmbeddedSiteSettings({
             </span>
           </div>
         ) : (
-          <SiteSettings workspaceId={workspaceId} artifact={artifact} management={management} />
+          <SiteSettings
+            workspaceId={workspaceId}
+            artifact={artifact}
+            management={management}
+            openCopy={false}
+          />
         )}
       </div>
       {management.showAudience ? management.audience.dialog : null}
@@ -533,17 +542,20 @@ function ArtifactDetailPage({
       requestedTools,
     });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
+  // Edit with Opengeni readies a new chat about the Site without sending it,
+  // so the person says what to change instead of waiting to be asked.
+  const [preparingEdit, setPreparingEdit] = useState(false);
   const startEditSession = async () => {
-    if (!canPublish || !detail || detail.artifact.status === "archived") return;
-    const artifact = detail.artifact;
-    const created = await context.startSession(workspaceId, {
-      text: `Help me edit the Site “${artifact.title}”: /workspaces/${workspaceId}/artifacts/${artifact.id}`,
-    });
-    if (created)
-      await navigate({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId, sessionId: created.id },
-      });
+    if (!canPublish || !detail || detail.artifact.status === "archived" || preparingEdit) return;
+    setPreparingEdit(true);
+    try {
+      await readyNewChat(context.client, workspaceId, siteEditPrompt(workspaceId, detail.artifact));
+      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
+    } catch (nextError) {
+      toast.error("Couldn't open a new chat", { description: userErrorText(nextError) });
+    } finally {
+      setPreparingEdit(false);
+    }
   };
   const rollback = async (versionId: string) => {
     const current = detail?.artifact.currentVersion;
@@ -673,7 +685,7 @@ function ArtifactDetailPage({
                       type="button"
                       size="sm"
                       onClick={() => void startEditSession()}
-                      disabled={context.busy}
+                      disabled={context.busy || preparingEdit}
                       className="rounded-[10px] pointer-coarse:h-11"
                     >
                       <SparklesIcon aria-hidden="true" />
@@ -713,7 +725,7 @@ function ArtifactDetailPage({
                   versionLabel={
                     artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
                   }
-                  editDisabled={context.busy || archived}
+                  editDisabled={context.busy || preparingEdit || archived}
                   onEdit={canPublish ? () => void startEditSession() : undefined}
                   toolBridge={archived ? undefined : siteToolBridge}
                   viewer={viewer}
