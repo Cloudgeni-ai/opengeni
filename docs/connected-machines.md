@@ -927,8 +927,11 @@ before its existing claim lease expires; this never cancels or time-limits the c
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
-ambient default shell. Calls that omit `shell` intentionally retain the
-machine-owned `$SHELL`/`ComSpec` default.
+ambient default shell. Calls that omit `shell` retain the machine-owned `$SHELL`
+default on Linux and macOS. On Windows they run Windows PowerShell
+(`powershell.exe -NoLogo -NoProfile -NonInteractive -Command`), the dialect agents
+write for Windows and the one secret splicing already uses, instead of the
+machine's `ComSpec` (`cmd.exe`). Internal Channel-A commands keep the machine default.
 On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind. The runner-death lease

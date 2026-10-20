@@ -112,6 +112,9 @@ const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
 // well below the 1 MiB RPC payload ceiling.
 const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
 
+/** Windows PowerShell ships with every supported Windows release; `pwsh` may not. */
+const WINDOWS_EXEC_COMMAND_SHELL = "powershell.exe";
+
 /**
  * Builds the exact argv for an explicitly selected shell.
  *
@@ -1756,7 +1759,7 @@ export class SelfhostedSession {
    *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.execInternal(args, true);
+    const result = await this.execInternal(this.withExecCommandDefaultShell(args), true);
     if (result.backgroundCommandId && result.backgroundOpId) {
       const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
@@ -1777,6 +1780,21 @@ export class SelfhostedSession {
     return result.backgroundChildrenStopped
       ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
       : formatted;
+  }
+
+  /**
+   * `exec_command` with no `shell` runs PowerShell on a Windows machine.
+   *
+   * The machine's own default there is `cmd.exe` (`ComSpec`), but agents writing
+   * commands for Windows write PowerShell, and the rest of this session already
+   * treats PowerShell as the Windows dialect (secret splicing forces it). Choosing
+   * it here, as direct argv, makes the default the same for every enrolled agent
+   * version. An explicit `shell` is always honoured, and internal Channel-A
+   * callers (`exec`) keep the machine default they were written for.
+   */
+  private withExecCommandDefaultShell(args: SelfhostedExecArgs): SelfhostedExecArgs {
+    if (args.shell?.trim() || this.hostOs() !== "windows") return args;
+    return { ...args, shell: WINDOWS_EXEC_COMMAND_SHELL };
   }
 
   /**
