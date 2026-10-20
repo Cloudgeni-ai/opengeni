@@ -22,6 +22,7 @@ import {
   sharedOrganizationSlackBots,
 } from "../src/organization-slack-bots";
 import { provisionRoles } from "../src/provision-roles";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
 
 const MIGRATION = "0864_scheduled_bot_capability.sql";
 const PREVIOUS_REVISION = "50db761640045ae4142d54d379dba809e729b454";
@@ -235,7 +236,11 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
-    expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
+    // Only 0864 was applied. Current readiness still requires the deliberately
+    // withheld 0871/0872, while the immutable previous runtime stays ready.
+    expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual(
+      ABSENT_USAGE_HISTORY_POSTURE,
+    );
     expect(
       previous.evaluateRuntimeDatabasePosture(
         await previous.inspectRuntimeDatabasePosture(client.db, options),
