@@ -285,7 +285,7 @@ for (const posture of ["production", "restricted"] as const) {
       (error: unknown) => error,
     );
     expect(refused).toBeInstanceOf(Error);
-    expect((refused as Error).message).toBe("insufficient Opengeni credits");
+    expect((refused as Error).message).toBe("insufficient workspace credits");
     expect(nestedPostgresSqlState(refused) ?? null).toBeNull();
     expect(model.calls).toBe(0);
     expect(
