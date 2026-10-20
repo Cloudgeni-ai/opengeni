@@ -1256,20 +1256,28 @@ describe("CUA desktop boundary", () => {
 
     // The wait does not hold the queue: previews and observations run between
     // window searches, and closing ends the wait.
-    const waiting = await CuaComputerBackend.open(fixture);
-    const target = (await waiting.targets())[0]!;
-    const before = await waiting.observe(target.id);
-    const started = performance.now();
-    const launching = waiting.dispatch({
-      ...command(before),
-      action: { type: "launch", applicationId: "Menu Bar Helper" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await waiting.observe(target.id);
-    expect(performance.now() - started).toBeLessThan(1_000);
-    await waiting.close();
-    await launching;
-    expect(performance.now() - started).toBeLessThan(2_000);
+    const windowless = new Fixture();
+    const listed = windowless.callTool.bind(windowless);
+    windowless.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await listed(name, json);
+    const waiting = await CuaComputerBackend.open(windowless);
+    try {
+      const target = (await waiting.targets())[0]!;
+      const before = await waiting.observe(target.id);
+      const started = performance.now();
+      const launching = waiting.dispatch({
+        ...command(before),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waiting.observe(target.id);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      await waiting.close();
+      await launching;
+      expect(performance.now() - started).toBeLessThan(2_000);
+    } finally {
+      await waiting.close();
+    }
   }, 20_000);
 
   test("a launch observes the app's own window before a window lying within it", async () => {
