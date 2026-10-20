@@ -3373,47 +3373,52 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("a failing approval preflight returns to the model and the run continues", async () => {
-      const fixture = await connectorPolicyFixture({
-        connectorDecision: "ask",
-        previewReview: true,
-      });
-      for (const server of fixture.prepared.mcpServers) {
-        (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
-          async () => {
-            throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
-          };
-      }
-      try {
-        const model = new ScriptedModel([
-          {
-            output: [
-              scriptedFunctionCall("docs__search_documents", { query: "..." }, "preflight-run"),
-            ],
-          },
-          { outputText: "Recovered." },
-        ]);
-        const result = await runAgentStream(
-          fixture.agent.clone({ model }),
-          "Search documents",
-          fixture.settings,
-        );
-        for await (const _event of result.toStream()) {
-          // Drain the run.
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "a failing approval preflight returns to the model and the run continues (%s)",
+      async (lazyToolTransport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          previewReview: true,
+          lazyToolTransport,
+        });
+        for (const server of fixture.prepared.mcpServers) {
+          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+            async () => {
+              throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
+            };
         }
-        await result.completed;
-        expect(model.calls).toBe(2);
-        expect(result.interruptions).toHaveLength(0);
-        expect(result.finalOutput).toBe("Recovered.");
-        const secondInput = JSON.stringify(model.requests[1]?.input);
-        expect(secondInput).toContain("preflight-run");
-        expect(secondInput).toContain("The tool was not run");
-        expect(fixture.mcp.calls).toHaveLength(0);
-      } finally {
-        await fixture.prepared.close();
-        fixture.mcp.close();
-      }
-    });
+        try {
+          const model = new ScriptedModel([
+            {
+              output: [
+                scriptedFunctionCall("docs__search_documents", { query: "..." }, "preflight-run"),
+              ],
+            },
+            { outputText: "Recovered." },
+          ]);
+          const result = await runAgentStream(
+            // A clone of a clone keeps the containment and its approval-hook identity.
+            fixture.agent.clone({}).clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the run.
+          }
+          await result.completed;
+          expect(model.calls).toBe(2);
+          expect(result.interruptions).toHaveLength(0);
+          expect(result.finalOutput).toBe("Recovered.");
+          const secondInput = JSON.stringify(model.requests[1]?.input);
+          expect(secondInput).toContain("preflight-run");
+          expect(secondInput).toContain("The tool was not run");
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
 
     test("an approval preflight without a call id keeps failing closed", async () => {
       const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
