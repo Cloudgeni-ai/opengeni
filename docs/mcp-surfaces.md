@@ -348,11 +348,13 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 Progressive discovery uses the same authorized deferred pool on every transport.
 Field-aware retrieval weights names and capability sentences separately from
 long operational descriptions. Search loads the strongest match per explicit
-query clause and returns compact alternatives in `suggestions`; ranking is not
-certainty. Exact ties, operation-only queries and no matches stay compact.
+query clause; ranking is not certainty. Native Responses routes retain hosted
+client `tool_search` and real loaded function definitions. Generic routes return
+compact alternatives in `suggestions`. Exact ties, operation-only queries and
+no matches return no loaded schemas; generic results still include compact candidates.
 An optional decision model selects from a wider shortlist for ambiguous searches;
-strong lexical matches skip inference. With `schemasLoaded:true`, only `tools`
-have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
+strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
+means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
 inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
@@ -367,8 +369,8 @@ Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit
 a tool outside the current pool. Search backfills smaller candidates after
 schema-size exclusions while retaining existing count and byte limits.
-Frozen selected schemas are appended after the result, never added to the
-first-request tool block. The original SDK tool objects, approvals and invocation
+Selected schemas remain in native search outputs or are appended after the generic
+result, never added to the first-request tool block. The original SDK tool objects, approvals and invocation
 continue through the existing runtime on every provider. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.

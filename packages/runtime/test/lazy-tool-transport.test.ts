@@ -1996,7 +1996,7 @@ describe("generic lazy tool dispatch", () => {
     expect(input[0]!.providerData).toBeUndefined();
   });
 
-  test("reserves the same control names on every transport", () => {
+  test("reserves only the control names installed by each transport", () => {
     const invokeNamedTool = tool({
       name: "tool_invoke",
       description: "An existing eager tool",
@@ -2014,7 +2014,7 @@ describe("generic lazy tool dispatch", () => {
       "openai_native",
       new Set(),
     );
-    expect(() => native.refresh([invokeNamedTool])).toThrow(/reserved/);
+    expect(() => native.refresh([invokeNamedTool])).not.toThrow();
 
     const generic = installLazyToolRuntime(
       {
@@ -2248,7 +2248,7 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
         transport === "generic_dispatch"
           ? ["opengeni__set_session_title", "tool_search", "tool_invoke", "tool_list"]
-          : ["opengeni__set_session_title", "tool_search", "tool_invoke", "tool_list"],
+          : ["opengeni__set_session_title", "tool_search", "tool_list"],
       );
       expect(
         runtime.search({ query: "set the session title" }).map((candidate) => candidate.name),
@@ -2275,9 +2275,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(tools.map((candidate) => candidate.name)).toEqual([
       WEATHER_TOOL,
       "tool_search",
-      "tool_invoke",
       "tool_list",
-      "tool_search", // Execution-only compatibility for historical native calls.
     ]);
   });
 
@@ -2308,7 +2306,6 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
         "exec_command",
         "tool_search",
-        "tool_invoke",
         "tool_list",
       ]);
       expect(
@@ -2351,7 +2348,7 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
         transport === "generic_dispatch"
           ? ["exec_command", "tool_search", "tool_invoke", "tool_list"]
-          : ["exec_command", "tool_search", "tool_invoke", "tool_list"],
+          : ["exec_command", "tool_search", "tool_list"],
       );
       expect(
         runtime.search({ query: "generate an image" }).map((candidate) => candidate.name),
@@ -2498,7 +2495,6 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       `${requiredServerId}__status`,
       "tool_search",
-      "tool_invoke",
       "tool_list",
     ]);
     expect(executions).toBe(0);
@@ -2512,13 +2508,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain(`${requiredServerId}__status`);
     expect(
       (await agent.getAllTools(undefined as never)).map((candidate) => candidate.name),
-    ).toEqual([
-      `${requiredServerId}__status`,
-      "tool_search",
-      "tool_invoke",
-      "tool_list",
-      "tool_search",
-    ]);
+    ).toEqual([`${requiredServerId}__status`, "tool_search", "tool_list"]);
   });
 
   test("keeps the callback tool pool unique across multiple searches in one response", async () => {
@@ -2823,14 +2813,12 @@ describe("OpenAI/Azure native client tool search", () => {
     expect((realTool as { deferLoading?: boolean }).deferLoading).not.toBe(true);
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
-      "tool_invoke",
       "tool_list",
     ]);
     expect(JSON.stringify(model.requests[1]!.input)).toContain("tool_search_output");
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
     expect(model.requests[1]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
-      "tool_invoke",
       "tool_list",
     ]);
   });
@@ -2863,7 +2851,6 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(executions).toBe(1);
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
-      "tool_invoke",
       "tool_list",
     ]);
   });
@@ -2898,11 +2885,7 @@ describe("OpenAI/Azure native client tool search", () => {
     );
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(first.map((candidate) => candidate.name)).toEqual([
-      "tool_search",
-      "tool_invoke",
-      "tool_list",
-    ]);
+    expect(first.map((candidate) => candidate.name)).toEqual(["tool_search", "tool_list"]);
   });
 
   test("clears the SDK deferred gate; planted raw negative proves why", async () => {
@@ -3003,7 +2986,6 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(model.requests).toHaveLength(1);
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
-      "tool_invoke",
       "tool_list",
     ]);
     expect(executions).toBe(0);

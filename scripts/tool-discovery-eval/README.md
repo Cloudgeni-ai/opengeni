@@ -6,12 +6,13 @@ Improve the existing search/list/invoke path, not a second discovery API:
 
 - Field-aware lexical retrieval separates names and capability sentences from long operational guidance. It indexes the exact authorized deferred pool.
 - Ordinary search loads the strongest match per explicit query clause and returns compact alternatives. No-match, operation-only and exact-tie queries stay compact. Known exact names bypass ranking and inference. This avoids making every no-model search pay for a second load call.
+- Native OpenAI/Azure and Codex routes **keep hosted client search and native function loading**. The shared selection runs inside that protocol, not a migration to text declarations / `tool_invoke`. Native search outputs carry only complete selected definitions; compact alternatives are available through `tool_list`, not embedded into the native search output.
 - An explicitly configured **decision model** handles ambiguous searches from the first 40 candidates. Strong lexical matches skip inference. The bypass requires resource coverage of at least 0.5 and a score at least 1.25 times the runner-up for every explicit clause. These are transparent heuristics, **not calibrated confidence probabilities**; the no-model default does not pretend its best-ranked choice is certain.
 - `tool_list({view:"groups"})` is an on-demand directory; pass a returned `group` to browse it. Opaque connections stay together under compact display keys with a representative tool, rather than exposing long identity hashes or hundreds of tiny groups.
 - Schemas are not shortened or inferred. Selected definitions are frozen on the search call and disclosed after its result. They never enter a changing earlier prompt or top-level tools block.
 - There is no default paid model, embedding index, extra credential, new inference timeout or concurrency quota. Unconfigured/unavailable selection uses the same best-match-first lexical path. Only selected schemas are loaded; alternatives remain compact.
 
-**Recommendation:** ship best-match-first without a paid model as the default. It was faster than the old path on both task sets in both repeats. For deployments prioritizing accuracy, the measured conditional GPT-OSS-120B low / fast route also beat the old path on both sets in both repeats and improved accuracy further. Keep it explicitly configured: this is not permission to route every deployment to that account/provider. It is slower than the new no-model default, and small repeated development samples do not guarantee a production latency win.
+**Recommendation:** ship best-match-first without a paid model as the default and preserve existing native routing. On the **generic Chat Completions path tested live**, it was faster than the old path on both task sets in both repeats. For deployments prioritizing accuracy, the measured conditional GPT-OSS-120B low / fast route also beat the old path on both sets in both repeats and improved accuracy further. Keep it explicitly configured: this is not permission to route every deployment to that account/provider. It is slower than the new no-model default, and small repeated development samples do not guarantee a production latency win. Native routes have offline selection and SDK/wire regression evidence, **not a live native latency comparison**.
 
 ## Dataset and method (October 20, 2026)
 
@@ -32,7 +33,7 @@ Token counts use `gpt-tokenizer@4.1.0`, `o200k_base` BPE of serialized JSON. The
 
 ## Retrieval results
 
-Each cell is top-1 / top-3 over 60 queries. First, the actual current runtime paths:
+Each cell is top-1 / top-3 over 60 queries. First, the current **generic** runtime paths, including unloaded alternatives:
 
 | Runtime path | A: 605 deferred tools | B: 1,079 tools |
 | --- | ---: | ---: |
@@ -41,6 +42,16 @@ Each cell is top-1 / top-3 over 60 queries. First, the actual current runtime pa
 | Conditional fast selection + lexical bypass | 88.3% / 95.0% | 95.0% / 98.3% |
 
 The conditional row replays the captured pinned-Cerebras selections through the real runtime, including strong-match bypass and schema budgets. It is not a fresh provider call or a latency measurement. Some lexical bypasses are wrong: conditional selection on A has lower top-1 than asking the selector on every query. It is a deliberate speed/accuracy tradeoff, not hidden by reporting only pure-selector results.
+
+Native results contain selected schemas only, not compact alternatives. This is their **offline executor-output** measurement, excluding native envelope overhead:
+
+| Native output | A top-1 / top-3 | B top-1 / top-3 | A / B mean schema tokens |
+| --- | ---: | ---: | ---: |
+| Before, full ranked results | 60.0% / 76.7% | 51.7% / 70.0% | 6,671 / 5,913 |
+| Best-match-first | 76.7% / 76.7% | 66.7% / 66.7% | 831 / 435 |
+| Conditional fast selection replay | 88.3% / 88.3% | 95.0% / 95.0% | 970 / 617 |
+
+The underlying field-aware ranking is 78.3/88.3% on A and 66.7/83.3% on B. Native best-match-first omits one tied A case and usually loads one tool, so loaded-output top-3 cannot be equated with ranked-candidate top-3. **B's default loaded top-3 falls from 70.0% to 66.7% while top-1 improves.** That may require additional recovery calls; no native latency win is claimed. Native compact browsing remains in `tool_list`; the optional selector substantially improves selected-output accuracy here. This limitation is not hidden by the generic trajectory results.
 
 For comparison, isolated ranking and selection on **every query**, without the runtime bypass:
 
@@ -83,9 +94,9 @@ Costs are the provider's reported request cost, not advertised starting prices. 
 
 Lexical retrieval p95 was about 6 ms. The optional embedding probe used Transformers.js 4.3.1 and `Xenova/bge-small-en-v1.5` q8, normalized CLS vectors, the model's query prefix, and RRF k=10. Index construction took 23.1 / 14.1 seconds; mean query embedding/ranking took 16 / 59 ms. The two probes ran concurrently, so those CPU timings are exploratory, not comparative capacity results. No embedding package is a production dependency.
 
-## Live discovery trajectories
+## Live generic discovery trajectories
 
-GPT-5.4 mini ran every third frozen query: 20 cases per catalog. It could search/list/load and request the first domain tool, but the harness intercepted that call **before execution**, with empty task arguments. These are live discovery-only simulations, not completed user tasks or production rollout results. Time includes main-agent and selector network/inference time through the first requested domain call. Calls count discovery operations before that call. Repeating an identical discovery request ends a stalled case rather than an unbounded loop.
+GPT-5.4 mini ran every third frozen query: 20 cases per catalog, using generic dispatch over Chat Completions for both arms. This **does not measure the hosted Responses search used by native GPT/Codex sessions**, nor justify migrating those sessions to generic dispatch; that proposed migration was removed during review. The agent could search/list/load and request the first domain tool, but the harness intercepted that call **before execution**, with empty task arguments. These are live discovery-only simulations, not completed user tasks or production rollout results. Time includes main-agent and selector network/inference time through the first requested domain call. Calls count discovery operations before that call. Repeating an identical discovery request ends a stalled case rather than an unbounded loop.
 
 The revised best-match-first runtime was run twice on the same 20 cases. Repeat 1 reused the original baseline; repeat 2 freshly interleaved before/default within each case. Conditional-fast arms reused the corresponding baseline. Cases ran sequentially within each process, with the two catalogs running concurrently. These are repeated measurements of **20 distinct cases**, not 40 independent tasks or randomized trials.
 
@@ -140,16 +151,18 @@ The default group page has 20 entries. A has 61 groups in four pages, 1,263 toke
 
 This supersedes #2650's request-local directory insertion. Rebuilding a directory before existing conversation history changes earlier text when preparation finishes or the catalog changes, even when unchanged directories reuse object identity. An ordinary tool result is the cache-stable place for it.
 
-New search receipts freeze selected definitions once. Replaying them never calls the decision model or consults today's catalog. Legacy full-schema search markers and native interrupted calls remain replayable. Compact hits do not count as schema disclosure. Every transport now advertises stable ordinary search/list/invoke controls. The verified Codex route can project `additional_tools`; other Responses routes and Chat/Claude use existing text declarations plus `tool_invoke`. Unit/SDK tests cover all three transport modes and provider projections; this work does **not** claim a live provider matrix or live cache-hit measurement. Static instruction/control-schema changes at upgrade still establish a new prefix; no runtime result modifies an earlier item.
+New search receipts freeze selection once. Replaying completed results never calls the decision model or consults today's catalog. Legacy full-schema search markers and native interrupted calls remain replayable. Compact hits do not count as schema disclosure. Native routes still declare hosted client search and load real functions through `tool_search_output`; generic routes use ordinary search/list/invoke and appended declarations. There is **no native-to-generic protocol migration**. Existing native history is replayed unchanged, and a tool loaded by an old search can be called on the next turn without another search. Real SDK tests cover both native routes, including normal approval checks; serialization tests inspect the actual Responses request body, retain hosted search, keep old output schemas and verify prefix equality. They are not live endpoint acceptance tests.
+
+**The static prompt and control-schema changes invalidate the old cached prefix once per existing session at upgrade.** This PR does not promise zero cache misses on deployment. After upgrade, no result/catalog changes earlier items or grows the top-level block. Native search remains declared, so the rejected draft's risk of replaying native history with the hosted tool removed no longer applies. No direct OpenAI/Azure or Codex live probe was run: no direct OpenAI credential was available to the evaluator, and an OpenRouter probe would not establish compatibility with those endpoints. A production GPT check after an approved deployment remains useful, but no rollout is included here.
 
 ## Failure behavior and remaining risks
 
-- Unconfigured, failed or invalid selection uses best-match-first lexical disclosure and compact alternatives, without dumping raw provider errors. Exact ties/no-resource queries remain compact. Revoked selections disclose no schema. Exact names still work during an outage. Cancellation propagates. Existing schema budgets still apply; a selected schema can be too large to disclose.
+- Unconfigured, failed or invalid selection uses best-match-first lexical disclosure, with compact alternatives on generic routes, without dumping raw provider errors. Exact ties/no-resource queries load nothing; native routes can browse compact alternatives through `tool_list`. Revoked selections disclose no schema. Exact names still work during an outage. Cancellation propagates. Existing schema budgets still apply; a selected schema can be too large to disclose.
 - Selection is probabilistic and can omit a needed tool or include an unwanted one. The first 40 lexical candidates are a recall constraint. A selector cannot rescue a missing candidate.
 - Tool descriptions and query text are untrusted classification data. Only exact candidate IDs can resolve, and selection never grants authorization or executes tools. This is not a claim of prompt-injection immunity.
 - Existing original SDK tool objects, validation and approvals remain authoritative. A valid invocation is rewritten before normal dispatch; it is not executed inside a router tool.
 - Usage is recorded through the ordinary deployment provider and `tool_discovery.*` events, including malformed responses. The worker refuses to silently borrow a customer-owned key/subscription. **These events do not debit customer credits.** `recordUsageEvent` in `packages/db/src/index.ts` writes telemetry; customer model charges require the explicit `settleModelUsage` / `applyCreditDebitUpToBalance` path in `packages/core/src/billing/model-usage-settlement.ts`, which discovery never calls. The usage-event debit trigger in migration `0552_usage_allowances.sql` applies only to `knowledge_query` / `document.query_embedding_cost`; the host export trigger exports telemetry, not a debit. External hosts can apply their own policy. Accounting persistence, cancellation and interrupted-run recovery deserve normal release scrutiny.
-- The paid selector is opt-in, and static model-facing descriptions are identical with or without it. The new ordinary controls, optional config field and frozen-history version are model-facing changes and require review before merge.
+- The paid selector is opt-in, and each transport's static model-facing descriptions are identical with or without it. The changed descriptions/list schema, optional config field and frozen-selection receipts are model-facing changes and require review before merge.
 
 ## Reproduce
 

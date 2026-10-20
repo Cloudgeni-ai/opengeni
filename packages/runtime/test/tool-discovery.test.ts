@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   Agent,
+  OpenAIResponsesModel,
   Runner,
   tool,
   Usage,
@@ -10,6 +11,7 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
+import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { rankToolPool } from "../src/codex-tool-search";
@@ -54,12 +56,36 @@ const call = (id: string, name: string, args: unknown) => ({
   name,
   arguments: JSON.stringify(args),
 });
+const searchCall = (transport: string, id: string, args: Record<string, unknown>) =>
+  transport === "generic_dispatch"
+    ? call(id, "tool_search", args)
+    : {
+        type: "tool_search_call" as const,
+        call_id: id,
+        execution: "client" as const,
+        status: "completed" as const,
+        arguments: args,
+      };
+const invokeCall = (transport: string, id: string, name: string, args: unknown) =>
+  transport === "generic_dispatch"
+    ? call(id, "tool_invoke", { name, arguments: args })
+    : call(id, name, args);
 const done = {
   type: "message" as const,
   role: "assistant" as const,
   status: "completed" as const,
   content: [{ type: "output_text" as const, text: "done" }],
 };
+class ResponsesWireModel extends OpenAIResponsesModel {
+  wire(request: ModelRequest) {
+    return this._buildResponsesCreateRequest(request, false).requestData;
+  }
+}
+const responsesWire = () =>
+  new ResponsesWireModel(
+    new OpenAI({ apiKey: "test", baseURL: "https://example.invalid/v1" }),
+    "test-model",
+  );
 
 describe("tool discovery ranking", () => {
   test("matches inflections without penalizing a long operational description", () => {
@@ -515,8 +541,8 @@ test.each(
         : undefined,
     );
     const model = new ScriptedModel([
-      [call("find", "tool_search", { query: decision ? "task" : "read task" })],
-      [call("invoke", "tool_invoke", { name: "tasks__read", arguments: { id: 7 } })],
+      [searchCall(transport, "find", { query: decision ? "task" : "read task" })],
+      [invokeCall(transport, "invoke", "tasks__read", { id: 7 })],
       [done],
     ]);
     const runner = new Runner({
@@ -535,6 +561,24 @@ test.each(
     expect(decisions).toBe(decision ? 1 : 0);
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).toContain('"required"');
+    if (transport !== "generic_dispatch") {
+      const wire = responsesWire().wire(model.requests[1]!);
+      expect(wire.tools?.some((t) => t.type === "tool_search" && t.execution === "client")).toBe(
+        true,
+      );
+      expect(wire.tools?.some((t) => t.type === "function" && t.name === "tool_invoke")).toBe(
+        false,
+      );
+      expect(wire.input).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "tool_search_output",
+            tools: [expect.objectContaining({ type: "function", name: "tasks__read" })],
+          }),
+        ]),
+      );
+      expect(JSON.stringify(wire)).not.toContain("opengeni.lazy_search.v1");
+    }
     for (let i = 1; i < model.requests.length; i++) {
       expect(model.requests[i]!.tools).toEqual(model.requests[0]!.tools);
       const previous = model.requests[i - 1]!.input as unknown[];
@@ -544,7 +588,7 @@ test.each(
 );
 
 test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
-  "%s: compact find, exact load and execute use the real SDK with stable prefixes",
+  "%s: ambiguous find, exact load and execute use the real SDK with stable prefixes",
   async (transport) => {
     let approvals = 0;
     let executions = 0;
@@ -575,9 +619,9 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     });
     const runtime = installLazyToolRuntime(agent, transport, new Set());
     const model = new ScriptedModel([
-      [call("find", "tool_search", { query: "task" })],
-      [call("load", "tool_search", { query: "", names: ["tasks__read"] })],
-      [call("invoke", "tool_invoke", { name: "tasks__read", arguments: { id: 7 } })],
+      [searchCall(transport, "find", { query: "task" })],
+      [searchCall(transport, "load", { query: "", names: ["tasks__read"] })],
+      [invokeCall(transport, "invoke", "tasks__read", { id: 7 })],
       [done],
     ]);
     const runner = new Runner({
@@ -605,3 +649,149 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     }
   },
 );
+
+test.each(["codex_native", "openai_native"] as const)(
+  "%s: legacy native history stays native and a previously loaded function remains callable",
+  async (transport) => {
+    let executions = 0;
+    let approvals = 0;
+    let selections = 0;
+    const target = tool({
+      name: "tasks__read",
+      description: "Current task reader",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "integer" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+      strict: false,
+      needsApproval: () => {
+        approvals++;
+        return false;
+      },
+      execute: () => {
+        executions++;
+        return "read";
+      },
+    }) as Tool;
+    const agent = new Agent({ name: "legacy-native", model: "scripted", tools: [target] });
+    const runtime = installLazyToolRuntime(
+      agent,
+      transport,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        selections++;
+        return [];
+      },
+    );
+    const historical = [
+      { type: "message", role: "user", content: "Find a task reader" },
+      searchCall(transport, "old-search", { query: "read task" }),
+      {
+        type: "tool_search_output",
+        call_id: "old-search",
+        execution: "client",
+        status: "completed",
+        tools: [
+          {
+            type: "function",
+            name: "tasks__read",
+            description: "Old task reader",
+            parameters: {
+              type: "object",
+              properties: { id: { type: "integer" } },
+              required: ["id"],
+              additionalProperties: false,
+            },
+            strict: false,
+          },
+        ],
+      },
+      done,
+      { type: "message", role: "user", content: "Read task 7 with the tool already loaded" },
+    ];
+    const model = new ScriptedModel([[call("read-again", "tasks__read", { id: 7 })], [done]]);
+    const runner = new Runner({
+      modelProvider: new LazyToolModelProvider({ getModel: () => model }, runtime),
+    });
+    const result = await runner.run(agent, historical as never, {
+      stream: true,
+      historyOwnership: "external",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+    });
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+    expect(executions).toBe(1);
+    expect(approvals).toBe(1);
+    expect(selections).toBe(0);
+    expect(model.requests[0]!.tools).toEqual(model.requests[1]!.tools);
+    expect(
+      model.requests[0]!.tools.some(
+        (t) => t.type === "hosted_tool" && t.providerData?.type === "tool_search",
+      ),
+    ).toBe(true);
+    expect(model.requests[0]!.tools.some((t) => t.name === "tool_invoke")).toBe(false);
+    expect((model.requests[0]!.input as unknown[]).slice(0, historical.length)).toEqual(historical);
+    expect((model.requests[1]!.input as unknown[]).slice(0, historical.length)).toEqual(historical);
+    expect(JSON.stringify(model.requests)).not.toContain("opengeni.lazy_search.v1");
+    const serializer = responsesWire();
+    const first = serializer.wire(model.requests[0]!);
+    const second = serializer.wire(model.requests[1]!);
+    expect(first.tools).toEqual(second.tools);
+    expect(first.tools?.some((t) => t.type === "tool_search" && t.execution === "client")).toBe(
+      true,
+    );
+    const initialInput = first.input as unknown[];
+    expect((second.input as unknown[]).slice(0, initialInput.length)).toEqual(initialInput);
+    expect(JSON.stringify(first.input)).toContain("Old task reader");
+    expect(JSON.stringify(first.input)).not.toContain("Current task reader");
+  },
+);
+
+test("native routes never reinterpret an application function named tool_invoke as the generic router", async () => {
+  let invoked = 0;
+  const owned = tool({
+    name: "tool_invoke",
+    description: "Application-owned function",
+    parameters: {
+      type: "object",
+      properties: { name: { type: "string" }, arguments: { type: "object" } },
+      additionalProperties: false,
+    },
+    strict: false,
+    execute: () => {
+      invoked++;
+      return "owned";
+    },
+  }) as Tool;
+  const agent = new Agent({
+    name: "native-owned-name",
+    model: "scripted",
+    tools: [owned, candidate("tasks__read", "Read task")],
+  });
+  const runtime = installLazyToolRuntime(agent, "openai_native", new Set());
+  const model = new ScriptedModel([
+    [call("owned", "tool_invoke", { name: "tasks__read", arguments: {} })],
+    [done],
+  ]);
+  const result = await new Runner({
+    modelProvider: new LazyToolModelProvider({ getModel: () => model }, runtime),
+  }).run(agent, "Use application function", {
+    stream: true,
+    historyOwnership: "external",
+    resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+  });
+  for await (const event of result.toStream()) void event;
+  await result.completed;
+  expect(invoked).toBe(1);
+});

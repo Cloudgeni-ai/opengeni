@@ -102,15 +102,23 @@ const rows = await Promise.all(
         top: names.slice(0, 3),
       };
     };
-    const measurePrepared = (prepared: Awaited<ReturnType<LazyToolRuntime["prepareSearch"]>>) => {
+    const measurePrepared = (
+      prepared: Awaited<ReturnType<LazyToolRuntime["prepareSearch"]>>,
+      native = false,
+    ) => {
       const receipt = JSON.parse(prepared.output);
-      const descriptors = [...receipt.tools, ...(receipt.suggestions ?? [])];
+      const descriptors = native
+        ? (prepared.tools ?? [])
+        : [...receipt.tools, ...(receipt.suggestions ?? [])];
       const hits = descriptors
         .map((t) => tools.find((tool) => name(tool) === t.name))
         .filter(Boolean) as Tool[];
       const result = metrics(
         hits,
-        prepared.output + (prepared.tools?.length ? JSON.stringify({ tools: prepared.tools }) : ""),
+        native
+          ? JSON.stringify({ tools: prepared.tools ?? [] })
+          : prepared.output +
+              (prepared.tools?.length ? JSON.stringify({ tools: prepared.tools }) : ""),
       );
       return {
         ...result,
@@ -119,8 +127,11 @@ const rows = await Promise.all(
           .length,
       };
     };
-    const defaultResult = measurePrepared(await runtime.prepareSearch({ query: c.query }));
+    const defaultPrepared = await runtime.prepareSearch({ query: c.query });
+    const defaultResult = measurePrepared(defaultPrepared);
+    const nativeDefault = measurePrepared(defaultPrepared, true);
     let decisionResult: ReturnType<typeof measurePrepared> | undefined;
+    let nativeDecision: ReturnType<typeof measurePrepared> | undefined;
     if (selectedResults) {
       const row = selectedResults.rows.find(
         (entry: { id: string; query: string }) => entry.id === c.id && entry.query === c.query,
@@ -141,7 +152,9 @@ const rows = await Promise.all(
         async () => row.selected,
       );
       replay.refresh(catalogTools);
-      decisionResult = measurePrepared(await replay.prepareSearch({ query: c.query }));
+      const prepared = await replay.prepareSearch({ query: c.query });
+      decisionResult = measurePrepared(prepared);
+      nativeDecision = measurePrepared(prepared, true);
     }
     return {
       id: c.id,
@@ -152,7 +165,8 @@ const rows = await Promise.all(
       before: metrics(before, fullOutput(before)),
       after: metrics(after, runtime.genericSearchOutput({ query: c.query })),
       default: defaultResult,
-      ...(decisionResult ? { decision: decisionResult } : {}),
+      nativeDefault,
+      ...(decisionResult ? { decision: decisionResult, nativeDecision } : {}),
       searchMs,
     };
   }),
@@ -183,7 +197,13 @@ const summary = (source?: string) => {
   const selected = measured.filter((r) => !source || r.source === source);
   return Object.fromEntries(
     (
-      ["before", "after", "default", ...(selectedResults ? ["decision" as const] : [])] as const
+      [
+        "before",
+        "after",
+        "default",
+        "nativeDefault",
+        ...(selectedResults ? ["decision" as const, "nativeDecision" as const] : []),
+      ] as const
     ).map((arm) => {
       const ms = selected.map((r) => r[arm]!);
       return [
@@ -194,7 +214,10 @@ const summary = (source?: string) => {
           top3: mean(ms.map((m) => Number(m.top3))),
           recall3: mean(ms.map((m) => m.recall3)),
           meanWronglyIncluded: mean(ms.map((m) => m.wronglyIncluded)),
-          ...(arm === "default" || arm === "decision"
+          ...(arm === "default" ||
+          arm === "decision" ||
+          arm === "nativeDefault" ||
+          arm === "nativeDecision"
             ? {
                 meanLoadedTools: mean(
                   ms.map((m) => ("schemasLoaded" in m ? Number(m.schemasLoaded) : 0)),

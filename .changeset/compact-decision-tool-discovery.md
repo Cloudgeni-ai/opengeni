@@ -8,4 +8,5 @@ Improve deferred tool discovery with field-aware retrieval, best-match-first sch
 loading and compact alternatives, an optional generic decision model for ambiguous
 queries, exact-name loading,
 and a paginated tool-group directory. Freeze disclosures in append-only history and
-keep the first-request tool block stable. Add retrieval and live discovery evaluations.
+keep the first-request tool block stable. Preserve native Responses search and direct
+function loading. Add retrieval and live generic discovery evaluations.

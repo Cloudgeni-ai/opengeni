@@ -48,9 +48,9 @@ export function responsesRouteDeclaresAdditionalTools(providerKind: string): boo
  * is a developer message carrying the frozen definitions; each provider
  * projection renders it in that API's own form: a Responses `additional_tools`
  * item where the route accepts it, otherwise a developer or system message
- * as text. New disclosures carry definitions and call through the stable
- * tool_invoke control on every route. Preserve legacy viaToolInvoke:false
- * receipts exactly: those older turns asked for native tool_search instead.
+ * as text. Generic routes carry definitions and call through tool_invoke;
+ * native routes retain native search and direct calls. Preserve the originating
+ * viaToolInvoke value on replay rather than rewriting earlier instructions.
  */
 export function toolDisclosureItem(
   tools: Record<string, unknown>[],

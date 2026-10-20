@@ -75,6 +75,8 @@ const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:regis
 
 const SEARCH_DESCRIPTION =
   "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest match and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
+const NATIVE_SEARCH_DESCRIPTION =
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads complete schemas for the strongest matches; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. Call loaded functions directly. For compact alternatives or an empty result, use tool_list view:'groups' and browse a group, then load chosen exact names with query:''. Known exact names bypass ranking and inference. Discovery never grants access.";
 const INVOKE_DESCRIPTION =
   "Invoke a tool whose complete schema was loaded by tool_search or an entry-tool disclosure. Pass its exact name and put its arguments in the nested arguments object.";
 
@@ -148,8 +150,8 @@ type FamilyDisclosureMarker = {
   version: 1;
   tools: Record<string, unknown>[];
   /**
-   * New disclosures always have tool_invoke. Preserve false on legacy receipts:
-   * their original text asks for native tool_search and must not be rewritten.
+   * Native routes retain native loading; generic routes use tool_invoke.
+   * Preserve the originating route on replay, never rewrite an old receipt.
    */
   viaToolInvoke: boolean;
 };
@@ -248,12 +250,15 @@ export class LazyToolRuntime {
     private readonly decisionModel?: ToolDecisionModel,
   ) {
     this.routerWasExposed = routerInHistory;
-    this.controlTools = [
-      this.buildGenericSearchTool(),
-      this.buildGenericInvokeTool(),
-      this.buildListTool(),
-      this.buildHistoricalNativeSearchTool(),
-    ];
+    this.controlTools =
+      transport !== "generic_dispatch"
+        ? [this.buildNativeSearchTool(), this.buildListTool()]
+        : [
+            this.buildGenericSearchTool(),
+            this.buildGenericInvokeTool(),
+            this.buildListTool(),
+            this.buildNativeSearchTool(true),
+          ];
     if (toolPreparationReady) {
       void toolPreparationReady.then(
         () => {
@@ -365,7 +370,7 @@ export class LazyToolRuntime {
         isFunctionTool(tool) &&
         (tool.name === TOOL_SEARCH_NAME ||
           tool.name === TOOL_LIST_NAME ||
-          tool.name === TOOL_INVOKE_NAME)
+          (this.transport === "generic_dispatch" && tool.name === TOOL_INVOKE_NAME))
       ) {
         throw new Error(
           `Tool name ${JSON.stringify(tool.name)} is reserved by progressive tool disclosure`,
@@ -836,29 +841,41 @@ export class LazyToolRuntime {
     }) as unknown as Tool;
   }
 
-  /**
-   * Execution-only compatibility for an interrupted pre-compact-discovery native
-   * tool_search_call. Never advertise it or rewrite its already-recorded call.
-   * Its historical output remains a native full-schema tool_search_output.
-   */
-  private buildHistoricalNativeSearchTool(): Tool {
+  /** Preserve hosted client search and native function loading on native routes. */
+  private buildNativeSearchTool(executionOnly = false): Tool {
     const search = toolSearchTool({
       execution: "client",
-      description: SEARCH_DESCRIPTION,
+      description: NATIVE_SEARCH_DESCRIPTION,
       parameters: SEARCH_PARAMETERS as never,
       execute: (async (args: {
         agent?: object;
         availableTools?: Tool[];
         runContext?: unknown;
-        toolCall?: { arguments?: unknown };
+        toolCall?: { arguments?: unknown; providerData?: Record<string, unknown> };
       }) => {
         const tools = args.agent
           ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
           : (args.availableTools ?? []);
-        return searchToolPool(this.searchableTools(tools), args.toolCall?.arguments);
+        const pool = this.searchableTools(tools);
+        const marker = args.toolCall?.providerData?.[SEARCH_MARKER_KEY] as
+          | GenericSearchMarker
+          | undefined;
+        if (marker?.version === 2 && marker.tools) {
+          // Selection ran once at the model-response boundary with the owning
+          // request's cancellation signal. Revalidate identities here and let
+          // the SDK serialize the native output from original executable tools.
+          const selected = new Set(marker.tools.map((entry) => entry.name));
+          return marker.tools.flatMap((entry) => {
+            const found = pool.find((tool) => isFunctionTool(tool) && tool.name === entry.name);
+            return found && selected.delete(entry.name) ? [found] : [];
+          });
+        }
+        // An interrupted pre-upgrade native call has no frozen selection. Finish
+        // it through the original executor contract, never rerun completed history.
+        return searchToolPool(pool, args.toolCall?.arguments);
       }) as never,
     }) as Tool;
-    if (search.type === "hosted_tool")
+    if (executionOnly && search.type === "hosted_tool")
       search.providerData = {
         ...search.providerData,
         [INTERNAL_REGISTRATION_TOOL_MARKER_KEY]: true,
@@ -910,7 +927,8 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
  * MCP tools, and the first-party harness control tools (goal lifecycle,
  * command polling, wait_for_input) stay in the first request when listed;
  * everything else is searchable.
- * Every transport uses stable ordinary tool_search/tool_list/tool_invoke schemas.
+ * Native routes retain hosted client search; other routes use stable ordinary
+ * search/list/invoke controls. Neither path grows the top-level tool block.
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,
@@ -1015,7 +1033,11 @@ export function restoreGenericDispatchHistory(input: ModelRequest["input"]): Mod
 
 /** Per-item form used by the run-local memoized wire projector. */
 export function restoreGenericDispatchHistoryItem<T>(candidate: T): T {
-  if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  if (
+    !isRecord(candidate) ||
+    (candidate.type !== "function_call" && candidate.type !== "tool_search_call")
+  )
+    return candidate;
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : undefined;
   const marker = providerData?.[DISPATCH_MARKER_KEY];
   const hasDispatchMarker =
@@ -1191,6 +1213,33 @@ async function transformResponseItem(
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
 ): Promise<unknown[]> {
+  if (isRecord(item) && item.type === "tool_search_call") {
+    const providerData = isRecord(item.providerData) ? item.providerData : {};
+    if ((item.execution ?? providerData.execution) === "client") {
+      if (SEARCH_MARKER_KEY in providerData)
+        throw new Error("Provider tool-search call collided with lazy-search metadata");
+      await runtime.ensurePrepared();
+      return [
+        {
+          ...item,
+          providerData: {
+            ...providerData,
+            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(item.arguments, signal),
+          },
+        },
+      ];
+    }
+  }
+  if (runtime.transport !== "generic_dispatch") {
+    return [
+      withFamilyDisclosure(
+        isRecord(item) && item.type === "function_call"
+          ? restoreDirectDeferredCallArgumentTypes(item, runtime)
+          : item,
+        runtime,
+      ),
+    ];
+  }
   const search =
     isRecord(item) &&
     item.type === "function_call" &&
@@ -1240,7 +1289,7 @@ function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unk
       [FAMILY_DISCLOSURE_MARKER_KEY]: {
         version: 1,
         tools,
-        viaToolInvoke: true,
+        viaToolInvoke: runtime.transport === "generic_dispatch",
       } satisfies FamilyDisclosureMarker,
     },
   };

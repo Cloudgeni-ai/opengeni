@@ -1605,9 +1605,10 @@ Canonical: [`model-providers.md`](model-providers.md),
 delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
-Discovery uses field-aware retrieval, compact candidates and optional generic
-decision-model selection. Exact loading appends frozen schemas after the result;
-catalog changes never rewrite prior items or the first-request tool block.
+Discovery uses field-aware retrieval and optional generic decision-model selection.
+Native Responses routes retain hosted search and native function loading; generic
+routes return compact alternatives and append selected schemas after the result.
+Catalog changes never rewrite prior items or the first-request tool block.
 `tool_list(view:"groups")` is an explicit source/resource directory, not a prefix.
 Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
 suggestions, never schemas/authority; exact `tool_search` resolves them.

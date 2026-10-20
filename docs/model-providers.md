@@ -1296,25 +1296,34 @@ always-visible base set) so the model can discover them without preloading
 every schema. It does not search the public web and must not be presented as a
 fallback for native `web_search`.
 
-All three progressive-disclosure transports (`codex_native`, `openai_native`,
-`generic_dispatch`) expose the same stable ordinary `tool_search`, `tool_list`
-and `tool_invoke` functions. Ranked discovery loads the strongest match per
-explicit query clause and returns compact alternatives, not every candidate's
-schema. Exact ties, operation-only queries and no matches stay compact. Exact
+Native progressive-disclosure routes (`codex_native`, `openai_native`) retain
+hosted client `tool_search`, `tool_list`, native search output definitions and
+direct function calls. `generic_dispatch` retains ordinary search/list/invoke
+controls. Ranked discovery loads the strongest match per explicit query clause;
+generic receipts also return compact alternatives. Native search outputs cannot
+carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+operation-only queries and no matches disclose no schemas. Exact
 `names` loads complete schemas. An optional decision model handles ambiguous
 searches from a wider candidate set; strong lexical matches skip inference.
 Rank is not calibrated certainty: the agent should check a loaded match and can
-load an alternative by name. With `schemasLoaded:true`, only the receipt's
+load an alternative by name. In generic receipts, with `schemasLoaded:true`, only the receipt's
 `tools` have loaded schemas; its `suggestions` remain compact.
 The original SDK tool objects remain in the execution registry; remembered names
 bind through `resolveMissingFunctionTool`, with approvals unchanged.
 
-Selected definitions are frozen on the search call and appended after its result.
-The verified Codex Responses route projects them as `additional_tools`; other
-routes use inline declarations and `tool_invoke`. There is no claim that direct
-OpenAI/Azure or an arbitrary gateway accepts `additional_tools`. An execution-only
-native-search registration completes interrupted historical native calls, but
-is never advertised in a new request. Historical results are never rerun.
+Selection is frozen on the search call. Native outputs retain the SDK's normal
+`tool_search_output` definitions; generic definitions are appended after their
+ordinary result. Native history is not migrated to text declarations or a
+different tool block. An execution-only native registration on generic routes
+can finish interrupted historical native calls after a provider change.
+Historical results are never rerun. Interaction-family disclosures keep their
+existing route-specific projection: the verified Codex route accepts
+`additional_tools`; other Responses routes use text plus native exact-name loading.
+No new live-provider compatibility claim is made.
+
+Static prompt/control-schema changes at upgrade invalidate the old cached prefix
+once for existing sessions; this is not a zero-cache-miss deployment. After that
+upgrade, catalogs/results never rewrite earlier items or grow the tool block.
 
 `OPENGENI_TOOL_SEARCH_DECISION_MODEL_ID` optionally names an ordinary configured,
 deployment-owned provider model. It reuses the normal single-model-call client,
@@ -1328,8 +1337,8 @@ embedding events. External hosts may apply their own telemetry policy. It never
 silently borrows a customer's key or subscription. Embedders may instead pass an admitted
 `BuildAgentOptions.toolSearchDecisionModel` callback or use `createToolDecisionModel`
 with their own usage hook. Unset, failed or invalid model selection uses the same
-best-match-first lexical path. If no match can be loaded, `schemasLoaded:false`
-explicitly requires exact-name loading.
+best-match-first lexical path. If no match can be loaded, browse with `tool_list`
+and load exact names (`schemasLoaded:false` in generic receipts).
 Cancellation propagates rather than being mistaken for an outage.
 
 Classification is origin, not transport. The same first-request set is eager on
