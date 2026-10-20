@@ -395,6 +395,12 @@ function matrix(f: Fixture) {
     const config = await f.gateway(host, "GET", "/site/config", viewer);
     return config.status === 200 ? `200 ${config.json.viewer?.kind}` : brief(config);
   };
+  /** Whether the page is told the Site's assistant is available to this viewer. */
+  const assistantOffered = async (host: string, viewer: Viewer) => {
+    const config = await f.gateway(host, "GET", "/site/config", viewer);
+    if (config.status !== 200) return brief(config);
+    return config.json.capabilities?.agent === true ? "offered" : "not offered";
+  };
   /**
    * A Site AI turn: the gateway starts the conversation, then the worker's
    * first database step (claim and the frozen learning policy) runs on it,
@@ -462,6 +468,7 @@ function matrix(f: Fixture) {
     viewerFor,
     isViewer,
     open,
+    assistantOffered,
     aiTurn,
     siteData,
     editable,
@@ -970,13 +977,13 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
     accessMode: "append_only",
     guestAccess: "append",
   });
-  // A Viewer has no sessions:create, so (unlike a guest) cannot start Site AI
-  // conversations: an open product decision, reported with this matrix.
+  // A Viewer has no sessions:create, so on a Site that admits people outside
+  // the workspace they use the assistant as an outside visitor would.
   const viewers: Array<[string, Person | "guest", string, string, string]> = [
     ["owner", f.owner, "200 member", "board", "202 turn starts"],
     ["admin", f.people.admin, "200 member", "board", "202 turn starts"],
     ["member", f.people.member, "200 member", "board", "202 turn starts"],
-    ["viewer", f.people.viewer, "200 member", "guestbook", "403 forbidden"],
+    ["viewer", f.people.viewer, "200 member", "guestbook", "202 turn starts"],
     ["outsider", f.outsider, "200 user", "guestbook", "202 turn starts"],
     ["guest", "guest", "200 guest", "guestbook", "202 turn starts"],
   ];
@@ -987,6 +994,13 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
       continue;
     }
     m.record(ws, actor, "open public Site", kind, await m.open(host, viewer));
+    m.record(
+      ws,
+      actor,
+      "Site AI offered (public Site)",
+      "offered",
+      await m.assistantOffered(host, viewer),
+    );
     m.record(
       ws,
       actor,
@@ -1006,6 +1020,15 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
       ),
     );
     m.record(ws, actor, "Site AI turn (public Site)", ai, await m.aiTurn(ws, host, viewer));
+    if (actor === "viewer") {
+      // The Viewer's conversation is an outside visitor's (Site identity and
+      // limits), never a member chat they have no permission to start.
+      const [conversation] = await shared.admin<Array<{ kind: string }>>`
+        select viewer_kind as kind from site_runtime_conversations
+        where viewer_principal = ${`user:${f.people.viewer.subjectId}`}
+        order by created_at desc limit 1`;
+      m.record(ws, actor, "Site AI conversation runs as", "user", conversation?.kind ?? "none");
+    }
   }
   // A members Site admits the workspace only.
   const membersHost = String(
@@ -1022,6 +1045,25 @@ test("shared workspace: every preset creates, publishes and uses Sites as its pe
       "open members Site",
       expected,
       m.isViewer(viewer) ? await m.open(membersHost, viewer) : brief(viewer),
+    );
+  }
+  // A members-only Site has no outside visitors, so a Viewer has no assistant
+  // there, and the page is told so.
+  const viewerOnMembers = await m.viewerFor(f.people.viewer, membersHost);
+  if (m.isViewer(viewerOnMembers)) {
+    m.record(
+      ws,
+      "viewer",
+      "Site AI offered (members Site)",
+      "not offered",
+      await m.assistantOffered(membersHost, viewerOnMembers),
+    );
+    m.record(
+      ws,
+      "viewer",
+      "Site AI turn (members Site)",
+      "403 forbidden",
+      await m.aiTurn(ws, membersHost, viewerOnMembers),
     );
   }
   m.record(

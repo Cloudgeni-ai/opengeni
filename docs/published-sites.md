@@ -135,8 +135,13 @@ the gateway origin and secret stay configured. Details and limits are in
 
 When the embedded agent is on, workspace members start ordinary private chats
 as themselves, with their live native permissions and normal workspace defaults.
-A member therefore needs `sessions:create` to start one: the Viewer preset has
-none, so a Viewer can open and use a Site but not start its agent.
+That needs `sessions:create`. A member without it (the Viewer preset) uses the
+agent on a Site that admits people outside the workspace (invited or anyone
+with the link) as a signed-in outside visitor would: invited or `user`, with
+the Site service identity, viewer-bound data tools and the Site's limits
+(`resolveSiteAgentViewer`), never more than outside visitors get. On a
+members-only Site they have no agent, and `site.config` reports
+`capabilities.agent: false`.
 Site-origin and console turns have identical tools, compute, learning, and
 agent reach. Author instructions remain explicit. Saved settings are never
 rewritten on Send; old chats retain their stored selections, editable normally.

@@ -130,6 +130,7 @@ import {
   meterSiteRuntime,
   requireServedSiteRuntimeHost,
   requireSiteAgent,
+  resolveSiteAgentViewer,
   resolveSiteRuntimeViewer,
   settleSiteRuntimeSpend,
   sha256Text,
@@ -582,6 +583,22 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   /**
+   * The viewer the Site's assistant serves and their limits: a workspace
+   * member without `sessions:create` uses it as an outside visitor
+   * (resolveSiteAgentViewer), under the Site's limits for that visitor.
+   */
+  const agentViewing = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: Awaited<ReturnType<typeof siteRuntimeLimitProfile>>["limits"],
+  ) => {
+    const assistant = await resolveSiteAgentViewer(deps, host, viewer);
+    if (assistant.viewer.kind === viewer.kind) return { ...assistant, limits };
+    const outside = await siteRuntimeLimitProfile(deps, host, assistant.viewer);
+    return { ...assistant, limits: outside.limits };
+  };
+
+  /**
    * Immutable HTML of the Site's current version, or of a version a publish
    * or rollback replaced within the last ten minutes (pages already open).
    * Never another Site's version, nor an older one of this Site.
@@ -967,10 +984,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     limits: Parameters<typeof siteViewerCapabilities>[3],
   ) => {
     const base = siteViewerCapabilities(deps, host, viewer, limits);
-    let agent = base.agent;
-    if (agent && (viewer.kind === "guest" || viewer.kind === "user"))
+    // The assistant answers the viewer it serves (a member without
+    // sessions:create as an outside visitor), under that viewer's limits.
+    const assistant = await agentViewing(host, viewer, limits);
+    const agentViewer = assistant.viewer;
+    let agent =
+      !assistant.unavailable &&
+      siteViewerCapabilities(deps, host, agentViewer, assistant.limits).agent;
+    if (agent && (agentViewer.kind === "guest" || agentViewer.kind === "user"))
       agent = !(await sitePlatformBrakeEngaged(deps).catch(() => false));
-    if (agent && viewer.kind !== "member") {
+    if (agent && agentViewer.kind !== "member") {
       const choice = await resolveSiteOutsideModel(deps, host.scope, {
         siteId: host.site.id,
         agentModel: host.publication.agent.model,
@@ -1024,7 +1047,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return context.json(config);
       }
       case "models.list": {
-        const models = await siteViewerModels(host, viewer, limits);
+        const assistant = await agentViewing(host, viewer, limits);
+        const models = await siteViewerModels(host, assistant.viewer, assistant.limits);
         // The in-Site SDK reads this as the workspace model catalog, so each
         // row carries the same definition, readiness and availability as
         // GET /v1/workspaces/:id/model-catalog, limited to this viewer.
@@ -1044,7 +1068,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
       default:
-        if (id.startsWith("sessions.")) return await sessions(request, id, host, viewer, limits);
+        if (id.startsWith("sessions.")) {
+          const assistant = await agentViewing(host, viewer, limits);
+          return await sessions(request, id, host, assistant.viewer, assistant.limits);
+        }
         throw unsupported();
     }
   };
@@ -1237,7 +1264,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
     const reauthorizeViewer = async () => {
       const liveHost = await requireServedSiteRuntimeHost(deps, host.domain, request.fields.host);
-      const liveViewer = await resolveSiteRuntimeViewer(deps, liveHost, request.fields);
+      const liveViewer = (
+        await resolveSiteAgentViewer(
+          deps,
+          liveHost,
+          await resolveSiteRuntimeViewer(deps, liveHost, request.fields),
+        )
+      ).viewer;
       if (
         liveHost.site.id !== host.site.id ||
         liveViewer.principal !== viewer.principal ||
