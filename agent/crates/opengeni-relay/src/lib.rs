@@ -67,4 +67,4 @@ pub use config::RelayConfig;
 pub use error::{RelayError, RelayResult};
 pub use metrics::RelayMetrics;
 pub use registry::ChannelRegistry;
-pub use server::serve;
+pub use server::{serve, BoundRelay};

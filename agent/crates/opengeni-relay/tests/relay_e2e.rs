@@ -1,5 +1,5 @@
-//! Local relay e2e (NO k8s) — a real `opengeni-relay` process (in-process `serve`
-//! on an ephemeral port) + a real PRODUCER (the `opengeni-agent-stream`
+//! Local relay e2e (NO k8s) — a real `opengeni-relay` process (an in-process
+//! [`BoundRelay`] on an ephemeral port) + a real PRODUCER (the `opengeni-agent-stream`
 //! `RelayChannel`, the agent's own relay client, dialing real wss) + a real
 //! CONSUMER (a viewer dialing raw `tokio-tungstenite` wss). It proves, over real
 //! sockets through the actual relay code:
@@ -18,7 +18,6 @@
 //! contract — the cross-stack agreement with the TS mint is proven separately in
 //! `cross_stack_token.rs`).
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -27,7 +26,7 @@ use hmac::{Hmac, Mac};
 use opengeni_agent_proto::v1;
 use opengeni_agent_stream::channel::{ChannelConfig, RelayChannel};
 use opengeni_agent_stream::codec::RelayMessage;
-use opengeni_relay::{serve, RelayConfig, RelayMetrics};
+use opengeni_relay::{BoundRelay, RelayConfig, RelayMetrics};
 use sha2::Sha256;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -63,8 +62,10 @@ fn viewer_token(epoch: u64, port: u32) -> String {
     )
 }
 
-/// Reserve an ephemeral localhost port (close the probe listener so `serve` can
-/// rebind it — a tiny race window that is fine for a test).
+/// Reserve an ephemeral localhost port for the relay PROCESS (close the probe
+/// listener so the process can bind it). Another socket can take the port in
+/// between; [`relay_process`] then fails loudly rather than talking to a stranger.
+/// In-process relays use [`start_relay`], which has no such window.
 async fn free_port() -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
@@ -72,34 +73,30 @@ async fn free_port() -> u16 {
     port
 }
 
-/// Start the relay on an explicit port + return (base_ws_url, shutdown, metrics).
-async fn start_relay_on(
-    port: u16,
+/// Start an in-process relay on an ephemeral port + return (base_ws_url, shutdown,
+/// metrics). The relay binds port 0 itself and holds it from then on, so its base
+/// URL can only reach this relay (a port probed and released first could be taken
+/// by another test's relay in between). Connections queue on the bound listener
+/// until it serves, so no readiness wait is needed.
+async fn start_relay(
     tune: impl FnOnce(&mut RelayConfig),
 ) -> (String, tokio::sync::oneshot::Sender<()>, RelayMetrics) {
     let mut config = RelayConfig::for_test(SECRET);
-    config.bind = format!("127.0.0.1:{port}");
+    config.bind = "127.0.0.1:0".to_string();
     tune(&mut config);
     let metrics = RelayMetrics::new();
+    let relay = BoundRelay::bind(config, metrics.clone())
+        .await
+        .expect("bind the relay");
+    let base = format!("ws://{}/stream", relay.local_addr());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let m = metrics.clone();
     tokio::spawn(async move {
-        let _ = serve(config, m, async {
-            let _ = rx.await;
-        })
-        .await;
+        let _ = relay
+            .serve(async {
+                let _ = rx.await;
+            })
+            .await;
     });
-    // Wait for the listener to accept connections.
-    let base = format!("ws://127.0.0.1:{port}/stream");
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
     (base, tx, metrics)
 }
 
@@ -219,11 +216,11 @@ async fn next_msg(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // One channel's replay/fence history must span all reconnects.
 async fn different_replicas_share_pairing_replay_and_epoch_fences_without_affinity() {
-    let (owner, _owner_shutdown, owner_metrics) = start_relay_on(free_port().await, |c| {
+    let (owner, _owner_shutdown, owner_metrics) = start_relay(|c| {
         c.advertise_ip = Some("127.0.0.1".parse().unwrap());
     })
     .await;
-    let (edge, _edge_shutdown, edge_metrics) = start_relay_on(free_port().await, |c| {
+    let (edge, _edge_shutdown, edge_metrics) = start_relay(|c| {
         c.advertise_ip = Some("127.0.0.1".parse().unwrap());
     })
     .await;
@@ -395,7 +392,7 @@ async fn dead_owner_and_reused_pod_address_refresh_route_without_restarting_prod
     let owner_port = free_port().await;
     let owner_process = relay_process(owner_port).await;
     let owner_base = format!("ws://127.0.0.1:{owner_port}/stream");
-    let (edge, _edge_shutdown, _) = start_relay_on(free_port().await, |c| {
+    let (edge, _edge_shutdown, _) = start_relay(|c| {
         c.advertise_ip = Some("127.0.0.1".parse().unwrap());
     })
     .await;
@@ -488,8 +485,7 @@ async fn dead_owner_and_reused_pod_address_refresh_route_without_restarting_prod
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn frames_splice_end_to_end_bidirectionally() {
-    let port = free_port().await;
-    let (base, _shutdown, _m) = start_relay_on(port, |_| {}).await;
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
 
     // Producer (agent) registers.
     let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
@@ -526,8 +522,7 @@ async fn frames_splice_end_to_end_bidirectionally() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stale_epoch_viewer_is_rejected() {
-    let port = free_port().await;
-    let (base, _shutdown, metrics) = start_relay_on(port, |_| {}).await;
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
 
     let _producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await
@@ -549,8 +544,7 @@ async fn a_stale_epoch_viewer_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_channel_isolation() {
-    let port = free_port().await;
-    let (base, _shutdown, _m) = start_relay_on(port, |_| {}).await;
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
 
     // Channel A (port 7681) + channel B (port 6080), each its own producer + viewer.
     let mut prod_a = RelayChannel::register(producer_config(&base, 7681))
@@ -583,8 +577,7 @@ async fn cross_channel_isolation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn viewer_reconnect_replays_the_buffered_tail() {
-    let port = free_port().await;
-    let (base, _shutdown, _m) = start_relay_on(port, |_| {}).await;
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
 
     let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await
@@ -629,9 +622,8 @@ async fn viewer_reconnect_replays_the_buffered_tail() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rate_limit_sheds_oversized_traffic_and_is_observable() {
-    let port = free_port().await;
     // A tiny per-token byte budget so a couple of frames exhaust it.
-    let (base, _shutdown, metrics) = start_relay_on(port, |c| {
+    let (base, _shutdown, metrics) = start_relay(|c| {
         c.rate_burst_bytes = 8; // 8 bytes burst
         c.rate_bytes_per_sec = 0; // no refill within the test
     })
@@ -665,17 +657,9 @@ async fn rate_limit_sheds_oversized_traffic_and_is_observable() {
     );
 }
 
-// Re-export `serve` returns the bound addr on shutdown — unused here because the
-// tests reserve an explicit port; reference it so the import is not flagged.
-#[allow(dead_code)]
-fn _serve_returns_addr() -> Option<SocketAddr> {
-    None
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn producer_reconnect_resumes_from_its_cursor() {
-    let port = free_port().await;
-    let (base, _shutdown, _m) = start_relay_on(port, |_| {}).await;
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
 
     let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await
