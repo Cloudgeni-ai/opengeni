@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   BrowserDownload,
@@ -138,6 +138,10 @@ export class BrowserDownloadStore {
    * may still finish and rename a file until Chromium reports them. */
   private readonly unconfirmed = new Set<string>();
   private observationSequence = 0;
+  /** For each running download, the last observation made before Chromium
+   * announced it. A download announced after another's finish was observed
+   * renamed its file after that one's. */
+  private readonly announcedAfter = new Map<string, number>();
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -269,6 +273,7 @@ export class BrowserDownloadStore {
            ) VALUES (?, ?, ?, ?, 'in_progress', 0, NULL, NULL, 1, ?, NULL, NULL)`,
         )
         .run(id, guid, targetId, filename, startedAt);
+      this.announcedAfter.set(guid, this.observationSequence);
       return this.fromRow(this.requireRowByGuid(guid));
     });
   }
@@ -292,7 +297,12 @@ export class BrowserDownloadStore {
             await this.observeChromiumFile(row, event.state === "completed" ? fileName : null);
             await this.resolveHeld();
           }
-          await this.removeUnownedCompletion(row, fileName);
+          await this.discardFiles(
+            row.guid,
+            fileName,
+            this.observations.get(row.guid)?.identity ?? null,
+            event.eventBarrier ?? null,
+          );
         }
         return { cancelReason: null };
       }
@@ -314,7 +324,12 @@ export class BrowserDownloadStore {
             ? downloadedFileName(this.filesDirectory, event.filePath)
             : null;
           await this.observeChromiumFile(row, fileName);
-          if (fileName) await this.removeUnownedCompletion(row, fileName);
+          await this.discardFiles(
+            row.guid,
+            fileName,
+            this.observations.get(row.guid)?.identity ?? null,
+            event.eventBarrier ?? null,
+          );
         }
         return { cancelReason: "download_quota_exceeded" };
       }
@@ -345,7 +360,9 @@ export class BrowserDownloadStore {
           )
           .run(receivedBytes, totalBytes, guid);
       }
-      if (totalBytes !== null && receivedBytes < totalBytes) {
+      // Chromium sets both counts to the final size once all data is saved,
+      // before it renames the file; an unknown total is reported as 0.
+      if (totalBytes !== null && totalBytes > 0 ? receivedBytes < totalBytes : receivedBytes > 0) {
         this.clearStillReceiving(guid);
         await this.resolveHeld();
       }
@@ -390,6 +407,7 @@ export class BrowserDownloadStore {
       this.held.clear();
       this.observations.clear();
       this.unconfirmed.clear();
+      this.announcedAfter.clear();
       for (const row of rows) {
         await this.removePhysicalFiles(row.guid);
         const current = this.requireRowByGuid(row.guid);
@@ -618,7 +636,7 @@ export class BrowserDownloadStore {
         sizeBytes > this.maxFileBytes ||
         this.otherActiveBytes(row.guid) + sizeBytes > this.maxSessionBytes
       ) {
-        await this.discardCompletion(row.guid, fileName);
+        await this.discardFiles(row.guid, fileName, observation.identity, eventBarrier);
         this.settle(
           row.guid,
           "failed",
@@ -678,7 +696,7 @@ export class BrowserDownloadStore {
     } catch {
       if (observation) observation.conflict = true;
       else this.observe(row, null, true);
-      await this.discardCompletion(row.guid, fileName);
+      await this.discardFiles(row.guid, fileName, observation?.identity ?? null, eventBarrier);
       this.settle(
         row.guid,
         "failed",
@@ -693,7 +711,9 @@ export class BrowserDownloadStore {
   /** Record what Chromium's finished download left at its name. The first
    * observation of a download stands; two downloads seeing the same file
    * conflict, whatever their names, since that file can be only one
-   * download's bytes. */
+   * download's bytes. When this download was announced after the other's
+   * finish was observed, it renamed its file after that one's, so the file
+   * is this download's and only the other conflicts. */
   private observe(
     row: Pick<DownloadRow, "guid" | "filename">,
     identity: FileIdentity | null,
@@ -708,10 +728,12 @@ export class BrowserDownloadStore {
       conflict,
     };
     if (identity !== null) {
+      const announcedAfter = this.announcedAfter.get(row.guid);
       for (const [guid, other] of this.observations) {
         if (guid === row.guid || other.identity !== identity) continue;
         other.conflict = true;
-        observation.conflict = true;
+        if (announcedAfter === undefined || announcedAfter < other.sequence)
+          observation.conflict = true;
       }
     }
     this.observations.set(row.guid, observation);
@@ -858,6 +880,7 @@ export class BrowserDownloadStore {
         fileName,
         guid,
       );
+    this.announcedAfter.delete(guid);
   }
 
   private settleExistingCompletedAsUnavailable(guid: string, failureCode: string): void {
@@ -991,26 +1014,68 @@ export class BrowserDownloadStore {
     return join(this.filesDirectory, row.file_name ?? requireGuid(row.guid));
   }
 
-  /** Remove what a download that is no longer wanted left behind. Chromium's
-   * named file is removed only when it can be nobody else's: no other
-   * download may still be saving a file, and no completed download keeps
-   * this one. Otherwise recovery sweeps it once nothing owns it. */
-  private async removeUnownedCompletion(
-    row: Pick<DownloadRow, "guid" | "filename">,
+  /** Remove what a download that is not accepted left behind. Its kept bytes
+   * go now. Chromium's named file, the one this download saw finished
+   * (`expected`), goes only once every event emitted until now has reached
+   * the store, since a download announced before then may have saved its own
+   * file under that name; and only when it can be nobody else's. Otherwise
+   * recovery sweeps it once nothing owns it. */
+  private async discardFiles(
+    guid: string,
     fileName: string | null,
+    expected: FileIdentity | null,
+    eventBarrier: (() => Promise<void>) | null,
   ): Promise<void> {
-    await this.removePhysicalFiles(row.guid);
-    if (fileName === null) return;
+    await this.removePhysicalFiles(guid);
+    if (fileName === null || expected === null) return;
+    const remove = () =>
+      this.enqueue(() => this.removeChromiumFileIfUnowned(guid, fileName, expected));
+    if (eventBarrier === null) {
+      // Without a barrier, the events already queued are all there is.
+      void remove().catch(() => undefined);
+      return;
+    }
+    void eventBarrier()
+      .then(remove)
+      .catch(() => undefined);
+  }
+
+  /** Remove Chromium's file at `fileName` if it is still the file a discarded
+   * download saw, no other download may still save a file, and no completed
+   * download keeps it. The file is moved aside before it is removed, so a
+   * file Chromium saved there in the meantime is put back. */
+  private async removeChromiumFileIfUnowned(
+    guid: string,
+    fileName: string,
+    expected: FileIdentity,
+  ): Promise<void> {
     const running = this.database
       .query<{ guid: string }, [string]>(
         "SELECT guid FROM browser_downloads WHERE guid <> ? AND status = 'in_progress' LIMIT 1",
       )
-      .get(row.guid);
-    if (running || [...this.unconfirmed].some((peer) => peer !== row.guid)) return;
+      .get(guid);
+    if (running || [...this.unconfirmed].some((peer) => peer !== guid)) return;
+    if ((await this.keptIdentities()).has(expected)) return;
     const path = join(this.filesDirectory, fileName);
-    const identity = await fileIdentity(path);
-    if (identity === null || (await this.keptIdentities()).has(identity)) return;
-    await rm(path, { force: true });
+    if ((await fileIdentity(path)) !== expected) return;
+    const aside = join(this.storedDirectory, `.discard-${randomUUID()}`);
+    try {
+      await rename(path, aside);
+    } catch {
+      return;
+    }
+    if ((await fileIdentity(aside)) !== expected) {
+      // Not the discarded file: put it back where Chromium saved it. If that
+      // fails it stays aside, and recovery sweeps it.
+      try {
+        await link(aside, path);
+      } catch {
+        if (await pathExists(path)) return;
+        await rename(aside, path).catch(() => undefined);
+        return;
+      }
+    }
+    await rm(aside, { force: true });
   }
 
   /** The identities of the files completed downloads keep. A kept hard link
@@ -1024,27 +1089,6 @@ export class BrowserDownloadStore {
       if (identity !== null) identities.add(identity);
     }
     return identities;
-  }
-
-  /** Remove a completion that is not accepted. Chromium's file is removed
-   * only while it is still this download's own bytes: a later download with
-   * the same name may already have replaced it. */
-  private async discardCompletion(guid: string, fileName: string | null): Promise<void> {
-    if (fileName !== null) {
-      const saved = join(this.filesDirectory, fileName);
-      const [savedFacts, keptFacts] = await Promise.all([
-        lstat(saved).catch(() => null),
-        lstat(this.filePath({ guid })).catch(() => null),
-      ]);
-      if (
-        savedFacts &&
-        keptFacts &&
-        savedFacts.dev === keptFacts.dev &&
-        savedFacts.ino === keptFacts.ino
-      )
-        await rm(saved, { force: true });
-    }
-    await this.removePhysicalFiles(guid);
   }
 
   /** Remove what is known of a download's bytes. Chromium removes the partial

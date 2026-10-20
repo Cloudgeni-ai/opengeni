@@ -515,6 +515,69 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
+  test("a late rejected completion leaves the file of a download announced after it", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "rejected", targetId: null, suggestedFilename: "report.txt" });
+    await store.reject("rejected", "download_quota_exceeded", "uncertain");
+    // Chromium finished the rejected download, then announced and saved a
+    // second one under the same name before the store saw either event.
+    await writeFile(path, "AAAAA");
+    const kept = await partial(store, "kept", "kept bytes");
+    await rename(kept, path);
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => (releaseBarrier = resolve));
+    const late = store.progress({
+      guid: "rejected",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+      eventBarrier: async () => await barrier,
+    });
+    const begun = store.begin({ guid: "kept", targetId: null, suggestedFilename: "report.txt" });
+    await late;
+    await begun;
+    releaseBarrier();
+    await store.list();
+    expect(await readFile(path, "utf8")).toBe("kept bytes");
+    await store.progress({
+      guid: "kept",
+      state: "completed",
+      receivedBytes: 10,
+      totalBytes: 10,
+      filePath: path,
+    });
+    expect(await store.get(secondDownloadId)).toMatchObject({ status: "completed" });
+    expect(await readFile((await store.completedFile(secondDownloadId)).path, "utf8")).toBe(
+      "kept bytes",
+    );
+    expect(await readFile(path, "utf8")).toBe("kept bytes");
+    await store.close();
+  });
+
+  test("a download of unknown size still receiving data does not hold a completion", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "small", targetId: null, suggestedFilename: "small.txt" });
+    await store.begin({ guid: "stream", targetId: null, suggestedFilename: "stream.bin" });
+    const path = join(store.filesDirectory, "small.txt");
+    await rename(await partial(store, "small", "small"), path);
+    await store.progress({
+      guid: "small",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    // Nothing received yet, size unknown: it may still be saved as this file.
+    await store.progress({ guid: "stream", state: "inProgress", receivedBytes: 0, totalBytes: 0 });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({ guid: "stream", state: "inProgress", receivedBytes: 7, totalBytes: 0 });
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe("small");
+    expect((await store.get(secondDownloadId))?.status).toBe("in_progress");
+    await store.close();
+  });
+
   test("adopts a named download completed before downloads were kept apart", async () => {
     const rootDirectory = await newRoot();
     const open = async () =>
