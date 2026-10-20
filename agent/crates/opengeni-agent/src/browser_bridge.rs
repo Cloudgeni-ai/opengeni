@@ -109,25 +109,85 @@ fn extension_origin() -> String {
 /// Run the Chrome-spawned Native Messaging host. It owns no browser or cloud
 /// authority: after reading the owner-only local authority file it authenticates
 /// to the already-running agent and copies bounded native-message frames.
+///
+/// Chrome discards a host's stderr, so when the host cannot reach the agent it
+/// first tells the extension why in one `unavailable` frame on stdout. The
+/// extension shows that to the person instead of a bare disconnect.
 pub fn run_native_host() -> Result<(), BrowserBridgeError> {
-    let config_dir = crate::config::config_dir()
-        .map_err(|error| BrowserBridgeError::Protocol(error.to_string()))?;
-    let authority = read_authority(&authority_path(&config_dir))?;
+    let mut browser_output = std::io::stdout().lock();
+    let connected = crate::config::config_dir()
+        .map_err(|error| {
+            (
+                AgentUnavailableReason::AgentError,
+                BrowserBridgeError::Protocol(error.to_string()),
+            )
+        })
+        .and_then(|config_dir| connect_native_host(&config_dir));
+    match connected {
+        Ok(socket) => relay_native_host(socket, std::io::stdin(), browser_output),
+        Err((reason, error)) => {
+            write_agent_unavailable_sync(&mut browser_output, reason, &error.to_string());
+            Err(error)
+        }
+    }
+}
+
+/// Opens the authenticated agent connection for this host, or says which
+/// [`AgentUnavailableReason`] keeps it from doing so.
+fn connect_native_host(
+    config_dir: &Path,
+) -> Result<std::net::TcpStream, (AgentUnavailableReason, BrowserBridgeError)> {
+    use AgentUnavailableReason::{AgentError, AgentNotRunning, AgentOutdated};
+    // The running agent writes this file when it starts its bridge.
+    let authority = match read_authority(&authority_path(config_dir)) {
+        Ok(authority) => authority,
+        Err(BrowserBridgeError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err((AgentNotRunning, error.into()));
+        }
+        Err(error) => return Err((AgentError, error)),
+    };
     if authority.protocol_version != BRIDGE_PROTOCOL_VERSION {
-        return Err(BrowserBridgeError::Protocol(
-            "running agent uses an incompatible browser bridge".to_string(),
+        // This host is the agent's installed program. A running agent with an
+        // older bridge is a previous version that has not restarted yet.
+        let reason = if authority.protocol_version < BRIDGE_PROTOCOL_VERSION {
+            AgentOutdated
+        } else {
+            AgentError
+        };
+        return Err((
+            reason,
+            BrowserBridgeError::Protocol(
+                "the running agent and its installed program use different browser bridge versions; restart the agent"
+                    .to_string(),
+            ),
         ));
     }
-    let mut socket = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))?;
+    let mut socket = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+        .map_err(|error| {
+            // A file left behind by an agent that exited without removing it.
+            let reason = if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                AgentNotRunning
+            } else {
+                AgentError
+            };
+            (reason, error.into())
+        })?;
+    authenticate_native_host(&mut socket, &authority.token).map_err(|error| (AgentError, error))?;
+    Ok(socket)
+}
+
+fn authenticate_native_host(
+    socket: &mut std::net::TcpStream,
+    token: &str,
+) -> Result<(), BrowserBridgeError> {
     socket.set_nodelay(true)?;
     let authentication = serde_json::to_vec(&serde_json::json!({
         "type": "authenticate",
         "protocolVersion": BRIDGE_PROTOCOL_VERSION,
         "role": "extension",
-        "token": authority.token,
+        "token": token,
     }))?;
-    write_native_frame_sync_bounded(&mut socket, &authentication, MAX_AUTH_MESSAGE_BYTES)?;
-    relay_native_host(socket, std::io::stdin(), std::io::stdout().lock())
+    write_native_frame_sync_bounded(socket, &authentication, MAX_AUTH_MESSAGE_BYTES)
 }
 
 /// Copy frames between Chrome (`browser_input`/`browser_output`) and the
@@ -180,9 +240,14 @@ where
         let _ = writer.shutdown(Shutdown::Write);
     });
 
-    while let Some(message) =
-        read_native_frame_sync_bounded(&mut socket, MAX_COMMAND_MESSAGE_BYTES)?
-    {
+    let mut answered = false;
+    let ended = loop {
+        let message = match read_native_frame_sync_bounded(&mut socket, MAX_COMMAND_MESSAGE_BYTES) {
+            Ok(Some(message)) => message,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        };
+        answered = true;
         if let Err(error) = write_native_frame_sync_bounded(
             &mut browser_output,
             &message,
@@ -197,8 +262,99 @@ where
             let _ = writer.shutdown(Shutdown::Write);
             return Err(error);
         }
+    };
+    if !answered {
+        // The agent explains every hello it refuses. Closing without a word
+        // means it stopped, or did not accept this host's authentication.
+        let detail = match &ended {
+            Ok(()) => "the agent closed the browser connection without answering".to_string(),
+            Err(error) => format!("the agent connection failed before answering: {error}"),
+        };
+        write_agent_unavailable_sync(
+            &mut browser_output,
+            AgentUnavailableReason::AgentError,
+            &detail,
+        );
     }
-    Ok(())
+    ended
+}
+
+/// Why this computer's agent cannot take an extension connection. The agent
+/// side sends it in one `unavailable` frame before closing, so the extension
+/// can tell the person which side to start or update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentUnavailableReason {
+    /// No agent is running for this user.
+    AgentNotRunning,
+    /// The running agent is older than the extension (or than its own
+    /// installed program, until it restarts).
+    AgentOutdated,
+    /// The extension is older than the running agent.
+    ExtensionOutdated,
+    /// Anything else; the frame's detail says what.
+    AgentError,
+}
+
+/// The frame an extension of any version can read: it exists to explain a
+/// version difference, so its shape never depends on the protocol version.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUnavailable<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    protocol_version: u32,
+    reason: AgentUnavailableReason,
+    /// The running agent's version. Only the running agent sends it: a native
+    /// host is the installed program, which may already be newer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_version: Option<&'static str>,
+    detail: &'a str,
+}
+
+fn agent_unavailable_frame(
+    reason: AgentUnavailableReason,
+    agent_version: Option<&'static str>,
+    detail: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&AgentUnavailable {
+        kind: "unavailable",
+        protocol_version: BRIDGE_PROTOCOL_VERSION,
+        reason,
+        agent_version,
+        detail: truncate_utf8(detail, MAX_CONNECTION_END_DETAIL_BYTES),
+    })
+    .expect("agent unavailable frame serializes")
+}
+
+/// The native host's own report. Best effort: Chrome may already have closed
+/// the port.
+fn write_agent_unavailable_sync<W: std::io::Write>(
+    browser_output: &mut W,
+    reason: AgentUnavailableReason,
+    detail: &str,
+) {
+    let frame = agent_unavailable_frame(reason, None, detail);
+    let _ = write_native_frame_sync_bounded(browser_output, &frame, MAX_COMMAND_MESSAGE_BYTES);
+}
+
+/// Which side is outdated when a hello names another bridge protocol version.
+/// Read before the full hello, whose shape belongs to that version.
+fn hello_version_refusal(bytes: &[u8]) -> Option<AgentUnavailableReason> {
+    #[derive(Deserialize)]
+    struct HelloVersion {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "protocolVersion")]
+        protocol_version: Option<u32>,
+    }
+    let hello = serde_json::from_slice::<HelloVersion>(bytes).ok()?;
+    let version = hello.protocol_version.filter(|_| hello.kind == "hello")?;
+    match version.cmp(&BRIDGE_PROTOCOL_VERSION) {
+        std::cmp::Ordering::Less => Some(AgentUnavailableReason::ExtensionOutdated),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(AgentUnavailableReason::AgentOutdated),
+    }
 }
 
 fn send_native_host_closing(
@@ -1401,6 +1557,10 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let (outbound, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
     let mut claim: Option<(String, String)> = None;
     let mut closing: Option<(NativeHostClosingReason, Option<String>)> = None;
+    // Until `ready` is written, a failure is a refused hello: the extension is
+    // told why before the connection closes.
+    let mut ready_sent = false;
+    let mut refusal: Option<AgentUnavailableReason> = None;
     let result = async {
         loop {
             // read_exact may already have consumed part of the header or body.
@@ -1411,6 +1571,12 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 tokio::select! {
                     frame = &mut incoming => {
                         let Some(bytes) = frame? else { return Ok(()); };
+                        if !ready_sent {
+                            refusal = hello_version_refusal(&bytes);
+                            if refusal.is_some() {
+                                return Err(BrowserBridgeError::Protocol("extension protocol version is unsupported".to_string()));
+                            }
+                        }
                         let message: ExtensionMessage = serde_json::from_slice(&bytes)?;
                         match message {
                             ExtensionMessage::Hello { protocol_version, device, tabs } => {
@@ -1442,6 +1608,7 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                     MAX_COMMAND_MESSAGE_BYTES,
                                 )
                                 .await?;
+                                ready_sent = true;
                                 debug!(%device_id, connection_generation = %generation, tab_count, "attached browser profile registered");
                             }
                             ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, profile, tabs } => {
@@ -1478,6 +1645,14 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
     }
     .await;
+    if let (false, Err(error)) = (ready_sent, &result) {
+        let frame = agent_unavailable_frame(
+            refusal.unwrap_or(AgentUnavailableReason::AgentError),
+            Some(env!("CARGO_PKG_VERSION")),
+            &error.to_string(),
+        );
+        let _ = write_native_frame_bounded(&mut writer, &frame, MAX_COMMAND_MESSAGE_BYTES).await;
+    }
     if let Some((device_id, generation)) = claim {
         inventory.disconnect(
             &device_id,
@@ -2920,8 +3095,124 @@ mod tests {
             v1::AttachedBrowserConnectionEndReason::AgentRejected as i32
         );
         assert!(end.detail.contains("unavailable reason"), "{}", end.detail);
+        // The extension is told why before the connection closes.
+        let refusal = read_json(&mut socket).await;
+        assert_eq!(refusal["type"], "unavailable");
+        assert_eq!(refusal["reason"], "agent_error");
+        assert_eq!(refusal["agentVersion"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("unavailable reason")),
+            "{refusal}"
+        );
         assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_hello_from_another_bridge_version_says_which_side_is_outdated() {
+        for (version, reason) in [(0, "extension_outdated"), (2, "agent_outdated")] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let server = BrowserBridgeServer::start(directory.path())
+                .await
+                .expect("start");
+            let mut socket = extension_socket(directory.path()).await;
+            let other_version = hello_with(
+                "11111111-1111-4111-8111-111111111111",
+                "connection-1",
+                |hello| {
+                    hello["protocolVersion"] = json!(version);
+                    // Another version's hello need not parse as this one's.
+                    hello.as_object_mut().expect("hello").remove("device");
+                },
+            );
+            write_native_frame(&mut socket, &other_version)
+                .await
+                .expect("hello");
+
+            let refusal = read_json(&mut socket).await;
+            assert_eq!(refusal["type"], "unavailable", "{refusal}");
+            assert_eq!(refusal["reason"], reason, "{refusal}");
+            assert_eq!(refusal["agentVersion"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(server.inventory().snapshot().devices.len(), 0);
+            server.shutdown().await.expect("shutdown");
+        }
+    }
+
+    #[test]
+    fn the_native_host_tells_chrome_when_the_agent_closes_without_answering() {
+        let listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let agent = std::thread::spawn(move || drop(listener.accept().expect("accept")));
+        let socket =
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).expect("connect");
+        agent.join().expect("agent thread");
+
+        let mut chrome_input = Vec::new();
+        // Ignore the result: a reset connection is as silent as a closed one.
+        let _ = relay_native_host(socket, std::io::empty(), &mut chrome_input);
+
+        let frame = read_native_frame_sync_bounded(
+            &mut Cursor::new(chrome_input),
+            MAX_COMMAND_MESSAGE_BYTES,
+        )
+        .expect("frame")
+        .expect("an unavailable frame for Chrome");
+        let refusal: serde_json::Value = serde_json::from_slice(&frame).expect("json");
+        assert_eq!(refusal["type"], "unavailable");
+        assert_eq!(refusal["reason"], "agent_error");
+        // The host is the installed program, not the running agent.
+        assert!(refusal.get("agentVersion").is_none(), "{refusal}");
+    }
+
+    #[test]
+    fn a_hello_version_probe_reads_only_hellos() {
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"hello","protocolVersion":0}"#),
+            Some(AgentUnavailableReason::ExtensionOutdated)
+        );
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"hello","protocolVersion":7,"device":"new shape"}"#),
+            Some(AgentUnavailableReason::AgentOutdated)
+        );
+        assert_eq!(
+            hello_version_refusal(&hello("11111111-1111-4111-8111-111111111111", "c", 1)),
+            None
+        );
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"native_host_closing","protocolVersion":7}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_native_host_says_when_no_agent_is_running() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("no authority");
+        assert_eq!(reason, AgentUnavailableReason::AgentNotRunning);
+
+        // An agent that exited without removing its authority file.
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind")
+            .local_addr()
+            .expect("address")
+            .port();
+        let authority = |protocol_version| BridgeAuthority {
+            protocol_version,
+            port,
+            token: "token".to_string(),
+            pid: 1,
+        };
+        write_authority(directory.path(), &authority(BRIDGE_PROTOCOL_VERSION)).expect("write");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("stale authority");
+        assert_eq!(reason, AgentUnavailableReason::AgentNotRunning);
+
+        // A running agent from before its installed program was updated.
+        write_authority(directory.path(), &authority(BRIDGE_PROTOCOL_VERSION - 1)).expect("write");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("older agent");
+        assert_eq!(reason, AgentUnavailableReason::AgentOutdated);
     }
 
     #[tokio::test]

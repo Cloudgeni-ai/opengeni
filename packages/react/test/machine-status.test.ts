@@ -59,6 +59,67 @@ function update(overrides: Partial<Update>): Update {
 }
 
 describe("describeAgentRuntime", () => {
+  test("an offline hold is historical and overlapping machine counters are not added", () => {
+    const status = describeAgentRuntime(
+      englishText,
+      runtime({
+        update: update({
+          status: "waiting_for_idle",
+          requestedAt: new Date(NOW - 17 * 3600_000).toISOString(),
+          updatedAt: new Date(NOW - 2 * 3600_000).toISOString(),
+          blockers: [
+            { kind: "native_request", count: 1 },
+            { kind: "native_heavy_running", count: 1 },
+          ],
+        }),
+      }),
+      NOW,
+      false,
+    );
+    expect(status.tone).toBe("muted");
+    expect(status.status).toContain("not connected");
+    expect(status.note).toContain("2h ago");
+    expect(status.note).toContain("overlapping counters): 1");
+    expect(status.note).not.toContain("; ");
+    expect(status.action).toBeNull();
+  });
+  test("a long hold names the reported work without exposing private owners or interrupting it", () => {
+    const status = describeAgentRuntime(
+      englishText,
+      runtime({
+        versionState: "updating",
+        update: update({
+          status: "waiting_for_idle",
+          requestedAt: new Date(NOW - 17 * 60 * 60_000).toISOString(),
+          updatedAt: new Date(NOW - 60_000).toISOString(),
+          errorCode: "update_busy_interactions",
+          blockers: [{ kind: "browser_action", count: 1 }],
+        }),
+      }),
+      NOW,
+    );
+    expect(status.tone).toBe("attention");
+    expect(status.status).toContain("17h");
+    expect(status.note).toContain("Browser action");
+    expect(status.note).not.toContain("session ");
+    expect(status.note).toContain("Last reported");
+    expect(status.note).toContain("Nothing will be stopped");
+    expect(status.action).toBeNull();
+  });
+
+  test("old ambiguous busy-work receipts do not invent a command or session culprit", () => {
+    const status = describeAgentRuntime(
+      englishText,
+      runtime({
+        versionState: "updating",
+        update: update({ status: "waiting_for_idle", errorCode: "update_busy_work" }),
+      }),
+      NOW,
+    );
+    expect(status.note).toContain("does not identify it");
+    expect(status.note).not.toContain("command");
+  });
+
   test("lost cleanup explains the cause and recovery without hiding the retry", () => {
     for (const errorCode of ["update_cleanup_unconfirmed", "update_state_unavailable"]) {
       const status = describeAgentRuntime(

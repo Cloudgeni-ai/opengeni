@@ -127,6 +127,10 @@ export type ThisComputerErrorCode =
 
 export interface ThisComputerStatus {
   state: ThisComputerState;
+  /** An existing background service stays independent of the desktop app. */
+  management?: "service" | "app";
+  /** The permission-bearing app, when it differs from the desktop shell. */
+  permissionAppName?: string;
   /** A connect, pause or resume is in progress. */
   busy: boolean;
   /** The last failure, in plain words, until the next successful action. */

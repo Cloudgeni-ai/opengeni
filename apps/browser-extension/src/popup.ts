@@ -3,6 +3,8 @@ type Status = {
   deviceId: string | null;
   profileLabel: string | null;
   error: string | null;
+  /** Short headline, when not connected. */
+  title?: string | null;
   /** What to do about it, when not connected. */
   detail?: string | null;
 };
@@ -16,7 +18,7 @@ const save = document.querySelector<HTMLButtonElement>("button")!;
 async function refresh(): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "status" })) as Status;
   document.body.dataset.connected = String(status.connected);
-  state.textContent = status.connected ? "Connected" : "Agent unavailable";
+  state.textContent = status.connected ? "Connected" : (status.title ?? "Agent unavailable");
   detail.textContent = status.connected
     ? "This Chrome profile is ready in Opengeni. Tabs attach only when an agent uses them."
     : (status.detail ??

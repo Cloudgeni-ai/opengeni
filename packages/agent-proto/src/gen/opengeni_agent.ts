@@ -2102,6 +2102,15 @@ export interface AgentUpdateProgress {
   errorCode: string;
   retryable: boolean;
   rolledBack: boolean;
+  /** Content-free blockers from this idle proof, not permission to stop work. */
+  blockers: AgentUpdateBlocker[];
+}
+
+export interface AgentUpdateBlocker {
+  kind: string;
+  /** Unused: enrollment-wide diagnostics must never carry private session IDs. */
+  resourceId: string;
+  count: number;
 }
 
 /**
@@ -13190,6 +13199,7 @@ function createBaseAgentUpdateProgress(): AgentUpdateProgress {
     errorCode: "",
     retryable: false,
     rolledBack: false,
+    blockers: [],
   };
 }
 
@@ -13215,6 +13225,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     }
     if (message.rolledBack !== false) {
       writer.uint32(56).bool(message.rolledBack);
+    }
+    for (const v of message.blockers) {
+      AgentUpdateBlocker.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -13282,6 +13295,14 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
           message.rolledBack = reader.bool();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.blockers.push(AgentUpdateBlocker.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13320,6 +13341,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
         : isSet(object.rolled_back)
         ? globalThis.Boolean(object.rolled_back)
         : false,
+      blockers: globalThis.Array.isArray(object?.blockers)
+        ? object.blockers.map((e: any) => AgentUpdateBlocker.fromJSON(e))
+        : [],
     };
   },
 
@@ -13346,6 +13370,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     if (message.rolledBack !== false) {
       obj.rolledBack = message.rolledBack;
     }
+    if (message.blockers?.length) {
+      obj.blockers = message.blockers.map((e) => AgentUpdateBlocker.toJSON(e));
+    }
     return obj;
   },
 
@@ -13361,6 +13388,103 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     message.errorCode = object.errorCode ?? "";
     message.retryable = object.retryable ?? false;
     message.rolledBack = object.rolledBack ?? false;
+    message.blockers = object.blockers?.map((e) => AgentUpdateBlocker.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseAgentUpdateBlocker(): AgentUpdateBlocker {
+  return { kind: "", resourceId: "", count: 0 };
+}
+
+export const AgentUpdateBlocker: MessageFns<AgentUpdateBlocker> = {
+  encode(message: AgentUpdateBlocker, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.kind !== "") {
+      writer.uint32(10).string(message.kind);
+    }
+    if (message.resourceId !== "") {
+      writer.uint32(18).string(message.resourceId);
+    }
+    if (message.count !== 0) {
+      writer.uint32(24).uint32(message.count);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AgentUpdateBlocker {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAgentUpdateBlocker();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.kind = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.resourceId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.count = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AgentUpdateBlocker {
+    return {
+      kind: isSet(object.kind) ? globalThis.String(object.kind) : "",
+      resourceId: isSet(object.resourceId)
+        ? globalThis.String(object.resourceId)
+        : isSet(object.resource_id)
+        ? globalThis.String(object.resource_id)
+        : "",
+      count: isSet(object.count) ? globalThis.Number(object.count) : 0,
+    };
+  },
+
+  toJSON(message: AgentUpdateBlocker): unknown {
+    const obj: any = {};
+    if (message.kind !== "") {
+      obj.kind = message.kind;
+    }
+    if (message.resourceId !== "") {
+      obj.resourceId = message.resourceId;
+    }
+    if (message.count !== 0) {
+      obj.count = Math.round(message.count);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(base?: I): AgentUpdateBlocker {
+    return AgentUpdateBlocker.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(object: I): AgentUpdateBlocker {
+    const message = createBaseAgentUpdateBlocker();
+    message.kind = object.kind ?? "";
+    message.resourceId = object.resourceId ?? "";
+    message.count = object.count ?? 0;
     return message;
   },
 };

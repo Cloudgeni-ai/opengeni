@@ -18,6 +18,7 @@ import {
   responsesTransport,
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   withResponsesContinuationAdmission,
+  withModelTransportObservation,
 } from "@opengeni/network/responses-websocket";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
@@ -130,7 +131,11 @@ export function buildOpenAIClientFromSettings(
           streamIdleTimeoutModelFetch(
             providerId,
             modelStreamIdlePolicy(settings),
-            instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
+            instrumentedModelFetch(
+              providerId,
+              openAIResponsesFetch(settings),
+              settings.openaiResponsesWebSocketEnabled,
+            ),
           ),
         ),
       },
@@ -150,7 +155,11 @@ export function buildOpenAIClientFromSettings(
         streamIdleTimeoutModelFetch(
           providerId,
           modelStreamIdlePolicy(settings),
-          instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
+          instrumentedModelFetch(
+            providerId,
+            openAIResponsesFetch(settings),
+            settings.openaiResponsesWebSocketEnabled,
+          ),
         ),
       ),
     },
@@ -476,6 +485,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 settings.codexResponsesWebSocketEnabled
                   ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
                   : globalThis.fetch,
+                settings.codexResponsesWebSocketEnabled,
               ),
             ),
           },
@@ -550,7 +560,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
+                      : instrumentedModelFetch(
+                          provider.id,
+                          openAIResponsesFetch(settings),
+                          settings.openaiResponsesWebSocketEnabled,
+                        ),
                 ),
               ),
             },
@@ -568,7 +582,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   return client;
 }
 
-export function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
+export function instrumentedModelFetch(
+  provider: string,
+  inner: typeof fetch,
+  transportReportsDispatch = false,
+): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
@@ -580,7 +598,6 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
-    recordModelTransportDispatched(started);
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from
     // its outcome; any other request passes straight through.
@@ -598,9 +615,21 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
             await recordModelTransportStarted();
             replacementSignal.throwIfAborted();
             requestInit?.signal?.throwIfAborted();
-            recordModelTransportDispatched(performance.now());
+            if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
           },
-          () => inner(input, requestInit),
+          () => {
+            // No awaited admission remains between this notification and fetch
+            // entry. Dispatch-triggered preparation must not run ahead of the
+            // credential custody check above.
+            if (transportReportsDispatch) {
+              return withModelTransportObservation(
+                () => recordModelTransportDispatched(performance.now()),
+                () => inner(input, requestInit),
+              );
+            }
+            recordModelTransportDispatched(performance.now());
+            return inner(input, requestInit);
+          },
         );
       } catch (error) {
         await current.failed();

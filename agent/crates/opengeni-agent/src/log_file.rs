@@ -22,6 +22,11 @@ pub const AGENT_LOG: &str = "agent.log";
 /// LaunchAgent `StandardErrorPath`). Rust panics after an abort, allocator
 /// failures and other output that bypasses `tracing` land here.
 pub const AGENT_STDERR_LOG: &str = "agent.stderr.log";
+/// The Chrome-spawned browser native host's log. Chrome discards a host's
+/// stderr, so a host that fails would otherwise leave nothing behind.
+pub const NATIVE_HOST_LOG: &str = "browser-native-host.log";
+/// Rotate the native host log once it would exceed this size.
+pub const MAX_NATIVE_HOST_LOG_BYTES: u64 = 1024 * 1024;
 /// Rotate the agent log once it would exceed this size.
 pub const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// Rotated generations kept beside the live file (`.1` newest).

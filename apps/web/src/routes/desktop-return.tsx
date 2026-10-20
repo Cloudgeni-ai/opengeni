@@ -39,8 +39,8 @@ export function DesktopReturnRoute() {
         {appLink && target ? (
           <>
             <p className="text-sm text-fg-muted">
-              Opengeni opens by itself and shows the result there. If your browser asks, allow it
-              to open Opengeni. You can close this tab afterwards.
+              Opengeni opens by itself and shows the result there. If your browser asks, allow it to
+              open Opengeni. You can close this tab afterwards.
             </p>
             <Button asChild className="mt-4 w-full">
               <a href={appLink}>Open Opengeni</a>
