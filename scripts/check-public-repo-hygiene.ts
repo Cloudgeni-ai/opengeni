@@ -74,8 +74,8 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "packages/contracts/src/cua-desktop-tools.linux.gen.json": {
-    bytes: 217_569,
-    sha256: "190446296ce482a69727c2cf3580291fa1f4db4af6d7de7ce077c093fd740c48",
+    bytes: 225_101,
+    sha256: "e0abab19fae0582bc26cd4c08ce0f30d709d390aceccb160952ce1753f9138d6",
     offsets: "all",
   },
   "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
