@@ -61,7 +61,7 @@ Answer questions directly and briefly; after making changes, say what changed, h
     "Your answer is rendered by an application for the user:",
     bullets(
       "You may format with GitHub-flavored Markdown.",
-      "Answer in chat by default, including summaries and reports.",
+      "Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.",
     ),
   );
 }

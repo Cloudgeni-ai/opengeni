@@ -1,6 +1,6 @@
 ---
 name: documents
-description: Create, inspect, edit, review, import, and export durable document artifacts and explicit DOCX file boundaries. Use when creating or editing a document Artifact or DOCX (reports, briefs, proposals, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery); ordinary chat answers do not need it.
+description: Create, inspect, edit, review, import, and export durable document artifacts and explicit DOCX file boundaries. Use when the user asks for a document or file, asks to edit one, or the result is too long for chat (DOCX, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery). Briefs, letters, plans and reports written on request are chat answers and do not need it.
 ---
 
 # Documents
@@ -10,10 +10,12 @@ live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
 artifact state.
 
-Create a document when the user asks for a document or file, or when a
-deliverable is large (multi-page) or clearly meant to be kept or shared;
-otherwise answer in chat. This also applies when a report is a secondary output
-of another task, such as a Knowledge cleanup audit. If the session has a goal,
+Create a document when the user asks for a document or file (for example a
+DOCX or PDF), asks to edit an existing document, or when a deliverable is too
+long to read comfortably in chat (several pages); otherwise answer in chat,
+including briefs, letters, plans and reports written on request. This also
+applies when a report is a secondary output of another task, such as
+a Knowledge cleanup audit. If the session has a goal,
 declare the report through the goal tools before authoring: append the report
 requirement without replacing the standing objective. Do not create a goal only
 to declare a document. After authoring, reply with a short summary and the

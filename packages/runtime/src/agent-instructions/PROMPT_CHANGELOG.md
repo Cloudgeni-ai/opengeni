@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+Written pieces the person asks for (briefs, letters, plans, reports) are
+answered in chat. A document Artifact is created only when the person asks for
+a document or file (for example a DOCX or PDF), asks to edit an existing
+document, or the result is too long to read comfortably in chat (several
+pages). The earlier "or clearly meant to be kept or shared" let agents build a
+document for any requested brief, which took several times longer than a chat
+answer and left only a link in the conversation. The `documents` Skill
+description and its routing paragraph, and the goal continuation's report
+clause, say the same. Both compositions change identically; legacy prompt
+digests are refreshed for this reviewed change.
+
 Agent-facing text no longer names the product, so an embedding product's agent
 only ever sees and repeats its own product's name. Bundled Skills take neutral
 names (`documents`, `spreadsheets`, `presentations`, `sites`, `visualize`,
