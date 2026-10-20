@@ -4,10 +4,12 @@ import postgres from "postgres";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const maintenance = "0730_maintenance_work_probes.sql";
 const personal = "0730_subscription_core_personal_connection_versions.sql";
 const pair = [maintenance, personal];
+const withheld = [...pair, ...strictOwnerMaintenanceMigrationTail];
 const options = { applicationDatabaseRoles: ["opengeni_app"] };
 const routines = [
   "session_workflow_wakes_due_v1",
@@ -46,7 +48,7 @@ for (const history of ["fresh", "neither", "personal", "maintenance", "both"] as
         // temporary withholding stamps are removed before constructing history.
         await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,
           applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) SELECT unnest(${pair}::text[])`;
+        await owner`INSERT INTO schema_migrations(name) SELECT unnest(${withheld}::text[])`;
         await migrate(database.ownerUrl, undefined, options);
         await owner`DELETE FROM schema_migrations WHERE name = ANY(${pair}::text[])`;
         expect((await snapshot(owner)).routines).toHaveLength(0);
@@ -72,15 +74,26 @@ for (const history of ["fresh", "neither", "personal", "maintenance", "both"] as
       }
       const before = history === "fresh" ? undefined : await snapshot(owner);
       await migrate(database.ownerUrl, undefined, options);
-      const upgraded = await snapshot(owner);
-      expect(upgraded.receipts.filter((row) => pair.includes(row.name))).toHaveLength(2);
-      expect(upgraded.routines).toHaveLength(5);
+      const pairUpgraded = await snapshot(owner);
+      expect(pairUpgraded.receipts.filter((row) => pair.includes(row.name))).toHaveLength(2);
+      expect(pairUpgraded.routines).toHaveLength(5);
       for (const receipt of before?.receipts ?? []) {
-        expect(upgraded.receipts.find((row) => row.name === receipt.name)).toEqual(receipt);
+        expect(pairUpgraded.receipts.find((row) => row.name === receipt.name)).toEqual(receipt);
       }
       for (const routine of before?.routines ?? []) {
-        expect(upgraded.routines.find((row) => row.proname === routine.proname)).toEqual(routine);
+        expect(pairUpgraded.routines.find((row) => row.proname === routine.proname)).toEqual(
+          routine,
+        );
       }
+      // First prove the published pair preserves existing definitions. Its newer
+      // dependent migrations deliberately rewrite those definitions, so replay
+      // them only after that historical assertion and verify final-state no-op.
+      if (history !== "fresh") {
+        await owner`DELETE FROM schema_migrations
+          WHERE name = ANY(${strictOwnerMaintenanceMigrationTail}::text[])`;
+        await migrate(database.ownerUrl, undefined, options);
+      }
+      const upgraded = await snapshot(owner);
       await migrate(database.ownerUrl, undefined, options);
       expect(await snapshot(owner)).toEqual(upgraded);
 

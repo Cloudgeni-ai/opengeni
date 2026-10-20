@@ -10,12 +10,14 @@ export function CreditScopeDetails({
   amount,
   eligibleModelIds,
   coversVoice = false,
+  description = "Free credits · View models",
 }: {
   label: string;
   amount: string;
   eligibleModelIds: readonly string[];
   /** Also pays for dictation and live voice. */
   coversVoice?: boolean | undefined;
+  description?: string | undefined;
 }) {
   return (
     <Collapsible className="group/credit min-w-0">
@@ -27,9 +29,7 @@ export function CreditScopeDetails({
         >
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm font-medium text-fg">{label}</span>
-            <span className="mt-0.5 block text-xs font-normal text-fg-muted">
-              Free credits · View models
-            </span>
+            <span className="mt-0.5 block text-xs font-normal text-fg-muted">{description}</span>
           </span>
           <span className="shrink-0 text-sm font-medium text-fg tabular-nums">{amount}</span>
           <ChevronDownIcon

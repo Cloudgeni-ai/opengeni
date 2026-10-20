@@ -43,6 +43,16 @@ export function controllerCachedUrlIsUsable(url: string, nowMs = Date.now()): bo
   }
 }
 
+/** Whether a home sandbox's controller is reached through an exposed port that
+ * can be cached on the lease. An agent-native controller (a compute sandbox's
+ * agent, like a Connected Machine's) is reached only through the agent session:
+ * resolving its "port" would open an agent stream, not an HTTP endpoint. */
+export function controllerHasCacheableDataPlane<
+  S extends { resolveExposedPort?: unknown; ensureBrowserControl?: unknown },
+>(session: S): session is S & { resolveExposedPort: NonNullable<S["resolveExposedPort"]> } {
+  return Boolean(session.resolveExposedPort) && !session.ensureBrowserControl;
+}
+
 export function shouldPersistControllerDataPlaneUrl(input: {
   backend: string | null | undefined;
   signedEndpoints: boolean;

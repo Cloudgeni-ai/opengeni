@@ -1,0 +1,318 @@
+//! PID 1 on Linux: the order things start in, and the threads that keep
+//! them going.
+
+mod agent;
+mod guest;
+mod supervise;
+mod sys;
+mod system;
+mod vsock;
+
+use std::fs;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, channel};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use self::guest::{CommandEnv, Guest};
+use self::supervise::Children;
+use self::sys::{Exit, Signals};
+use crate::cmdline::BootArgs;
+use crate::config::{self, ImageConfig};
+use crate::envd::InitData;
+use crate::users;
+use crate::{ENVD_PORT, GATEWAY_PORT, NOTICE_PORT, READY_PORT};
+
+/// Writes one line to the console.
+pub(crate) fn log(message: &str) {
+    eprintln!("compute-guest: {message}");
+}
+
+/// Starts a thread with a small stack; `None` if it could not start.
+pub(crate) fn spawn(
+    name: &'static str,
+    work: impl FnOnce() + Send + 'static,
+) -> Option<JoinHandle<()>> {
+    thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(128 * 1024)
+        .spawn(work)
+        .inspect_err(|error| log(&format!("thread {name}: {error}")))
+        .ok()
+}
+
+/// How long the guest gives its processes to end on shutdown.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Runs the guest. Never returns: it ends with the machine.
+pub fn run() -> ! {
+    // Blocked before any thread starts, so every thread inherits the mask
+    // and only the main loop below takes them.
+    let signals = Signals::block(&[
+        libc::SIGCHLD,
+        libc::SIGTERM,
+        libc::SIGINT,
+        libc::SIGHUP,
+        libc::SIGPWR,
+    ])
+    .unwrap_or_else(|error| {
+        log(&format!("signals: {error}"));
+        std::process::exit(1)
+    });
+    if let Err(error) = sys::ctrl_alt_del_signals() {
+        log(&format!("ctrl-alt-del: {error}"));
+    }
+    system::mount_basics();
+    agent::clear_activity();
+    let args = BootArgs::parse(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
+    system::network(args.network.as_ref());
+    if let Some(sandbox) = &args.sandbox {
+        system::boot_identity(sandbox);
+    }
+    let image: ImageConfig = fs::read(config::CONFIG_PATH)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    // envd starts SDK commands there by default, before the image's
+    // command may have run.
+    if let Err(error) = fs::create_dir_all(image.working_dir()) {
+        log(&format!("working directory: {error}"));
+    }
+    let children = Arc::new(Children::default());
+    let (command, start_command) = channel();
+    let has_envd = Path::new(config::ENVD_PATH).exists();
+    let guest = Arc::new(Guest::new(
+        InitData {
+            env_vars: image.env_map(),
+            access_token: None,
+            default_user: Some(config::DEFAULT_USER.to_owned()),
+            default_workdir: image.default_workdir().map(str::to_owned),
+            agent: None,
+        },
+        command,
+        has_envd,
+        Arc::clone(&children),
+    ));
+    listen(NOTICE_PORT, "notice", {
+        let guest = Arc::clone(&guest);
+        move |stream| guest.notice(stream)
+    });
+    listen(GATEWAY_PORT, "gateway", {
+        let guest = Arc::clone(&guest);
+        move |stream| {
+            let guest = Arc::clone(&guest);
+            spawn("gateway", move || guest.gateway(stream));
+        }
+    });
+    if has_envd {
+        spawn("envd", {
+            let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
+            move || supervise_envd(&guest, &children)
+        });
+    } else {
+        // Nothing to wait for: template builders may snapshot it now.
+        listen(READY_PORT, "ready", drop);
+    }
+    if Path::new(crate::agent::AGENT_PATH).exists() {
+        spawn("agent", {
+            let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
+            move || agent::supervise(&guest, &children)
+        });
+    }
+    // The image's command starts once the sandbox has its own identity
+    // and init: never in a template, whose clones would all copy what it
+    // made, and on a restore it simply carries on.
+    spawn("command", {
+        let children = Arc::clone(&children);
+        move || {
+            if let Ok(env) = start_command.recv() {
+                run_command(&image, &env, &children);
+            }
+        }
+    });
+    guest.booted(args.sandbox.as_deref());
+    loop {
+        match signals.wait(Duration::from_secs(1)) {
+            Some(libc::SIGTERM | libc::SIGINT | libc::SIGPWR) => shutdown(&signals, &children),
+            _ => children.reap(),
+        }
+    }
+}
+
+/// Accepts connections on vsock `port` for ever, handing each to `handle`.
+fn listen(port: u32, name: &'static str, handle: impl Fn(vsock::Stream) + Send + 'static) {
+    let listener = match vsock::Listener::bind(port) {
+        Ok(listener) => listener,
+        Err(error) => {
+            log(&format!("{name} port {port}: {error}"));
+            return;
+        }
+    };
+    spawn(name, move || {
+        loop {
+            match listener.accept() {
+                Ok(stream) => handle(stream),
+                Err(error) => {
+                    log(&format!("{name} port {port}: {error}"));
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    });
+}
+
+/// How long envd may take to answer after it starts.
+const ENVD_START: Duration = Duration::from_secs(30);
+
+/// Keeps envd running. Each time it starts, it gets its `/init` before the
+/// guest counts it as up; the first time, the guest becomes ready. One
+/// that does not take it in time is stopped and started again.
+fn supervise_envd(guest: &Guest, children: &Children) {
+    let mut ready = false;
+    let mut pause = Duration::from_millis(200);
+    loop {
+        guest.wait_readable();
+        let started = Instant::now();
+        let mut command = supervise::command(config::ENVD_PATH);
+        command
+            .args(["-isnotfc", "-port", &ENVD_PORT.to_string()])
+            .env_clear()
+            .env("PATH", config::DEFAULT_PATH)
+            .env("HOME", "/root")
+            .stdin(Stdio::null());
+        let up = || {
+            guest::envd_healthy()
+                && guest
+                    .envd_started()
+                    .inspect_err(|error| log(&format!("envd /init: {error}")))
+                    .is_ok()
+        };
+        match start(children, &mut command, ENVD_START, up) {
+            Ok((pid, Started::Up(exited))) => {
+                if !ready {
+                    ready = true;
+                    // Template builders and the host wait on this port.
+                    listen(READY_PORT, "ready", drop);
+                }
+                let exit = exited.recv();
+                guest.envd_stopped();
+                log(&format!("envd (pid {pid}) ended: {exit:?}"));
+            }
+            Ok((pid, Started::Ended(exit))) => {
+                log(&format!("envd (pid {pid}) never came up: {exit:?}"));
+            }
+            Err(error) => log(&format!("envd: {error}")),
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            pause = Duration::from_millis(200);
+        }
+        thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_secs(10));
+    }
+}
+
+/// How a started daemon fared.
+#[derive(Debug)]
+enum Started {
+    /// It came up; the receiver gets how it ends.
+    Up(Receiver<Exit>),
+    /// It ended, or was stopped for not coming up in time.
+    Ended(Option<Exit>),
+}
+
+/// Starts `command` and waits at most `within` for `up` to say it came
+/// up. One still running then is killed and reaped, so the caller can
+/// start it again from scratch.
+fn start(
+    children: &Children,
+    command: &mut Command,
+    within: Duration,
+    mut up: impl FnMut() -> bool,
+) -> std::io::Result<(i32, Started)> {
+    let (pid, exited) = children.spawn(command)?;
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if let Ok(exit) = exited.try_recv() {
+            return Ok((pid, Started::Ended(Some(exit))));
+        }
+        if up() {
+            return Ok((pid, Started::Up(exited)));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    log(&format!(
+        "pid {pid} did not come up in {within:?}; stopping it"
+    ));
+    if let Err(error) = children.signal(pid, libc::SIGKILL) {
+        log(&format!("stopping pid {pid}: {error}"));
+    }
+    Ok((pid, Started::Ended(exited.recv().ok())))
+}
+
+/// Runs the image's command once, as `docker run` would, under the image's
+/// user, with the image's environment and then `given`'s.
+fn run_command(image: &ImageConfig, given: &CommandEnv, children: &Children) {
+    let command = image.command();
+    let Some((program, args)) = command.split_first() else {
+        return;
+    };
+    let accounts = users::parse_passwd(&fs::read_to_string("/etc/passwd").unwrap_or_default());
+    let groups = users::parse_group(&fs::read_to_string("/etc/group").unwrap_or_default());
+    let user = match users::resolve(&image.user, &accounts, &groups) {
+        Ok(user) => user,
+        Err(error) => {
+            log(&format!("the image's command does not run: {error}"));
+            return;
+        }
+    };
+    let dir = image.working_dir();
+    let _ = fs::create_dir_all(dir);
+    let mut env = image.process_env(&user.home);
+    env.extend(given.clone());
+    let mut process = supervise::command(program);
+    process
+        .args(args)
+        .env_clear()
+        .envs(env)
+        .current_dir(dir)
+        .process_group(0)
+        .stdin(Stdio::null());
+    sys::run_as(&mut process, user.uid, user.gid, user.groups);
+    match children.spawn(&mut process) {
+        Ok((pid, exited)) => {
+            log(&format!("the image's command runs as pid {pid}"));
+            if let Ok(exit) = exited.recv() {
+                log(&format!("the image's command ended: {exit}"));
+            }
+        }
+        Err(error) => log(&format!("the image's command did not start: {error}")),
+    }
+}
+
+/// Ends every process, gently first, then the machine.
+fn shutdown(signals: &Signals, children: &Children) -> ! {
+    log("shutting down");
+    sys::signal_all(libc::SIGTERM);
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    while Instant::now() < deadline && sys::others_alive() {
+        let _ = signals.wait(Duration::from_millis(50));
+        children.reap();
+    }
+    sys::signal_all(libc::SIGKILL);
+    children.reap();
+    sys::sync();
+    if let Err(error) = sys::remount_root_read_only() {
+        log(&format!("remount: {error}"));
+    }
+    sys::sync();
+    let error = sys::restart_machine();
+    log(&format!("restart: {error}"));
+    std::process::exit(1)
+}
+
+#[cfg(test)]
+mod tests;

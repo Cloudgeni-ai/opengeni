@@ -23,7 +23,7 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, ne, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -148,6 +148,11 @@ export class BrowserSessionStateError extends Error {
   readonly name = "BrowserSessionStateError";
 }
 
+/** A capacity save's candidate no longer qualifies; nothing was written. */
+export class BrowserCapacitySuspendClaimRejectedError extends Error {
+  readonly name = "BrowserCapacitySuspendClaimRejectedError";
+}
+
 export type PrepareBrowserSessionCreateInput = {
   accountId: string;
   workspaceId: string;
@@ -183,6 +188,18 @@ export type PrepareBrowserSessionLifecycleInput = Omit<
   PrepareBrowserSessionEndInput,
   "expectedLifecycle" | "expectedControllerGeneration" | "expectedFailureCode"
 >;
+
+/**
+ * What a capacity save claims: the browser it picked as idle, exactly as it
+ * was picked. Under the browser's row lock the save goes ahead only while the
+ * browser is still active on that controller, still unused since the cutoff,
+ * and has no operation in flight.
+ */
+export type BrowserCapacitySuspendClaim = {
+  idleBefore: Date;
+  placementInstanceId: string;
+  controllerGeneration: string;
+};
 
 export type BrowserPrivateCheckpointAuthority = {
   artifactId: string;
@@ -476,6 +493,71 @@ async function replayedMutation(
 
 /** Lifecycles that never return to use; `includeTerminal: false` omits them in SQL. */
 const TERMINAL_INTERACTION_LIFECYCLES = ["ended", "failed"] as const;
+
+/**
+ * Saveable browsers on one controller, least recently used first, that a full
+ * controller may suspend to make room for a new browser. Only active browsers
+ * with a private checkpoint, bound to this exact placement instance, unused
+ * since `idleBefore` and with no lifecycle operation in flight qualify.
+ */
+export async function listBrowserCapacitySuspendCandidates(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    placement: InteractionPlacement;
+    placementInstanceId: string;
+    excludeBrowserSessionId: string;
+    idleBefore: Date;
+    limit: number;
+  },
+): Promise<string[]> {
+  const placementFilter =
+    input.placement.kind === "connected_machine"
+      ? and(
+          eq(schema.browserSessions.placementKind, "connected_machine"),
+          eq(schema.browserSessions.connectedSandboxId, input.placement.sandboxId),
+        )
+      : input.placement.kind === "sandbox_group"
+        ? and(
+            eq(schema.browserSessions.placementKind, "sandbox_group"),
+            eq(schema.browserSessions.sandboxGroupId, input.placement.sandboxGroupId),
+          )
+        : null;
+  if (!placementFilter) return [];
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ id: schema.browserSessions.id })
+        .from(schema.browserSessions)
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.lifecycle, "active"),
+            placementFilter,
+            eq(schema.browserSessions.placementInstanceId, input.placementInstanceId),
+            sql`${schema.browserSessions.controllerGeneration} is not null`,
+            sql`(${schema.browserSessions.capabilities} ->> 'privateCheckpoint') = 'true'`,
+            lt(schema.browserSessions.lastUsedAt, input.idleBefore),
+            ne(schema.browserSessions.id, input.excludeBrowserSessionId),
+            sql`not exists (
+              select 1 from ${schema.interactionOperations}
+              where ${schema.interactionOperations.workspaceId} = ${input.workspaceId}
+                and ${schema.interactionOperations.resourceKind} = 'browser_session'
+                and ${schema.interactionOperations.resourceId} = ${schema.browserSessions.id}
+                and ${schema.interactionOperations.state} in ('prepared', 'dispatched')
+            )`,
+          ),
+        )
+        .orderBy(schema.browserSessions.lastUsedAt, schema.browserSessions.id)
+        .limit(input.limit);
+      return rows.map((row) => row.id);
+    },
+    CONSISTENT_READ,
+  );
+}
 
 export async function listBrowserSessions(
   db: Database,
@@ -1592,12 +1674,52 @@ export async function failBrowserSessionOperation(
 
 export async function prepareBrowserSessionSuspend(
   db: Database,
-  input: PrepareBrowserSessionLifecycleInput,
+  input: PrepareBrowserSessionLifecycleInput & {
+    /** Set for a capacity save; see {@link BrowserCapacitySuspendClaim}. A
+     * browser that no longer qualifies, including one already suspended by
+     * another save, is refused with BrowserCapacitySuspendClaimRejectedError. */
+    capacityClaim?: BrowserCapacitySuspendClaim;
+  },
 ): Promise<BrowserSessionMutationResponseValue> {
+  const claim = input.capacityClaim;
   return await prepareBrowserSessionLifecycleTransition(db, input, {
     kind: "suspend",
     terminalLifecycle: "suspended",
     targetLifecycle: "suspending",
+    ...(claim
+      ? {
+          claim: async (tx: Database, row: BrowserSessionRow) => {
+            if (
+              row.lifecycle !== "active" ||
+              row.placementInstanceId !== claim.placementInstanceId ||
+              row.controllerGeneration !== claim.controllerGeneration ||
+              !row.lastUsedAt ||
+              row.lastUsedAt.getTime() >= claim.idleBefore.getTime()
+            ) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession is no longer idle on this controller",
+              );
+            }
+            const [inFlight] = await tx
+              .select({ operationId: schema.interactionOperations.operationId })
+              .from(schema.interactionOperations)
+              .where(
+                and(
+                  eq(schema.interactionOperations.workspaceId, row.workspaceId),
+                  eq(schema.interactionOperations.resourceKind, "browser_session"),
+                  eq(schema.interactionOperations.resourceId, row.id),
+                  inArray(schema.interactionOperations.state, ["prepared", "dispatched"]),
+                ),
+              )
+              .limit(1);
+            if (inFlight) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession has an operation in flight",
+              );
+            }
+          },
+        }
+      : {}),
     assertReady: (row) => {
       if (row.lifecycle !== "active" || !controllerFromRow(row)) {
         throw new BrowserSessionStateError("Only an active BrowserSession can be suspended");
@@ -1792,6 +1914,8 @@ async function prepareBrowserSessionLifecycleTransition(
     terminalLifecycle: "suspended" | "active";
     targetLifecycle: "suspending" | "restoring";
     assertReady: (row: BrowserSessionRow) => void;
+    /** Checked under the row lock before anything is written. */
+    claim?: (tx: Database, row: BrowserSessionRow) => Promise<void>;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   const digest = lifecycleRequestDigest(
@@ -1827,6 +1951,7 @@ async function prepareBrowserSessionLifecycleTransition(
             });
           }
 
+          if (transition.claim) await transition.claim(tx, row);
           const terminal = row.lifecycle === transition.terminalLifecycle;
           if (!terminal) transition.assertReady(row);
           const now = new Date();

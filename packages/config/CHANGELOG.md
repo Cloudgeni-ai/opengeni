@@ -1,5 +1,42 @@
 # @opengeni/config
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+
+### Patch Changes
+
+- Updated dependencies [641e179]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/codex@4.1.2
+- @opengeni/contracts@4.1.2
+- @opengeni/xai-subscription@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- cf899f4: The e2b sandbox backend now works and can point at any E2B-compatible API. The E2B SDK (2.56.0) is installed, and the API key, now with `OPENGENI_E2B_DOMAIN`, `OPENGENI_E2B_API_URL` and `OPENGENI_E2B_SANDBOX_URL`, is passed to it explicitly on every create and resume instead of relying on ambient `E2B_*` variables. Before, the key was checked but never reached the SDK, and the SDK itself was missing. The connection is kept out of saved session state.
+- Updated dependencies [afff3f9]
+- Updated dependencies [84688e2]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
 ## 4.0.4
 
 ### Minor Changes

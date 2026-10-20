@@ -1,5 +1,44 @@
 # @opengeni/codemode
 
+## 4.2.0
+
+### Patch Changes
+
+- c27cffc: Make bulk browser work easy to script with Opengeni's own browsers. `navigate` takes an optional `waitUntil` (`load` or `network_idle`), and `viewport` defaults to desktop layout when `mobile` is omitted. `tab.navigate(url, { waitUntil })` passes it through in Code Mode. An explicit `load` wait now waits for the page's load event (images and other subresources finished), not just a parsed document. `ogtool call` and the native `codemode call` now write image blocks such as screenshots to files and print their paths instead of base64 pixels, and `--save-image <path>` saves the single image at an exact path. An existing `--save-image` path is refused before the call; a completed call whose image cannot be saved still prints its result with `imageSaveError` and exits with status 4. Expired temporary image directories are removed only when private and owned by the same user.
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- e4e30b8: Reuse integrity verification for the exact immutable catalog snapshot produced by `createAttemptToolEnvironment`, reducing repeated turn-start parsing and hashing. The factory's catalog is now deeply frozen and detached from caller-owned schemas; callers constructing modified fixtures should clone it first. Deserialized catalogs and database reads retain full integrity checks. Catalog bytes, tool definitions and execution authority are unchanged.
+
+  Allow an owning runtime to start deferred tool preparation at provider dispatch rather than during first-request setup. Earlier tool demand starts the same operation, while closing before either event releases resources without starting unused preparation. Existing embedded callers retain immediate background preparation by default.
+
+- Updated dependencies [afff3f9]
+- Updated dependencies [04019de]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

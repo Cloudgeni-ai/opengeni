@@ -232,7 +232,10 @@ import {
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
-import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  changeWorkspaceFileVisibility,
+  publishSandboxFileArtifact,
+} from "../sandbox-file-artifacts";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -254,7 +257,6 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
-  assertNotSiteClampedAgent,
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -299,6 +301,7 @@ import {
 } from "@opengeni/core";
 import {
   buildFleetContextForSession,
+  fleetAgentNotice,
   listFleet,
   provisionSandbox,
   runOnSandbox,
@@ -384,15 +387,9 @@ import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
   afterSiteArtifactMutation,
   requireSiteVersionPublishOpen,
-  SITE_AGENT_OTHER_SITE_MESSAGE,
-  siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
-import {
-  siteAgentClampRefusal,
-  siteAgentClampedToolResult,
-  siteAgentComputeRefusal,
-} from "./site-agent-clamp-tools";
+
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -1179,9 +1176,7 @@ export function buildOpenGeniMcpServer(
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
-      // A Site-started agent does not propose or confirm the organization profile.
-      refuseSiteAgent: async () =>
-        await siteAgentClampRefusal(deps, grant, "the organization profile"),
+
       json,
     });
   }
@@ -2058,7 +2053,6 @@ export function buildOpenGeniMcpServer(
         const adminPause =
           viewer.admin &&
           (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
-        if (adminPause) await assertNotSiteClampedAgent(deps.db, grant, "schedules");
         const task = adminPause
           ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
           : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
@@ -2143,6 +2137,7 @@ export function buildOpenGeniMcpServer(
             db: deps.db,
             grant,
             runMode: task.runMode,
+            reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
             audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
@@ -2288,19 +2283,34 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it. A new file gets this chat's visibility (Only me in an Only me chat, otherwise the workspace) unless you pass visibility; to change an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check the result's access.whoCanOpen before sharing a link with anyone.",
       inputSchema: {
-        path: z4.string().min(1).max(4_096),
+        path: z4.string().min(1).max(4_096).optional(),
+        artifactId: z4.string().uuid().optional(),
+        visibility: z4
+          .enum(["private", "workspace"])
+          .optional()
+          .describe(
+            '"private" is Only me (only the person you work for); "workspace" is everyone in the workspace.',
+          ),
       },
     },
-    async ({ path }) => {
+    async ({ path, artifactId, visibility }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      if ((path === undefined) === (artifactId === undefined))
+        throw new Error("Pass exactly one of path or artifactId.");
+      if (artifactId !== undefined) {
+        if (!visibility)
+          throw new Error("Pass visibility with artifactId to change who can open that file.");
+        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+      }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
-          path,
+          path: path!,
+          visibility,
         }),
       );
     },
@@ -2545,9 +2555,9 @@ function registerSlackBotTools(
     },
   );
 
-  // Scheduled runs retain their person-chosen channel; ordinary chats supply
-  // an explicit destination. A server-owned prepared message id is the durable
-  // Slack delivery identity in both cases.
+  // All accepted work uses the same selected bot capability. A server-owned
+  // prepared message ID is the durable delivery identity; legacy schedules can
+  // still use their saved destination as a default.
   const authorizeBotPost = async () => {
     if (sessionId === null) {
       throw new Error("Bot posting requires a chat");
@@ -2558,7 +2568,7 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message as the Opengeni bot, never as a personal Slack account. In an ordinary chat supply channelId and, if multiple bots are available, connectionId. Scheduled runs omit both and use only the channel chosen by a person in Post to Slack. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
+        "Prepare a message as the Opengeni bot, never as a personal Slack account. Supply channelId and, if multiple bots are available, connectionId. Scheduled and interactive work use the same capability. Older schedules may omit both to use their saved destination. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4
@@ -3428,12 +3438,7 @@ function registerWorkspaceArtifactTools(
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
     await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
-  // An agent started from a Site page changes only the Sites it was started
-  // from and Sites its own session tree created (the HTTP routes check the same).
-  const otherSiteRefusal = async (artifactId: string) =>
-    (await siteAgentMayChangeArtifact(deps, grant, artifactId))
-      ? null
-      : siteAgentClampedToolResult(SITE_AGENT_OTHER_SITE_MESSAGE);
+
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3532,7 +3537,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3660,8 +3665,7 @@ function registerWorkspaceArtifactTools(
       idempotencyKey,
     }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       const braked = await sitePlatformBrakeToolRefusal(() =>
         requireSiteVersionPublishOpen(
           deps,
@@ -3702,8 +3706,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
@@ -3734,8 +3737,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -3766,8 +3768,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -4300,34 +4301,34 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
+        "List the sandboxes this session can run on: the person's connected computers and machines (enrolled selfhosted Connected Machines, such as their Mac, Windows PC or laptop, Linux desktop or server), plus the session's own managed sandbox when the deployment has one. Check it before telling the person you cannot reach their computer; when exactly one entry fits what they mean, use it without asking which. To work on a machine (commands, files, its screen with computer_open, a browser on it with browser_open), sandbox_swap to its `id`; staying there afterwards is fine. run_on is a one-off side channel to another machine without swapping. When talking to the person, name their computers plainly; never mention sandboxes, placements, swaps, sessions, enrollments, tool names or ids. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
-    async () => json(await listFleet(services, await fleetContext())),
+    async () => {
+      const fleet = await listFleet(services, await fleetContext());
+      // The notice comes first so it is read before the machine details.
+      return json({ notice: fleetAgentNotice(fleet), ...fleet });
+    },
   );
 
   server.registerTool(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) =>
-      (await siteAgentComputeRefusal(deps, grant)) ??
-      json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) =>
-      (await siteAgentComputeRefusal(deps, grant)) ??
-      json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4353,8 +4354,6 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const refused = await siteAgentComputeRefusal(deps, grant);
-      if (refused) return refused;
       const typedOp = op as RunOnOp;
       const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
       // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
@@ -4388,8 +4387,6 @@ function registerFleetTools(
       },
     },
     async ({ kind, name }) => {
-      const refused = await siteAgentComputeRefusal(deps, grant);
-      if (refused) return refused;
       if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.
@@ -4462,8 +4459,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
+
       const minted = await mintEnrollToken(deps, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -4495,8 +4491,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
+
       // Personal machines belong to the person the attempt acts for.
       const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
       const resourceGrant =
@@ -4569,8 +4564,6 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
       const resourceGrant =
         sessionId && exactAgentAttemptClaims(grant)
           ? {
@@ -4708,9 +4701,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
@@ -4792,9 +4782,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
@@ -4898,9 +4885,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };

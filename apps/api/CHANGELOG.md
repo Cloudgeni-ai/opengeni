@@ -1,5 +1,157 @@
 # @opengeni/api-router
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+
+### Patch Changes
+
+- 7dcb1d5: Making room on a full browser controller is now safer. A browser is saved to make room only if it is still idle, active on the same controller and free of other operations at the moment it is claimed, and a browser another request already saved no longer counts as room made. A failure while preparing the save returns the browser to active instead of leaving it stuck suspending. Downloads kept when any browser is saved stay private to the owner of a private chat instead of becoming workspace files, even when another person's request made the room, and are read back as that owner once the request is authorized for the chat. Keeping downloads no longer risks the save expiring before capture. The memory-based browser limit now honours memory limits on the controller's own nested cgroup and its ancestors, wherever the cgroup hierarchy is mounted.
+- e189078: A JavaScript dialog (alert, confirm, prompt) that a browser action opens no longer leaves the call hanging or silent. The action returns at once with the dialog's type and text, even when no page view was requested; a batch stops at the dialog and says how many of its actions ran; and page reads, fenced batch steps and screenshots that the dialog blocks end immediately with the same guidance to answer it with `handle_dialog`, instead of waiting out their timeouts. This holds in managed browsers and in the user's own Chrome.
+- 8aa733f: A browser resume that reaches a full controller saves the least recently used idle browser once and retries, like a create, so a capacity-saved browser can come back while its machine is at the limit.
+- 7344f8e: Computer screenshots from adapters that only produce PNG (such as the Windows CUA adapter) no longer fail on large, photographic windows. When a PNG frame exceeds the model image size limit, the API re-encodes the same pixels as JPEG, keeping the frame's identity and dimensions so pointer coordinates stay valid, before falling back to a smaller capture. If nothing fits, the request now fails with a clear, non-retryable error instead of "temporarily unavailable".
+- b8d5b64: A machine's browser limit now follows its memory instead of a flat 64: half of the machine's memory (or its container's limit) at 300 MiB per browser, never under 8, so a 48 GiB machine runs 81 browsers and an 86 GiB one 147. `OPENGENI_BROWSERD_MAX_SESSIONS` still overrides it. When a new browser would exceed the limit, the least recently used browser that has been idle for at least five minutes is saved and stopped to make room; it resumes from its saved working copy the next time it is opened. Nothing changes below the limit.
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- Updated dependencies [641e179]
+- Updated dependencies [641e179]
+- Updated dependencies [7dcb1d5]
+- Updated dependencies [e189078]
+- Updated dependencies [49b121d]
+- Updated dependencies [b02f045]
+- Updated dependencies [aebb860]
+- Updated dependencies [c27cffc]
+- Updated dependencies [93e20fe]
+- Updated dependencies [641e179]
+- Updated dependencies [1830cf0]
+- Updated dependencies [507caf7]
+- Updated dependencies [e018445]
+- Updated dependencies [b8d5b64]
+- Updated dependencies [a336e51]
+- Updated dependencies [5715a3e]
+- Updated dependencies [4c90154]
+- Updated dependencies [523bac6]
+- Updated dependencies [47eeb80]
+- Updated dependencies [78bd3fd]
+- Updated dependencies [641e179]
+- Updated dependencies [da09a6e]
+- Updated dependencies [32c356f]
+- Updated dependencies [dfd0ce5]
+- Updated dependencies [641e179]
+- Updated dependencies [184167c]
+- Updated dependencies [6c603cb]
+- Updated dependencies [fd7e63f]
+- Updated dependencies [ac63730]
+- Updated dependencies [daec93b]
+- Updated dependencies [25c316a]
+  - @opengeni/runtime@4.2.0
+  - @opengeni/db@4.2.0
+  - @opengeni/core@4.2.0
+  - @opengeni/codemode@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/agent-proto@4.2.0
+  - @opengeni/events@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/documents@4.2.0
+  - @opengeni/artifact-tool@4.2.0
+  - @opengeni/capabilities@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/github@4.2.0
+  - @opengeni/interaction@4.2.0
+  - @opengeni/storage@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+  - @opengeni/vaults@4.2.0
+  - @opengeni/vaults-keeper@4.2.0
+  - @opengeni/vaults-onepassword@4.2.0
+  - @opengeni/vaults-protonpass@4.2.0
+  - @opengeni/network@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- Updated dependencies [1e77fbc]
+- Updated dependencies [3beb7bc]
+- Updated dependencies [175f595]
+  - @opengeni/runtime@4.1.2
+  - @opengeni/db@4.1.2
+  - @opengeni/core@4.1.2
+  - @opengeni/documents@4.1.2
+  - @opengeni/events@4.1.2
+  - @opengeni/codemode@4.1.2
+  - @opengeni/agent-proto@4.1.2
+  - @opengeni/artifact-tool@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/github@4.1.2
+  - @opengeni/interaction@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/storage@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+  - @opengeni/vaults@4.1.2
+  - @opengeni/vaults-keeper@4.1.2
+  - @opengeni/vaults-onepassword@4.1.2
+  - @opengeni/vaults-protonpass@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- 938050b: Lost browsers recover in more cases and refuse clearly otherwise. A browser whose controller died is relaunched in its own directory even when the agent-browser daemon that launched it is still running: that daemon is identified from its own environment and stopped. macOS controllers now prove that nothing runs a profile from one full process listing, so lost browsers there resume like on Linux. Daemons whose browser is gone are stopped when a session ends and when a controller starts, instead of running forever. A recovery proof that cannot be completed is a 409 with its reason instead of an internal error, and a lost browser's preserved working copy can be inspected and adopted through the controller generation that owns it.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- Updated dependencies [a254a76]
+- Updated dependencies [373f408]
+- Updated dependencies [afff3f9]
+- Updated dependencies [6156fab]
+- Updated dependencies [e6f56a1]
+- Updated dependencies [84688e2]
+- Updated dependencies [cf899f4]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [7837e4f]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [89ac8a8]
+- Updated dependencies [781a3c1]
+- Updated dependencies [f20f60c]
+- Updated dependencies [91dc10d]
+- Updated dependencies [9be9a82]
+- Updated dependencies [3b980e6]
+- Updated dependencies [523d8f9]
+  - @opengeni/core@4.1.0
+  - @opengeni/db@4.1.0
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/agent-proto@4.1.0
+  - @opengeni/codemode@4.1.0
+  - @opengeni/vaults-protonpass@4.1.0
+  - @opengeni/documents@4.1.0
+  - @opengeni/events@4.1.0
+  - @opengeni/artifact-tool@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/github@4.1.0
+  - @opengeni/interaction@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/storage@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/vaults-keeper@4.1.0
+  - @opengeni/vaults-onepassword@4.1.0
+  - @opengeni/network@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

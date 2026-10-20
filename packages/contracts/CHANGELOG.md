@@ -1,5 +1,34 @@
 # @opengeni/contracts
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+- e018445: Files can be shared like Sites. A file is Only me or visible to the whole workspace; a new file follows its chat, and its owner can share it or limit it again.
+
+  - `client.updateFileVisibility(workspaceId, fileId, { visibility })` changes who can open one file; only its owner can.
+  - `FileAsset.ownerSubjectId`, `FileAsset.access`, `CreateFileUploadResponse.access` and `SandboxFileArtifactReceipt.access` say who can open a file (`access.whoCanOpen` is one plain sentence). `ArtifactCatalogItem.ownedByViewer` marks files the viewer can share.
+  - `PublishSandboxFileArtifactRequest.visibility` chooses a published file's audience.
+  - Opening someone else's Only me file returns `403` with the retained-output reason `"private"`; a missing file is still `404`.
+
+### Patch Changes
+
+- 5715a3e: Preserve complete words such as History, HelloWorld, and Heyday during automatic title cleanup by requiring a separator after greeting prefixes.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+
+## 4.1.3
+
+## 4.1.1
+
+### Patch Changes
+
+- afff3f9: Managed browsers on Linux machines no longer fail requests with ERR_NETWORK_CHANGED when containers, bridges or VPN interfaces come and go on the machine. Each managed Chromium now runs in its own network namespace bridged to the host by pasta, keeping the person's UID, host localhost servers, DNS and the DevTools endpoint working. Machines without pasta or user namespaces launch as before, and browser_open then adds one plain line saying page loads can fail when the machine's network changes.
+- 57e3a3e: Expose actionable Connected Machine credential-expiration diagnostics without overriding live runner authority. The matching native agent pauses refused transport credentials, renews recoverable grants, and persists reconnect-required state only after an explicit permanent renewal denial. Deploy the API and release the updated agent for the complete recovery behavior.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
 ## 4.0.4
 
 ### Minor Changes

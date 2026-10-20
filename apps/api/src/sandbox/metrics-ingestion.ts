@@ -81,6 +81,7 @@ import {
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 import { reconcileScreenControlOnHello } from "./screen-control";
 import { ingestConnectedCommandCompletion } from "./command-completion";
+import { answerOperationInventory } from "./operation-inventory";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -128,6 +129,8 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
  * while GoingOffline and update-progress events remain ordered barriers. Exit
  * collectors use a separate exact-operation lane: draining retained output must
  * not hold that machine's heartbeats or unrelated command completions hostage.
+ * Operation inventory pages share that lane, in their own FIFO queue per
+ * runner process, because answering one can collect retained output too.
  */
 export function createAgentEventIngestionScheduler(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
@@ -141,7 +144,8 @@ export function createAgentEventIngestionScheduler(
     enqueue(payload, subject) {
       let completion = false;
       try {
-        completion = AgentEvent.decode(payload).event?.$case === "operationCompleted";
+        const kind = AgentEvent.decode(payload).event?.$case;
+        completion = kind === "operationCompleted" || kind === "operationInventory";
       } catch {
         /* The control handler owns malformed-event diagnostics. */
       }
@@ -229,6 +233,9 @@ function createAgentEventIngestionLane(
         if (event?.$case === "operationCompleted") {
           completion = true;
           queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+        } else if (event?.$case === "operationInventory") {
+          // Every page is answered, in order: never coalesced.
+          queueKey = `${subject}:inventory`;
         }
       } catch {
         /* The handler owns malformed payload diagnostics. */
@@ -574,6 +581,18 @@ export async function handleAgentEventPayload(
     }
     return;
   }
+  if (event.event?.$case === "operationInventory") {
+    try {
+      await answerOperationInventory(db, ids, event.event.operationInventory, bus, observability);
+    } catch (error) {
+      // Unanswered, the runner repeats the page on its next tick.
+      observability?.warn?.("Failed to answer a runner's operation inventory", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
   // A clean GoingOffline is the machine-plane's typed shutdown signal. Two things
   // happen, in this order:
   //   1. Record it ALWAYS on the machine plane (a Prometheus counter keyed by the
@@ -728,7 +747,8 @@ export async function handleAgentEventPayload(
   }
   // A live machine behind its promoted build is asked to update; the decision
   // reads only this enrollment, and a request never blocks heartbeat ingestion.
-  agentUpdates?.consider(enrollment);
+  // A compute sandbox's agent is pinned by its image and never self-updates.
+  if (enrollment.kind !== "sandbox") agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
@@ -898,6 +918,8 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     transactionalFsWriteMachine: caps.transactionalFsWriteMachine === true,
     credentialRenew: caps.credentialRenew === true,
     browserControlHttp: caps.browserControlHttp === true,
+    runAs: caps.runAs === true,
+    opRelease: caps.opRelease === true,
     screenControl: caps.consentedScreenControl === true,
     ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };
@@ -1049,6 +1071,19 @@ export async function handleHelloPayload(
       agentId: ids.agentId,
     });
     return;
+  }
+  // Every compute sandbox agent serves OpRelease; there is no older release
+  // path for compute. An image built with an older agent is a version error,
+  // and the sandbox's operations are refused until the image is rebuilt.
+  if (authority.kind === "sandbox" && hello.capabilities?.opRelease !== true) {
+    observability?.error?.(
+      "A compute sandbox agent does not support releasing command output (capabilities.op_release); rebuild the sandbox image with the agent from this Opengeni release or later",
+      {
+        workspaceId: ids.workspaceId,
+        agentId: ids.agentId,
+        agentVersion: hello.agentVersion.trim() || "unknown",
+      },
+    );
   }
   let workspaceRoot: string | undefined;
   if (hello.workspaceRoot.length > 0) {

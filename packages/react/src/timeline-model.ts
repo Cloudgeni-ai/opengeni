@@ -32,6 +32,15 @@ export {
 export type { ActivityGroup, ReadableWorkOptions, TurnGroup } from "./timeline/work-presentation";
 export { timelineGroupContainsPresentedImage } from "./timeline/presented-image";
 export { mcpToolLeaf, toolDisplayName } from "./timeline/tool-display-name";
+export {
+  BUILT_IN_TOOL_STEP_NAMES,
+  builtInToolStep,
+  builtInToolStepLabel,
+  TOOL_STEP_IDS,
+  toolStepLabel,
+  toolStepPhase,
+} from "./timeline/tool-steps";
+export type { ToolStepId, ToolStepPhase } from "./timeline/tool-steps";
 export { rawTypeOf } from "./timeline/registry";
 export {
   applyPatchOpsFromToolItem,
@@ -46,11 +55,13 @@ export { formatClockTime } from "./lib/format";
 export {
   applyPatchPresentation,
   askPresentation,
+  callStepPhase,
   execPresentation,
   genericToolIconKind,
   genericToolPresentation,
   pathBasename,
   pathDirname,
+  plainToolRow,
   presentedToolKind,
   runOnPresentation,
   toolRowPresentation,
@@ -63,6 +74,7 @@ export type {
   PresentedToolKind,
   ToolBody,
   ToolChip,
+  ToolDetails,
   ToolIconKind,
   ToolIconTone,
   ToolPatchFile,

@@ -45,6 +45,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
+  resolveWorkspaceDefaultExecutionTarget,
   resolveBundledSkillSelection,
   SessionAgentAccess,
   SessionScopeSubjectId,
@@ -97,7 +98,7 @@ import {
   siteSessionOriginFromMetadata,
   withSiteOriginMetadata,
 } from "../site-session-origin";
-import { assertNotSiteClampedAgent } from "../site-agent-clamp";
+
 import { personalGitHubRepositoryResources } from "./resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -371,8 +372,6 @@ export async function createValidatedScheduledTask(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
-  // An agent started from a Site page acts with the page's reach: no schedules.
-  await assertNotSiteClampedAgent(input.db, input.grant, "schedules");
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
   if (input.payload.runMode === "existing_session") {
@@ -434,8 +433,8 @@ export async function createValidatedScheduledTask(input: {
     workspaceId: input.grant.workspaceId,
   });
   // A schedule created from a Site page records which Site. Each run's
-  // session copies this metadata, so runs record it too and act with the
-  // page's reach (the Site agent clamp). Callers never supply it themselves.
+  // session copies this provenance, without changing its authority.
+  // Callers never supply it themselves.
   const agentConfig: ScheduledTaskAgentConfig = {
     ...validatedAgentConfig,
     metadata: withSiteOriginMetadata(
@@ -970,7 +969,6 @@ export async function assertScheduledTaskMutationOwner(
   grant: AccessGrant,
   taskId: string,
 ): Promise<void> {
-  await assertNotSiteClampedAgent(db, grant, "schedules");
   await assertSiteMayReachScheduledTask(db, grant, taskId);
   const writer = scheduledTaskInitiatorForGrant(grant);
   const matches = await scheduledTaskMutationOwnerMatches(db, {
@@ -1192,12 +1190,45 @@ export async function validateScheduledTaskMachineTarget(input: {
    */
   audience: "user_private" | "workspace_shared";
   requireOnline?: boolean;
+  /** A reusable chat already owns its placement. */
+  reusableSessionId?: string | null;
 }): Promise<{
   sandboxId: string;
   enrollmentId: string;
   sandboxOs: Session["sandboxOs"];
 } | null> {
-  const machineTarget = input.agentConfig.machineTarget;
+  if (input.runMode === "reusable_session" && input.reusableSessionId) return null;
+  let machineTarget = input.agentConfig.machineTarget;
+  const followsWorkspace = input.agentConfig.executionTarget === "workspace_default";
+  if (followsWorkspace) {
+    if (
+      input.runMode === "existing_session" ||
+      machineTarget ||
+      input.agentConfig.sandboxBackend !== undefined
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "Workspace default requires a generated-session schedule without an explicit machine or backend",
+      });
+    }
+    const workspace = await requireWorkspace(input.db, input.grant.workspaceId);
+    let target;
+    try {
+      target = resolveWorkspaceDefaultExecutionTarget(workspace.settings);
+    } catch {
+      throw new HTTPException(422, { message: "The workspace default machine setting is invalid" });
+    }
+    if (
+      target?.kind === "managed" &&
+      (input.settings.sandboxBackend === "none" || input.settings.sandboxBackend === "selfhosted")
+    ) {
+      throw new HTTPException(422, {
+        message: "Managed sandbox is not available in this deployment",
+      });
+    }
+    machineTarget =
+      target?.kind === "machine" ? { targetSandboxId: target.targetSandboxId } : undefined;
+  }
   if (!machineTarget) {
     if (
       input.runMode !== "existing_session" &&
@@ -1230,6 +1261,9 @@ export async function validateScheduledTaskMachineTarget(input: {
     throw new HTTPException(422, {
       message: "the selected Connected Machine is unavailable",
     });
+  }
+  if (sandbox.scope === "user" && followsWorkspace) {
+    throw new HTTPException(422, { message: "The workspace default must be a shared machine" });
   }
   if (sandbox.scope === "user" && input.audience !== "user_private") {
     throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
@@ -1318,7 +1352,8 @@ async function resolveScheduledTaskCreateRigId(input: {
 }): Promise<string | null> {
   if (input.requestedRigId !== undefined) return input.requestedRigId;
   if (input.runMode === "existing_session") return input.target?.rigId ?? null;
-  if (input.agentConfig.machineTarget) return null;
+  if (input.agentConfig.machineTarget || input.agentConfig.executionTarget === "workspace_default")
+    return null;
   const defaultRigId = await getWorkspaceDefaultRigId(input.db, input.grant.workspaceId);
   if (!defaultRigId) return null;
   const rig = await getRig(
@@ -2063,6 +2098,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     !knowledgeSource &&
     !(
       materializedReusable &&
+      nextAgentConfig.executionTarget === input.existing.agentConfig.executionTarget &&
       isDeepStrictEqual(nextAgentConfig.machineTarget, input.existing.agentConfig.machineTarget) &&
       nextAgentConfig.sandboxBackend === input.existing.agentConfig.sandboxBackend
     )

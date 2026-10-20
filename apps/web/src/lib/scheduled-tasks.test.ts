@@ -395,14 +395,14 @@ describe("scheduled task form projection", () => {
     ).not.toHaveProperty("machineTarget");
   });
 
-  test("defaults self-hosted deployments to the first Connected Machine", () => {
+  test("new schedules follow the workspace execution default", () => {
     expect(
       newScheduledTaskFormState(false, [], {
         defaultSandboxBackend: "selfhosted",
         defaultMachineSandboxId: "99999999-9999-4999-8999-999999999999",
       }),
     ).toMatchObject({
-      executionTarget: "machine",
+      executionTarget: "workspace_default",
       sandboxBackend: "",
       machineSandboxId: "99999999-9999-4999-8999-999999999999",
     });
@@ -1094,4 +1094,22 @@ test("historical Atlassian schedules are retired while hosted MCP tasks remain a
       },
     }),
   ).toMatchObject({ active: true });
+});
+
+test("workspace execution defaults round-trip without a stale pinned target", () => {
+  const task = scheduledTask();
+  task.agentConfig.executionTarget = "workspace_default";
+  const form = formStateFromScheduledTask(task);
+  expect(form.executionTarget).toBe("workspace_default");
+  expect(agentConfigFromFormState(form, task)).toMatchObject({
+    executionTarget: "workspace_default",
+  });
+  const pinned = agentConfigFromFormState(
+    { ...form, executionTarget: "managed", sandboxBackend: "docker" },
+    task,
+  );
+  expect(pinned.sandboxBackend).toBe("docker");
+  expect(pinned).not.toHaveProperty("executionTarget");
+  const inherited = agentConfigFromFormState({ ...form, runMode: "existing_session" }, task);
+  expect(inherited).not.toHaveProperty("executionTarget");
 });

@@ -1,5 +1,6 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
@@ -320,4 +321,27 @@ export const embeddingMigrationTail = [
   "0842_site_session_access.sql",
   // Patches the withheld provenance fences and subscription compatibility readers.
   "0843_indexed_inbox_lineage.sql",
+  // Both extend the scoped-credit constraint from withheld 0613 and plan
+  // routines from withheld 0797; replay only after those prerequisites.
+  "0844_free_plan_credit_scope.sql",
+  "0845_signup_eligibility_without_bonus.sql",
+  "0846_independent_session_titles.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Temporarily disables the sessions fence trigger installed by withheld 0345.
+  "0853_connected_machine_root_working_dirs.sql",
+  // Replaces the file ownership trigger from withheld 0461 and reads the file
+  // read-capability table from withheld 0499.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines that withheld 0738 rewrites; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and temporarily disables the sessions fence
+  // trigger installed by withheld 0345.
+  "0856_session_fork_workflow_identity.sql",
+  // Replaces the Slack message routine and alters the access table created by
+  // withheld 0622; replay after it.
+  "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];

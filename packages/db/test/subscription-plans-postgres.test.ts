@@ -14,6 +14,7 @@ import {
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUser,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   expirePlanCreditPeriod,
   freePlanCreditEligible,
   getBillingBalance,
@@ -691,6 +692,7 @@ test("only the organization that actually received the verified signup trial is 
     operationId: crypto.randomUUID(),
     requestFingerprint: "a".repeat(64),
     trialCreditsEnabled: true,
+    trialCreditModelIds: ["model-a"],
   });
   expect(await freePlanCreditEligible(client.db, setup.organizationId)).toBe(true);
   const input = await activate(setup.organizationId, "free");
@@ -719,7 +721,7 @@ test("only the organization that actually received the verified signup trial is 
   expect(await getBillingBalance(client.db, setup.organizationId)).toMatchObject({
     balanceMicros: beforeUpgrade.balanceMicros + 190 * M,
     plan: { key: "pro", creditGrantedMicros: 200 * M, creditRemainingMicros: 200 * M },
-    promotionalCredits: beforeUpgrade.promotionalCredits,
+    promotionalCredits: beforeUpgrade.promotionalCredits?.filter((grant) => !grant.planCredit),
   });
 }, 180_000);
 
@@ -816,6 +818,143 @@ test("seat caps cover provisioning/reactivation, exclude external/service identi
     seatLimit: null,
     seatsUsed: 7,
   });
+}, 180_000);
+
+// Regression for the 19 October 2026 production lockout. Sign-in binds pending
+// email invitations with only the recipient's subject context. The seat
+// trigger must evaluate its own row's organization, whatever the writer's
+// context and whether or not the routine owner bypasses RLS.
+async function asProductionOwnerPosture<T>(fn: () => Promise<T>): Promise<T> {
+  // Production's migration owner has BYPASSRLS; the test owner does not. That
+  // difference hid the lockout here, so exercise the production posture too.
+  const [row] = await shared!.admin<Array<{ owner: string }>>`
+    select pg_get_userbyid(proowner)::text as owner from pg_proc
+    where oid = 'opengeni_private.enforce_organization_plan_seats()'::regprocedure`;
+  const owner = row!.owner;
+  await shared!.admin.unsafe(`ALTER ROLE "${owner.replaceAll('"', '""')}" BYPASSRLS`);
+  try {
+    return await fn();
+  } finally {
+    await shared!.admin.unsafe(`ALTER ROLE "${owner.replaceAll('"', '""')}" NOBYPASSRLS`);
+  }
+}
+
+for (const posture of ["production", "restricted"] as const) {
+  test(`sign-in binds an email invitation into a full seat-limited organization and keeps existing access (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const { accountId, subject } = await account();
+    await activate(accountId, "free");
+    const userId = crypto.randomUUID();
+    const email = `${userId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Existing recipient', ${email}, true)`;
+    const own = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email,
+      name: "Existing recipient",
+    });
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail: email,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    // Fill the organization exactly to its five-seat cap, including this invitation.
+    for (let i = 0; i < 3; i++) await invite(accountId, subject);
+    expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+
+    // A fresh connection: binding must not depend on account context left on a pooled one.
+    const fresh = createDb(shared.appUrl, { max: 1, searchPath: shared.schema });
+    try {
+      const signIn = () =>
+        ensureManagedAccessForUserWithOrganizationMemberships(fresh.db, {
+          userId,
+          email,
+          name: "Existing recipient",
+          emailVerified: true,
+        });
+      const signedIn = await run(signIn);
+      expect(signedIn.organizationMemberships.map((m) => m.organizationId)).toContain(
+        own.defaultAccountId!,
+      );
+      const [bound] = await shared.admin<
+        Array<{ target_subject_id: string | null; revision: string }>
+      >`
+        select target_subject_id, revision::text from organization_membership_invitations where id = ${invitation.id}`;
+      expect(bound?.target_subject_id).toBe(`user:${userId}`);
+      expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+      // A repeated sign-in is a no-op, and the cap still refuses a new seat.
+      await run(signIn);
+      await expectState(() => invite(accountId, subject), "P0S01");
+
+      await run(() =>
+        acceptOrganizationInvitation(client!.db, {
+          organizationId: accountId,
+          actorSubjectId: `user:${userId}`,
+          operationId: crypto.randomUUID(),
+          invitationId: invitation.id,
+          expectedRevision: Number(bound!.revision),
+        }),
+      );
+      expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+      expect((await run(signIn)).organizationMemberships.map((m) => m.organizationId)).toEqual(
+        expect.arrayContaining([own.defaultAccountId!, accountId]),
+      );
+    } finally {
+      await fresh.close();
+    }
+  }, 180_000);
+}
+
+test("seat limits apply to lifecycle writers without the organization's account context", async () => {
+  if (!client || !shared) return;
+  const { accountId, subject } = await account();
+  await activate(accountId, "free");
+  const lapsed = await invite(accountId, subject);
+  await shared.admin`update organization_membership_invitations set expires_at=clock_timestamp()-interval '1 second' where id=${lapsed.id}`;
+  const pending: Array<Awaited<ReturnType<typeof invite>>> = [];
+  for (let i = 0; i < 4; i++) pending.push(await invite(accountId, subject));
+  expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+  // Reviving the lapsed invitation would take a sixth seat. A writer with only
+  // a subject context (as during sign-in) must be refused, not silently allowed,
+  // and its own context must be restored afterwards.
+  await expectState(
+    () =>
+      shared!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.subject_id', ${subject}, true)`;
+        await tx`update organization_membership_invitations set expires_at=clock_timestamp()+interval '1 hour' where id=${lapsed.id}`;
+      }),
+    "P0S01",
+  );
+  const [restored] = await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.subject_id', ${subject}, true)`;
+    // Binding a pending invitation passes through the full seat check at the cap.
+    await tx`update organization_membership_invitations set target_subject_id=${`user:${crypto.randomUUID()}`} where id=${pending[0]!.id}`;
+    return await tx<
+      Array<{ account: string | null }>
+    >`select nullif(current_setting('opengeni.account_id', true), '') as account`;
+  });
+  expect(restored?.account ?? null).toBeNull();
+}, 180_000);
+
+test("the public seat reader still refuses callers outside the organization", async () => {
+  if (!client || !shared) return;
+  const { accountId } = await account();
+  const other = await account();
+  await activate(accountId, "free");
+  await expectState(
+    () =>
+      withRlsContext(client!.db, { accountId: other.accountId }, (tx) =>
+        tx.execute(sql`select organization_plan_seats_used(${accountId}::uuid)`),
+      ),
+    "42501",
+  );
 }, 180_000);
 
 test("expired invitations do not consume seats and organizations without plans remain uncapped", async () => {

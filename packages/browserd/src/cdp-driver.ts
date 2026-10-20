@@ -1,9 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   navigateBrowserMetadataDocument,
   navigateToInterceptedMetadataDocument,
 } from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
-import { resolve as resolvePath } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, extname, resolve as resolvePath } from "node:path";
 import {
   BrowserActionCommand,
   BrowserClipboard,
@@ -82,6 +84,7 @@ import type {
 } from "./downloads";
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
+import { TypedSecretMemory } from "./typed-secrets";
 import {
   completeClientHints,
   hasEmptiedHighEntropyHints,
@@ -96,6 +99,66 @@ import {
 } from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+// Attached Chrome without file access receives upload bytes over its
+// one-megabyte command channel: 384 KiB per chunk is 512 KiB of base64.
+const ATTACHED_TRANSFER_CHUNK_BYTES = 384 * 1024;
+const ATTACHED_TRANSFER_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
+const TRANSFER_UPLOAD_FILES_FUNCTION = `function (parts, files) {
+  if (!(this instanceof HTMLInputElement) || this.type !== 'file' || this.disabled) {
+    return 'not_file_input';
+  }
+  const transfer = new DataTransfer();
+  files.forEach((file, index) => {
+    const chunks = (parts[index] || []).map((data) => {
+      const binary = atob(data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    });
+    transfer.items.add(new File(chunks, file.name, { type: file.type, lastModified: file.lastModified }));
+  });
+  this.files = transfer.files;
+  this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  this.dispatchEvent(new Event('change', { bubbles: true }));
+  return this.files.length;
+}`;
+// Chrome derives an uploaded file's type from its extension; mirror the
+// common ones so pages that check File.type accept the transferred file.
+const UPLOAD_MEDIA_TYPES: Readonly<Record<string, string>> = {
+  ".csv": "text/csv",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".gif": "image/gif",
+  ".htm": "text/html",
+  ".html": "text/html",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".md": "text/markdown",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xml": "application/xml",
+  ".zip": "application/zip",
+};
+
+function uploadMediaType(path: string): string {
+  return UPLOAD_MEDIA_TYPES[extname(path).toLowerCase()] ?? "";
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${Math.ceil(bytes / (1024 * 1024))} MB`;
+}
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
 const TARGET_CLOSE_SETTLE_TIMEOUT_MS = 2_000;
@@ -114,7 +177,11 @@ const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
+/** How long the controller's own close request may take to be acknowledged. */
+const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
+/** Response types that stay open for the life of the page by design. */
+const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
@@ -152,6 +219,58 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 
 class DialogOpenedSignal extends Error {}
 
+/** Page reads cannot complete while a JavaScript dialog is open: the page's
+ * renderer is blocked until the dialog is answered. */
+class DialogBlockedError extends InteractionControllerError {
+  constructor(readonly dialog: BrowserDialog | null) {
+    super("invalid_action", `${dialogSummary(dialog)} ${DIALOG_GUIDANCE}`, false);
+    this.name = "DialogBlockedError";
+  }
+}
+
+/** Page work a dialog cut short. Once abandoned, nothing it still runs may
+ * reach the browser: the caller was already told it did not happen. */
+type DialogWorkScope = { abandoned: boolean };
+const dialogWork = new AsyncLocalStorage<DialogWorkScope>();
+
+function dialogScopedConnection(
+  connection: BrowserCdpConnection,
+  scope: DialogWorkScope,
+): BrowserCdpConnection {
+  return new Proxy(connection, {
+    get(target, property) {
+      if (property === "send") {
+        return async (...args: Parameters<BrowserCdpConnection["send"]>) => {
+          if (scope.abandoned) throw new DialogBlockedError(null);
+          return await target.send(...args);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/** How long work that noticed a dialog itself gets to report it. */
+const DIALOG_WORK_SETTLE_MS = 250;
+
+const DIALOG_GUIDANCE =
+  'Accept or dismiss it with browser_act action {type:"handle_dialog"} before anything else in this tab.';
+
+/** Dialog text is page content: it can echo a secret the action typed, so
+ * it is redacted before it is shortened. */
+function dialogSummary(
+  dialog: BrowserDialog | null,
+  secretValues?: BrowserActionCommandValue["secretValues"],
+): string {
+  if (!dialog) return "A JavaScript dialog is open in this tab.";
+  const message = redactInteractionSecretValues(dialog.message, secretValues)
+    .replace(/\s+/gu, " ")
+    .trim();
+  const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
+  return `A JavaScript ${dialog.type} dialog is open in this tab${shown ? `: "${shown}"` : ""}.`;
+}
+
 export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
   daemonPid?: () => Promise<number | null>;
@@ -185,6 +304,12 @@ export type BrowserCdpConnection = {
     options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
   ): Promise<T>;
   on(method: string, listener: (event: CdpEvent) => void, sessionId?: string): () => void;
+  /**
+   * Resolves once events the browser sent before this call have reached
+   * listeners. Omitted by transports that deliver events in order with
+   * command replies, where a reply already proves it.
+   */
+  flushEvents?: () => Promise<void>;
   waitForEvent(
     method: string,
     options?: {
@@ -262,7 +387,17 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<string, { method: string; url: string; browserInitiated: boolean }>;
+  requests: Map<
+    string,
+    {
+      method: string;
+      url: string;
+      browserInitiated: boolean;
+      /** An event stream or other response that never finishes by design,
+       * so it does not keep the page from being network idle. */
+      stream: boolean;
+    }
+  >;
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   /** Counts cross-document navigations the page started in its main frame. */
@@ -317,7 +452,11 @@ export type AgentBrowserDriverOptions = {
   downloadEvents?: {
     begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
     progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
-    reject(guid: string, failureCode: string): Promise<void>;
+    reject(
+      guid: string,
+      failureCode: string,
+      cancellation: "confirmed" | "uncertain",
+    ): Promise<void>;
   };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
@@ -486,6 +625,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly autoSessions = new Map<string, string>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
+  /** Secret values this controller typed; redacted from everything it returns. */
+  private readonly typedSecrets: TypedSecretMemory;
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -499,6 +640,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
+    this.typedSecrets = TypedSecretMemory.forSession("browser", options.browserSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
@@ -645,13 +787,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return process;
   }
 
+  /** Tab inventory with typed secrets hidden in titles and URLs. Saved
+   * snapshots take their tabs from here, so they never keep a typed secret
+   * either; a tab whose address carried one reopens without it. */
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));
-    return infos.map((info) => {
-      const state = this.states.get(info.targetId);
-      return this.targetFromInfo(info, state ?? null);
-    });
+    return this.typedSecrets.redact(
+      infos.map((info) => this.targetFromInfo(info, this.states.get(info.targetId) ?? null)),
+    );
   }
 
   async openTarget(
@@ -829,6 +973,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     if (this.started && this.targetLifecycle === "runner") {
+      // agent-browser runs its own CDP work in line with its commands. A tab
+      // that closes while it is still preparing that page leaves a request
+      // Chromium never answers, and its daemon then holds every command,
+      // `close` included, for its 30 second CDP deadline. The controller's
+      // own connection is independent of that queue, so it asks the browser
+      // to shut down cleanly first; the daemon's close then only reconciles a
+      // browser that is already exiting.
+      if (connection) {
+        try {
+          await connection.send(
+            "Browser.close",
+            {},
+            { timeoutMs: BROWSER_CLOSE_REQUEST_TIMEOUT_MS },
+          );
+        } catch {
+          // The daemon's close below still shuts the browser down.
+        }
+      }
       try {
         await this.runner.run(["close"], {
           timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS,
@@ -949,20 +1111,36 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
     if (!state.dialog) await this.refreshFrame(state);
-    return this.targetFromInfo(info, state);
+    return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
   async observe(targetId: string): Promise<BrowserObservationValue> {
-    return await this.withTarget(
-      targetId,
-      async (state, info) => await this.observeUnlocked(state, info),
-    );
+    return this.typedSecrets.redact(await this.observeTarget(targetId));
+  }
+
+  private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
+    return await this.withTarget(targetId, async (state, info) => {
+      if (state.dialog) return await this.observeUnlocked(state, info);
+      try {
+        return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
+      } catch (error) {
+        // A dialog opened while the page was being read: report it.
+        if (!(error instanceof DialogBlockedError)) throw error;
+        return await this.observeUnlocked(state, info);
+      }
+    });
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(targetId: string): Promise<BrowserTargetStateValue> {
     return await this.withTarget(targetId, async (state) => {
-      if (!state.dialog) await this.refreshFrame(state);
+      if (!state.dialog) {
+        try {
+          await this.untilDialog(state, async () => await this.refreshFrame(state));
+        } catch (error) {
+          if (!(error instanceof DialogBlockedError)) throw error;
+        }
+      }
       return this.targetStateFrom(state);
     });
   }
@@ -980,44 +1158,53 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.dialog) {
         throw new InteractionDefiniteDriverError(
           "resource_unavailable",
-          "browser DOM reads are unavailable while a dialog is open",
+          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
         );
       }
-      await this.refreshFrame(state);
-      this.assertReadGenerations(request, state);
-      let result: Record<string, unknown>;
-      if (request.kind === "count") {
-        const count = await this.domSelectorCount(state, request.selector);
-        result = { kind: "count", count, truncated: false };
-      } else {
-        const entry = await this.resolveLocator(state, request.locator);
-        const value = await this.callOnNode(
-          state,
-          entry.backendDOMNodeId,
-          DOM_READ_FUNCTION,
-          [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
-          { isolatedFrameId: entry.frameId ?? state.frame.id },
-        );
-        if (!isRecord(value) || value.ok !== true) {
-          throw new InteractionDefiniteDriverError(
-            "locator_not_found",
-            "browser DOM element is no longer available",
-          );
-        }
-        result = {
-          kind: "element",
-          count: 1,
-          text: value.text,
-          value: value.value,
-          attributes: value.attributes,
-          redacted: value.redacted,
-          truncated: value.truncated,
-        };
-      }
-      await this.refreshFrame(state);
-      this.assertReadGenerations(request, state);
-      return BrowserDomReadResponse.parse({ ...this.targetStateFrom(state), ...result });
+      return this.typedSecrets.redact(
+        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
+      );
     });
+  }
+
+  private async readDomUnlocked(
+    state: TargetState,
+    request: BrowserDomReadRequestValue,
+  ): Promise<BrowserDomReadResponseValue> {
+    await this.refreshFrame(state);
+    this.assertReadGenerations(request, state);
+    let result: Record<string, unknown>;
+    if (request.kind === "count") {
+      const count = await this.domSelectorCount(state, request.selector);
+      result = { kind: "count", count, truncated: false };
+    } else {
+      const entry = await this.resolveLocator(state, request.locator);
+      const value = await this.callOnNode(
+        state,
+        entry.backendDOMNodeId,
+        DOM_READ_FUNCTION,
+        [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
+        { isolatedFrameId: entry.frameId ?? state.frame.id },
+      );
+      if (!isRecord(value) || value.ok !== true) {
+        throw new InteractionDefiniteDriverError(
+          "locator_not_found",
+          "browser DOM element is no longer available",
+        );
+      }
+      result = {
+        kind: "element",
+        count: 1,
+        text: value.text,
+        value: value.value,
+        attributes: value.attributes,
+        redacted: value.redacted,
+        truncated: value.truncated,
+      };
+    }
+    await this.refreshFrame(state);
+    this.assertReadGenerations(request, state);
+    return BrowserDomReadResponse.parse({ ...this.targetStateFrom(state), ...result });
   }
 
   private targetStateFrom(state: TargetState): BrowserTargetStateValue {
@@ -1106,7 +1293,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.diagnosticEntries.length > 0 &&
         state.diagnosticEntries[0]!.sequence > afterSequence + 1;
       const limited = available.length > entries.length;
-      return BrowserDiagnosticBatch.parse({
+      const batch = BrowserDiagnosticBatch.parse({
         browserSessionId: this.browserSessionId,
         controllerGeneration: this.controllerGeneration,
         targetId,
@@ -1117,6 +1304,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           : Math.max(afterSequence, state.diagnosticSequence),
         truncated: droppedBeforeCursor || limited,
       });
+      return this.typedSecrets.redact(batch);
     });
   }
 
@@ -1133,96 +1321,107 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const normalized = normalizeScreenshotOptions(options);
-    return await this.withTarget(targetId, async (state) => {
-      const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
-      await this.screenshotRead(
-        "Page.getFrameTree",
-        deadline,
-        async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-      );
-      const metrics = await this.screenshotRead(
-        "Page.getLayoutMetrics",
-        deadline,
-        async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-      );
-      const capture: Record<string, unknown> = {
-        format: normalized.format,
-        fromSurface: true,
-        captureBeyondViewport: normalized.fullPage,
-        ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-      };
-      let cssWidth = metrics.viewport.width;
-      let cssHeight = metrics.viewport.height;
-      let scrollX = metrics.viewport.x;
-      let scrollY = metrics.viewport.y;
-      if (normalized.fullPage) {
-        cssWidth = metrics.content.width;
-        cssHeight = metrics.content.height;
-        scrollX = 0;
-        scrollY = 0;
-        assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-        capture.clip = {
-          x: 0,
-          y: 0,
-          width: cssWidth,
-          height: cssHeight,
-          scale: 1,
-        };
-      }
-      const captureOnce = async () => {
-        const response = await this.screenshotRead(
-          "Page.captureScreenshot",
-          deadline,
-          async (timeoutMs) =>
-            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
-              timeoutMs,
-            }),
-        );
-        const data = decodeBoundedBase64Image(response.data);
-        return { data, dimensions: imageDimensions(data, normalized.format) };
-      };
-      let { data, dimensions } = await captureOnce();
-      // Chromium applies a new device-metrics override asynchronously, so a
-      // capture right after a viewport change can still return the previous
-      // surface. A viewport capture of an emulated device has an exact size;
-      // wait briefly for the compositor instead of publishing the stale frame.
-      const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-      if (expected) {
-        const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-        const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-        const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-        let pause = 16;
-        while (
-          (Math.abs(dimensions.width - expectedWidth) > 1 ||
-            Math.abs(dimensions.height - expectedHeight) > 1) &&
-          Date.now() + pause < settleDeadline
-        ) {
-          await delay(pause);
-          pause = Math.min(pause * 2, 200);
-          const refreshed = await this.screenshotRead(
+    // A JavaScript dialog blocks capture until it is answered: fail at once,
+    // naming it, instead of waiting out the capture deadline.
+    return await this.withTarget(
+      targetId,
+      async (state) =>
+        await this.untilDialog(state, async () => {
+          const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
+          await this.screenshotRead(
+            "Page.getFrameTree",
+            deadline,
+            async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+          );
+          const metrics = await this.screenshotRead(
             "Page.getLayoutMetrics",
             deadline,
             async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
           );
-          cssWidth = refreshed.viewport.width;
-          cssHeight = refreshed.viewport.height;
-          scrollX = refreshed.viewport.x;
-          scrollY = refreshed.viewport.y;
-          ({ data, dimensions } = await captureOnce());
-        }
-      }
-      return this.imageFrame({
-        state,
-        sequence: 0,
-        format: normalized.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-        scrollX,
-        scrollY,
-      });
-    });
+          const capture: Record<string, unknown> = {
+            format: normalized.format,
+            fromSurface: true,
+            captureBeyondViewport: normalized.fullPage,
+            ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+          };
+          let cssWidth = metrics.viewport.width;
+          let cssHeight = metrics.viewport.height;
+          let scrollX = metrics.viewport.x;
+          let scrollY = metrics.viewport.y;
+          if (normalized.fullPage) {
+            cssWidth = metrics.content.width;
+            cssHeight = metrics.content.height;
+            scrollX = 0;
+            scrollY = 0;
+            assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+            capture.clip = {
+              x: 0,
+              y: 0,
+              width: cssWidth,
+              height: cssHeight,
+              scale: 1,
+            };
+          }
+          const captureOnce = async () => {
+            const response = await this.screenshotRead(
+              "Page.captureScreenshot",
+              deadline,
+              async (timeoutMs) =>
+                await this.sendTarget<{ data?: unknown }>(
+                  state,
+                  "Page.captureScreenshot",
+                  capture,
+                  {
+                    timeoutMs,
+                  },
+                ),
+            );
+            const data = decodeBoundedBase64Image(response.data);
+            return { data, dimensions: imageDimensions(data, normalized.format) };
+          };
+          let { data, dimensions } = await captureOnce();
+          // Chromium applies a new device-metrics override asynchronously, so a
+          // capture right after a viewport change can still return the previous
+          // surface. A viewport capture of an emulated device has an exact size;
+          // wait briefly for the compositor instead of publishing the stale frame.
+          const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+          if (expected) {
+            const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+            const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+            const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+            let pause = 16;
+            while (
+              (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                Math.abs(dimensions.height - expectedHeight) > 1) &&
+              Date.now() + pause < settleDeadline
+            ) {
+              await delay(pause);
+              pause = Math.min(pause * 2, 200);
+              const refreshed = await this.screenshotRead(
+                "Page.getLayoutMetrics",
+                deadline,
+                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+              );
+              cssWidth = refreshed.viewport.width;
+              cssHeight = refreshed.viewport.height;
+              scrollX = refreshed.viewport.x;
+              scrollY = refreshed.viewport.y;
+              ({ data, dimensions } = await captureOnce());
+            }
+          }
+          return this.imageFrame({
+            state,
+            sequence: 0,
+            format: normalized.format,
+            data,
+            width: dimensions.width,
+            height: dimensions.height,
+            deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+            scrollX,
+            scrollY,
+          });
+        }),
+    );
   }
 
   async subscribeFrames(
@@ -1337,7 +1536,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
     const parsed = BrowserActionCommand.parse(commandInput);
-    const secretValues = parsed.secretValues;
+    // Remembered before dispatch: a failed action can still leave the value typed.
+    this.typedSecrets.remember(parsed.secretValues);
+    const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
@@ -1363,35 +1564,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
+        const effectsBeforeAction = state.actionEffectCount;
         try {
-          if (
-            completedActions > 0 &&
-            command.action.type === "batch" &&
-            command.action.fenceEachAction
-          ) {
-            await this.refreshFrame(state);
-            this.assertExpectedGenerations(command, state);
+          if (action.type === "handle_dialog") {
+            await this.dispatchAction(state, action, command.operationId);
+          } else {
+            // A dialog the previous action opened, or one that opens while
+            // this action reads the page, ends the batch here: the page
+            // cannot answer until the dialog is handled.
+            await this.untilDialog(state, async () => {
+              if (
+                completedActions > 0 &&
+                command.action.type === "batch" &&
+                command.action.fenceEachAction
+              ) {
+                await this.refreshFrame(state);
+                this.assertExpectedGenerations(command, state);
+              }
+              await this.dispatchAction(state, action, command.operationId);
+            });
           }
-          await this.dispatchAction(state, action, command.operationId);
           state.nodeRoute = null;
           state.actionTrace = undefined;
           completedActions += 1;
           if (state.dialog) {
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog");
-            }
+            if (completedActions < actions.length)
+              throw await this.dialogPause(
+                state,
+                info.targetId,
+                secretValues,
+                actions.length,
+                completedActions,
+              );
             break;
           }
         } catch (error) {
           state.nodeRoute = null;
           state.actionTrace = undefined;
-          if (error instanceof DialogOpenedSignal) {
-            completedActions += 1;
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog", {
-                cause: error,
-              });
-            }
+          if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
+            // This action counts as run once it sent input: that input is
+            // what opened the dialog, or it may have had effects before it.
+            if (state.actionEffectCount !== effectsBeforeAction) completedActions += 1;
+            if (completedActions < actions.length || state.actionEffectCount === initialEffectCount)
+              throw await this.dialogPause(
+                state,
+                info.targetId,
+                secretValues,
+                actions.length,
+                completedActions,
+              );
             break;
           }
           if (
@@ -1422,6 +1643,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
       }
+      // An open dialog is the page's state, whatever view was asked for: the
+      // caller must handle it before anything else works in this tab. Its
+      // observation reads nothing from the blocked page.
+      if (state.dialog)
+        return await this.observeUnlocked(
+          state,
+          await this.requireTargetInfo(await this.ensureConnection(), info.targetId),
+        );
       if (command.observationMode === "none") return null;
       if (command.observationMode === "input") {
         // A live viewer already has pixels. Only native dropdowns need the
@@ -1468,14 +1697,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         // Navigation already waits for the new document to load, and an
         // explicit wait has its own condition; only page input settles here.
         const last = actions.at(-1)?.type;
-        if (last !== "navigate" && last !== "history" && last !== "wait")
-          await this.settleActionRequests(state, requestsBeforeActions);
-        await this.settleFiniteAnimations(state);
-        const currentInfo = await this.requireTargetInfo(
-          await this.ensureConnection(),
-          info.targetId,
-        );
-        return await this.observeUnlocked(state, currentInfo);
+        // The page may open another dialog while it settles (for example the
+        // next one in a sequence after handle_dialog): report that one.
+        try {
+          return await this.untilDialog(state, async () => {
+            if (last !== "navigate" && last !== "history" && last !== "wait")
+              await this.settleActionRequests(state, requestsBeforeActions);
+            await this.settleFiniteAnimations(state);
+            const currentInfo = await this.requireTargetInfo(
+              await this.ensureConnection(),
+              info.targetId,
+            );
+            return await this.observeUnlocked(state, currentInfo);
+          });
+        } catch (error) {
+          if (!(error instanceof DialogBlockedError)) throw error;
+          return await this.observeUnlocked(
+            state,
+            await this.requireTargetInfo(await this.ensureConnection(), info.targetId),
+          );
+        }
       } catch (error) {
         // Input has already been dispatched. A closing popup or failed
         // follow-up read cannot prove that the mutation itself failed.
@@ -1533,11 +1774,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       !(
         error instanceof InteractionDefiniteDriverError ||
         error instanceof InteractionOutcomeUnknownDriverError
-      ) ||
-      (command.observationMode !== undefined && command.observationMode !== "full") ||
-      state.dialog
+      )
     )
       return error;
+    // An open dialog is shown whatever view was asked for: the caller has to
+    // answer it next. Its observation reads nothing from the blocked page.
+    if (state.dialog) {
+      try {
+        const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
+        error.observation = redactInteractionSecretValues(
+          await this.observeUnlocked(state, info),
+          secretValues,
+        );
+      } catch {
+        // Optional context only.
+      }
+      return error;
+    }
+    if (command.observationMode !== undefined && command.observationMode !== "full") return error;
     try {
       if (settleAfter) {
         await this.settleActionRequests(state, settleAfter);
@@ -1554,7 +1808,44 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return error;
   }
 
+  /** The failure for a batch a JavaScript dialog stopped before its end, or
+   * for an action a dialog blocked before it sent any input. It carries the
+   * page's observation, with the dialog, so the caller can answer it next. */
+  private async dialogPause(
+    state: TargetState,
+    targetId: string,
+    secretValues: BrowserActionCommandValue["secretValues"],
+    total: number,
+    completed: number,
+  ): Promise<Error> {
+    const summary = dialogSummary(state.dialog, secretValues);
+    const error =
+      completed === 0
+        ? new InteractionDefiniteDriverError(
+            "invalid_action",
+            `${summary} ${total > 1 ? "No action in this batch ran." : "The action did not run."} ${DIALOG_GUIDANCE}`,
+          )
+        : new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `${summary} ${completed} of ${total} actions ran; the last of them opened the dialog or was interrupted by it, and the remaining actions did not run. ${DIALOG_GUIDANCE} Then check the page before continuing; do not replay the actions that ran.`,
+          );
+    try {
+      const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
+      error.observation = redactInteractionSecretValues(
+        await this.observeUnlocked(state, info),
+        secretValues,
+      );
+    } catch {
+      // Optional context only; the failure itself names the dialog.
+    }
+    return error;
+  }
+
   readClipboard(): BrowserClipboardValue {
+    return this.typedSecrets.redact(this.clipboardValue());
+  }
+
+  private clipboardValue(): BrowserClipboardValue {
     return BrowserClipboard.parse({
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,
@@ -1622,6 +1913,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async ensureConnection(): Promise<BrowserCdpConnection> {
+    const connection = await this.openConnection();
+    const scope = dialogWork.getStore();
+    return scope ? dialogScopedConnection(connection, scope) : connection;
+  }
+
+  private async openConnection(): Promise<BrowserCdpConnection> {
     if (this.connection) return this.connection;
     if (this.connectionPromise) return await this.connectionPromise;
     this.connectionPromise = (async () => {
@@ -1651,7 +1948,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
           ...this.contextScope(),
-          behavior: "allowAndName",
+          // Chromium names each file as in any downloads folder, so its
+          // Downloads page shows the real name and opens it by type.
+          behavior: "allow",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
         });
@@ -1732,6 +2031,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
           const totalBytes = event.params.totalBytes;
+          const filePath =
+            state === "completed" && typeof event.params.filePath === "string"
+              ? event.params.filePath
+              : null;
           if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
           if (
             totalBytes !== undefined &&
@@ -1745,14 +2048,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state,
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
+              filePath,
+              // Browser events and replies share this connection in order, so
+              // a reply proves every earlier download event was delivered.
+              ...(state === "completed"
+                ? {
+                    eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
+                  }
+                : {}),
             })
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection
+              const cancelled = await connection
                 .send("Browser.cancelDownload", { guid, ...this.contextScope() })
-                .catch(() => undefined);
-              await this.downloadEvents?.reject(guid, cancelReason);
+                .then(
+                  () => true,
+                  () => false,
+                );
+              await this.downloadEvents?.reject(
+                guid,
+                cancelReason,
+                cancelled ? "confirmed" : "uncertain",
+              );
             })
             .catch(() => undefined);
         }),
@@ -2224,7 +2542,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "console",
             level,
-            message: consoleMessage(event.params.args),
+            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
             url: null,
             method: null,
             status: null,
@@ -2243,7 +2561,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "page_error",
             level: "error",
-            message: exceptionMessage(details),
+            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
             url: boundedUrlField(details.url),
             method: null,
             status: null,
@@ -2273,6 +2591,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               // being on almost every site, would otherwise show as a failed
               // request in every observation.
               browserInitiated: event.params.type === "Other" && initiator.type === "other",
+              stream: event.params.type === "EventSource",
             });
             boundMap(state.requests, 10_000);
           }
@@ -2320,6 +2639,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const response = isRecord(event.params.response) ? event.params.response : null;
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (
+            request &&
+            typeof response?.mimeType === "string" &&
+            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
+          ) {
+            request.stream = true;
+          }
           if (requestId && typeof response?.status === "number" && response.status >= 400) {
             this.recordFailedRequest(state, requestId, {
               message: `HTTP ${Math.trunc(response.status)}`,
@@ -3851,7 +4178,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     frameId: string,
     paths: readonly string[],
   ): Promise<void> {
-    if (this.engine === "chromium") {
+    if (this.engine !== "lightpanda") {
       const input = await this.callOnNode(
         state,
         backendNodeId,
@@ -3880,12 +4207,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
     }
+    const effectsBeforeSelection = state.actionEffectCount;
     try {
       await this.sendActionTarget(state, "DOM.setFileInputFiles", {
         files: [...paths],
         backendNodeId,
       });
     } catch (error) {
+      if (
+        this.engine === "chrome" &&
+        error instanceof CdpProtocolError &&
+        error.message === "Not allowed"
+      ) {
+        // Chrome lets an extension's debugger pick local files only when the
+        // person allowed it file URL access. Without that, put the same files
+        // on the input from the page, as a drag-and-drop would. The refusal
+        // selected nothing, so it is not a page effect.
+        state.actionEffectCount = effectsBeforeSelection;
+        await this.transferUploadFiles(state, backendNodeId, frameId, paths);
+        return;
+      }
       if (
         error instanceof CdpProtocolError &&
         error.message === "Node is not a file input element"
@@ -3896,6 +4237,139 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       throw error;
+    }
+  }
+
+  /** Set a file input's files from inside the page, in bounded chunks that fit
+   * the attached browser's one-megabyte command limit. The input receives the
+   * same input and change events as when Chrome selects the files itself. */
+  private async transferUploadFiles(
+    state: TargetState,
+    backendNodeId: number | null,
+    frameId: string,
+    paths: readonly string[],
+  ): Promise<void> {
+    if (backendNodeId === null) {
+      throw new InteractionDefiniteDriverError("invalid_action", "upload requires a file input");
+    }
+    const files = await Promise.all(paths.map(async (path) => ({ path, info: await stat(path) })));
+    const totalBytes = files.reduce((sum, file) => sum + file.info.size, 0);
+    if (totalBytes > ATTACHED_TRANSFER_UPLOAD_MAX_BYTES) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        `these files total ${formatMegabytes(totalBytes)}; without file access this Chrome can ` +
+          `receive at most ${formatMegabytes(ATTACHED_TRANSFER_UPLOAD_MAX_BYTES)} per upload. ` +
+          'The person can turn on "Allow access to file URLs" for the Opengeni extension in ' +
+          "chrome://extensions to upload larger files",
+      );
+    }
+    const world = await this.sendTarget<{ executionContextId?: unknown }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId, worldName: "opengeni-upload" },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) {
+      throw new Error("CDP did not create an isolated upload world");
+    }
+    const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+      backendNodeId,
+      executionContextId: world.executionContextId,
+    });
+    if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "upload file input is no longer present",
+      );
+    }
+    const inputId = resolved.object.objectId;
+    let partsId: string | null = null;
+    try {
+      const parts = await this.sendTarget<{ result?: unknown }>(state, "Runtime.callFunctionOn", {
+        objectId: inputId,
+        functionDeclaration: "function () { return []; }",
+        returnByValue: false,
+      });
+      if (!isRecord(parts.result) || typeof parts.result.objectId !== "string") {
+        throw new Error("CDP did not create an upload buffer");
+      }
+      partsId = parts.result.objectId;
+      for (const [index, file] of files.entries()) {
+        const bytes = await readFile(file.path);
+        if (bytes.byteLength !== file.info.size) {
+          throw new InteractionDefiniteDriverError(
+            "resource_unavailable",
+            "an upload file changed while it was being read",
+          );
+        }
+        for (let offset = 0; offset < bytes.byteLength; offset += ATTACHED_TRANSFER_CHUNK_BYTES) {
+          const appended = await this.sendTarget<{ exceptionDetails?: unknown }>(
+            state,
+            "Runtime.callFunctionOn",
+            {
+              objectId: partsId,
+              functionDeclaration:
+                "function (index, data) { (this[index] = this[index] || []).push(data); }",
+              arguments: [
+                { value: index },
+                {
+                  value: bytes
+                    .subarray(offset, offset + ATTACHED_TRANSFER_CHUNK_BYTES)
+                    .toString("base64"),
+                },
+              ],
+              returnByValue: true,
+            },
+          );
+          if (appended.exceptionDetails) throw new Error("browser upload buffer failed");
+        }
+      }
+      const result = await this.sendActionTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId: inputId,
+          functionDeclaration: TRANSFER_UPLOAD_FILES_FUNCTION,
+          arguments: [
+            { objectId: partsId },
+            {
+              value: files.map((file) => ({
+                name: basename(file.path),
+                type: uploadMediaType(file.path),
+                lastModified: Math.trunc(file.info.mtimeMs),
+              })),
+            },
+          ],
+          returnByValue: true,
+        },
+        { potentialEffect: true },
+      );
+      if (result.exceptionDetails) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "the page failed while receiving the upload; inspect the file input before continuing",
+        );
+      }
+      const selected = isRecord(result.result) ? result.result.value : undefined;
+      if (selected === "not_file_input") {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload target is no longer an enabled file input",
+        );
+      }
+      if (selected !== files.length) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "the file input did not keep every uploaded file; inspect it before continuing",
+        );
+      }
+    } finally {
+      for (const objectId of [partsId, inputId]) {
+        if (objectId) {
+          await this.sendTarget(state, "Runtime.releaseObject", { objectId }).catch(
+            () => undefined,
+          );
+        }
+      }
     }
   }
 
@@ -5153,7 +5627,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (action.condition === "load") {
-        if (await this.documentReady(state)) return;
+        // An explicit load wait means the load event: images and other
+        // subresources finished, unlike navigation's own interactive wait.
+        if ((await this.evaluate(state, "document.readyState")) === "complete") return;
       } else if (action.condition === "network_idle") {
         if (state.networkTrackingOverflow) {
           throw new InteractionDefiniteDriverError(
@@ -5162,9 +5638,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             true,
           );
         }
+        // Live pages keep event streams open for good. Only requests that
+        // can still finish count as loading; anything not positively known
+        // to be a stream (a slow fetch or a long poll alike) still counts.
+        const loading = [...state.inflightRequests].some(
+          (requestId) => state.requests.get(requestId)?.stream !== true,
+        );
         if (
           (await this.documentReady(state)) &&
-          state.inflightRequests.size === 0 &&
+          !loading &&
           Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
         ) {
           return;
@@ -5242,8 +5724,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       // The renderer reports a request or navigation it starts before it
       // answers a later command on the same session, so one cheap round trip
-      // makes sure the ones this action started have been seen.
+      // makes sure the ones this action started have been sent, and a flush
+      // that they have been seen where events arrive separately from replies.
       await this.sendTarget(state, "Runtime.getIsolateId", {});
+      await (await this.ensureConnection()).flushEvents?.();
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
     }
@@ -5474,6 +5958,60 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new DialogOpenedSignal("browser action opened a JavaScript dialog");
       }
       return result.value;
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  /**
+   * Runs page work that a JavaScript dialog would block, ending it as soon as
+   * a dialog is open instead of waiting out command deadlines: until the
+   * dialog is answered the page cannot reply. Work that notices the dialog
+   * itself (input that opened it) settles right away, and its own account of
+   * what happened stands; otherwise it is abandoned and settles later.
+   */
+  private async untilDialog<T>(state: TargetState, work: () => Promise<T>): Promise<T> {
+    if (state.dialog) throw new DialogBlockedError(state.dialog);
+    const connection = await this.ensureConnection();
+    let unsubscribe: () => void = () => undefined;
+    const opened = new Promise<{ kind: "dialog" }>((resolve) => {
+      unsubscribe = connection.on(
+        "Page.javascriptDialogOpening",
+        () => resolve({ kind: "dialog" }),
+        state.sessionId,
+      );
+    });
+    const scope: DialogWorkScope = { abandoned: false };
+    const settled = dialogWork.run(scope, work).then(
+      (value) => ({ kind: "result" as const, value }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    try {
+      let outcome = await Promise.race([settled, opened]);
+      if (outcome.kind === "dialog") {
+        const dialog = outcome;
+        outcome = await Promise.race([settled, delay(DIALOG_WORK_SETTLE_MS).then(() => dialog)]);
+      }
+      if (outcome.kind === "dialog") {
+        // The work is still blocked on the page. It must never act after
+        // its caller was told where it stopped.
+        scope.abandoned = true;
+        throw new DialogBlockedError(state.dialog);
+      }
+      if (outcome.kind === "result") return outcome.value;
+      const error = outcome.error;
+      // A typed driver outcome already says what happened. Anything else that
+      // failed while a dialog is open failed because of it.
+      if (
+        state.dialog &&
+        !(
+          error instanceof DialogBlockedError ||
+          error instanceof InteractionDefiniteDriverError ||
+          error instanceof InteractionOutcomeUnknownDriverError
+        )
+      )
+        throw new DialogBlockedError(state.dialog);
+      throw error;
     } finally {
       unsubscribe();
     }
@@ -6686,33 +7224,46 @@ function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {
   return "info";
 }
 
-function consoleMessage(value: unknown): string {
+/** Console text with each argument redacted before it is clipped and joined:
+ * a secret clipped mid-argument and followed by more text would otherwise
+ * survive as an unrecognizable prefix. */
+function consoleMessage(value: unknown, redact: (text: string) => string): string {
   if (!Array.isArray(value) || value.length === 0) return "Console event";
-  const text = value.slice(0, 100).map(remoteObjectText).filter(Boolean).join(" ").slice(0, 8_192);
+  const text = value
+    .slice(0, 100)
+    .map((entry) => remoteObjectText(entry, redact))
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 8_192);
   return text || "Console event";
 }
 
-function remoteObjectText(value: unknown): string {
+function remoteObjectText(value: unknown, redact: (text: string) => string): string {
   if (!isRecord(value)) return "";
   if (value.value !== undefined) {
-    if (typeof value.value === "string") return value.value.slice(0, 4_096);
+    if (typeof value.value === "string") return redact(value.value).slice(0, 4_096);
     try {
-      return JSON.stringify(value.value).slice(0, 4_096);
+      return redact(JSON.stringify(value.value)).slice(0, 4_096);
     } catch {
       return "[unserializable value]";
     }
   }
-  if (typeof value.description === "string") return value.description.slice(0, 4_096);
+  if (typeof value.description === "string") return redact(value.description).slice(0, 4_096);
   return typeof value.type === "string" ? `[${value.type.slice(0, 128)}]` : "";
 }
 
-function exceptionMessage(details: Record<string, unknown>): string {
+function exceptionMessage(
+  details: Record<string, unknown>,
+  redact: (text: string) => string,
+): string {
   const exception = isRecord(details.exception) ? details.exception : {};
-  return (
-    boundedTextField(exception.description, 8_192) ??
-    boundedTextField(details.text, 8_192) ??
-    "Unhandled page exception"
-  );
+  const text =
+    typeof exception.description === "string"
+      ? exception.description
+      : typeof details.text === "string"
+        ? details.text
+        : null;
+  return text === null ? "Unhandled page exception" : redact(text).slice(0, 8_192);
 }
 
 function boundedTextField(value: unknown, maxLength: number): string | null {

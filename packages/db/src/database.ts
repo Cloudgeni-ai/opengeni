@@ -58,6 +58,13 @@ export type RlsContext = {
   workspaceId?: string | null;
 };
 
+/** The requested tenant no longer exists. Other scope/setup failures stay errors. */
+export class WorkspaceNotFoundError extends Error {
+  constructor(readonly workspaceId: string) {
+    super(`Workspace not found: ${workspaceId}`);
+  }
+}
+
 export type SessionRlsActorContext = {
   /** Server-authorized session attachment scope; never taken from request JSON. */
   sessionAttachmentReadAccess?: SessionAttachmentReadAccess;
@@ -91,6 +98,15 @@ export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAcces
  */
 export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext> | undefined {
   return sessionRlsActorContext.getStore();
+}
+
+/**
+ * Runs `fn` with no session RLS actor, so its reads see the tenant as the
+ * system does (private chats included). Only for narrow reads whose result is
+ * never disclosed to the request; not re-exported from the package.
+ */
+export async function withoutSessionRlsActor<T>(fn: () => Promise<T>): Promise<T> {
+  return await sessionRlsActorContext.exit(() => siteViewerRlsContext.exit(fn));
 }
 
 /**
@@ -713,7 +729,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
       from ${sql.raw(last)}, resolved, parent`,
   );
   if (!row) {
-    if (input.accountId === null) throw new Error(`Workspace not found: ${input.workspaceId}`);
+    if (input.accountId === null) throw new WorkspaceNotFoundError(input.workspaceId!);
     throw new Error("RLS context could not be applied on the active backend");
   }
   const expectedWorkspaceId = input.workspaceId ?? "";
@@ -1026,7 +1042,7 @@ export async function rlsContextForWorkspace(
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
   if (!row) {
-    throw new Error(`Workspace not found: ${workspaceId}`);
+    throw new WorkspaceNotFoundError(workspaceId);
   }
   return { accountId: row.accountId, workspaceId };
 }

@@ -253,6 +253,29 @@ function captureScope(fixture: Fixture) {
 }
 
 describe("warm checkpoints while background commands run", () => {
+  test("a compute sandbox gets no periodic warm checkpoint: compute persists it", async () => {
+    const fixture = await runningTurnWithBackgroundCommand();
+    await admin`update sandbox_leases set backend = 'compute', resume_backend_id = 'compute'
+      where id = ${fixture.leaseId}`;
+    let reads = 0;
+    const session = {
+      backendId: "compute",
+      state: { workspacePersistence: "tar" },
+      persistWorkspace: async () => {
+        reads += 1;
+        return new Uint8Array();
+      },
+    };
+    const { skipped, metrics } = skipRecorder();
+    expect(await checkpoint(fixture, session, metrics)).toBe(false);
+    expect(reads).toBe(0);
+    expect(skipped).toEqual(["capture_policy"]);
+    expect(await readLease(db, fixture.workspaceId, fixture.attempt.sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      archiveCapture: null,
+    });
+  });
+
   test("a command running across the snapshot interval is checkpointed around, never starving capture", async () => {
     const fixture = await runningTurnWithBackgroundCommand();
     const provider = modalSession();

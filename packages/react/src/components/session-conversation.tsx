@@ -18,12 +18,15 @@ import {
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import {
   useSessionConversation,
   type SessionConversationController,
   type UseSessionConversationOptions,
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
+import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
+import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
@@ -186,6 +189,18 @@ export type SessionConversationProps = ClientOverride &
     /** Defaults to filling the host. The host owns available height. */
     height?: CSSProperties["height"];
     /**
+     * Mark the conversation read while the person can see it. Defaults to
+     * true: whenever the timeline is on screen, the page is visible and the
+     * window focused, each delivered reply, question or failure is
+     * acknowledged for the signed-in person (once per reply, not per streamed
+     * token). Unread state, and notifications a host derives from it (for
+     * example from `turn.completed` webhooks that check `session.unread`),
+     * then skip replies the person already watched. A hidden or collapsed
+     * timeline, a background tab, or an unfocused window acknowledges nothing.
+     * Set `false` when viewing must not count as reading.
+     */
+    readAcknowledgement?: boolean | undefined;
+    /**
      * Light or dark. Defaults to `auto`: follow the host page (an enclosing
      * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
      * host's `color-scheme`, then its background), not the OS setting alone.
@@ -248,18 +263,26 @@ export function SessionConversation({
   fetch,
   ...props
 }: SessionConversationProps) {
-  if (baseUrl === undefined) return <RetryingConversation {...props} />;
+  const resetKey = `${props.workspaceId ?? ""}:${props.sessionId}`;
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <RetryingConversation {...props} />
+      </ConversationRenderBoundary>
+    );
   const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope
-      baseUrl={baseUrl}
-      workspaceId={workspaceId}
-      client={client}
-      headers={headers}
-      fetch={fetch}
-    >
-      <RetryingConversation {...rest} />
-    </SessionProxyScope>
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        workspaceId={workspaceId}
+        client={client}
+        headers={headers}
+        fetch={fetch}
+      >
+        <RetryingConversation {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
   );
 }
 
@@ -313,6 +336,7 @@ function ConversationView({
   loadSkillReview,
   className,
   height = "100%",
+  readAcknowledgement = true,
   theme,
   surface,
   labels: labelOverrides,
@@ -348,6 +372,28 @@ function ConversationView({
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
+  // Read means seen: the timeline itself must be on screen (hosts may hide it
+  // while keeping the composer), in a visible, focused page, showing the live
+  // end of the conversation rather than an older page of history.
+  const foreground = useDocumentForeground();
+  const timelineOnScreen = useElementOnScreen(
+    () => region.current?.querySelector("[data-og-timeline-scroller]") ?? null,
+    loadFailed,
+  );
+  useSessionReadAcknowledgement({
+    client: context.client,
+    workspaceId: context.workspaceId,
+    sessionId,
+    session: detail.session,
+    events: feed.events,
+    active:
+      readAcknowledgement &&
+      foreground &&
+      timelineOnScreen &&
+      feed.initialHistoryReady &&
+      !loadFailed &&
+      !feed.hasNewer,
+  });
   const defaultInteractiveBlock = useDefaultInteractiveBlock(
     context.client,
     context.workspaceId,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   OPENGENI_BROWSER_EXTENSION_URL,
   CUA_DESKTOP_TOOLS,
@@ -104,6 +105,7 @@ import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
   browserActModelInputSchema,
+  computerActModelInputSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
@@ -594,7 +596,33 @@ const BrowserUploadPathsAction = z
       .max(INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND),
   })
   .strict();
-const AgentBrowserAction = z.union([...BrowserAction.options, BrowserUploadPathsAction]);
+/** navigate may name a load state to wait for; the tool dispatches it as the
+ * navigation followed by an ordinary wait action. */
+const AgentBrowserNavigateAction = z
+  .object({
+    type: z.literal("navigate"),
+    url: z.string().min(1).max(8_192),
+    waitUntil: z.enum(["load", "network_idle"]).optional(),
+  })
+  .strict();
+/** viewport defaults to desktop layout without touch emulation. */
+const AgentBrowserViewportAction = z
+  .object({
+    type: z.literal("viewport"),
+    width: z.number().int().min(240).max(4_096),
+    height: z.number().int().min(240).max(4_096),
+    mobile: z.boolean().optional(),
+    deviceScaleFactor: z.number().min(0.5).max(4).optional(),
+  })
+  .strict();
+const AgentBrowserAction = z.union([
+  AgentBrowserNavigateAction,
+  AgentBrowserViewportAction,
+  ...BrowserAction.options.filter(
+    (option) => option.shape.type.value !== "navigate" && option.shape.type.value !== "viewport",
+  ),
+  BrowserUploadPathsAction,
+]);
 type AgentBrowserAction = z.infer<typeof AgentBrowserAction>;
 const AgentBrowserActionBatch = z
   .object({
@@ -605,20 +633,41 @@ const AgentBrowserActionBatch = z
   .strict();
 type AgentBrowserActionBatch = z.infer<typeof AgentBrowserActionBatch>;
 
-/** Publish every upload path once and return the action with File IDs only. */
-async function withPublishedUploadPaths(
+/** Return the dispatched action: upload paths published once as File IDs, a
+ * viewport's omitted `mobile` as desktop, and a navigate's `waitUntil` as the
+ * navigation followed by a wait for that load state. */
+async function toDispatchedBrowserAction(
   action: AgentBrowserAction | AgentBrowserActionBatch,
   publish: (path: string) => Promise<string>,
 ): Promise<BrowserAction | BrowserActionBatch> {
-  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction> => {
-    if (item.type !== "upload" || !("paths" in item)) return item as BrowserAction;
+  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction[]> => {
+    if (item.type === "navigate") {
+      const navigate = BrowserAction.parse({ type: "navigate", url: item.url });
+      const waitUntil = "waitUntil" in item ? item.waitUntil : undefined;
+      if (!waitUntil) return [navigate];
+      return [navigate, { type: "wait", condition: waitUntil }];
+    }
+    if (item.type === "viewport") {
+      return [BrowserAction.parse({ ...item, mobile: item.mobile ?? false })];
+    }
+    if (item.type !== "upload" || !("paths" in item)) return [item as BrowserAction];
     const workspaceFileIds: string[] = [];
     for (const path of item.paths) workspaceFileIds.push(await publish(path));
-    return { type: "upload", locator: item.locator, workspaceFileIds };
+    return [{ type: "upload", locator: item.locator, workspaceFileIds }];
   };
-  if (action.type !== "batch") return await resolve(action);
+  if (action.type !== "batch") {
+    const resolved = await resolve(action);
+    return resolved.length === 1
+      ? resolved[0]!
+      : BrowserActionBatch.parse({ type: "batch", actions: resolved });
+  }
   const actions: BrowserAction[] = [];
-  for (const item of action.actions) actions.push(await resolve(item));
+  for (const item of action.actions) actions.push(...(await resolve(item)));
+  if (actions.length > INTERACTION_MAX_ACTIONS_PER_BATCH) {
+    throw new Error(
+      `a batch runs at most ${INTERACTION_MAX_ACTIONS_PER_BATCH} actions, and each navigate with waitUntil counts as two; split the batch`,
+    );
+  }
   return BrowserActionBatch.parse({ ...action, actions });
 }
 
@@ -815,6 +864,33 @@ const ComputerObserveOutput = ComputerObservation.extend({
     .optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+/** Action types a computer_act batch runs. Each acts on the state the one
+ * before it left; a pointer action needs the pixels of one exact screenshot,
+ * so it is not batched. */
+const COMPUTER_BATCH_ACTION_TYPES: ReadonlySet<ComputerAction["type"]> = new Set([
+  "semantic",
+  "keyboard",
+]);
+const ComputerActionBatch = z
+  .object({
+    type: z.literal("batch"),
+    actions: z
+      .array(ComputerAction)
+      .min(1)
+      .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
+      .superRefine((actions, context) => {
+        actions.forEach((action, index) => {
+          if (!COMPUTER_BATCH_ACTION_TYPES.has(action.type)) {
+            context.addIssue({
+              code: "custom",
+              path: [index, "type"],
+              message: `a batch runs semantic and keyboard actions; run a ${action.type} action on its own`,
+            });
+          }
+        });
+      }),
+  })
+  .strict();
 const ComputerActInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -822,9 +898,33 @@ const ComputerActInput = z
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
-    action: ComputerAction,
+    action: z.union([ComputerAction, ComputerActionBatch]),
   })
   .strict();
+/** What a computer_act batch did: each action's settled operation, in order,
+ * up to the first one that did not complete, and the latest observation of
+ * the target. */
+const ComputerActionBatchReceipt = z
+  .object({
+    type: z.literal("batch"),
+    targetId: z.string().min(1).max(512),
+    actionCount: z.number().int().positive(),
+    steps: z.array(
+      z
+        .object({
+          operationId: z.string().uuid(),
+          state: ComputerActionReceipt.shape.state,
+          error: ComputerActionReceipt.shape.error,
+        })
+        .strict(),
+    ),
+    observation: ComputerObservation.nullable(),
+    /** The observation was read before the action the batch stopped at, and
+     * a fresh read after it failed. */
+    observationPrecedesStop: z.boolean(),
+  })
+  .strict();
+const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
 const ComputerLifecycleInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -892,6 +992,48 @@ export function createInteractionAttemptToolDefinitions(
     }
     return published;
   };
+  // Whether a ComputerSession runs a computer_act batch as one operation.
+  // The computer fixes the answer for the session's life, across agent
+  // updates, so every try of one batch, concurrent or retried, picks the same
+  // way and cannot send its actions under both ways' operation IDs. A yes is
+  // kept; a no is asked again, since a new session may say yes. An
+  // unreadable or not yet reported answer sends nothing (see
+  // actInComputerBatch).
+  const actionBatchSupport = new Map<string, Promise<boolean>>();
+  const supportsActionBatches = (computerSessionId: string): Promise<boolean> => {
+    let known = actionBatchSupport.get(computerSessionId);
+    if (!known) {
+      known = Promise.resolve()
+        .then(() => input.transport.getComputerSession(input.workspaceId, computerSessionId))
+        .then(
+          (session) => {
+            if (!session.capabilities)
+              throw new Error(
+                "this computer session has not reported what it supports yet, so the batch was not sent; retry the call",
+              );
+            return session.capabilities.actionBatches === true;
+          },
+          (error: unknown) => {
+            throw new Error(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+                0,
+                8_192,
+              ),
+            );
+          },
+        )
+        .then((supported) => {
+          if (!supported) actionBatchSupport.delete(computerSessionId);
+          return supported;
+        })
+        .catch((error: unknown) => {
+          actionBatchSupport.delete(computerSessionId);
+          throw error;
+        });
+      actionBatchSupport.set(computerSessionId, known);
+    }
+    return known;
+  };
   const currentTab = new CurrentBrowserTab({
     listLiveSessions: async () =>
       filterDiscoveredSessions(
@@ -908,34 +1050,254 @@ export function createInteractionAttemptToolDefinitions(
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
-  /** Run one call on the requested or current tab and remember it on success. */
-  const onTab = async <T>(
-    value: { browserSessionId?: string | undefined; targetId?: string | undefined },
-    run: (tab: ResolvedBrowserTarget) => Promise<T>,
-  ): Promise<T> => {
-    const tab = await currentTab.target(value);
-    try {
-      const output = await run(tab);
-      currentTab.use(tab.browserSessionId, tab.targetId);
-      return output;
-    } catch (error) {
-      if (isGoneBrowserError(error)) currentTab.failed(tab);
+  // Every call notes the event count when it starts. A browser resumed after
+  // that, or whose resume no result had shown by then, has new tab IDs and
+  // reloaded pages the call's caller had not seen when it chose the call.
+  let browserEventCount = 0;
+  const resumeFailures = new WeakSet<Error>();
+  type ResumedTabs = z.infer<typeof BrowserTargetListResponse>;
+  /** Resumes in flight, shared by concurrent calls on the same browser. */
+  const resumesInFlight = new Map<string, Promise<ResumedTabs | null>>();
+  /** Each browser's latest resume that may have reloaded its tabs, with the
+   * restored tabs once they were read. */
+  const lastResumes = new Map<
+    string,
+    { count: number; tabs: ResumedTabs | null; shownAt: number | null }
+  >();
+  /** This browser's resume that the caller of a call started at `startedAt`
+   * has not seen, if any. */
+  const unseenResume = (browserSessionId: string, startedAt: number) => {
+    const resume = lastResumes.get(browserSessionId);
+    return resume &&
+      (resume.count > startedAt || resume.shownAt === null || resume.shownAt > startedAt)
+      ? resume
+      : null;
+  };
+  /** The tabs a resume restored, read again if the resume could not. */
+  const restoredTabs = async (
+    browserSessionId: string,
+    resume: { tabs: ResumedTabs | null },
+  ): Promise<ResumedTabs> =>
+    resume.tabs ?? (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId));
+  /** A result about the browser's current tabs reached the caller. */
+  const markResumeShown = (browserSessionId: string) => {
+    const resume = lastResumes.get(browserSessionId);
+    if (resume && resume.shownAt === null) resume.shownAt = ++browserEventCount;
+  };
+  /** Resume a browser the API refused to use because it is not running. A
+   * browser suspended while idle (to make room for another one on its
+   * machine) or lost to a restarted controller resumes from its saved working
+   * copy, the way browser_open resumes it. Concurrent calls share one resume.
+   * Returns the resumed browser's tabs, or null when the browser was not
+   * paused, so the original error stands. */
+  const resumePausedBrowser = async (
+    browserSessionId: string,
+    operationId: string,
+    startedAt: number,
+  ): Promise<ResumedTabs | null> => {
+    const inFlight = resumesInFlight.get(browserSessionId);
+    if (inFlight) return await inFlight;
+    // The browser was resumed while this call ran, so its refusal came from
+    // before that resume.
+    const completed = lastResumes.get(browserSessionId);
+    if (completed && completed.count > startedAt) {
+      return await restoredTabs(browserSessionId, completed);
+    }
+    const count = ++browserEventCount;
+    const resume = resumeBrowser(browserSessionId, operationId, count).catch((error: unknown) => {
+      // A failed resume is the answer for every call waiting on it; none of
+      // them retries it.
+      if (error instanceof Error) resumeFailures.add(error);
       throw error;
+    });
+    resumesInFlight.set(browserSessionId, resume);
+    try {
+      return await resume;
+    } finally {
+      resumesInFlight.delete(browserSessionId);
     }
   };
-  /** Run one call on the requested or current browser and remember it on success. */
-  const onBrowser = async <T>(
-    browserSessionId: string | undefined,
-    run: (browser: ResolvedBrowserSession) => Promise<T>,
-  ): Promise<T> => {
-    const browser = await currentTab.session(browserSessionId);
+  const resumeBrowser = async (
+    browserSessionId: string,
+    operationId: string,
+    count: number,
+  ): Promise<z.infer<typeof BrowserTargetListResponse> | null> => {
+    let before: z.infer<typeof BrowserSession>;
     try {
-      const output = await run(browser);
+      before = await input.transport.getBrowserSession(input.workspaceId, browserSessionId);
+    } catch {
+      // When even the browser's state can't be read, the original refusal stands.
+      return null;
+    }
+    if (!isResumablePausedBrowser(before)) return null;
+    const response = await input.transport.resumeBrowserSession(
+      input.workspaceId,
+      browserSessionId,
+      { operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId) },
+    );
+    const resumed = { count, tabs: null as ResumedTabs | null, shownAt: null as number | null };
+    if (response.operation.state !== "failed") {
+      // From here the browser may have reloaded its tabs, even if what
+      // follows fails. Earlier tab IDs are gone.
+      lastResumes.set(browserSessionId, resumed);
+      currentTab.use(browserSessionId, null);
+    }
+    const failure = response.operation.error;
+    if (response.operation.state === "outcome_unknown") {
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${browserSessionId} had stopped, and whether it resumed is unknown: ${failure?.message ?? "no answer"}. Check it with browser_open before retrying.`,
+        { code: failure?.code ?? "outcome_unknown", retryable: false, outcomeUnknown: true },
+      );
+    }
+    if (response.operation.state === "failed") {
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${browserSessionId} had stopped and could not be resumed: ${failure?.message ?? response.operation.state}`,
+        {
+          code: failure?.code ?? "browser_resume_failed",
+          retryable: failure?.retryable ?? false,
+        },
+      );
+    }
+    if (response.session.lifecycle !== "active") {
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${browserSessionId} had stopped and is still resuming from its saved state; try again shortly.`,
+        { code: "browser_resuming", retryable: true },
+      );
+    }
+    resumed.tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
+    // Later calls on the current tab use the restored selected tab, whether
+    // or not this call goes on to succeed.
+    currentTab.use(
+      browserSessionId,
+      resumed.tabs.targets.find((target) => target.selected)?.id ?? null,
+    );
+    return resumed.tabs;
+  };
+  /** After a resume, tab IDs are new and unsaved page state may be gone, so a
+   * call aimed at an earlier tab does not run. Report the restored tabs and
+   * the selected tab's outline, so the next call can act on them directly.
+   * `completed` names a tab operation that had already run before the
+   * browser stopped, so the caller does not repeat it. */
+  const resumedBrowserError = async (
+    tabs: z.infer<typeof BrowserTargetListResponse>,
+    completed?: string,
+  ): Promise<BrowserTargetResolutionError> => {
+    const selectedTab = tabs.targets.find((target) => target.selected);
+    const observation = selectedTab
+      ? await input.transport
+          .observeBrowserTarget(input.workspaceId, tabs.browserSessionId, selectedTab.id)
+          .then((observed) => projectBrowserObservation(observed, "compact"))
+          .catch(() => undefined)
+      : undefined;
+    markResumeShown(tabs.browserSessionId);
+    return new BrowserTargetResolutionError(
+      "browser_resumed",
+      [
+        completed
+          ? `The tab ${completed} completed, then this browser stopped (it was idle while its machine needed room, or its controller restarted) and has been resumed from its saved state.`
+          : "This browser had stopped (it was idle while its machine needed room, or its controller restarted) and has been resumed from its saved state.",
+        completed
+          ? "Its tabs reloaded with new targetIds and unsaved page input may be gone. Check the tabs below for the result before repeating it."
+          : "Its tabs reloaded with new targetIds and unsaved page input may be gone, so this call did not run. Continue from the tabs below.",
+        browserTabsText({
+          ...agentTargetList(tabs),
+          ...(observation ? { mutationObservation: observation } : {}),
+        }),
+      ].join("\n"),
+    );
+  };
+  /** Run one call on the requested or current tab and remember it on success.
+   * When the browser had stopped, it resumes. A read on the current tab then
+   * runs again on the resumed browser's selected tab ("replay"); other calls
+   * report the restored tabs instead ("report"), since they name a tab that no
+   * longer exists or would act on a page the agent has not seen. A "report"
+   * call never runs on a browser resumed after it started, or whose resume no
+   * result had shown before it started. */
+  const onTab = async <T>(
+    value: { browserSessionId?: string | undefined; targetId?: string | undefined },
+    context: { operationId: string },
+    afterResume: "replay" | "report",
+    run: (tab: ResolvedBrowserTarget) => Promise<T>,
+  ): Promise<T> => {
+    const startedAt = browserEventCount;
+    let tab: ResolvedBrowserTarget | undefined;
+    try {
+      // Finding the current tab lists the browser's tabs, which also fails
+      // while it is stopped.
+      tab = await currentTab.target(value);
+      if (afterResume === "report") {
+        // A resume still in flight, or one no result had shown before this
+        // call started, means the page it would act on reloaded unseen. A
+        // failed resume fails this call too.
+        await resumesInFlight.get(tab.browserSessionId);
+        const unseen = unseenResume(tab.browserSessionId, startedAt);
+        if (unseen) {
+          throw await resumedBrowserError(await restoredTabs(tab.browserSessionId, unseen));
+        }
+      }
+      const output = await run(tab);
+      currentTab.use(tab.browserSessionId, tab.targetId);
+      markResumeShown(tab.browserSessionId);
+      return output;
+    } catch (error) {
+      if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) throw error;
+      const browser = tab ?? (await currentTab.session(value.browserSessionId));
+      const resumed = await resumePausedBrowser(
+        browser.browserSessionId,
+        context.operationId,
+        startedAt,
+      );
+      if (!resumed) throw error;
+      const selectedTab = resumed.targets.find((target) => target.selected);
+      if (afterResume === "report" || value.targetId !== undefined || !selectedTab) {
+        throw await resumedBrowserError(resumed);
+      }
+      const replayed = { ...browser, targetId: selectedTab.id, implicitTarget: true };
+      const output = await run(replayed);
+      currentTab.use(replayed.browserSessionId, replayed.targetId);
+      markResumeShown(replayed.browserSessionId);
+      return output;
+    }
+  };
+  /** Run one tab operation on the requested or current browser and remember
+   * it on success, resuming a browser that had stopped as onTab does. Listing
+   * a tab, or opening one the browser refused to open, then runs again; select
+   * and close name a tab from before the resume, whose ID no longer exists. */
+  const onBrowser = async <T>(
+    value: { browserSessionId?: string | undefined; operation: string },
+    context: { operationId: string },
+    run: (browser: ResolvedBrowserSession, progress: { changed: boolean }) => Promise<T>,
+  ): Promise<T> => {
+    const startedAt = browserEventCount;
+    const browser = await currentTab.session(value.browserSessionId);
+    // Set once the operation has changed the browser, so it never runs twice.
+    const progress = { changed: false };
+    try {
+      const output = await run(browser, progress);
       currentTab.use(browser.browserSessionId);
+      markResumeShown(browser.browserSessionId);
       return output;
     } catch (error) {
       if (isGoneBrowserError(error)) currentTab.failed(browser);
-      throw error;
+      if (!isBrowserNotRunningError(error)) throw error;
+      const resumed = await resumePausedBrowser(
+        browser.browserSessionId,
+        context.operationId,
+        startedAt,
+      );
+      if (!resumed) throw error;
+      if (progress.changed) throw await resumedBrowserError(resumed, value.operation);
+      if (value.operation !== "list" && value.operation !== "open") {
+        throw await resumedBrowserError(resumed);
+      }
+      const output = await run(browser, progress);
+      currentTab.use(browser.browserSessionId);
+      markResumeShown(browser.browserSessionId);
+      return output;
     }
   };
   const add = <TInput extends z.ZodType, TOutput extends z.ZodType>(options: {
@@ -1069,7 +1431,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1129,8 +1491,8 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: false,
     modelText: browserTabsText,
-    execute: async (value) =>
-      await onBrowser(value.browserSessionId, async ({ browserSessionId }) => {
+    execute: async (value, context) =>
+      await onBrowser(value, context, async ({ browserSessionId }, progress) => {
         let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
         if (value.operation === "open") {
           mutationObservation = await input.transport.openBrowserTarget(
@@ -1153,6 +1515,7 @@ export function createInteractionAttemptToolDefinitions(
           currentTab.forgetTarget(browserSessionId, value.targetId);
           return agentTargetList(closed);
         }
+        if (mutationObservation) progress.changed = true;
         const tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
         if (mutationObservation) {
           currentTab.use(browserSessionId, mutationObservation.target.id);
@@ -1176,8 +1539,8 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     modelText: agentObservationText,
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         const observationRequest = input.transport.observeBrowserTarget(
           input.workspaceId,
           browserSessionId,
@@ -1194,6 +1557,13 @@ export function createInteractionAttemptToolDefinitions(
           ),
         ]);
         if (observed.status === "rejected") throw observed.reason;
+        // A tab cannot be captured while a JavaScript dialog is open; the
+        // observation names the dialog.
+        if (captured.status === "rejected" && observed.value.dialog)
+          return new InteractionExecutionResult(
+            projectBrowserObservation(observed.value, value.view ?? "compact"),
+            [{ type: "text" as const, text: BROWSER_DIALOG_NO_SCREENSHOT }],
+          );
         if (captured.status === "rejected") throw captured.reason;
         let observation = observed.value;
         const frame = captured.value;
@@ -1225,15 +1595,15 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "read"],
     title: "Read focused browser content",
     description:
-      "Search, count, or read a subtree from one tab's accessibility snapshot; filter by ref, role, name, accessibility text, state, or action, and scopeRef. AX mode refreshes the full tree internally and cannot return DOM attributes or editable input values. Use mode=dom with a ref, CSS, test-id, or placeholder locator for bounded element text, editable value, or allowlisted attributes, or a CSS selector for count. Content-matching role/label/text locators and CSS attribute/pseudo selectors are rejected for DOM reads to prevent secret-value probing. DOM reads use exact causal fences and only fixed, read-only browser-side projection; callers cannot supply JavaScript. Ref DOM locators refresh accessibility; CSS/test-id/placeholder locators avoid that scan.",
+      "Search, count, or read a subtree from one tab's accessibility snapshot; filter by ref, role, name, accessibility text, state, or action, and scopeRef. AX mode refreshes the full tree internally and cannot return DOM attributes. Use mode=dom with a ref, CSS, test-id, or placeholder locator for bounded element text, a long field value, or allowlisted attributes, or a CSS selector for count. Content-matching role/label/text locators and CSS attribute/pseudo selectors are rejected for DOM reads to prevent secret-value probing. DOM reads use exact causal fences and only fixed, read-only browser-side projection; callers cannot supply JavaScript. Ref DOM locators refresh accessibility; CSS/test-id/placeholder locators avoid that scan.",
     input: BrowserReadInput,
     output: BrowserReadToolOutput,
     readOnly: true,
     idempotent: true,
     modelText: (output) =>
       output.source === "accessibility" ? browserReadText(output) : JSON.stringify(output),
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         if (value.mode === "dom") {
           const state =
             value.expectedTargetGeneration !== undefined &&
@@ -1300,13 +1670,13 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "screenshot"],
     title: "Capture browser screenshot",
     description:
-      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit.",
+      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit. In Code Mode, tab.screenshot({saveTo}) or the shell client's --save-image <path> writes the image to a file, and Code Mode output names image files instead of carrying their pixels.",
     input: BrowserScreenshotInput,
     output: BrowserScreenshotOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         const frame = await input.transport.captureBrowserTarget(
           input.workspaceId,
           browserSessionId,
@@ -1344,16 +1714,17 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
     modelText: agentActionText,
+    // An action never runs on a page that reloaded since the agent saw it.
     execute: async (value, context) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
-        const action = await withPublishedUploadPaths(value.action, (path) =>
+      await onTab(value, context, "report", async ({ browserSessionId, targetId }) => {
+        const action = await toDispatchedBrowserAction(value.action, (path) =>
           publishUploadPath(context.operationId, path),
         );
         // Omitted fences are resolved by the API from the live target in the same
@@ -1375,6 +1746,12 @@ export function createInteractionAttemptToolDefinitions(
         });
         const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
         if (!value.includeScreenshot) return projected;
+        // A tab cannot be captured while a JavaScript dialog is open; the
+        // receipt already names the dialog.
+        if (receipt.observation?.dialog)
+          return new InteractionExecutionResult(projected, [
+            { type: "text" as const, text: BROWSER_DIALOG_NO_SCREENSHOT },
+          ]);
         // The action has already run. A failed capture must not turn its
         // receipt into an error the model could answer by replaying the action.
         try {
@@ -1421,9 +1798,12 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserDiagnosticBatch,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
+    // Diagnostics belong to the tab from before a resume, which is gone.
+    execute: async (value, context) =>
       await onTab(
         value,
+        context,
+        "report",
         async ({ browserSessionId, targetId }) =>
           await input.transport.listBrowserDiagnostics(
             input.workspaceId,
@@ -1767,7 +2147,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
@@ -1874,17 +2254,53 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. Pause for new state instead of batching steps that depend on an unseen result. Returns the durable causal receipt.",
     input: ComputerActInput,
-    output: ComputerActionReceipt,
+    output: ComputerActOutput,
     readOnly: false,
     idempotent: true,
+    modelInputSchema: computerActModelInputSchema,
     modelText: computerActionText,
     execute: async (value, context) => {
+      const action = value.action;
+      if (action.type === "batch") {
+        return await actInComputerBatch(
+          input.transport,
+          input.workspaceId,
+          value,
+          action.actions,
+          context.operationId,
+          () => supportsActionBatches(value.computerSessionId),
+        );
+      }
+      // A launch acts on no window's contents, and an action that names the
+      // observation it was read from has its content fence already: both need
+      // only the target's generation, which the target list gives without
+      // reading the window again (a fresh read would retire the refs the
+      // caller holds). A target missing from the list is read below, which
+      // explains why.
+      const listedGeneration =
+        action.type !== "launch" &&
+        (action.type === "pointer" || value.expectedObservationId == null)
+          ? undefined
+          : (value.expectedTargetGeneration ??
+            (
+              await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId)
+            ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
+      if (listedGeneration !== undefined) {
+        return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
+          operationId: context.operationId,
+          targetId: value.targetId,
+          expectedTargetGeneration: listedGeneration,
+          expectedObservationId: value.expectedObservationId ?? null,
+          expectedFrameId: null,
+          action,
+        });
+      }
       const current =
         value.expectedTargetGeneration !== undefined &&
-        (value.action.type === "pointer"
-          ? (value.expectedFrameId ?? value.action.frameId) != null
+        (action.type === "pointer"
+          ? (value.expectedFrameId ?? action.frameId) != null
           : value.expectedObservationId != null)
           ? null
           : await input.transport.observeComputerTarget(
@@ -1902,12 +2318,12 @@ export function createInteractionAttemptToolDefinitions(
             ? (current?.observationId ?? null)
             : value.expectedObservationId,
         expectedFrameId:
-          value.action.type === "pointer"
+          action.type === "pointer"
             ? value.expectedFrameId === undefined
-              ? value.action.frameId
+              ? action.frameId
               : value.expectedFrameId
             : null,
-        action: value.action,
+        action,
       });
     },
   });
@@ -2181,6 +2597,334 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
   });
 }
 
+/** Failures the browser resume route can continue from the browser's own
+ * working copy (an expired resume, or a suspension that found its controller
+ * restarted). Every other lost browser stays as it is. */
+const RESUMABLE_LOST_BROWSER_FAILURES: ReadonlySet<string> = new Set([
+  "controller_resource_missing",
+  "controller_transition_expired",
+]);
+
+/** A browser that is not running but continues from its saved working copy
+ * when resumed: suspended, or lost to a restarted controller. */
+function isResumablePausedBrowser(session: z.infer<typeof BrowserSession>): boolean {
+  return (
+    session.lifecycle === "suspended" ||
+    // A browser lost to a restarted controller continues from its preserved
+    // working copy. The resume refuses, and says why, when it cannot.
+    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
+  );
+}
+
+/** A stable operation ID for a step a tool call takes on its own behalf, so a
+ * retried call repeats the same step instead of starting another. */
+function derivedOperationId(purpose: string, operationId: string, subject: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni:${purpose}:v1\n${operationId}\n${subject}`, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Run a computer_act batch: each action is its own durable operation, fenced
+ * by the observation the action before it returned, so it acts on the state
+ * that action left. Stops at the first action that does not complete. A
+ * retried call derives the same operation IDs; an action that already ran
+ * under its ID returns its recorded receipt, whatever fence it ran with.
+ * Before reading a fresh fence, the step's recorded receipt is read alongside
+ * it, so a retry reuses what already ran even when the window is gone.
+ */
+async function actInComputerBatch(
+  transport: InteractionTransport,
+  workspaceId: string,
+  value: z.output<typeof ComputerActInput>,
+  actions: ComputerAction[],
+  operationId: string,
+  /** Whether the computer runs the whole batch as one operation. */
+  runsNatively: () => Promise<boolean> = async () => false,
+): Promise<z.output<typeof ComputerActionBatchReceipt>> {
+  type Observation = z.output<typeof ComputerObservation>;
+  type Receipt = z.output<typeof ComputerActionReceipt>;
+  const observe = async (): Promise<Observation> =>
+    await transport.observeComputerTarget(workspaceId, value.computerSessionId, value.targetId);
+  // A recorded receipt, "absent" when nothing ran under the ID, or "unknown"
+  // when the lookup itself failed.
+  const recorded = async (stepOperationId: string): Promise<Receipt | "absent" | "unknown"> => {
+    try {
+      return await transport.getComputerActionReceipt(
+        workspaceId,
+        value.computerSessionId,
+        stepOperationId,
+      );
+    } catch (error) {
+      return error instanceof OpenGeniApiError && error.status === 404 ? "absent" : "unknown";
+    }
+  };
+  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // The two ways derive different operation IDs. The computer fixes its
+  // answer for the session's life, so every try of one batch picks the same
+  // way. A recorded receipt still decides first: both first receipts are read
+  // before anything is sent, and running the other way would send the actions
+  // again.
+  const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
+  const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
+  const [nativePrior, firstStepPrior] = await Promise.all([
+    recorded(nativeOperationId),
+    recorded(firstStepOperationId),
+  ]);
+  let nativeBatch: boolean;
+  if (typeof nativePrior === "object") nativeBatch = true;
+  else if (typeof firstStepPrior === "object") nativeBatch = false;
+  else {
+    nativeBatch = await runsNatively();
+    if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
+      throw new Error(
+        "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
+      );
+  }
+  if (nativeBatch)
+    return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
+      operationId: nativeOperationId,
+      prior: nativePrior,
+      observe,
+      recorded,
+    });
+  let generation = value.expectedTargetGeneration;
+  let observationId = value.expectedObservationId;
+  let observation: Observation | null = null;
+  let observedAfterLastAction = true;
+  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  for (const [index, action] of actions.entries()) {
+    const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
+    let receipt: Receipt | null = null;
+    if (index === 0 && typeof firstStepPrior === "object") {
+      receipt = firstStepPrior;
+    } else if (generation === undefined || observationId == null) {
+      // Read the recorded receipt first: a fresh read replaces the latest
+      // observation, which would make a recovered receipt's fence stale.
+      const prior = index === 0 ? firstStepPrior : await recorded(stepOperationId);
+      if (typeof prior === "object") {
+        receipt = prior;
+      } else {
+        let current: Observation;
+        try {
+          current = await observe();
+        } catch (error) {
+          // The first action failing is the call failing. Later, the actions
+          // before this one did run and must still be reported.
+          if (index === 0) throw error;
+          steps.push(
+            prior === "absent"
+              ? {
+                  operationId: stepOperationId,
+                  state: "failed",
+                  error: {
+                    code: "resource_unavailable",
+                    message:
+                      `the window could not be read before this action, so it was not sent: ${reasonOf(error)}`.slice(
+                        0,
+                        8_192,
+                      ),
+                    retryable: true,
+                  },
+                }
+              : {
+                  operationId: stepOperationId,
+                  state: "outcome_unknown",
+                  error: {
+                    code: "outcome_unknown",
+                    message:
+                      `this call did not send this action because the window could not be read, and whether an earlier try of this batch sent it could not be read either: ${reasonOf(error)}`.slice(
+                        0,
+                        8_192,
+                      ),
+                    retryable: false,
+                  },
+                },
+          );
+          observedAfterLastAction = false;
+          break;
+        }
+        generation ??= current.target.targetGeneration;
+        observationId ??= current.observationId;
+        observation = current;
+      }
+    }
+    if (!receipt) {
+      try {
+        // Without a recorded receipt, the fences were read above.
+        receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
+          operationId: stepOperationId,
+          targetId: value.targetId,
+          expectedTargetGeneration: generation!,
+          expectedObservationId: observationId!,
+          expectedFrameId: null,
+          action,
+        });
+      } catch (error) {
+        // A retried batch reaches an action that already ran with the fence
+        // of its first run, or the reply to this request was lost: the
+        // recorded receipt says what happened.
+        const prior = await recorded(stepOperationId);
+        if (typeof prior !== "object") {
+          if (index === 0) throw error;
+          steps.push({
+            operationId: stepOperationId,
+            state: "outcome_unknown",
+            error: {
+              code: "outcome_unknown",
+              message: `the request for this action failed: ${reasonOf(error)}`.slice(0, 8_192),
+              retryable: false,
+            },
+          });
+          observedAfterLastAction = false;
+          break;
+        }
+        receipt = prior;
+      }
+    }
+    steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
+    if (receipt.observation) observation = receipt.observation;
+    if (receipt.state !== "completed") {
+      observedAfterLastAction = receipt.observation !== null;
+      break;
+    }
+    // The action opened a window: the actions after it were meant for this
+    // target, or for a window not yet seen, so the batch stops at the window.
+    if (receipt.observation && receipt.observation.target.id !== value.targetId) break;
+    generation = receipt.observation?.target.targetGeneration;
+    observationId = receipt.observation?.observationId ?? null;
+  }
+  if (!observedAfterLastAction) {
+    // Show the state the stopped action left, not the state before it.
+    try {
+      observation = await observe();
+      observedAfterLastAction = true;
+    } catch {
+      // Keep the earlier state; the text says it predates the stopped action.
+    }
+  }
+  return {
+    type: "batch",
+    targetId: value.targetId,
+    actionCount: actions.length,
+    steps,
+    observation,
+    observationPrecedesStop: !observedAfterLastAction && observation !== null,
+  };
+}
+
+/**
+ * Run a computer_act batch as one operation on a computer that supports it:
+ * the computer checks every action against the one observation the batch
+ * names, runs them in order and observes the target once. A batch it stopped
+ * part way says in its error details how many actions completed, so each
+ * action is still reported as it would be one at a time.
+ */
+async function actInComputerNativeBatch(
+  transport: InteractionTransport,
+  workspaceId: string,
+  value: z.output<typeof ComputerActInput>,
+  actions: ComputerAction[],
+  batch: {
+    operationId: string;
+    /** The batch's recorded receipt, read before this call sends anything. */
+    prior: z.output<typeof ComputerActionReceipt> | "absent" | "unknown";
+    observe: () => Promise<z.output<typeof ComputerObservation>>;
+    recorded: (
+      operationId: string,
+    ) => Promise<z.output<typeof ComputerActionReceipt> | "absent" | "unknown">;
+  },
+): Promise<z.output<typeof ComputerActionBatchReceipt>> {
+  const entries = actions.map((action) => {
+    if (action.type !== "semantic" && action.type !== "keyboard")
+      throw new Error(`a batch runs semantic and keyboard actions, not ${action.type}`);
+    return action;
+  });
+  let receipt = typeof batch.prior === "object" ? batch.prior : null;
+  let generation = value.expectedTargetGeneration;
+  let observationId = value.expectedObservationId ?? null;
+  if (!receipt && (generation === undefined || observationId === null)) {
+    // The recorded receipt was read first: a fresh read replaces the latest
+    // observation, which would make a recovered receipt's fence stale.
+    if (observationId !== null) {
+      // The batch names its observation: the target list gives the
+      // generation without reading the window again, which would retire the
+      // refs the caller holds.
+      generation = (
+        await transport.listComputerTargets(workspaceId, value.computerSessionId)
+      ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
+    }
+    if (generation === undefined || observationId === null) {
+      const current = await batch.observe();
+      generation ??= current.target.targetGeneration;
+      observationId ??= current.observationId;
+    }
+  }
+  if (!receipt) {
+    try {
+      receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
+        operationId: batch.operationId,
+        targetId: value.targetId,
+        expectedTargetGeneration: generation!,
+        expectedObservationId: observationId,
+        expectedFrameId: null,
+        action: { type: "batch", actions: entries },
+      });
+    } catch (error) {
+      // A retried call, or a lost reply: the recorded receipt says what ran.
+      const prior = await batch.recorded(batch.operationId);
+      if (typeof prior !== "object") throw error;
+      receipt = prior;
+    }
+  }
+  const { operationId, state, error } = receipt;
+  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  if (state === "completed") {
+    for (let index = 0; index < actions.length; index++)
+      steps.push({ operationId, state, error: null });
+  } else {
+    const { batchActionsCompleted, batchStoppedActionState, ...details } = error?.details ?? {};
+    const completed =
+      typeof batchActionsCompleted === "number" && Number.isInteger(batchActionsCompleted)
+        ? Math.min(Math.max(batchActionsCompleted, 0), actions.length - 1)
+        : 0;
+    for (let index = 0; index < completed; index++)
+      steps.push({ operationId, state: "completed", error: null });
+    steps.push({
+      operationId,
+      state: batchStoppedActionState === "failed" ? "failed" : state,
+      error: error && {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        ...(Object.keys(details).length ? { details } : {}),
+      },
+    });
+  }
+  let observation = receipt.observation;
+  if (observation === null && state !== "completed") {
+    // Show the state the stopped batch left.
+    try {
+      observation = await batch.observe();
+    } catch {
+      // The receipt shows no state; the caller observes when it needs one.
+    }
+  }
+  return {
+    type: "batch",
+    targetId: value.targetId,
+    actionCount: actions.length,
+    steps,
+    observation,
+    observationPrecedesStop: false,
+  };
+}
+
 async function openBrowser(
   transport: InteractionTransport,
   workspaceId: string,
@@ -2277,7 +3021,7 @@ async function openBrowser(
       }
     }
   }
-  if (session.lifecycle === "suspended") {
+  if (isResumablePausedBrowser(session)) {
     session = (
       await transport.resumeBrowserSession(workspaceId, session.id, {
         operationId: context.operationId,
@@ -2322,7 +3066,11 @@ async function openBrowser(
     }
     targets = inventory.targets;
   }
-  const primary = openedBrowserTarget(targets, value.initialUrl);
+  const primary = openedBrowserTarget(
+    targets,
+    value.initialUrl,
+    initialView?.observation.target.id,
+  );
   const observation = !primary
     ? undefined
     : initialView?.observation.target.id === primary.id
@@ -2385,16 +3133,28 @@ function agentAttachedProfile(
 }
 
 /**
- * The tab the agent most likely acts on next: the tab showing the requested
- * URL, else the selected page.
+ * The tab the agent most likely acts on next: the tab this open launched, else
+ * the session's own (selected) tab showing the requested URL, else any tab
+ * showing it, else the selected page. An attached Chrome profile lists the
+ * person's tabs and other sessions' tabs too, so an older tab on the same URL
+ * must not win over the one this session opened.
  */
 function openedBrowserTarget(
   targets: z.infer<typeof BrowserTarget>[],
   initialUrl: string | undefined,
+  launchedTargetId: string | undefined,
 ): z.infer<typeof BrowserTarget> | undefined {
   const pages = targets.filter((target) => target.kind === "page");
+  const launched = launchedTargetId
+    ? pages.find((target) => target.id === launchedTargetId)
+    : undefined;
+  if (launched) return launched;
+  const showingUrl = initialUrl
+    ? pages.filter((target) => sameBrowserUrl(target.url, initialUrl))
+    : [];
   return (
-    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
+    showingUrl.find((target) => target.selected) ??
+    showingUrl[0] ??
     pages.find((target) => target.selected) ??
     (pages.length === 1 ? pages[0] : undefined)
   );
@@ -3283,6 +4043,9 @@ function screenshotFailureReason(error: unknown): string {
   return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
 
+const BROWSER_DIALOG_NO_SCREENSHOT =
+  "No screenshot: a JavaScript dialog is open in this tab. Handle it first with browser_act action {type:'handle_dialog'}.";
+
 function browserToolImageContent(
   data: Uint8Array,
   mimeType: string,
@@ -3300,6 +4063,12 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+/** The API refused the call before running it, possibly because its browser
+ * is not running. */
+function isBrowserNotRunningError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 409 && !error.outcomeUnknown;
 }
 
 function interactionErrorResult(

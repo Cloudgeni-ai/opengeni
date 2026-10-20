@@ -334,6 +334,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
       "test/e2e/error-branding.browser.e2e.ts",
@@ -930,6 +931,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
       "test/e2e/error-branding.browser.e2e.ts",
@@ -1357,6 +1359,17 @@ describe("workflow fail-closed contracts", () => {
     expect(sourceContracts).toContain("path: ${{ runner.temp }}/ci-impact-plan");
     expect(sourceContracts).toContain("--plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json");
     expect(sourceContracts).not.toContain("--plan impact-plan.json");
+    const freshness = sourceContracts.indexOf(
+      "run: bun scripts/generate-site-browser-runtime.ts --check",
+    );
+    expect(freshness).toBeGreaterThan(sourceContracts.indexOf("bun install --frozen-lockfile"));
+    expect(freshness).toBeLessThan(
+      sourceContracts.indexOf("- name: Validate changeset release plan"),
+    );
+    expect(freshness).toBeLessThan(sourceContracts.indexOf("- name: Profile impacted TypeScript"));
+    expect(freshness).toBeLessThan(
+      sourceContracts.indexOf("- name: Run exactly the explained source guards"),
+    );
   });
 
   test("CI runs the compact session-search header regression with real database evidence", () => {

@@ -31,7 +31,7 @@ import {
   sessionCreationMetadata,
   SITE_ORIGIN_METADATA_KEY,
 } from "../site-session-origin";
-import { assertSiteAgentMayChooseCompute } from "../site-agent-clamp";
+
 import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
@@ -93,6 +93,7 @@ import {
   evaluateWorkspaceModelPolicy,
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
+  resolveWorkspaceDefaultExecutionTarget,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -2545,9 +2546,7 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
-  // An agent started from a Site page keeps its workers off chosen machines
-  // and other sessions' sandboxes.
-  await assertSiteAgentMayChooseCompute(unresolvedDeps.db, grant, payload);
+
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
   if (payload.firstPartyMcpTools) {
@@ -2781,6 +2780,7 @@ async function createSessionForRequestInFileScope(
       : null;
   let retainedKeyedShellModel: string | null = null;
   let retainedKeyedShellReasoningEffort: Session["reasoningEffort"] | null = null;
+  let retainedKeyedShellExecution: Session | null = null;
   if (
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
@@ -2821,6 +2821,7 @@ async function createSessionForRequestInFileScope(
         if (initializedReplay.outcome === "pending") {
           retainedKeyedShellModel = initializedReplay.session.model;
           retainedKeyedShellReasoningEffort = initializedReplay.session.reasoningEffort;
+          retainedKeyedShellExecution = initializedReplay.session;
         } else {
           if (initializedReplay.workflowWakeRevision !== null) {
             await unresolvedDeps.workflowClient.wakeSessionWorkflow({
@@ -2856,6 +2857,63 @@ async function createSessionForRequestInFileScope(
         throw new HTTPException(409, { message: error.message, cause: error });
       }
       throw error;
+    }
+  }
+  // A workspace default applies only to a new root's own box. Explicit targets,
+  // explicit backends, children, and shared groups retain their chosen placement.
+  // A keyed shell already froze its route in the insert transaction: recovery
+  // must keep that route even when the workspace default has since changed.
+  if (
+    !parentSession &&
+    !payload.targetSandboxId &&
+    payload.sandboxBackend === undefined &&
+    (payload.sandbox === undefined || payload.sandbox === "new")
+  ) {
+    if (retainedKeyedShellExecution) {
+      payload.sandboxBackend = retainedKeyedShellExecution.sandboxBackend;
+      if (retainedKeyedShellExecution.activeSandboxId) {
+        payload.targetSandboxId = retainedKeyedShellExecution.activeSandboxId;
+        if (retainedKeyedShellExecution.workingDir) {
+          payload.workingDir = retainedKeyedShellExecution.workingDir;
+        }
+      }
+    } else {
+      let target: ReturnType<typeof resolveWorkspaceDefaultExecutionTarget>;
+      try {
+        target = resolveWorkspaceDefaultExecutionTarget(workspace.settings);
+      } catch {
+        throw new HTTPException(422, {
+          message:
+            "The workspace default machine setting is invalid. Choose it again in workspace settings.",
+        });
+      }
+      if (target?.kind === "machine") {
+        const machine = await getSandbox(db, grant, target.targetSandboxId);
+        if (
+          !unresolvedDeps.settings.sandboxOwnershipEnabled ||
+          !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
+          !machine ||
+          machine.kind !== "selfhosted" ||
+          machine.scope === "user"
+        ) {
+          throw new HTTPException(422, {
+            message:
+              "Workspace default machine is unavailable. Choose another machine in workspace settings.",
+          });
+        }
+        payload.targetSandboxId = target.targetSandboxId;
+        // A machine brings its own environment. Do not also bind the implicit
+        // managed-sandbox image/rig when the workspace chooses a machine.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else if (target?.kind === "managed") {
+        if (["selfhosted", "none"].includes(unresolvedDeps.settings.sandboxBackend)) {
+          throw new HTTPException(422, {
+            message:
+              "The workspace default requires a managed sandbox, which this deployment does not provide.",
+          });
+        }
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
+      }
     }
   }
   let settings = await measureSessionStartPhase(

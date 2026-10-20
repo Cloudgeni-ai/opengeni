@@ -9,7 +9,7 @@ export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
  * Structural fake for `SessionClientLike`: implement only the methods the
  * hook under test calls; everything else throws with a clear message.
  */
-const OPTIONAL_METHODS = new Set(["findGoal"]);
+const OPTIONAL_METHODS = new Set(["findGoal", "updateSessionAttention"]);
 
 export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
   const emptyDraft: ComposerDraft = {

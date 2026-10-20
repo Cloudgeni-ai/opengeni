@@ -29,7 +29,7 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
-import { siteClampedAgentGuard } from "./site-agent-guard";
+
 import { siteFrameGuard } from "./site-frame-guard";
 import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
@@ -595,6 +595,7 @@ export function createAppComposition(deps: AppDependencies): {
         reapExpiredManagedAuthSessionSets(deps.db, 100),
       ]).catch((error) => {
         observability.error("Managed isolated-auth orphan reap failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
@@ -1136,6 +1137,7 @@ export function createAppComposition(deps: AppDependencies): {
     } finally {
       await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
         observability.error("Managed actor mutation lease release failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
@@ -1725,13 +1727,6 @@ export function createAppComposition(deps: AppDependencies): {
   // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
   // the frame's own sessions, and the validated Site origin as provenance.
   app.use("/v1/workspaces/:workspaceId/*", nativeWorkspaceMiddleware(siteFrameGuard(routeDeps)));
-  // Agents started from a Site page do not learn or widen access: their
-  // workspace writes are held to an allowlist (their tools, conversations,
-  // files and content); everything else is refused.
-  app.use(
-    "/v1/workspaces/:workspaceId/*",
-    nativeWorkspaceMiddleware(siteClampedAgentGuard(routeDeps)),
-  );
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");

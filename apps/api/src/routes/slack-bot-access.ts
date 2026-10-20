@@ -8,6 +8,7 @@ import {
   requireAccessGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import { requireWorkspaceIntegrationAdministration } from "./connections";
 import {
   availableSlackBotConnectionMetadata,
   nestedPostgresSqlState,
@@ -77,6 +78,8 @@ export function registerSlackBotAccessRoutes(app: Hono, deps: ApiRouteDeps): voi
       context.req.param("workspaceId"),
       "connections:write",
     );
+    // Sharing the workspace's Slack bot with the organization is a settings action.
+    requireWorkspaceIntegrationAdministration(grant);
     const connectionId = z.string().uuid().safeParse(context.req.param("connectionId"));
     const request = UpdateOpenGeniSlackBotOrganizationAccess.safeParse(
       await context.req.json().catch(() => null),
@@ -92,6 +95,9 @@ export function registerSlackBotAccessRoutes(app: Hono, deps: ApiRouteDeps): voi
           workspaceId: grant.workspaceId,
           connectionId: connectionId.data,
           enabled: request.data.enabled,
+          ...(request.data.workspaceIds !== undefined
+            ? { workspaceIds: request.data.workspaceIds }
+            : {}),
         },
         () => authorizeOrganizationIntegrationAdministration(context, deps, grant.accountId, true),
       );

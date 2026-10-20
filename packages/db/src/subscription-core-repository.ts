@@ -10,6 +10,7 @@ import type {
   SubscriptionQuota,
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
+import { quotaAfterRateLimitReset, storedQuotaDocument } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 
@@ -400,6 +401,53 @@ function decodeQuotaBlockClaim(value: unknown): QuotaBlockClaim | null {
     observedAt: claim.observedAt,
     windowIds: [...new Set(claim.windowIds as string[])],
   };
+}
+
+/**
+ * Record, inside the caller's transaction, that the provider reset a
+ * connection's rate limits at `resetAt` (`quotaAfterRateLimitReset`): the
+ * stored windows and exhaustion deadline are invalidated, so placement no
+ * longer waits on readings taken before the reset. Only a quota observed with
+ * the connection's current refresh generation is rewritten (an observation of
+ * an older credential is left for the generation fence to discard). Returns
+ * whether the stored quota changed.
+ */
+export async function recordSubscriptionCoreRateLimitResetInTransaction(
+  tx: Database,
+  input: { accountId: string; provider: ProviderId; connectionId: string; resetAt: Date },
+): Promise<boolean> {
+  const [row] = await rawRows<{
+    quota: unknown;
+    quota_revision: number | string | null;
+    quota_observed_refresh_generation: number | string | null;
+    quota_updated_at: Date | string | null;
+  }>(
+    tx,
+    sql`select quota.quota, quota.revision as quota_revision,
+      quota.observed_refresh_generation as quota_observed_refresh_generation,
+      quota.updated_at as quota_updated_at
+    from subscription_connection_quota quota
+    join subscription_connections connection
+      on connection.account_id = quota.account_id and connection.id = quota.connection_id
+    where quota.account_id = ${input.accountId}::uuid
+      and quota.connection_id = ${input.connectionId}::uuid
+      and connection.provider = ${input.provider}
+      and quota.observed_refresh_generation = connection.refresh_generation
+    for update of quota`,
+  );
+  if (!row) return false;
+  const current = decodeSubscriptionQuota(row);
+  if (!current) return false;
+  const next = quotaAfterRateLimitReset(current, input.resetAt.getTime());
+  if (next === current) return false;
+  await tx.execute(
+    sql`update subscription_connection_quota
+      set quota = ${JSON.stringify(storedQuotaDocument(next))}::jsonb,
+        revision = revision + 1,
+        updated_at = ${new Date(next.observedAt ?? input.resetAt.getTime()).toISOString()}::timestamptz
+      where account_id = ${input.accountId}::uuid and connection_id = ${input.connectionId}::uuid`,
+  );
+  return true;
 }
 
 /** Canonical IDs win; otherwise resolve one visible provider-scoped alias. */
@@ -852,6 +900,7 @@ function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
 }
 
 export type SubscriptionOperationKind =
+  | "session_title"
   | "image"
   | "video"
   | "realtime"

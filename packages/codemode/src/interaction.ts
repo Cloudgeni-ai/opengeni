@@ -869,8 +869,15 @@ export class CodemodeBrowserTab {
     );
   }
 
-  async navigate(url: string, callOptions: CodemodeCallOptions = {}) {
-    return await this.act({ type: "navigate", url }, {}, callOptions);
+  /** Navigate this tab. `waitUntil` also waits for that load state, which is
+   * useful before a screenshot of a page that loads its data after `load`. */
+  async navigate(
+    url: string,
+    options: CodemodeCallOptions & { waitUntil?: "load" | "network_idle" | undefined } = {},
+  ) {
+    const { waitUntil, ...callOptions } = options;
+    const action = waitUntil ? { type: "navigate", url, waitUntil } : { type: "navigate", url };
+    return await this.act(action as BrowserAction, {}, callOptions);
   }
 
   async setPermission(

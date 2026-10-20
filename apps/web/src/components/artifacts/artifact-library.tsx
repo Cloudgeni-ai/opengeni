@@ -1,16 +1,19 @@
 import { defaultStringifySearch, useNavigate } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
+  CopyIcon,
   ImageIcon,
   LayoutGridIcon,
   LinkIcon,
   ListIcon,
   LockIcon,
+  LockKeyholeIcon,
   MessageSquareIcon,
   MoreHorizontalIcon,
   PanelsTopLeftIcon,
   PinIcon,
   PinOffIcon,
+  UsersIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -50,6 +53,11 @@ import {
   type ToolbarFilterValue,
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
+import { useDuplicateSite } from "@/lib/use-duplicate-site";
+import { FILE_AUDIENCE_COPY, useArtifactAudience } from "./site-audience";
 import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { ARTIFACT_ACCESS_REQUIRED } from "@/lib/artifact-access";
 import {
@@ -73,7 +81,9 @@ import type { ArtifactReturnSearch } from "@/lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
-  import("./inline-chat-image").then((module) => ({ default: module.InlineChatImage })),
+  import("./inline-chat-image").then((module) => ({
+    default: module.InlineChatImage,
+  })),
 );
 
 const IMAGE_GLYPH = <ImageIcon className="size-4 text-fg-subtle" aria-hidden />;
@@ -89,7 +99,7 @@ function PinnedMarker() {
   );
 }
 
-/** A Site only its owner (the viewer) can see, marked like an Only me schedule. */
+/** A Site or file only its owner (the viewer) can open, marked like an Only me schedule. */
 function OnlyMeMarker({ bare = false }: { bare?: boolean }) {
   return (
     <MetaChip icon={<LockIcon />} {...(bare ? { variant: "text" as const } : {})}>
@@ -99,7 +109,53 @@ function OnlyMeMarker({ bare = false }: { bare?: boolean }) {
 }
 
 function onlyMe(item: ArtifactCatalogItem): boolean {
-  return item.kind === "site" && item.visibility === "private";
+  return (
+    (item.kind === "site" || item.kind === "file" || item.kind === "image") &&
+    item.visibility === "private"
+  );
+}
+
+/**
+ * Share or limit a file from its row, with the same confirmation as its
+ * page. Only its owner sees the choice, and never in a Personal workspace.
+ */
+function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const owned = Boolean(
+    (item.kind === "file" || item.kind === "image") &&
+    item.ownedByViewer &&
+    item.visibility &&
+    item.status === "active" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext) &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
+  );
+  const audience = useArtifactAudience({
+    client: context.client,
+    workspaceId,
+    workspaceName: workspace?.name ?? "this workspace",
+    title: item.title,
+    visibility: item.visibility === "private" ? "private" : "workspace",
+    ownedByCurrentUser: owned,
+    copy: FILE_AUDIENCE_COPY,
+    canLimitToMe: true,
+    update: async (visibility) => {
+      await context.client.updateFileVisibility(workspaceId, item.id, { visibility });
+      invalidateArtifactCatalog(context.client, workspaceId);
+    },
+  });
+  const menuItem = !owned ? null : audience.share ? (
+    <DropdownMenuItem onSelect={audience.share}>
+      <UsersIcon />
+      Share with workspace…
+    </DropdownMenuItem>
+  ) : audience.limit ? (
+    <DropdownMenuItem onSelect={audience.limit}>
+      <LockKeyholeIcon />
+      Limit to me…
+    </DropdownMenuItem>
+  ) : null;
+  return { menuItem, dialog: owned ? audience.dialog : null };
 }
 
 /** Mount retained-image loaders only near the viewport, not merely their img elements. */
@@ -212,6 +268,13 @@ function useArtifactOpen(
   browseSearch?: ArtifactReturnSearch,
 ) {
   const navigate = useNavigate();
+  const audience = useLibraryFileAudience(workspaceId, item);
+  const { accessContext } = useAppContext();
+  const copies = useDuplicateSite(workspaceId);
+  const canDuplicate =
+    item.kind === "site" &&
+    Boolean(item.versionId) &&
+    hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const [pinning, setPinning] = useState(false);
   const pinInFlight = useRef(false);
   const togglePin = async () => {
@@ -251,6 +314,17 @@ function useArtifactOpen(
           {pinning ? "Saving…" : item.pinned ? "Unpin" : "Pin"}
         </DropdownMenuItem>
       ) : null}
+      {audience.menuItem}
+      {canDuplicate ? (
+        <DropdownMenuItem
+          disabled={copies.busy}
+          // In the session workbench the copy is offered, not opened.
+          onSelect={() => void copies.duplicate(item, { open: !onSelect })}
+        >
+          <CopyIcon />
+          {copies.busy ? "Duplicating…" : "Duplicate"}
+        </DropdownMenuItem>
+      ) : null}
       {item.sourceSessionId && item.sourceSessionId !== sessionId ? (
         <DropdownMenuItem
           onSelect={() =>
@@ -281,6 +355,7 @@ function useArtifactOpen(
   return {
     open,
     menu,
+    dialog: audience.dialog,
     // Links keep a real href (new tab, copy); a plain click stays in the router.
     link: onSelect
       ? null
@@ -308,7 +383,13 @@ function updatedMeta(item: ArtifactCatalogItem) {
 
 /** The date column every artifact list ends with, before the ⋯ menu. */
 const ARTIFACT_COLUMNS: RowListColumn[] = [
-  { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
+  {
+    id: "updated",
+    label: "Updated",
+    width: 112,
+    align: "end",
+    hideLabel: true,
+  },
 ];
 
 export function ArtifactRow({
@@ -328,7 +409,7 @@ export function ArtifactRow({
   loading?: boolean;
   browseSearch?: ArtifactReturnSearch;
 }) {
-  const { open, menu, link } = useArtifactOpen(
+  const { open, menu, link, dialog } = useArtifactOpen(
     workspaceId,
     item,
     sessionId,
@@ -339,42 +420,45 @@ export function ArtifactRow({
   );
   const archived = item.status === "archived";
   return (
-    <ListRow
-      // A tile for the kind of artifact; an image shows its own pixels.
-      leading={
-        item.kind === "image" ? (
-          <ImageTile workspaceId={workspaceId} item={item} />
-        ) : (
-          <ArtifactKindTile kind={item.kind} />
-        )
-      }
-      title={item.title}
-      titleAddon={
-        item.pinned || onlyMe(item) ? (
-          <span className="inline-flex items-center gap-2">
-            {item.pinned ? <PinnedMarker /> : null}
-            {onlyMe(item) ? <OnlyMeMarker /> : null}
-          </span>
-        ) : undefined
-      }
-      meta={[
-        artifactKindLabel[item.kind],
-        item.kind === "file" && item.filename && item.filename !== item.title
-          ? item.filename
-          : null,
-      ].filter((part): part is string => Boolean(part))}
-      status={
-        archived ? (
-          <StatusBadge variant="dot" tone="neutral">
-            Archived
-          </StatusBadge>
-        ) : undefined
-      }
-      cells={{ updated: <RelativeTime date={item.updatedAt} /> }}
-      {...(link ? { href: link.href, onOpen: link.onClick } : { onOpen: open })}
-      menu={menu}
-      menuLabel={`More actions for ${item.title}`}
-    />
+    <>
+      <ListRow
+        // A tile for the kind of artifact; an image shows its own pixels.
+        leading={
+          item.kind === "image" ? (
+            <ImageTile workspaceId={workspaceId} item={item} />
+          ) : (
+            <ArtifactKindTile kind={item.kind} />
+          )
+        }
+        title={item.title}
+        titleAddon={
+          item.pinned || onlyMe(item) ? (
+            <span className="inline-flex items-center gap-2">
+              {item.pinned ? <PinnedMarker /> : null}
+              {onlyMe(item) ? <OnlyMeMarker /> : null}
+            </span>
+          ) : undefined
+        }
+        meta={[
+          artifactKindLabel[item.kind],
+          item.kind === "file" && item.filename && item.filename !== item.title
+            ? item.filename
+            : null,
+        ].filter((part): part is string => Boolean(part))}
+        status={
+          archived ? (
+            <StatusBadge variant="dot" tone="neutral">
+              Archived
+            </StatusBadge>
+          ) : undefined
+        }
+        cells={{ updated: <RelativeTime date={item.updatedAt} /> }}
+        {...(link ? { href: link.href, onOpen: link.onClick } : { onOpen: open })}
+        menu={menu}
+        menuLabel={`More actions for ${item.title}`}
+      />
+      {dialog}
+    </>
   );
 }
 
@@ -402,14 +486,19 @@ const SITE_HTML_CACHE_LIMIT = 48;
 function useSiteHtml(workspaceId: string, item: ArtifactCatalogItem) {
   const { client, accessKeyVersion } = useAppContext();
   const versionId = item.versionId;
-  const [state, setState] = useState<{ key: string; html: string | null } | null>(null);
+  const [state, setState] = useState<{
+    key: string;
+    html: string | null;
+  } | null>(null);
   const key = `${accessKeyVersion}:${workspaceId}:${item.id}:${versionId}`;
   useEffect(() => {
     if (!versionId) return;
     let active = true;
     let request = siteHtmlCache.get(key);
     if (!request) {
-      request = client.getWorkspaceArtifactHtml(workspaceId, item.id, { versionId });
+      request = client.getWorkspaceArtifactHtml(workspaceId, item.id, {
+        versionId,
+      });
       siteHtmlCache.set(key, request);
       if (siteHtmlCache.size > SITE_HTML_CACHE_LIMIT)
         siteHtmlCache.delete(siteHtmlCache.keys().next().value!);
@@ -523,7 +612,7 @@ export function ArtifactCard({
   loading?: boolean;
   browseSearch?: ArtifactReturnSearch;
 }) {
-  const { open, menu, link } = useArtifactOpen(
+  const { open, menu, link, dialog } = useArtifactOpen(
     workspaceId,
     item,
     sessionId,
@@ -609,6 +698,7 @@ export function ArtifactCard({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {dialog}
     </li>
   );
 }
@@ -633,7 +723,12 @@ function GallerySkeleton() {
 }
 
 const VIEW_OPTIONS = [
-  { value: "gallery", label: "Gallery", icon: <LayoutGridIcon />, iconOnly: true },
+  {
+    value: "gallery",
+    label: "Gallery",
+    icon: <LayoutGridIcon />,
+    iconOnly: true,
+  },
   { value: "list", label: "List", icon: <ListIcon />, iconOnly: true },
 ] as const;
 

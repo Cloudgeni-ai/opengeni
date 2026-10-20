@@ -2806,6 +2806,55 @@ function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"])
   );
 }
 
+/** The program a managed Chromium launch executes for this driver context.
+ *
+ * A recovered working runtime records its browser's process image (the
+ * resolved `/proc/<pid>/exe`) only as ownership evidence. That image is not a
+ * launcher: distribution wrappers (NixOS, Debian and Google Chrome's own
+ * script) prepare the sandbox helper, flags and environment and then exec it,
+ * and a Chromium started from its bare image can abort before DevTools starts.
+ * A relaunch after the recorded browser exited therefore uses the same
+ * launcher as every other launch of this profile, and reattaching a live
+ * browser launches nothing. The record decides only whether this exact
+ * directory may be reattached or relaunched. Undefined selects the platform
+ * default launcher. */
+export async function managedChromiumLaunchExecutable(
+  context: Pick<
+    BrowserSupervisorDriverContext,
+    | "headed"
+    | "profileDirectory"
+    | "restoredProfile"
+    | "browserExecutablePath"
+    | "recoverOwnedProcess"
+    | "allowOwnedProcessLaunch"
+  >,
+  headlessShell?: VerifiedHeadlessShell,
+): Promise<{ browserExecutablePath: string | undefined; useHeadlessShell: boolean }> {
+  const browserExecutablePath = await selectManagedChromiumExecutable({
+    headed: context.headed,
+    profileDirectory: context.profileDirectory,
+    restoredProfile: context.restoredProfile,
+    ...(context.browserExecutablePath
+      ? { browserExecutablePath: context.browserExecutablePath }
+      : {}),
+    ...(headlessShell ? { headlessShell } : {}),
+  });
+  // Without directory launch permission only a verified headless shell, whose
+  // daemon lineage is proven before reattaching, may recover.
+  if (
+    context.recoverOwnedProcess &&
+    context.allowOwnedProcessLaunch !== true &&
+    (!headlessShell ||
+      (await realpath(headlessShell.path)) !== context.recoverOwnedProcess.executablePath)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  return {
+    browserExecutablePath,
+    useHeadlessShell: headlessShell !== undefined && browserExecutablePath === headlessShell.path,
+  };
+}
+
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
@@ -2823,7 +2872,7 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return createAttachedChromeDriver(context, attached);
+    return createAttachedChromeDriver(context, attached, context.resolveWorkspaceFiles);
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
@@ -2887,31 +2936,10 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
-  const selectedExecutable = await selectManagedChromiumExecutable({
-    headed: context.headed,
-    profileDirectory: context.profileDirectory,
-    restoredProfile: context.restoredProfile,
-    ...(context.browserExecutablePath
-      ? { browserExecutablePath: context.browserExecutablePath }
-      : {}),
-    ...(headlessShell ? { headlessShell } : {}),
-  });
-  if (
-    context.recoverOwnedProcess &&
-    selectedExecutable &&
-    (await realpath(selectedExecutable)) !== context.recoverOwnedProcess.executablePath
-  ) {
-    throw workingRuntimeUnavailable();
-  }
-  const browserExecutablePath = context.recoverOwnedProcess?.executablePath ?? selectedExecutable;
-  if (
-    context.recoverOwnedProcess &&
-    context.allowOwnedProcessLaunch !== true &&
-    (!headlessShell || (await realpath(headlessShell.path)) !== browserExecutablePath)
-  ) {
-    throw workingRuntimeUnavailable();
-  }
-  const useHeadlessShell = headlessShell && browserExecutablePath === headlessShell.path;
+  const { browserExecutablePath, useHeadlessShell } = await managedChromiumLaunchExecutable(
+    context,
+    headlessShell,
+  );
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
   }
@@ -2983,9 +3011,7 @@ async function createBrowserDriver(
     (!context.headed || offscreen)
       ? { completeClientHints: true }
       : {}),
-    ...(headlessShell && browserExecutablePath === headlessShell.path
-      ? { userAgentMetadataSource: "intercepted_local" as const }
-      : {}),
+    ...(useHeadlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,

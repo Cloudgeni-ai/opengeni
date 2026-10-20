@@ -329,7 +329,7 @@ export const McpOperationRecoverySchema = z
 
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
-  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:554d5b324a580071dd669e7c1190931e498eb1b397412a27c7de84a430ef393a";
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -480,6 +480,8 @@ const SettingsSchema = z.object({
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
+  // Legacy pre-0845 money switch; current signup eligibility is unconditional
+  // and zero-valued. Kept for compatibility with existing deployment config.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
@@ -1202,7 +1204,7 @@ const SettingsSchema = z.object({
   // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
   // timeout (~minutes) — and a box between turns sits with NO active connection,
   // so that idle clock runs and Modal idle-reaps the box LONG before Opengeni's
-  // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
+  // own reaper waits out sandboxIdleGraceMs to resume+persist+terminate
   // it. The observed failure: every drain logs "drainable box already gone
   // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
   // Modal's idle-reap is a SECOND reaper racing Opengeni's — and it wins. The fix:
@@ -1356,6 +1358,30 @@ const SettingsSchema = z.object({
     .max(63)
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
+  // --- Opengeni compute (optional; Opengeni's own microVM sandboxes) ---
+  // Every compute sandbox runs the Connected Machine agent, reached through
+  // its host's link to this API's agent gateway, so this backend also needs
+  // the relay and the agent op-stream. Nothing here is read unless a session
+  // or the deployment selects `compute`, or the gateway URL is set.
+  computeApiUrl: z.string().url().optional(),
+  computeApiKey: z.string().min(1).max(8192).optional(),
+  // Compute image refs. Omitted, the control service's default image. The desktop image is
+  // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
+  computeImage: z.string().min(1).max(2048).optional(),
+  computeDesktopImage: z.string().min(1).max(2048).optional(),
+  computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
+  computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
+  // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
+  computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
+  computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
+  // and it is the exact audience of their host tokens and sandbox tickets, so
+  // it must equal the URL the control service is configured with for Opengeni's team.
+  // This API serves the gateway at its path.
+  computeLinkUrl: z.string().url().optional(),
+  // How long a create waits for the sandbox's agent to connect, and how long
+  // a request to an unreachable sandbox keeps waking and retrying it.
+  computeAgentReadyTimeoutMs: z.coerce.number().int().min(1_000).max(900_000).default(120_000),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -1490,11 +1516,12 @@ const SettingsSchema = z.object({
   // dial — when the user navigates away the box keeps refcount 0, but it survives
   // this whole window so a "glanced away then came back" re-arms the SAME warm box
   // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
-  // skips a re-armed box). Default 15min so a brief detour never cold-creates a
-  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim.
+  // skips a re-armed box). Default 1min: a box restores from its workspace
+  // snapshot when the next turn comes later, so a long warm tail mostly bills an
+  // idle box. Raise it to trade warm cost for warm resumes after longer pauses.
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
-  sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(60_000),
   // Idle command containment. A legacy retained background command (a dev
   // server, a command whose output is still draining, a stopped command the
   // provider no longer answers for) keeps its box warm through a non-expiring
@@ -1504,8 +1531,8 @@ const SettingsSchema = z.object({
   // request, no held wait_for_input, no other holder or writer, measured from
   // durable turn/holder/admission facts - the reaper checkpoints the workspace,
   // stops the box and settles those commands `lost` with reason
-  // `idle_containment`. Default 30min: twice the default
-  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // `idle_containment`. Default 30min: well above the idle
+  // grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
   // the deadline path has to act. Set 0 to disable new idle enrollments without
@@ -4658,6 +4685,11 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
     { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
   ],
+  // compute also needs the gateway and relay; computeSettingsIssues checks them.
+  compute: [
+    { field: "computeApiUrl", env: "OPENGENI_COMPUTE_API_URL" },
+    { field: "computeApiKey", env: "OPENGENI_COMPUTE_API_KEY" },
+  ],
   // selfhosted needs NO per-box credentials: it is the user's own machine reached
   // over the agent's own enrollment. The enrollment-signing + relay-token secrets
   // are deployment-level (a single runtime secret, not per-active-backend creds),
@@ -5107,6 +5139,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openSandboxKubernetesInventoryNamespace: optional(
       "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
     ),
+    computeApiUrl: optional("OPENGENI_COMPUTE_API_URL"),
+    computeApiKey: optional("OPENGENI_COMPUTE_API_KEY"),
+    computeImage: optional("OPENGENI_COMPUTE_IMAGE"),
+    computeDesktopImage: optional("OPENGENI_COMPUTE_DESKTOP_IMAGE"),
+    computeVcpus: optional("OPENGENI_COMPUTE_VCPUS"),
+    computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
+    computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
+    computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
+    computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
@@ -5369,7 +5411,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ...parsed,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
@@ -10636,6 +10678,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
     );
   }
+  if (settings.sandboxBackend === "compute") {
+    const issues = computeSettingsIssues(settings);
+    if (issues.length > 0) {
+      throw new Error(`OPENGENI_SANDBOX_BACKEND=compute: ${issues.join("; ")}`);
+    }
+  }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(
@@ -11040,6 +11088,61 @@ export function resolveStreamTokenSecret(settings: Settings): string | undefined
  */
 export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
+}
+
+/** Whether this deployment serves the compute agent gateway: the control service API
+ * it reads link keys from and the gateway's own URL are both configured. */
+export function computeGatewayConfigured(settings: Settings): boolean {
+  return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);
+}
+
+/** Everything a deployment must configure before a compute sandbox can work,
+ * as human-readable problems; empty when it is ready. Checked at boot when
+ * compute is the deployment backend, and whenever a compute client is built,
+ * so a session that selects compute fails clearly instead of half-creating. */
+export function computeSettingsIssues(settings: Settings): string[] {
+  const issues: string[] = [];
+  if (!settings.computeApiUrl) issues.push("OPENGENI_COMPUTE_API_URL is required");
+  if (!settings.computeApiKey) issues.push("OPENGENI_COMPUTE_API_KEY is required");
+  if (
+    settings.computeApiUrl &&
+    !["local", "test"].includes(settings.environment) &&
+    !settings.computeApiUrl.startsWith("https://")
+  ) {
+    issues.push("OPENGENI_COMPUTE_API_URL must use https outside local/test");
+  }
+  const linkUrl = settings.computeLinkUrl;
+  if (!linkUrl) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL is required");
+  } else if (
+    !linkUrl.startsWith("wss://") &&
+    !(["local", "test"].includes(settings.environment) && linkUrl.startsWith("ws://"))
+  ) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL must be a wss:// URL (ws:// only in local/test)");
+  }
+  if (!settings.selfhostedRelayUrl || !resolveRelayTokenSecret(settings)) {
+    issues.push(
+      "OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required (terminal, desktop and ports)",
+    );
+  }
+  if (settings.agentOpStreamEnabled !== true) {
+    issues.push("OPENGENI_AGENT_OP_STREAM_ENABLED must stay true (agent exec needs op-stream)");
+  }
+  if (
+    settings.computeMemoryRequestMib !== undefined &&
+    settings.computeMemoryRequestMib > settings.computeMemoryMib
+  ) {
+    issues.push("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed OPENGENI_COMPUTE_MEMORY_MIB");
+  }
+  if (
+    settings.computeCpuRequestMillis !== undefined &&
+    settings.computeCpuRequestMillis > settings.computeVcpus * 1000
+  ) {
+    issues.push(
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS must not exceed OPENGENI_COMPUTE_VCPUS * 1000",
+    );
+  }
+  return issues;
 }
 
 /**

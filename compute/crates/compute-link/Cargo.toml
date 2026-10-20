@@ -1,0 +1,33 @@
+[package]
+name = "compute-link"
+description = "The host side of the agent link: a NATS endpoint for each sandbox's agent, bridged over one WebSocket per Opengeni gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "1"
+compute-protocol = { path = "../compute-protocol" }
+futures = "0.3"
+http = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+async-nats = { version = "=0.46.0", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+
+[lints]
+workspace = true

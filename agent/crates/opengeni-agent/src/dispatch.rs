@@ -162,6 +162,7 @@ async fn dispatch_future<P: Platform>(
             RespResult::Ping(v1::PingResponse {
                 nonce: req.nonce,
                 agent_monotonic_ms: ctx.monotonic_ms(),
+                control_replay_tokens: Vec::new(),
             }),
         ),
         Op::Metrics(_) => metrics_response(request_id).await,
@@ -188,9 +189,12 @@ async fn dispatch_future<P: Platform>(
         // The runner does not advertise `Capabilities.op_stream`, so a compliant
         // server never sends these; answer any that arrive with a typed Unsupported
         // rather than a silent drop, until the op engine is wired.
-        Op::OpStart(_) | Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::WriteChunk(_) => {
-            op_stream_unsupported(request_id)
-        }
+        Op::OpStart(_)
+        | Op::OpCancel(_)
+        | Op::OpQuery(_)
+        | Op::OpAttach(_)
+        | Op::OpRelease(_)
+        | Op::WriteChunk(_) => op_stream_unsupported(request_id),
 
         // --- platform-backed Channel-A ops -----------------------------------
         // NOTE: `fs_read` can produce a reply larger than the transport's max
@@ -751,7 +755,13 @@ mod tests {
     #[tokio::test]
     async fn ping_is_answered_by_the_agent() {
         let platform = Arc::new(FakePlatform::default());
-        let req = request(5, Op::Ping(v1::PingRequest { nonce: 99 }));
+        let req = request(
+            5,
+            Op::Ping(v1::PingRequest {
+                nonce: 99,
+                ..Default::default()
+            }),
+        );
         let resp = dispatch(req, &platform, &ctx()).await;
         match resp.result {
             Some(RespResult::Ping(p)) => assert_eq!(p.nonce, 99),

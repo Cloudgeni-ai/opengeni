@@ -596,6 +596,11 @@ export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation, SessionConversationView } from "./components/session-conversation";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {
   NewConversationController,
@@ -711,12 +716,16 @@ export type {
 } from "./components/markdown";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,

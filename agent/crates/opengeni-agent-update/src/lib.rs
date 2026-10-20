@@ -40,7 +40,12 @@ mod manifest;
 mod target;
 mod verify;
 
+#[cfg(test)]
+mod http_tests;
+
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use opengeni_agent_proto::v1::{UpdateArtifact, UpdateManifest};
 use tracing::{info, warn};
@@ -129,6 +134,9 @@ impl HttpSource {
     pub fn new() -> UpdateResult<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(concat!("opengeni-agent-update/", env!("CARGO_PKG_VERSION")))
+            // Bounds connection/headers and each blocking body read, not the
+            // complete artifact. Large updates may keep progressing indefinitely.
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| UpdateError::Download {
                 url: "client".to_string(),
@@ -140,7 +148,7 @@ impl HttpSource {
 
 impl Source for HttpSource {
     fn fetch(&self, url: &str) -> UpdateResult<Vec<u8>> {
-        let resp = self
+        let mut resp = self
             .client
             .get(url)
             .send()
@@ -149,11 +157,16 @@ impl Source for HttpSource {
                 url: url.to_string(),
                 source: Box::new(e),
             })?;
-        let bytes = resp.bytes().map_err(|e| UpdateError::Download {
-            url: url.to_string(),
-            source: Box::new(e),
-        })?;
-        Ok(bytes.to_vec())
+        // Response::bytes applies the timeout to the entire body. Its Read
+        // implementation instead resets that budget on every read, preserving
+        // stalled-transfer protection without imposing a size/throughput limit.
+        let mut bytes = Vec::new();
+        resp.read_to_end(&mut bytes)
+            .map_err(|e| UpdateError::Download {
+                url: url.to_string(),
+                source: Box::new(e),
+            })?;
+        Ok(bytes)
     }
 }
 
@@ -355,8 +368,12 @@ impl PendingUpdate {
 
 #[cfg(target_os = "macos")]
 fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
+    let resolved = install_path
+        .canonicalize()
+        .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?;
     if install_path
         .ancestors()
+        .chain(resolved.ancestors())
         .any(|path| path.extension().is_some_and(|ext| ext == "app"))
     {
         return Err(UpdateError::HealthCheck(

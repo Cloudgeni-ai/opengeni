@@ -80,11 +80,14 @@ spec:
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
+            {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
-          {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumeMounts }}
+          {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
+          {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumeMounts $computeTrusted }}
           volumeMounts:
+            {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
             {{- if $opensandboxKubernetesInventoryEnabled }}
             - name: opensandbox-kubernetes-inventory
               mountPath: /var/run/secrets/opengeni.io/opensandbox-kubernetes-inventory
@@ -106,8 +109,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumes }}
+      {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumes (include "opengeni.computeControl.trusted" .) }}
       volumes:
+        {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
         {{- if $opensandboxKubernetesInventoryEnabled }}
         - name: opensandbox-kubernetes-inventory
           projected:

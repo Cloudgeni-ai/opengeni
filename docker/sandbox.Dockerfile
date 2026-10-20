@@ -49,10 +49,12 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \
+    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
-    xx-verify /out/opengeni-computer-native
+    xx-verify /out/opengeni-computer-native; \
+    install -m 0755 "target/${rust_target}/release/opengeni-agent" /out/opengeni-agent; \
+    xx-verify /out/opengeni-agent
 
 # The command supervisor shares the existing native cross-toolchain and target
 # ABI verification. It has no runtime beyond libc and never routes user output
@@ -249,6 +251,7 @@ RUN set -eux; \
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
 COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
+COPY --from=computer-native-build /out/opengeni-agent /out/opengeni-agent
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-terminal-ready.so | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-terminal-ready.so >> /out/SHA256SUMS
@@ -259,6 +262,10 @@ RUN printf '%s  %s\n' \
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
+      >> /out/SHA256SUMS
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-agent | awk '{print $1}')" \
+      /usr/local/bin/opengeni-agent \
       >> /out/SHA256SUMS
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
@@ -557,6 +564,10 @@ ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+# The image ships opengeni-computer-native as its desktop driver and stages no
+# CUA runtime, so it selects that driver explicitly: an isolated Linux seat
+# otherwise defaults to CUA.
+ENV OPENGENI_BROWSERD_COMPUTER_BACKEND=native
 # The sandbox VM's network belongs to its browsers already; the per-browser
 # network namespace used on people's own machines is not needed here.
 ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
@@ -568,6 +579,10 @@ COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+# The machine agent an Opengeni compute sandbox runs as its guest agent
+# (`opengeni-agent run --compute`). It sits beside opengeni-browserd so its
+# browser controller finds the sidecar, and the image pins its version.
+COPY --from=browserd-build /out/opengeni-agent /usr/local/bin/opengeni-agent
 COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
 COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
 RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
@@ -592,7 +607,9 @@ RUN set -eux; \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
-               /usr/local/lib/opengeni/opengeni-computer-native; \
+               /usr/local/lib/opengeni/opengeni-computer-native \
+               /usr/local/bin/opengeni-agent; \
+    opengeni-agent --version; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \

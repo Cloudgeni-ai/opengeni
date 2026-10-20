@@ -1,0 +1,15 @@
+{
+  "name": "compute-e2b-conformance",
+  "private": true,
+  "description": "The unchanged E2B JS SDK and the E2B client Opengeni uses, against the front door",
+  "type": "module",
+  "dependencies": {
+    "@azure/storage-blob": "12.34.0",
+    "@openai/agents": "0.14.3",
+    "@openai/agents-core": "0.14.3",
+    "@openai/agents-extensions": "0.14.3",
+    "azurite": "3.37.0",
+    "e2b": "2.56.0",
+    "zod": "4.6.7"
+  }
+}

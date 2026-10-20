@@ -4,12 +4,13 @@ import {
   parseSiteHostname,
   siteHostname,
   SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE,
-  type Permission,
+  Permission,
   type SiteLimitProfileKind,
   type SiteLimits,
   type SiteViewerCapabilities,
 } from "@opengeni/contracts";
 import {
+  hasPermission,
   sessionUsageLimitsProducerEnabled,
   stampSiteViewerSessionAuthorization,
   type ApiRouteDeps,
@@ -21,6 +22,7 @@ import {
   getPublishedSite,
   getSession,
   getSitePublication,
+  getSiteWorkspaceMemberPermissions,
   isSiteWorkspaceMember,
   claimSiteRuntimeReservationSweep,
   readSessionUsageLimit,
@@ -436,6 +438,38 @@ export function siteAgentRefusal(
   return null;
 }
 
+/**
+ * The viewer as the Site's assistant serves them. Workspace members chat as
+ * themselves, which needs `sessions:create`. A member without it (the Viewer
+ * preset) uses the assistant on a Site that admits people outside the
+ * workspace as a signed-in visitor from outside would (`invited` or `user`):
+ * the Site service identity, viewer-bound data tools and the Site's limits,
+ * never more than outside visitors get. On a members-only Site such a member
+ * has no assistant (`unavailable`). Everyone else is returned unchanged.
+ */
+export async function resolveSiteAgentViewer(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  viewer: SiteRuntimeViewer,
+): Promise<{ viewer: SiteRuntimeViewer; unavailable: boolean }> {
+  if (viewer.kind !== "member" || !viewer.subjectId) return { viewer, unavailable: false };
+  const permissions = await getSiteWorkspaceMemberPermissions(
+    deps.db,
+    host.scope,
+    viewer.subjectId,
+  );
+  if (permissions && hasPermission(permissions, "sessions:create"))
+    return { viewer, unavailable: false };
+  const kind = signedInSiteViewerKind({
+    access: effectiveSiteAccess(host.publication.access, deps.settings),
+    member: false,
+    email: viewer.email,
+    invitedEmails: host.publication.invitedEmails,
+  });
+  if (kind === null || kind === "member") return { viewer, unavailable: true };
+  return { viewer: { ...viewer, kind }, unavailable: false };
+}
+
 const AGENT_REFUSAL_MESSAGES: Record<string, string> = {
   agent_disabled: "This Site's assistant is not available to you",
   usage_limits_disabled: "This Site's assistant is not available to you",
@@ -835,9 +869,9 @@ export async function siteRuntimeSessionRequest(
     stampSiteViewerSessionAuthorization(request, {
       organizationId: host.scope.accountId,
       subjectId: viewer.subjectId,
-      permissions: [
-        ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
-      ],
+      // The native resolver intersects this ceiling with live membership,
+      // including compact admin grants. The Site adds no permission ceiling.
+      permissions: [...Permission.options],
       workspaceId: host.scope.workspaceId,
     });
   }

@@ -21,6 +21,7 @@ import {
 import { SandboxFilesystemNotFoundError } from "modal";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
 import { isDefinitePathNotFoundError } from "./sandbox/channel-a";
+import { withSandboxOperationPurpose } from "./sandbox/operation-purpose";
 import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 
 const SKILL_FILE = "SKILL.md";
@@ -304,16 +305,18 @@ export async function discoverWorkspaceSkills(
   const startedAt = performance.now();
   let outcome: "completed" | "failed" = "completed";
   try {
-    return await discoverWorkspaceSkillsUnmeasured(
-      session,
-      searchPaths,
-      reservedNames,
-      runAs,
-      shadowedNames,
-      (warning) => {
-        console.warn("Repository skill skipped", warning);
-        onWarning?.(warning);
-      },
+    return await withSandboxOperationPurpose("repository_skills", () =>
+      discoverWorkspaceSkillsUnmeasured(
+        session,
+        searchPaths,
+        reservedNames,
+        runAs,
+        shadowedNames,
+        (warning) => {
+          console.warn("Repository skill skipped", warning);
+          onWarning?.(warning);
+        },
+      ),
     );
   } catch (error) {
     outcome = "failed";

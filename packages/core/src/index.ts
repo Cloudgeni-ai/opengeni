@@ -84,6 +84,8 @@ export * from "./default-session-model";
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
+export * from "./sandbox/compute-plane";
+export * from "./sandbox/output-release";
 export * from "./sandbox/fleet";
 export * from "./sandbox/routing";
 export * from "./sandbox/runtime-settings";
@@ -133,6 +135,7 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/site-audience";
+export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
@@ -173,17 +176,7 @@ export {
   withSiteSessionOrigin,
   type SiteSessionOrigin,
 } from "./site-session-origin";
-export {
-  assertNotSiteClampedAgent,
-  assertSiteAgentMayChooseCompute,
-  SITE_AGENT_COMPUTE_MESSAGE,
-  siteAgentClamp,
-  siteAgentMayReachSession,
-  siteClampedAgentMessage,
-  siteSessionClamp,
-  type SiteAgentClamp,
-  type SiteClampedResource,
-} from "./site-agent-clamp";
+
 export {
   currentHostSessionUsageLimit,
   withHostSessionUsageLimit,

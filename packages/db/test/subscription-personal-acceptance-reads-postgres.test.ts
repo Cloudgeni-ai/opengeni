@@ -46,6 +46,10 @@ import { rawRows, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  MAINTENANCE_PRIVATE_TABLES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
+} from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
 import {
   stageVaultPolicyColumns,
@@ -638,6 +642,34 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
       "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
     );
+    // 0848–0849 add the strict-owner projections and maintenance claim boundary.
+    // The original checkpoint validators already exist and provisioning revokes
+    // their runtime EXECUTE, even before the later wrappers are installed.
+    heldBack.push(
+      ...MAINTENANCE_PRIVATE_TABLES.map(
+        (table) => `maintenance probe index ${table} is missing or accessible to runtime`,
+      ),
+      ...MAINTENANCE_PROBE_OWNER_ROUTINES.filter(
+        (routine) =>
+          routine !== "validate_sandbox_checkpoint_refs()" &&
+          routine !== "validate_sandbox_checkpoint_artifact_refs()",
+      ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
+      "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
+      "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
+    );
+    // 0851 adds exact session-tree machine access and agent creation authority.
+    heldBack.push(
+      ...[
+        "guard_session_agent_creation_provenance()",
+        "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+        "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+      "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
+    );
+    // 0854 adds the private-file lookup.
+    heldBack.push(
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+    );
     // 0796-0798 (subscription plans and billing operations) are held back too.
     heldBack.push(
       ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
@@ -674,6 +706,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -717,6 +750,9 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
+      // Selected-workspace Slack bot access arrives in the withheld 0864.
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();

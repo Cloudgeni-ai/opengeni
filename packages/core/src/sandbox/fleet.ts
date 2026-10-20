@@ -569,6 +569,23 @@ export async function listFleet(
   };
 }
 
+/**
+ * What an agent reading `sandboxes_list` should know about the person's
+ * computers at that moment. It travels in the tool result, where it never
+ * changes text an earlier request already sent.
+ */
+export function fleetAgentNotice(fleet: FleetListResult): string {
+  const computers = fleet.sandboxes.filter((entry) => !entry.isSessionGroup);
+  const offline = computers.filter((entry) => entry.liveness !== "online");
+  const offer =
+    "before answering, call capability_authorization_request once with capabilityId api:connected-machine so they can connect it. They then see what to do, so do not describe buttons, commands or install steps.";
+  const unlisted = `If the computer the person means is not in this list, it is not connected: ${offer}`;
+  if (computers.length === 0) return `None of the person's computers is connected. ${unlisted}`;
+  if (offline.length === 0) return unlisted;
+  const names = offline.map((entry) => entry.name).join(", ");
+  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer}`;
+}
+
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
 
 type ResolvedNamedSandboxTarget =
@@ -732,9 +749,12 @@ async function resolveTarget(
       return {
         ok: false,
         reason:
-          ctx.sessionBackend === "none"
-            ? "this session has no home sandbox; attach a Connected Machine"
-            : "this deployment has no managed session sandbox; select an enrolled machine",
+          // Staying on the current machine is a fine end state, so say so
+          // instead of naming a sandbox that does not exist.
+          (ctx.sessionBackend === "none"
+            ? "This session has no managed sandbox of its own, so there is nothing to swap back to."
+            : "This deployment has no managed session sandbox, so there is nothing to swap back to.") +
+          " Keep working on the current machine, or swap to another machine's sandboxes_list id.",
         code: "unsupported_backend_context",
       };
     }
@@ -1028,6 +1048,7 @@ function runOnOperationAdmission(
     transactionalFsWriteMachineSupported:
       enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
@@ -1122,7 +1143,9 @@ export async function executeRunOnSelfhostedMachine(
         deadlineMs,
         ...(timedOut
           ? {
-              reason: `command exceeded the ${deadlineMs} ms execution deadline`,
+              // A command on someone's computer often stalls on a permission
+              // prompt or dialog that only the person at its screen can see.
+              reason: `command exceeded the ${deadlineMs} ms execution deadline. If someone uses this computer, it may be waiting on a permission prompt or dialog on their screen: ask them to check before retrying.`,
             }
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
@@ -1393,6 +1416,10 @@ export async function runOnSandbox(
               transport: new NatsOpStreamTransport(
                 async () => services.bus?.getOpStreamConnection?.() ?? null,
               ),
+              ...(enrollment.agentCapabilities.opRelease === true
+                ? { outputReleaseSupported: true }
+                : {}),
+              connectionGeneration: String(enrollment.connectionGeneration),
             },
           }
         : {}),

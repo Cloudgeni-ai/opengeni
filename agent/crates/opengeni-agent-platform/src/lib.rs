@@ -31,6 +31,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+mod continuous_clock;
 mod desktop;
 mod error;
 #[cfg(unix)]
@@ -39,6 +40,7 @@ mod native;
 #[cfg(unix)]
 mod process_cleanup;
 mod pty;
+pub mod run_as;
 pub mod service;
 pub mod transactional_write;
 mod work_scope;
@@ -60,6 +62,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use continuous_clock::continuous_time;
 pub use opengeni_agent_engine::update_drain::WorkReservation;
 pub use work_scope::{
     current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,
@@ -357,6 +360,13 @@ pub trait Platform: Send + Sync {
 
     /// Whether this platform implements the transactional upload contract.
     fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform honors a request's `run_as` (Hello
+    /// `Capabilities.run_as`). Platforms that do not must refuse a non-empty
+    /// `run_as` instead of ignoring it.
+    fn run_as_supported(&self) -> bool {
         false
     }
 

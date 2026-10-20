@@ -137,6 +137,7 @@ async function retainDownloadsBeforeCapture(
       workspaceId: target.workspaceId,
       subjectId: null,
       browserSessionId: target.browserSessionId,
+      sourceSessionId: record.sourceSessionId,
       source: client.downloads(
         deriveBrowserSessionControllerTokens({
           rootSecret: controllerRoot,

@@ -13,7 +13,7 @@ const readDiscontinuity = async () => {
 };
 
 test("the compatible worker module reconstructs the warning independently of transcript context", async () => {
-  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(3);
+  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(4);
   for (const instructions of [
     null,
     "After compaction",
@@ -65,6 +65,33 @@ test("warning fetch or parse failure prevents reaching inference", async () => {
     expect(reachedInference).toBe(false);
   }
   failure = null;
+});
+
+test("explicit recovery never rewrites the previously sent session instruction prefix", async () => {
+  const instructions = "stable session instructions";
+  let explicitDecision = false;
+  const reader: typeof readDiscontinuity = async () => null;
+  const read = async (_db: unknown, _workspace: string, _session: string, projection?: string) => {
+    expect(projection).toBe("legacy_instructions");
+    return projection === "explicit_notice" && explicitDecision
+      ? "new filesystem warning"
+      : reader();
+  };
+  const before = await recoveryAwareSessionInstructions(
+    {} as never,
+    "workspace",
+    { id: "session", instructions },
+    read,
+  );
+  explicitDecision = true;
+  const after = await recoveryAwareSessionInstructions(
+    {} as never,
+    "workspace",
+    { id: "session", instructions },
+    read,
+  );
+  expect(after).toBe(before);
+  expect(after).toBe(instructions);
 });
 
 test("the empty-workspace variant survives every reconstruction and names the loss, not the tree", async () => {

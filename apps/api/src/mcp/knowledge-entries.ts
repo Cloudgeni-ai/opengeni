@@ -18,8 +18,6 @@ import {
   retainKnowledgeMessage,
   searchKnowledgeEntries,
   requireLiveAgentAttemptAuthorization,
-  siteAgentClamp,
-  siteClampedAgentMessage,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -46,8 +44,7 @@ import { z } from "zod";
 
 const TELL_PERSON =
   "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
-const TELL_PERSON_WHY =
-  "Tell the person in your reply that it was not saved and why; your other work can continue.";
+
 const TELL_PERSON_IF_ASKED =
   "If the person asked you to save or remember this, tell them in your reply that it was not saved and why; your other work can continue.";
 
@@ -84,7 +81,9 @@ function refusalAgentMessage(
     return "Nothing was saved: this attempt is no longer current. Your other work can continue; retry with the same operation ID if the change still applies.";
   switch (refusal.reason) {
     case "site_agent":
-      return `Nothing was saved. ${siteClampedAgentMessage(what)}. ${surface === "instruction" ? TELL_PERSON_WHY : TELL_PERSON_IF_ASKED}`;
+      // Retained legacy refusal receipts remain readable; new turns do not
+      // impose a learning policy based on where a message came from.
+      return "Nothing was saved under the policy applied to that earlier attempt.";
     case "learning_off":
       return `Nothing was saved. Agent learning for ${what} is Off where this change would be saved (this chat's or the workspace's setting). Turning it on in Agent learning settings would let you save it. ${tell}`;
     case "not_permitted":
@@ -107,26 +106,6 @@ export function registerKnowledgeEntryTools(
     surface: "knowledge" | "instruction" = "knowledge",
     mode: "read" | "write" = "read",
   ) {
-    // An agent started from a Site page does not learn: it reads Knowledge
-    // and instructions but never writes them.
-    if (mode === "write" && (await siteAgentClamp(deps.db, grant))?.clamped) {
-      const message = refusalAgentMessage(surface, mode, null, {
-        destination: surface,
-        reason: "site_agent",
-      });
-      return withLearningRefusalMeta(
-        {
-          isError: true,
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ error: { code: "site_agent_clamped", message } }),
-            },
-          ],
-        },
-        { destination: surface, reason: "site_agent" },
-      );
-    }
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const context: KnowledgeContext = {

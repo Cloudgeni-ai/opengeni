@@ -2097,103 +2097,20 @@ export async function getSiteDataSite(
   });
 }
 
-/** What Site Data needs to know about the session an agent acts in. */
-export type SiteDataAgentSession = {
-  /**
-   * Distinct Site origins on the session, its spawning ancestors and its
-   * root session (read directly, so a lineage too deep to walk still finds it).
-   */
-  originSiteIds: string[];
-  /** Whether the current turn or a spawning ancestor turn arrived from a Site page. */
-  siteTurn: boolean;
-  /** The scheduled task whose run created this exact session, if any. */
-  scheduledTaskId: string | null;
-  /**
-   * False when the lineage could not be read in full: the session or an
-   * ancestor is missing, or the walk stopped at its depth cap with a parent
-   * still above. Callers must then fail closed.
-   */
-  complete: boolean;
-};
-
-/** Spawning ancestors the lineage walk reads before it reports itself incomplete. */
-export const SITE_DATA_AGENT_LINEAGE_MAX_DEPTH = 32;
-
-/**
- * Walk an agent's session up its spawning lineage (parent session and the
- * exact parent turn), collecting Site origins and Site-surface turns, and
- * find the scheduled task that created the session (from the server-written
- * run row, never from session metadata a caller could set).
- */
-export async function getSiteDataAgentSession(
+/** The scheduled task behind this session's Site Data principal, never caller metadata. */
+export async function getSiteDataScheduledTaskId(
   db: Database,
   scope: { accountId: string; workspaceId: string },
   sessionId: string,
-  turnId: string | null,
-): Promise<SiteDataAgentSession> {
-  const unknown: SiteDataAgentSession = {
-    originSiteIds: [],
-    siteTurn: false,
-    scheduledTaskId: null,
-    complete: false,
-  };
-  if (!UUID.test(sessionId)) return unknown;
-  const turn = turnId && UUID.test(turnId) ? turnId : null;
+): Promise<string | null> {
+  if (!UUID.test(sessionId)) return null;
   return withRlsContext(db, scope, async (tx) => {
-    const rows = await rawRows<{
-      depth: number;
-      found: boolean;
-      parent_session_id: string | null;
-      origin_site_id: string | null;
-      turn_surface: string | null;
-    }>(
-      tx,
-      sql`with recursive chain(session_id, turn_id, depth) as (
-            select ${sessionId}::uuid, ${turn}::uuid, 0
-            union all
-            select s.parent_session_id, s.parent_turn_id, chain.depth + 1
-              from chain
-              join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
-             where s.parent_session_id is not null
-               and chain.depth < ${SITE_DATA_AGENT_LINEAGE_MAX_DEPTH}
-          )
-          select chain.depth, s.id is not null as found, s.parent_session_id,
-                 s.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id,
-                 t.surface as turn_surface
-            from chain
-            left join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
-            left join session_turns t on t.workspace_id = ${scope.workspaceId}
-              and t.session_id = chain.session_id and t.id = chain.turn_id
-           order by chain.depth`,
-    );
-    if (!rows[0]?.found) return unknown;
-    const deepest = rows[rows.length - 1]!;
-    const complete = rows.every((row) => row.found) && deepest.parent_session_id === null;
-    const [root] = await rawRows<{ origin_site_id: string | null }>(
-      tx,
-      sql`select r.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id
-            from sessions s
-            join sessions r on r.workspace_id = s.workspace_id and r.id = s.root_session_id
-           where s.workspace_id = ${scope.workspaceId} and s.id = ${sessionId}`,
-    );
     const [run] = await rawRows<{ task_id: string }>(
       tx,
       sql`select task_id from scheduled_task_runs
-           where workspace_id = ${scope.workspaceId} and session_id = ${sessionId}
-           limit 1`,
+          where workspace_id = ${scope.workspaceId} and session_id = ${sessionId} limit 1`,
     );
-    return {
-      originSiteIds: [
-        ...new Set(
-          [...rows, ...(root ? [root] : [])].flatMap((row) =>
-            row.origin_site_id ? [row.origin_site_id] : [],
-          ),
-        ),
-      ],
-      siteTurn: rows.some((row) => row.turn_surface === "site"),
-      scheduledTaskId: run?.task_id ?? null,
-      complete,
-    };
+    return run?.task_id ?? null;
   });
 }
 

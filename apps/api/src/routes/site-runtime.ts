@@ -28,9 +28,7 @@ import {
   ToolGatewayInvokeRequest,
   type Permission,
   type SiteAuthExchangeResponse,
-  type SiteEmbeddedAgent,
   type SiteRuntimeConfig,
-  type ToolRef,
 } from "@opengeni/contracts";
 import {
   cancelPublishedSiteSession,
@@ -41,6 +39,7 @@ import {
   resolveWorkspaceModelSelection,
   hasPermission,
   type ApiRouteDeps,
+  type WorkspaceModelSelection,
 } from "@opengeni/core";
 import {
   consumeSiteAuthCode,
@@ -82,7 +81,9 @@ import {
   isSubscriptionBilledModel,
   resolveSiteOutsideModel,
   siteCreditModelIds,
+  siteCreditModelSelections,
 } from "../site-publishing/agent-model";
+import { projectWorkspaceModelCatalog } from "../model-catalog";
 import {
   afterSitePlatformUsage,
   requireSitePlatformOpen,
@@ -129,6 +130,7 @@ import {
   meterSiteRuntime,
   requireServedSiteRuntimeHost,
   requireSiteAgent,
+  resolveSiteAgentViewer,
   resolveSiteRuntimeViewer,
   settleSiteRuntimeSpend,
   sha256Text,
@@ -234,7 +236,6 @@ const SteerRequest = z
     clientEventId: ClientEventId,
   })
   .passthrough();
-const SessionMcpServerIdPattern = /^[A-Za-z0-9_-]{1,200}$/u;
 
 function invalid(message: string) {
   return sitePublishingError(400, "validation_failed", "site_invalid_request", message);
@@ -450,40 +451,6 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
   return text ? `?${text}` : "";
 }
 
-/**
- * The workspace tools a Site conversation gets: the OVERLAP of what the Site
- * declares (its admin-chosen MCP connections) and what the viewer may do in
- * the workspace. Only workspace members who may attach MCP connections to
- * their own sessions (`mcp_servers:attach`, or workspace admins) get them.
- * People outside the workspace (invited people and public visitors, signed in
- * or anonymous) never get workspace tools: only the Site's own data and the
- * page. There is no setting that changes this; `guestTools` is ignored.
- * Optional references: a connection the workspace does not have is skipped
- * rather than failing the conversation.
- */
-export function siteAgentToolRefs(
-  agent: Pick<SiteEmbeddedAgent, "tools">,
-  viewer: Pick<SiteRuntimeViewer, "kind">,
-  memberPermissions: readonly string[] | null = null,
-): ToolRef[] {
-  const toolIds = siteViewerGetsTools(viewer, memberPermissions) ? (agent.tools ?? []) : [];
-  return toolIds
-    .filter((tool) => SessionMcpServerIdPattern.test(tool))
-    .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
-}
-
-/** Only workspace members who may use MCP connections get the Site's tools. */
-export function siteViewerGetsTools(
-  viewer: Pick<SiteRuntimeViewer, "kind">,
-  memberPermissions: readonly string[] | null,
-): boolean {
-  if (viewer.kind !== "member" || !memberPermissions) return false;
-  return (
-    memberPermissions.includes("mcp_servers:attach") ||
-    memberPermissions.includes("workspace:admin")
-  );
-}
-
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */
 function idempotentSessionId(seed: string): string {
   const hex = createHash("sha256").update(seed, "utf8").digest("hex");
@@ -613,6 +580,22 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       limits.requestsPerMinutePerVisitor,
     );
     return { host, viewer, limits, profileKind };
+  };
+
+  /**
+   * The viewer the Site's assistant serves and their limits: a workspace
+   * member without `sessions:create` uses it as an outside visitor
+   * (resolveSiteAgentViewer), under the Site's limits for that visitor.
+   */
+  const agentViewing = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: Awaited<ReturnType<typeof siteRuntimeLimitProfile>>["limits"],
+  ) => {
+    const assistant = await resolveSiteAgentViewer(deps, host, viewer);
+    if (assistant.viewer.kind === viewer.kind) return { ...assistant, limits };
+    const outside = await siteRuntimeLimitProfile(deps, host, assistant.viewer);
+    return { ...assistant, limits: outside.limits };
   };
 
   /**
@@ -932,7 +915,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost,
     viewer: SiteRuntimeViewer,
     limits: { agentModels: string[] | null },
-  ): Promise<{ allowed: string[]; default: string | null; unavailable: boolean }> => {
+  ): Promise<{
+    allowed: string[];
+    /** The allowed models' catalog selections, in `allowed` order. */
+    selections: WorkspaceModelSelection[];
+    default: string | null;
+    unavailable: boolean;
+  }> => {
     const agentModel = host.publication.agent.model;
     const named = (models: (string | null | undefined)[]) => [
       ...new Set(
@@ -948,10 +937,12 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: viewer.subjectId,
         }),
       );
+      const admissible = selections.filter((selection) =>
+        admissibleWorkspaceModel([selection], selection.model.id),
+      );
       return {
-        allowed: selections
-          .filter((selection) => admissibleWorkspaceModel([selection], selection.model.id))
-          .map((selection) => selection.model.id),
+        allowed: admissible.map((selection) => selection.model.id),
+        selections: admissible,
         default: agentModel,
         unavailable: false,
       };
@@ -960,20 +951,25 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       siteId: host.site.id,
       agentModel,
     });
-    const creditModels = new Set(await siteCreditModelIds(deps, host.scope, host.site.id));
-    const credited = (models: string[]) => models.filter((model) => creditModels.has(model));
-    if (choice.kind === "unavailable")
-      return {
-        allowed: credited(named(limits.agentModels ?? [])),
-        default: null,
-        unavailable: true,
-      };
+    const creditSelections = new Map(
+      (await siteCreditModelSelections(deps, host.scope, host.site.id)).map((selection) => [
+        selection.model.id,
+        selection,
+      ]),
+    );
+    const credited = (models: string[]) => models.filter((model) => creditSelections.has(model));
+    const selectionsOf = (models: string[]) =>
+      models.flatMap((model) => {
+        const selection = creditSelections.get(model);
+        return selection ? [selection] : [];
+      });
+    if (choice.kind === "unavailable") {
+      const allowed = credited(named(limits.agentModels ?? []));
+      return { allowed, selections: selectionsOf(allowed), default: null, unavailable: true };
+    }
     const model = choice.model;
-    return {
-      allowed: credited(named([model, ...(limits.agentModels ?? [])])),
-      default: model,
-      unavailable: false,
-    };
+    const allowed = credited(named([model, ...(limits.agentModels ?? [])]));
+    return { allowed, selections: selectionsOf(allowed), default: model, unavailable: false };
   };
 
   /**
@@ -988,10 +984,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     limits: Parameters<typeof siteViewerCapabilities>[3],
   ) => {
     const base = siteViewerCapabilities(deps, host, viewer, limits);
-    let agent = base.agent;
-    if (agent && (viewer.kind === "guest" || viewer.kind === "user"))
+    // The assistant answers the viewer it serves (a member without
+    // sessions:create as an outside visitor), under that viewer's limits.
+    const assistant = await agentViewing(host, viewer, limits);
+    const agentViewer = assistant.viewer;
+    let agent =
+      !assistant.unavailable &&
+      siteViewerCapabilities(deps, host, agentViewer, assistant.limits).agent;
+    if (agent && (agentViewer.kind === "guest" || agentViewer.kind === "user"))
       agent = !(await sitePlatformBrakeEngaged(deps).catch(() => false));
-    if (agent && viewer.kind !== "member") {
+    if (agent && agentViewer.kind !== "member") {
       const choice = await resolveSiteOutsideModel(deps, host.scope, {
         siteId: host.site.id,
         agentModel: host.publication.agent.model,
@@ -1045,9 +1047,15 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return context.json(config);
       }
       case "models.list": {
-        const models = await siteViewerModels(host, viewer, limits);
+        const assistant = await agentViewing(host, viewer, limits);
+        // No assistant for this viewer here: no models to choose from.
+        if (assistant.unavailable) return context.json({ models: [], defaultModel: null });
+        const models = await siteViewerModels(host, assistant.viewer, assistant.limits);
+        // The in-Site SDK reads this as the workspace model catalog, so each
+        // row carries the same definition, readiness and availability as
+        // GET /v1/workspaces/:id/model-catalog, limited to this viewer.
         return context.json({
-          models: models.allowed.map((model) => ({ id: model })),
+          models: projectWorkspaceModelCatalog(models.selections).models,
           defaultModel: models.default,
         });
       }
@@ -1062,7 +1070,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
       default:
-        if (id.startsWith("sessions.")) return await sessions(request, id, host, viewer, limits);
+        if (id.startsWith("sessions.")) {
+          const assistant = await agentViewing(host, viewer, limits);
+          if (assistant.unavailable)
+            throw siteNotAvailableForViewer(
+              "agent",
+              "This Site's assistant is not available to you",
+              { reason: "sessions_permission_required" },
+            );
+          return await sessions(request, id, host, assistant.viewer, assistant.limits);
+        }
         throw unsupported();
     }
   };
@@ -1255,7 +1272,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
     const reauthorizeViewer = async () => {
       const liveHost = await requireServedSiteRuntimeHost(deps, host.domain, request.fields.host);
-      const liveViewer = await resolveSiteRuntimeViewer(deps, liveHost, request.fields);
+      const liveViewer = (
+        await resolveSiteAgentViewer(
+          deps,
+          liveHost,
+          await resolveSiteRuntimeViewer(deps, liveHost, request.fields),
+        )
+      ).viewer;
       if (
         liveHost.site.id !== host.site.id ||
         liveViewer.principal !== viewer.principal ||
@@ -1455,11 +1478,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
       const agent = host.publication.agent;
-      const memberPermissions =
-        viewer.kind === "member" && viewer.subjectId
-          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
-          : null;
-      const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
+
       if (repair) {
         const previous = repair.conversation;
         const legacyMember =
@@ -1468,7 +1487,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           previous.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
         if (
           (previous.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
-          previous.toolIds.some((tool) => !mcpTools.some((allowed) => allowed.id === tool))
+          (viewer.kind !== "member" && previous.toolIds.length > 0)
         )
           throw sitePublishingError(
             409,
@@ -1496,13 +1515,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       // Every conversation gets this Site's own data tools, pinned to this
       // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
-      const dataTools = await siteAgentDataToolsForStart(
-        deps,
-        host.scope,
-        host.site.id,
-        viewer.kind,
-        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
-      );
+      const dataTools =
+        viewer.kind === "member"
+          ? []
+          : await siteAgentDataToolsForStart(
+              deps,
+              host.scope,
+              host.site.id,
+              viewer.kind,
+              undefined,
+            );
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
@@ -1527,7 +1549,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
               viewerPrincipal: viewer.principal,
               viewerKind: viewer.kind,
               viewerEmail: viewer.email,
-              toolIds: mcpTools.map((tool) => tool.id),
+              toolIds: [],
               versionId: host.versionId,
               limits: budgets,
               budgetKey: siteRuntimeBudgetKey(viewer),
@@ -1541,23 +1563,28 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestedSessionId,
         ...(viewer.kind === "member" ? { visibility: "private" } : {}),
         startMode: "standard",
-        agentAccess: "session",
-        memoryScope: "off",
-        rigId: null,
-        // Only this Site's data tools; never management or workspace tools.
-        firstPartyMcpTools: dataTools,
-        ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
-        agent: {
-          capabilities: {
-            from: "none",
-            humanInput: false,
-            skills: false,
-            ...(dataTools.length > 0 ? { artifacts: true } : {}),
-          },
-        },
-        // No sandbox: a Site's agent answers from the page and the Site's
-        // data, with no shell or workspace files.
-        sandboxBackend: "none",
+        ...(viewer.kind === "member"
+          ? {}
+          : {
+              agentAccess: "session",
+              memoryScope: "off",
+              rigId: null,
+              // Only this Site's data tools; never management or workspace tools.
+              firstPartyMcpTools: dataTools,
+              ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
+              agent: {
+                capabilities: {
+                  from: "none",
+                  humanInput: false,
+                  skills: false,
+                  ...(dataTools.length > 0 ? { artifacts: true } : {}),
+                },
+              },
+              // No sandbox: a Site's agent answers from the page and the Site's
+              // data, with no shell or workspace files.
+              sandboxBackend: "none",
+              tools: [],
+            }),
         ...(repair
           ? { model: repair.model }
           : input.model || models.default
@@ -1565,15 +1592,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             : {}),
         ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.latencyMode === undefined ? {} : { latencyMode: input.latencyMode }),
-        instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
-        // Always explicit: an empty list means no workspace tools at all.
-        tools: mcpTools,
+        ...(viewer.kind === "member"
+          ? agent.instructions?.trim()
+            ? { instructions: agent.instructions.trim() }
+            : {}
+          : { instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions) }),
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,
             versionId: host.versionId,
             viewerKind: viewer.kind,
-            agentDefaultsVersion: SITE_AGENT_DEFAULTS_VERSION,
+            ...(viewer.kind === "member"
+              ? {}
+              : { agentDefaultsVersion: SITE_AGENT_DEFAULTS_VERSION }),
           },
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
@@ -1702,13 +1733,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // tool the Site no longer gives this viewer (removed, or the viewer left
       // the workspace or lost the permission), or counted as a member's while
       // the viewer no longer is one (or the reverse), takes no more work.
-      const memberPermissions =
-        viewer.kind === "member" && viewer.subjectId
-          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
-          : null;
-      const allowedTools = new Set(
-        siteAgentToolRefs(host.publication.agent, viewer, memberPermissions).map((t) => t.id),
-      );
+
       // A member's conversation started before members were kept out of the
       // Site's windows counts in `*` and stays usable; its reservations stay
       // in the windows they were made in.
@@ -1718,7 +1743,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
       if (
         (conversation.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
-        conversation.toolIds.some((tool) => !allowedTools.has(tool))
+        (viewer.kind !== "member" && conversation.toolIds.length > 0)
       )
         throw sitePublishingError(
           409,
@@ -1746,7 +1771,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewer,
         conversation.sessionId,
         conversation.toolIds,
-        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       // Clear the stamped session cap before dropping the durable conversation

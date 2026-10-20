@@ -28,7 +28,7 @@ use crate::enrollment::InstallIdentity;
 use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
-const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const DEFAULT_BASE_URL: &str = DEFAULT_API_URL;
 // Linux current_exe follows the running inode. After replacement it can return
 // a deleted path; retain the install identity for retries and successor exec.
 static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -37,10 +37,23 @@ static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new()
 pub fn installed_executable() -> Result<&'static Path, String> {
     INSTALLED_EXECUTABLE
         .get_or_init(|| {
-            std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())
+            let path =
+                std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
+            // _NSGetExecutablePath can return the launch symlink on macOS.
+            // Resolve it BEFORE selecting an artifact or replacing anything;
+            // otherwise a bundle alias becomes a standalone executable.
+            #[cfg(target_os = "macos")]
+            let path = resolve_macos_install_path(&path)
+                .map_err(|_| "installed_binary_unavailable".to_string())?;
+            Ok(path)
         })
         .as_deref()
         .map_err(Clone::clone)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_macos_install_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
 }
 
 fn apply_verified_update(
@@ -349,7 +362,14 @@ pub fn apply_managed(
     let plan = match check_update_manifest(&source, &config) {
         Ok(ManifestCheckOutcome::Available(plan)) => plan,
         Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
-        Err(_) => return Err("manifest_verification_failed".to_string()),
+        Err(error) => {
+            return Err(managed_fetch_failure(
+                operation_id,
+                target_version,
+                "manifest",
+                &error,
+            ));
+        }
     };
     if plan.version != target_version {
         return Err("target_manifest_mismatch".to_string());
@@ -358,7 +378,7 @@ pub fn apply_managed(
     progress(ManagedUpdatePhase::Downloading);
     let pending = plan
         .download(&source)
-        .map_err(|_| "artifact_verification_failed".to_string())?;
+        .map_err(|error| managed_fetch_failure(operation_id, target_version, "artifact", &error))?;
     progress(ManagedUpdatePhase::Verifying);
     progress(ManagedUpdatePhase::Applying);
     #[cfg(target_os = "macos")]
@@ -406,6 +426,29 @@ pub fn apply_managed(
         warn!(%error, "verified update is live; stale rollback backup cleanup failed");
     }
     Ok(ManagedUpdateResult { expected_sha256 })
+}
+
+fn managed_fetch_failure(
+    operation_id: &str,
+    target_version: &str,
+    stage: &str,
+    error: &UpdateError,
+) -> String {
+    let (suffix, failure_kind) = match error {
+        UpdateError::Download { .. } if error.is_download_timeout() => {
+            ("download_timeout", "timeout")
+        }
+        UpdateError::Download { .. } => ("download_failed", "transport"),
+        UpdateError::Signature(_) => ("verification_failed", "signature"),
+        UpdateError::Checksum { .. } => ("verification_failed", "checksum"),
+        _ => ("verification_failed", "manifest_or_target"),
+    };
+    let error_code = format!("{stage}_{suffix}");
+    // Progress error_code is an open string on the existing wire contract. Keep
+    // verification codes stable, and never log release URLs that may be signed.
+    warn!(operation_id, target_version, stage, %error_code, failure_kind,
+        "managed update fetch or verification failed; installed agent unchanged");
+    error_code
 }
 
 /// Executes the newly-swapped binary through the smallest stable startup surface.
@@ -482,6 +525,111 @@ fn resolve_channel(
 mod tests {
     use super::*;
     use crate::config::StoredCredentials;
+
+    #[test]
+    fn managed_fetch_failures_distinguish_transport_timeout_and_verification() {
+        for stage in ["manifest", "artifact"] {
+            for (error, suffix) in [
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact?token=not-for-logs".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                    },
+                    "download_timeout",
+                ),
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    },
+                    "download_failed",
+                ),
+                (
+                    UpdateError::Signature("bad signature".to_string()),
+                    "verification_failed",
+                ),
+                (
+                    UpdateError::Checksum {
+                        expected: "a".to_string(),
+                        actual: "b".to_string(),
+                    },
+                    "verification_failed",
+                ),
+            ] {
+                assert_eq!(
+                    managed_fetch_failure("operation", "1.0.0", stage, &error),
+                    format!("{stage}_{suffix}")
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_install_alias_resolves_before_artifact_selection_and_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "sealed original").unwrap();
+        let alias = dir.path().join("agent");
+        symlink(&executable, &alias).unwrap();
+        let resolved = resolve_macos_install_path(&alias).unwrap();
+        assert_eq!(resolved, executable.canonicalize().unwrap());
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        #[cfg(target_os = "macos")]
+        {
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, &resolved);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_through_an_app_symlink_captures_the_bundle_executable() {
+        const PROBE: &str = "OPENGENI_TEST_APP_ALIAS";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let installed = installed_executable().unwrap();
+            assert_eq!(installed, Path::new(&expected));
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, installed);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let alias = dir.path().join("agent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        let output = std::process::Command::new(&alias)
+            .args([
+                "--exact",
+                "update::tests::running_through_an_app_symlink_captures_the_bundle_executable",
+                "--nocapture",
+            ])
+            .env(PROBE, executable.canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

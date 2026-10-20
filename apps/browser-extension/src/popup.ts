@@ -3,6 +3,8 @@ type Status = {
   deviceId: string | null;
   profileLabel: string | null;
   error: string | null;
+  /** What to do about it, when not connected. */
+  detail?: string | null;
 };
 
 const state = document.querySelector<HTMLElement>("[data-state]")!;
@@ -17,7 +19,10 @@ async function refresh(): Promise<void> {
   state.textContent = status.connected ? "Connected" : "Agent unavailable";
   detail.textContent = status.connected
     ? "This Chrome profile is ready in Opengeni. Tabs attach only when an agent uses them."
-    : (status.error ?? "Start the Opengeni machine agent to connect this profile.");
+    : (status.detail ??
+      status.error ??
+      "Start the Opengeni machine agent to connect this profile.");
+  detail.title = status.connected ? "" : (status.error ?? "");
   label.value = status.profileLabel ?? "";
 }
 

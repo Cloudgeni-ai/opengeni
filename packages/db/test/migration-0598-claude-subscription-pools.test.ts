@@ -15,6 +15,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -60,6 +61,7 @@ const subscriptionCoreMigrations = [
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0716_subscription_authority_compat.sql",
   "0843_indexed_inbox_lineage.sql",
+  "0846_independent_session_titles.sql",
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
   // Adds a trigger on the session bindings table from withheld 0642.
@@ -104,6 +106,10 @@ const subscriptionCoreMigrations = [
   "0807_subscription_rls_admin_once_per_statement.sql",
   // Empties that table and rewrites the 0807 reclaim routine on it.
   "0838_reclaim_exited_backend_runtime_capabilities.sql",
+  // Replaces the admin helper created by withheld 0642; replay after its original.
+  "0847_read_only_runtime_probes.sql",
+  // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
+  ...strictOwnerMaintenanceMigrationTail,
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

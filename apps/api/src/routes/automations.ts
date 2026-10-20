@@ -43,7 +43,6 @@ import {
 import {
   automationRequestDigest,
   automationCredentialRestrictionForGrant,
-  assertNotSiteClampedAgent,
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
@@ -64,8 +63,7 @@ import { parseRequestJson } from "../http/request-body";
 
 /**
  * Create, change, delete or fire an automation: a workspace admin, but never
- * a Site page (a tool it called) or an agent started from one. Site pages and
- * their agents act with the page's reach, so no automation starts from a Site.
+ * a Site page (a tool it called). Agents use ordinary workspace permissions.
  */
 async function requireAutomationWriter(
   c: Context,
@@ -75,7 +73,7 @@ async function requireAutomationWriter(
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
   if (currentSiteSessionOrigin())
     throw new HTTPException(403, { message: "A Site page cannot create or change automations" });
-  await assertNotSiteClampedAgent(deps.db, grant, "automations");
+
   return grant;
 }
 

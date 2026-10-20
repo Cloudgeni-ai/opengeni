@@ -755,6 +755,30 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const noHome = await swapActiveSandbox(services, ctx, "session");
     expect(noHome.swapped).toBe(false);
     expect(noHome.code).toBe("unsupported_backend_context");
+    // Staying on the machine is the answer, not a sandbox that does not exist.
+    expect(noHome.reason).toBe(
+      "This session has no managed sandbox of its own, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
+    );
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
+      sandbox.id,
+    );
+  }, 60_000);
+
+  test("a machine-home session without a managed sandbox stays on its machine instead of swapping back", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "selfhosted" });
+    const machineOnly = {
+      ...services,
+      settings: testSettings({ ...services.settings, sandboxBackend: "selfhosted" }),
+    };
+    expect((await swapActiveSandbox(machineOnly, ctx, sandbox.id)).swapped).toBe(true);
+    for (const target of ["session", "default"]) {
+      const back = await swapActiveSandbox(machineOnly, ctx, target);
+      expect(back).toMatchObject({ swapped: false, code: "unsupported_backend_context" });
+      expect(back.reason).toBe(
+        "This deployment has no managed session sandbox, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
+      );
+    }
     expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
       sandbox.id,
     );

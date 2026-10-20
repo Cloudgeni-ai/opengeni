@@ -1,5 +1,31 @@
 # @opengeni/observability
 
+## 4.2.0
+
+### Patch Changes
+
+- 25c316a: Preserve safe operational error diagnostics and correlation without exposing raw errors or private identifiers in public logs.
+- Updated dependencies [641e179]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/contracts@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- Updated dependencies [afff3f9]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

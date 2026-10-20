@@ -1,8 +1,9 @@
 // One sandbox environment as its own page: Overview, Versions and Changes
 // tabs, a quiet aside, and Edit details / Edit setup as their own pages
 // (?view=edit, ?view=edit-setup). Reads poll so verification and promotion
-// move live. rigs:manage gates edit/promote/activate/default/delete;
-// rigs:use gates read + propose.
+// move live. rigs:manage gates edit/promote/activate/delete; choosing the
+// workspace default also needs workspace settings authority; rigs:use gates
+// read + propose.
 import { useOpenGeni, useRig, useRigChanges, useRigVersions } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -53,7 +54,7 @@ import { userFacingError } from "@/lib/api-error";
 import { LoadFailure } from "@/components/ui/load-failure";
 import { useAppContext } from "@/context";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
 import type { Rig } from "@/types";
@@ -176,6 +177,12 @@ export function RigDetailRoute({
   ).length;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
   const isDefaultRig = workspace?.defaultRigId === current.id;
+  // Which environment new sessions start on is a workspace setting.
+  const canSetDefault = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace ?? null,
+    context.managedSelfContext,
+  );
   const health = rigHealth(current);
 
   if (view === "edit" && canManage) {
@@ -312,14 +319,16 @@ export function RigDetailRoute({
               ) : null}
               {canManage ? (
                 <MoreMenu label={`More actions for ${current.name}`} disabled={rig.mutating}>
-                  <DropdownMenuItem onSelect={() => void toggleDefault()}>
-                    {isDefaultRig ? (
-                      <StarOffIcon aria-hidden="true" />
-                    ) : (
-                      <StarIcon aria-hidden="true" />
-                    )}
-                    {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
-                  </DropdownMenuItem>
+                  {canSetDefault ? (
+                    <DropdownMenuItem onSelect={() => void toggleDefault()}>
+                      {isDefaultRig ? (
+                        <StarOffIcon aria-hidden="true" />
+                      ) : (
+                        <StarIcon aria-hidden="true" />
+                      )}
+                      {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={() => openRig({ view: "edit" })}>
                     <PencilIcon aria-hidden="true" />
                     Edit details

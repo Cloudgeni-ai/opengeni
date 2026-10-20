@@ -1,5 +1,166 @@
 # @opengeni/worker-bundle
 
+## 4.2.0
+
+### Patch Changes
+
+- 7dcb1d5: Making room on a full browser controller is now safer. A browser is saved to make room only if it is still idle, active on the same controller and free of other operations at the moment it is claimed, and a browser another request already saved no longer counts as room made. A failure while preparing the save returns the browser to active instead of leaving it stuck suspending. Downloads kept when any browser is saved stay private to the owner of a private chat instead of becoming workspace files, even when another person's request made the room, and are read back as that owner once the request is authorized for the chat. Keeping downloads no longer risks the save expiring before capture. The memory-based browser limit now honours memory limits on the controller's own nested cgroup and its ancestors, wherever the cgroup hierarchy is mounted.
+- a336e51: Keep session title generation independent of conversation handover. Steer and cancellation no longer wait for a title or cancel it; a durable metadata operation retains the accepted provider account, request custody, usage accounting and human-title precedence across recovery.
+- a961825: Start pre-dispatch timing only at SDK model entry. Native-provider transport admission rechecks after dispatch no longer count the previous response and tool work as preparation for the next call. Authorization checks, provider requests, and existing persisted measurements are unchanged.
+- 6c603cb: A forked chat runs on the same Connected Machine and working directory as the chat it was forked from, when the person forking may use that machine, so its first message no longer fails with an internal sandbox error. Someone else's personal machine is never carried over, and a personal machine still asks its owner for approval in the fork just as it does in any other chat. A chat that runs on Connected Machines but has no machine selected, on a deployment without a managed sandbox, now says so and asks for a machine instead of failing with "no agentId bound".
+- Updated dependencies [641e179]
+- Updated dependencies [641e179]
+- Updated dependencies [7dcb1d5]
+- Updated dependencies [e189078]
+- Updated dependencies [49b121d]
+- Updated dependencies [b02f045]
+- Updated dependencies [aebb860]
+- Updated dependencies [c27cffc]
+- Updated dependencies [93e20fe]
+- Updated dependencies [641e179]
+- Updated dependencies [1830cf0]
+- Updated dependencies [507caf7]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [b8d5b64]
+- Updated dependencies [a336e51]
+- Updated dependencies [5715a3e]
+- Updated dependencies [4c90154]
+- Updated dependencies [523bac6]
+- Updated dependencies [47eeb80]
+- Updated dependencies [78bd3fd]
+- Updated dependencies [641e179]
+- Updated dependencies [da09a6e]
+- Updated dependencies [32c356f]
+- Updated dependencies [dfd0ce5]
+- Updated dependencies [641e179]
+- Updated dependencies [184167c]
+- Updated dependencies [6c603cb]
+- Updated dependencies [fd7e63f]
+- Updated dependencies [ac63730]
+- Updated dependencies [daec93b]
+- Updated dependencies [25c316a]
+  - @opengeni/runtime@4.2.0
+  - @opengeni/db@4.2.0
+  - @opengeni/core@4.2.0
+  - @opengeni/codemode@4.2.0
+  - @opengeni/subscriptions@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/agent-proto@4.2.0
+  - @opengeni/events@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/documents@4.2.0
+  - @opengeni/capabilities@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/github@4.2.0
+  - @opengeni/interaction@4.2.0
+  - @opengeni/storage@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+  - @opengeni/vaults@4.2.0
+  - @opengeni/vaults-keeper@4.2.0
+  - @opengeni/vaults-onepassword@4.2.0
+  - @opengeni/vaults-protonpass@4.2.0
+  - @opengeni/jev@4.2.0
+  - @opengeni/network@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- 18c8700: Re-read scheduled-task execution and authority after a concurrent task-head change rejects fresh producer admission, so simultaneous cold reusable runs converge without waiting for an activity retry. Preserve the exact database authority fence and accepted-producer replay.
+- Updated dependencies [1e77fbc]
+- Updated dependencies [3beb7bc]
+- Updated dependencies [175f595]
+- Updated dependencies [404e017]
+  - @opengeni/runtime@4.1.2
+  - @opengeni/db@4.1.2
+  - @opengeni/sdk@4.1.2
+  - @opengeni/core@4.1.2
+  - @opengeni/documents@4.1.2
+  - @opengeni/events@4.1.2
+  - @opengeni/codemode@4.1.2
+  - @opengeni/agent-proto@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/github@4.1.2
+  - @opengeni/interaction@4.1.2
+  - @opengeni/jev@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/storage@4.1.2
+  - @opengeni/subscriptions@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+  - @opengeni/vaults@4.1.2
+  - @opengeni/vaults-keeper@4.1.2
+  - @opengeni/vaults-onepassword@4.1.2
+  - @opengeni/vaults-protonpass@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- e3fcf29: Prepare reusable Codex model entitlements alongside accepted-turn settings reads without renewing credentials before admission. Keep the normal live placement check, and distinguish claim database admission and nested account-resolution costs in startup diagnostics.
+- 84688e2: Reuse familiar Codex prompt prefixes across sessions for the same person in a workspace by separating Responses cache affinity from session identity. Keep request bodies, per-session cache keys, conversation sockets, and continuation chains unchanged.
+- f20f60c: Retry transient database connection admission with bounded jittered backoff and
+  recover running turns after PostgreSQL refuses connections with SQLSTATE 53300.
+  Never replay entered callbacks or uncertain commits, and keep permanent data and
+  authentication errors non-retryable. Existing error messages remain unchanged.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- Updated dependencies [a254a76]
+- Updated dependencies [373f408]
+- Updated dependencies [afff3f9]
+- Updated dependencies [6156fab]
+- Updated dependencies [e6f56a1]
+- Updated dependencies [84688e2]
+- Updated dependencies [04019de]
+- Updated dependencies [cf899f4]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [7837e4f]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [89ac8a8]
+- Updated dependencies [781a3c1]
+- Updated dependencies [f20f60c]
+- Updated dependencies [91dc10d]
+- Updated dependencies [9be9a82]
+- Updated dependencies [3b980e6]
+- Updated dependencies [523d8f9]
+  - @opengeni/core@4.1.0
+  - @opengeni/db@4.1.0
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/agent-proto@4.1.0
+  - @opengeni/codemode@4.1.0
+  - @opengeni/vaults-protonpass@4.1.0
+  - @opengeni/documents@4.1.0
+  - @opengeni/events@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/github@4.1.0
+  - @opengeni/interaction@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/storage@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/vaults-keeper@4.1.0
+  - @opengeni/vaults-onepassword@4.1.0
+  - @opengeni/jev@4.1.0
+  - @opengeni/network@4.1.0
+  - @opengeni/subscriptions@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

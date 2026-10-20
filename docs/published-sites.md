@@ -33,7 +33,10 @@ Open the Site and choose **Publish**. The **Publish to web** page sets:
 
 Only the Site's owner and workspace admins with `artifacts:publish` see the
 button. A Site must be shared with its workspace first; an **Only me** Site
-can't be published. **Unpublish** takes the Site offline at once and keeps
+can't be published. In a **Personal workspace**, where every chat is Only me
+and nobody else is in the workspace, publishing an Only me Site shares it
+with that one-person workspace as it publishes: only its owner, or their own
+agent, can do this. **Unpublish** takes the Site offline at once and keeps
 its address reserved; publishing again brings it back on the same address.
 
 Agents can do the same with the first-party tools `site_publication_get`,
@@ -52,6 +55,11 @@ Invited people sign in to Opengeni with the invited email. They don't join
 the organization or workspace and see nothing else in it. The API checks
 access again on every call, so removing an address or changing the mode
 takes effect on the next request.
+
+A member is anyone with live authority in the Site's workspace, checked on
+every call: a workspace membership whose organization membership is active,
+or, for a Personal workspace, its owner (who has no membership row). Anyone
+else in the organization is outside the workspace.
 
 Anonymous visitors of a public Site are guests: `guest:<visitorId>`, where
 the visitor id comes from a cookie the gateway signs. Guests aren't users,
@@ -125,32 +133,25 @@ the gateway origin and secret stay configured. Details and limits are in
 
 ## Embedded agents
 
-When the embedded agent is on, visitors can start conversations with it from
-the Site. Each conversation runs as the Site's own service principal with
-narrow permissions and the publication's model and instructions, without a
-sandbox or shell (a publication has no sandbox setting, so Site agents never
-get one). For people outside the workspace a per-conversation spend cap is
-in place before the first model call; workspace members' conversations get
-no Site cap and no stamped session usage limit, only the workspace's normal
-limits.
+When the embedded agent is on, workspace members start ordinary private chats
+as themselves, with their live native permissions and normal workspace defaults.
+That needs `sessions:create`. A member without it (the Viewer preset) uses the
+agent on a Site that admits people outside the workspace (invited or anyone
+with the link) as a signed-in outside visitor would: invited or `user`, with
+the Site service identity, viewer-bound data tools and the Site's limits
+(`resolveSiteAgentViewer`), never more than outside visitors get. On a
+members-only Site they have no agent, and `site.config` reports
+`capabilities.agent: false`.
+Site-origin and console turns have identical tools, compute, learning, and
+agent reach. Author instructions remain explicit. Saved settings are never
+rewritten on Send; old chats retain their stored selections, editable normally.
 
-Every conversation (members, invited people and guests) gets the Site's own
-data tools, pinned on the server to this Site and acting as the
-conversation's viewer, so they see and change only what that person could
-on the page (per-viewer collections, owner binding, `:viewer` and query
-audiences such as `signed_in` or `managers`): `site_data_query`,
-`site_data_write`, `site_sql_run` for named queries when Site SQL is on, and
-the read-only `site_sql_query` for members when Site SQL is on. Calls for
-another Site and every Site management tool (publication, migrate, define,
-reset, import, export, enable, files) are refused. Members also get the
-overlap of the Site's declared workspace tools and their own permissions
-(below); people outside the workspace get the Site's own data tools only. A
-visitor can list, read and continue only their own conversations on that
-Site, and sees a Site-safe view of them (no workspace ids, instructions,
-tools or metadata). Agents started from a Site can't create or change
-schedules, automations, Site publications or workspace settings, and can't
-read other sessions; their API writes are held to an allowlist (see
-`docs/site-conversations.md`).
+People outside the workspace use the Site service identity and its viewer-bound
+data tools, no workspace tools or sandbox, and funded usage limits. Their data
+tools recheck current audience access. Every visitor can list/read/continue only
+their own conversations on that Site; projection and page-access rules remain.
+See [Site conversations](site-conversations.md) for the page/agent distinction.
+
 Public Sites can let guests chat too; the Site's limits and the deployment
 decide. Guest agents can optionally require a human check
 (`OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` with the gateway's Turnstile
@@ -185,34 +186,18 @@ returns `tool_gateway_approval_required`, never an automatic approval. The
 published shell does not currently present an approval dialog. Gateway schema,
 stale-catalog and provider errors retain their normal semantics.
 
-The assistant's workspace tools (MCP connections) act with the workspace's shared
-connections, so only a workspace admin can give them to a Site's agent, and
-only workspace members who may use connections (`mcp_servers:attach` or
-admins) get them. People outside the workspace (invited people, signed-in
-visitors and guests) never get workspace tools; they use the Site's own data
-(Site Data and Site SQL) and the page. `agent.guestTools` is retired: it is
-accepted and ignored, and always reads `false`. An agent started from a
-Site page gets only the tools the Site declared (intersected with the
-member's permissions), and can create, edit or export documents,
-spreadsheets and presentations only when the Site declares a first-party
-editing tool, and only artifacts created within that Site-clamped session tree.
-The server checks the immutable create/import receipt, not a recent-use link:
-reading an unrelated workspace artifact does not grant permission to edit or
-export it. Parent and child sessions in that clamped tree share their creations;
-another conversation on the same Site does not. No explicit existing-artifact
-declaration field is exposed yet. Normal artifact permissions still apply.
-A session a Site page starts in the console gets only the
-first-party tools the Site declares plus the Site's own data tools (never
-the workspace default set) and no sandbox. Console-frame workspace connections
-are narrowed to the exact declared tool names through `ToolRef.allowedTools`,
-intersected with the connection's own allowlist and the member's authority. A
-connection the workspace doesn't have is skipped rather than failing the
-conversation.
+An assistant uses the person's normal native connections and permissions,
+independent of the page's declared tools. The historical `agent.tools` field
+does not narrow member conversations. `agent.guestTools` stays retired and
+ignored; outside-workspace visitors never inherit member credentials.
+Document edits, schedules, learning and other tools use ordinary native access
+checks, not a special Site-surface policy. Authors can opt into narrower chat
+settings using the ordinary session configuration.
+
 Unpublishing, taking down, or narrowing a Site's access signs all its viewers
 out (those who keep access sign in again) and cancels its running
 conversations; turning the agent off cancels the conversations only.
-Removing a tool cancels the conversations that hold it, and those
-conversations take no more messages.
+Editing the legacy publication tool list does not cancel member conversations.
 
 ## What each audience can do
 

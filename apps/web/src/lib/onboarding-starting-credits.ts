@@ -14,14 +14,14 @@ import { confirmIncludedModel } from "./model-access-onboarding";
 
 /**
  * Opengeni credits the organization already holds when the post-signup model
- * step opens (the one-time verified-signup trial grant, or any other credits).
+ * step opens (monthly Free plan funding, legacy promotions, or other credits).
  */
 export type StartingCreditsOnboarding = {
   /** The positive balance, or null when it could not be read. */
   balance:
     | ({ balanceMicros: number; currency: string } & Pick<
         BillingBalance,
-        "promotionalCredits" | "generalBalanceMicros"
+        "promotionalCredits" | "generalBalanceMicros" | "plan"
       >)
     | null;
   /** The server-resolved default new chats use, billed in Opengeni credits. */
@@ -80,6 +80,7 @@ export function startingCreditsForOnboarding(input: {
       ...(balance.generalBalanceMicros !== undefined
         ? { generalBalanceMicros: balance.generalBalanceMicros }
         : {}),
+      ...(balance.plan ? { plan: balance.plan } : {}),
     },
     model,
   };

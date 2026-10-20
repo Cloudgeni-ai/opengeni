@@ -1,5 +1,6 @@
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { access, lstat, open } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { resolve } from "node:path";
 import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
@@ -200,7 +201,7 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
     ),
     maxSessions: environmentInteger(
       environment.OPENGENI_BROWSERD_MAX_SESSIONS,
-      64,
+      defaultMaxBrowserSessions(machineMemoryBytes()),
       1,
       10_000,
       "OPENGENI_BROWSERD_MAX_SESSIONS",
@@ -310,6 +311,148 @@ function requiredEnvironment(environment: NodeJS.ProcessEnv, name: string): stri
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+/** Memory one browser is planned at: about the p90 resident (PSS) size of
+ * live agent browsers, including their renderer and GPU processes. */
+const PLANNED_BROWSER_MEMORY_BYTES = 300 * 1024 * 1024;
+/** Share of machine memory browsers may plan to use; the rest stays with the
+ * operating system, the agent and whatever else the machine runs. */
+const BROWSER_MEMORY_SHARE = 0.5;
+const MIN_DEFAULT_BROWSER_SESSIONS = 8;
+
+/**
+ * Default browser limit for one controller, sized to the machine: half its
+ * memory at {@link PLANNED_BROWSER_MEMORY_BYTES} each, so a 48 GiB machine
+ * runs 81 browsers and an 86 GiB one 147. OPENGENI_BROWSERD_MAX_SESSIONS
+ * overrides it.
+ */
+export function defaultMaxBrowserSessions(memoryBytes: number): number {
+  if (!Number.isFinite(memoryBytes) || memoryBytes <= 0) return 64;
+  return Math.min(
+    10_000,
+    Math.max(
+      MIN_DEFAULT_BROWSER_SESSIONS,
+      Math.floor((memoryBytes * BROWSER_MEMORY_SHARE) / PLANNED_BROWSER_MEMORY_BYTES),
+    ),
+  );
+}
+
+/**
+ * Physical memory, or the tightest memory limit of this process's cgroup and
+ * its ancestors when that is lower. A browser controller started inside a
+ * service or container cgroup is bound by every limit above it, not just the
+ * one at the cgroup mount root. Each memory hierarchy is located through the
+ * mount table, which says which cgroup a mount shows and where; a membership
+ * outside a mount's root is not described by that mount and is skipped.
+ */
+export function machineMemoryBytes(
+  physicalBytes: number = totalmem(),
+  readLimit: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): number {
+  let lowest = physicalBytes;
+  const consider = (path: string) => {
+    try {
+      const value = readLimit(path).trim();
+      // "max" (cgroup v2) means unlimited.
+      if (!/^[0-9]+$/u.test(value)) return;
+      const limit = Number(value);
+      // cgroup v1 reports "unlimited" as a huge sentinel, past the safe range.
+      if (Number.isSafeInteger(limit) && limit > 0 && limit < lowest) lowest = limit;
+    } catch {
+      // No limit file at this level.
+    }
+  };
+  const read = (path: string) => {
+    try {
+      return readLimit(path);
+    } catch {
+      return null;
+    }
+  };
+  const membership = read("/proc/self/cgroup");
+  const mounts = read("/proc/self/mountinfo");
+  if (membership === null || mounts === null) {
+    // No per-process view (not Linux, or /proc is hidden): only the
+    // conventional mount roots can apply.
+    consider("/sys/fs/cgroup/memory.max");
+    consider("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    return lowest;
+  }
+  // v2: "0::<path>"; v1: "<id>:<controllers>:<path>".
+  let unified: string | null = null;
+  let v1Memory: string | null = null;
+  for (const line of membership.split("\n")) {
+    const match = /^[0-9]+:([^:]*):(.*)$/u.exec(line.trim());
+    if (!match) continue;
+    const [, controllers, path] = match as unknown as [string, string, string];
+    if (controllers === "") unified = path;
+    else if (controllers.split(",").includes("memory")) v1Memory = path;
+  }
+  for (const mount of cgroupMounts(mounts)) {
+    const membershipPath = mount.version === 2 ? unified : v1Memory;
+    if (membershipPath === null) continue;
+    const file = mount.version === 2 ? "memory.max" : "memory.limit_in_bytes";
+    for (const directory of cgroupAncestors(mount, membershipPath)) {
+      consider(`${directory}/${file}`);
+    }
+  }
+  return lowest;
+}
+
+type CgroupMount = { version: 1 | 2; root: string; mountPoint: string };
+
+/** cgroup v2 mounts and cgroup v1 memory mounts from a mountinfo table. */
+function cgroupMounts(mountinfo: string): CgroupMount[] {
+  const mounts: CgroupMount[] = [];
+  for (const line of mountinfo.split("\n")) {
+    const separator = line.indexOf(" - ");
+    if (separator < 0) continue;
+    const fields = line.slice(0, separator).split(" ");
+    const [fsType, , superOptions = ""] = line.slice(separator + 3).split(" ");
+    const root = fields[3];
+    const mountPoint = fields[4];
+    if (!root || !mountPoint) continue;
+    const version =
+      fsType === "cgroup2"
+        ? 2
+        : fsType === "cgroup" && superOptions.split(",").includes("memory")
+          ? 1
+          : null;
+    if (version === null) continue;
+    mounts.push({
+      version,
+      root: unescapeMountField(root),
+      mountPoint: unescapeMountField(mountPoint),
+    });
+  }
+  return mounts;
+}
+
+/** mountinfo escapes space, tab, newline and backslash as octal. */
+function unescapeMountField(value: string): string {
+  return value.replace(/\\([0-7]{3})/gu, (_, octal: string) =>
+    String.fromCharCode(parseInt(octal, 8)),
+  );
+}
+
+/**
+ * The directories of a cgroup and each ancestor down to the mount, innermost
+ * first, or none when the cgroup is not inside what the mount shows.
+ */
+function cgroupAncestors(mount: CgroupMount, path: string): string[] {
+  const split = (value: string) => value.split("/").filter((segment) => segment !== "");
+  const segments = split(path);
+  const root = split(mount.root);
+  if (segments.some((segment) => segment === "." || segment === "..")) return [];
+  if (root.some((segment, index) => segments[index] !== segment)) return [];
+  const relative = segments.slice(root.length);
+  const base = mount.mountPoint.replace(/\/+$/u, "");
+  const directories: string[] = [];
+  for (let depth = relative.length; depth >= 0; depth -= 1) {
+    directories.push(depth === 0 ? base || "/" : `${base}/${relative.slice(0, depth).join("/")}`);
+  }
+  return directories;
 }
 
 function environmentInteger(

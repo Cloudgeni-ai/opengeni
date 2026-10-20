@@ -794,6 +794,52 @@ describe("turnInput attachment projection", () => {
       const recoverySystemContent = (recoveryInput[1] as { content: string }).content;
       expect(recoverySystemContent).toContain("[Opengeni inference recovery]");
       expect(modelInputs[1]).toEqual([storedUser]);
+
+      const workspaceRecoveryNote =
+        "Filesystem discontinuity: a person selected an empty workspace. Never replay unknown effects.";
+      const prepareWithWarning = () =>
+        turnInput({} as Database, runtime, {}, trigger, {
+          turnId: laterTurnId,
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+          providerApi: "responses",
+          workspaceRecoveryNote,
+        });
+      await prepareWithWarning();
+      const warned = modelInputs[2] as Array<Record<string, unknown>>;
+      expect(warned[0]).toEqual(storedUser);
+      expect(warned[1]).toMatchObject({ type: "message", role: "system" });
+      expect(String(warned[1]!.content)).toContain(workspaceRecoveryNote);
+      // A retry/new turn retains the exact earlier notice, appending the fresh
+      // durable warning instead of recomputing any earlier model-visible item.
+      getHistory.mockResolvedValue(
+        warned.map((item, position) => ({
+          id: crypto.randomUUID(),
+          position,
+          item,
+          providerArtifactInvalidatedAt: null,
+        })),
+      );
+      await prepareWithWarning();
+      expect((modelInputs[3] as unknown[]).slice(0, warned.length)).toEqual(warned);
+      expect(String((modelInputs[3] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(
+        workspaceRecoveryNote,
+      );
+      // Even if compaction replaces the active tail, the new attempt appends
+      // the warning from its durable receipt without changing the summary.
+      const summary = user("Earlier conversation summary");
+      getHistory.mockResolvedValue([
+        {
+          id: crypto.randomUUID(),
+          position: 4,
+          item: summary,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]);
+      await prepareWithWarning();
+      expect((modelInputs[4] as unknown[])[0]).toEqual(summary);
+      expect(String((modelInputs[4] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(
+        workspaceRecoveryNote,
+      );
     } finally {
       listUpdates.mockRestore();
       getHistory.mockRestore();

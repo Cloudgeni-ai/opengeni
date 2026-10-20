@@ -830,28 +830,32 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
    */
   async function recordSubscriptionCoreUsageObservation(
     db: Database,
-    scope: Extract<SubscriptionCoreOperationScope, { kind: "workspace" }>,
+    scope: SubscriptionCoreOperationScope,
     connectionId: string,
     observation: SubscriptionQuota,
     options: SubscriptionCoreUsageMergeOptions = {},
+    ref: SubscriptionCoreOperationLeaseRef | null = null,
   ): Promise<{ applied: boolean; recovered: boolean }> {
+    const { accountId } = scopeTenant(scope);
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, scope.accountId))) return { applied: false, recovered: false };
+      if (!(await cutoverEnabled(tx, accountId))) return { applied: false, recovered: false };
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
         tx,
         sql`select refresh_generation from opengeni_private.read_subscription_core_connection_credential(${providerId},
-          ${routineArgs(scope, connectionId, null)}
+          ${routineArgs(scope, connectionId, ref)}
         )`,
       );
       if (!connection) return { applied: false, recovered: false };
       const refreshGeneration = Number(connection.refresh_generation);
+      if (ref && observation.observedRefreshGeneration !== refreshGeneration)
+        return { applied: false, recovered: false };
       const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
         tx,
         sql`select quota, revision as quota_revision,
           observed_refresh_generation as quota_observed_refresh_generation,
           updated_at as quota_updated_at
         from subscription_connection_quota
-        where account_id = ${scope.accountId}::uuid and connection_id = ${connectionId}::uuid
+        where account_id = ${accountId}::uuid and connection_id = ${connectionId}::uuid
         for update`,
       );
       const write = mergeSubscriptionCoreUsageObservation(
@@ -865,7 +869,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         sql`insert into subscription_connection_quota (
           account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
         ) values (
-          ${scope.accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(write.stored)}::jsonb,
+          ${accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(write.stored)}::jsonb,
           ${refreshGeneration}, 1, ${new Date(write.observedAt).toISOString()}::timestamptz
         )
         on conflict (connection_id) do update
@@ -878,6 +882,34 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       return { applied: true, recovered: write.recovered };
     });
     return access?.value ?? { applied: false, recovered: false };
+  }
+
+  /** Read-only quota evidence under the same exact live grant as credentials. */
+  async function readSubscriptionCoreOperationQuota(
+    db: Database,
+    scope: SubscriptionCoreOperationScope,
+    ref: SubscriptionCoreOperationLeaseRef,
+  ): Promise<{ quota: SubscriptionQuota | null } | null> {
+    const { accountId } = scopeTenant(scope);
+    const access = await withOperationScope(db, scope, async (tx) => {
+      if (!(await cutoverEnabled(tx, accountId))) return null;
+      const [connection] = await rawRows<{ status: string }>(
+        tx,
+        sql`
+        select status from opengeni_private.read_subscription_core_connection_credential(${providerId},
+          ${routineArgs(scope, ref.connectionId, ref)})`,
+      );
+      if (connection?.status !== "active") return null;
+      const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
+        tx,
+        sql`
+        select quota, revision as quota_revision, observed_refresh_generation as quota_observed_refresh_generation,
+          updated_at as quota_updated_at from subscription_connection_quota
+        where account_id = ${accountId}::uuid and connection_id = ${ref.connectionId}::uuid`,
+      );
+      return { quota: row ? decodeSubscriptionQuota(row) : null };
+    });
+    return access?.value ?? null;
   }
 
   /**
@@ -995,6 +1027,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     mergeSubscriptionCoreUsageObservation,
     recordSubscriptionCoreModelCatalog,
     recordSubscriptionCoreUsageObservation,
+    readSubscriptionCoreOperationQuota,
     resolveSubscriptionCoreConnectionId,
   };
 });

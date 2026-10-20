@@ -1,7 +1,10 @@
 //! Maintain the existing approved connection files. The ordinary live file
 //! reconciler adopts refreshed credentials without restarting the host engine.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::{info, warn};
 
 use crate::{config, enrollment};
@@ -17,6 +20,9 @@ pub(crate) enum RenewNowError {
     LocalState,
     /// The control plane refused or could not be reached; retrying may help.
     Renewal,
+    /// This agent has no enrollment of its own to renew: a compute sandbox's
+    /// agent, whose enrollment Opengeni compute keeps.
+    Unsupported,
 }
 
 impl RenewNowError {
@@ -26,6 +32,7 @@ impl RenewNowError {
             Self::LegacyOrigin => "legacy_origin",
             Self::LocalState => "local_state_unavailable",
             Self::Renewal => "renewal_failed",
+            Self::Unsupported => "renewal_unsupported",
         }
     }
 
@@ -58,18 +65,33 @@ pub(crate) fn record_authentication_rejection(
     Ok(())
 }
 
-/// A failed/unsupported renewal is not proof that NATS can never accept the
-/// existing grant. Let the live reconciler probe it on the renewal cadence;
-/// another authentication refusal suspends it again immediately.
-fn retry_unclassified_transport(
-    connection: &config::StoredConnection,
-) -> Result<(), config::ConfigError> {
+/// A rejected transport with no usable renewal path needs human reconnect.
+/// Never clear its suspension without successfully obtaining credentials.
+fn require_reconnect(connection: &config::StoredConnection) -> Result<(), config::ConfigError> {
     if connection.authentication_state == Some(config::AuthenticationState::RenewalRequired) {
-        let mut retry = connection.clone();
-        retry.authentication_state = None;
-        config::save_renewed_connection(connection, &retry)?;
+        let mut suspended = connection.clone();
+        suspended.authentication_state = Some(config::AuthenticationState::ReconnectRequired);
+        if config::save_renewed_connection(connection, &suspended)? {
+            warn!(connection_id = %connection.connection_id,
+                "connection needs reauthorization; automatic retries stopped. Run `opengeni-agent connections` to reconnect or remove this saved connection");
+        }
     }
     Ok(())
+}
+
+/// Only transitions are noteworthy; a temporary renewal outage is not a new
+/// incident on every timer tick. Entries disappear with their saved connection.
+#[derive(Default)]
+pub(crate) struct RenewalDiagnostics(HashMap<String, String>);
+
+impl RenewalDiagnostics {
+    fn changed(&mut self, connection_id: &str, reason: String) -> bool {
+        if self.0.get(connection_id) == Some(&reason) {
+            return false;
+        }
+        self.0.insert(connection_id.to_owned(), reason);
+        true
+    }
 }
 
 /// Renew one connection now, whatever its expiry. The control plane asks for
@@ -122,8 +144,9 @@ pub(crate) async fn renew_now(connection_id: &str) -> Result<bool, RenewNowError
 }
 
 pub(crate) async fn run(api_url: String) {
+    let mut diagnostics = RenewalDiagnostics::default();
     loop {
-        if let Err(error) = renew_due_connections(&api_url).await {
+        if let Err(error) = renew_due_connections(&api_url, &mut diagnostics).await {
             warn!(%error, "could not inspect machine credential renewal");
         }
         // Bounds retries on older APIs, revoked grants and transport failures.
@@ -132,8 +155,16 @@ pub(crate) async fn run(api_url: String) {
     }
 }
 
-async fn renew_due_connections(api_url: &str) -> Result<(), config::ConfigError> {
+pub(crate) async fn renew_due_connections(
+    api_url: &str,
+    diagnostics: &mut RenewalDiagnostics,
+) -> Result<(), config::ConfigError> {
     let connections = config::load_connections(api_url)?;
+    diagnostics.0.retain(|id, _| {
+        connections
+            .iter()
+            .any(|connection| &connection.connection_id == id)
+    });
     for connection in connections {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -142,7 +173,7 @@ async fn renew_due_connections(api_url: &str) -> Result<(), config::ConfigError>
         // Legacy records lack a verified deployment origin. Never send their
         // credentials to a guessed/default API; explicit reconnect establishes it.
         if connection.legacy_origin {
-            retry_unclassified_transport(&connection)?;
+            require_reconnect(&connection)?;
             continue;
         }
         if connection.authentication_state == Some(config::AuthenticationState::ReconnectRequired)
@@ -155,14 +186,18 @@ async fn renew_due_connections(api_url: &str) -> Result<(), config::ConfigError>
         let identity = match enrollment::InstallIdentity::load_existing(&config::config_dir()?) {
             Ok(identity) => identity,
             Err(error) => {
-                warn!(connection_id = %connection.connection_id, %error, "machine renewal needs its existing install identity");
-                retry_unclassified_transport(&connection)?;
+                if connection.authentication_state.is_some() {
+                    require_reconnect(&connection)?;
+                } else if diagnostics.changed(&connection.connection_id, error.to_string()) {
+                    warn!(connection_id = %connection.connection_id, %error, "machine renewal needs its existing install identity");
+                }
                 continue;
             }
         };
         match enrollment::renew_connection(&connection, &identity, now).await {
             Ok(renewed) => {
                 if config::save_renewed_connection(&connection, &renewed)? {
+                    diagnostics.0.remove(&connection.connection_id);
                     info!(connection_id = %connection.connection_id, "renewed machine transport credentials");
                 }
             }
@@ -175,9 +210,22 @@ async fn renew_due_connections(api_url: &str) -> Result<(), config::ConfigError>
                         "enrollment renewal rejected permanently; automatic retries stopped. Run `opengeni-agent connections` to reconnect or remove this saved connection");
                 }
             }
+            // An older API can only give a generic refusal or have no renewal
+            // endpoint. Combined with a transport rejection, retrying cannot
+            // recover this connection. Do not apply this to a healthy link or
+            // to explicit clock skew, server outages, or network failures.
+            Err(enrollment::EnrollmentError::Status {
+                status: 401 | 403 | 404 | 405,
+                ..
+            }) if connection.authentication_state
+                == Some(config::AuthenticationState::RenewalRequired) =>
+            {
+                require_reconnect(&connection)?;
+            }
             Err(error) => {
-                warn!(connection_id = %connection.connection_id, %error, "machine credential renewal was not definitive; retaining recovery on the renewal cadence");
-                retry_unclassified_transport(&connection)?;
+                if diagnostics.changed(&connection.connection_id, error.to_string()) {
+                    warn!(connection_id = %connection.connection_id, %error, "machine credential renewal was not definitive; retaining recovery on the renewal cadence");
+                }
             }
         }
     }
@@ -185,10 +233,31 @@ async fn renew_due_connections(api_url: &str) -> Result<(), config::ConfigError>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine as _;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[derive(Clone, Default)]
+    struct WarningCount(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCount {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 
     fn bearer(expiry: u64) -> String {
         format!(
@@ -209,6 +278,93 @@ mod tests {
             "stable",
         );
         config::StoredConnection::new(url, credentials)
+    }
+
+    #[test]
+    fn renewal_diagnostics_report_only_changes_per_connection() {
+        let mut diagnostics = RenewalDiagnostics::default();
+        assert!(diagnostics.changed("one", "HTTP 503".into()));
+        for _ in 0..100 {
+            assert!(!diagnostics.changed("one", "HTTP 503".into()));
+        }
+        assert!(diagnostics.changed("two", "HTTP 503".into()));
+        assert!(diagnostics.changed("one", "clock skew".into()));
+        assert!(!diagnostics.changed("two", "HTTP 503".into()));
+        diagnostics.0.remove("one");
+        assert!(diagnostics.changed("one", "HTTP 503".into()));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rejected_connection_without_install_identity_requires_reconnect() {
+        let (_lock, _dir) = config::tests::with_temp_config();
+        let mut saved = connection("http://127.0.0.1:1");
+        saved.authentication_state = Some(config::AuthenticationState::RenewalRequired);
+        config::save_connection(&saved).unwrap();
+        let mut diagnostics = RenewalDiagnostics::default();
+        for _ in 0..3 {
+            renew_due_connections(&saved.api_url, &mut diagnostics)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            config::load_connection(&saved.connection_id)
+                .unwrap()
+                .unwrap()
+                .authentication_state,
+            Some(config::AuthenticationState::ReconnectRequired)
+        );
+        config::remove_connection(&saved.connection_id, &saved.api_url).unwrap();
+        renew_due_connections(&saved.api_url, &mut diagnostics)
+            .await
+            .unwrap();
+        assert!(diagnostics.0.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn temporary_renewal_failure_never_resumes_rejected_transport_and_logs_once() {
+        let (_lock, dir) = config::tests::with_temp_config();
+        enrollment::InstallIdentity::load_or_generate(dir.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let mut saved = connection(&url);
+        saved.authentication_state = Some(config::AuthenticationState::RenewalRequired);
+        config::save_connection(&saved).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_renewal_request(&mut socket).await;
+                socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        let mut diagnostics = RenewalDiagnostics::default();
+        let warnings = WarningCount::default();
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(warnings.clone()));
+        for _ in 0..3 {
+            renew_due_connections(&url, &mut diagnostics)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                config::load_connection(&saved.connection_id)
+                    .unwrap()
+                    .unwrap(),
+                saved
+            );
+            assert_eq!(diagnostics.0.len(), 1);
+        }
+        server.await.unwrap();
+        assert_eq!(
+            warnings.0.load(Ordering::Relaxed),
+            1,
+            "unchanged failure logs only once"
+        );
+        // Deleting the connection also deletes its diagnostic state.
+        config::remove_connection(&saved.connection_id, &url).unwrap();
+        renew_due_connections(&url, &mut diagnostics).await.unwrap();
+        assert!(diagnostics.0.is_empty());
     }
 
     #[test]
@@ -243,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn legacy_origin_retries_transport_without_sending_credentials_to_a_guessed_api() {
+    async fn rejected_legacy_origin_stays_paused_without_sending_credentials_to_a_guessed_api() {
         let (_lock, _dir) = config::tests::with_temp_config();
         let original = connection("http://127.0.0.1:1");
         config::save_credentials(&original.credentials).unwrap();
@@ -253,27 +409,34 @@ mod tests {
         assert!(saved.legacy_origin);
         saved.authentication_state = Some(config::AuthenticationState::RenewalRequired);
         config::save_connection(&saved).unwrap();
-        renew_due_connections(&saved.api_url).await.unwrap();
+        let mut diagnostics = RenewalDiagnostics::default();
+        for _ in 0..3 {
+            renew_due_connections(&saved.api_url, &mut diagnostics)
+                .await
+                .unwrap();
+        }
         assert_eq!(
             config::load_connection(&saved.connection_id)
                 .unwrap()
                 .unwrap()
                 .authentication_state,
-            None
+            Some(config::AuthenticationState::ReconnectRequired)
         );
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn explicit_denial_stops_renewal_but_legacy_401_and_outages_remain_recoverable() {
+    async fn rejected_connections_stop_on_refusal_but_temporary_outages_remain_recoverable() {
         let (_lock, dir) = config::tests::with_temp_config();
         enrollment::InstallIdentity::load_or_generate(dir.path()).unwrap();
         for (status, body, terminal) in [
             (401, r#"{"code":"enrollment_reconnect_required"}"#, true),
             (401, r#"{"code":"enrollment_clock_skew"}"#, false),
-            (401, "machine renewal not authorized", false),
+            (401, "machine renewal not authorized", true),
+            (403, "forbidden", true),
             (503, r#"{"code":"enrollment_reconnect_required"}"#, false),
-            (404, "older API", false),
+            (404, "older API", true),
+            (405, "older API", true),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -286,7 +449,8 @@ mod tests {
                 socket.write_all(format!("HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 listener
             });
-            renew_due_connections(&url).await.unwrap();
+            let mut diagnostics = RenewalDiagnostics::default();
+            renew_due_connections(&url, &mut diagnostics).await.unwrap();
             let listener = server.await.unwrap();
             let current = config::load_connection(&saved.connection_id)
                 .unwrap()
@@ -296,7 +460,7 @@ mod tests {
                 if terminal {
                     Some(config::AuthenticationState::ReconnectRequired)
                 } else {
-                    None
+                    Some(config::AuthenticationState::RenewalRequired)
                 }
             );
             // A terminal connection is skipped entirely, including HTTP renewal.
@@ -306,7 +470,9 @@ mod tests {
                         .await
                         .is_ok()
                 });
-                renew_due_connections(&url).await.unwrap();
+                for _ in 0..3 {
+                    renew_due_connections(&url, &mut diagnostics).await.unwrap();
+                }
                 assert!(!attempted.await.unwrap());
             }
             config::remove_connection(&saved.connection_id, &url).unwrap();
@@ -331,7 +497,9 @@ mod tests {
                 + 30 * 24 * 3600,
         );
         let server = tokio::spawn(serve_one_renewal(listener, fresh.clone()));
-        renew_due_connections(&url).await.unwrap();
+        renew_due_connections(&url, &mut RenewalDiagnostics::default())
+            .await
+            .unwrap();
         server.await.unwrap();
         let current = config::load_connection(&saved.connection_id)
             .unwrap()
@@ -340,7 +508,7 @@ mod tests {
         assert_eq!(current.credentials.nats_bearer, fresh);
     }
 
-    async fn read_renewal_request(socket: &mut tokio::net::TcpStream) {
+    pub(crate) async fn read_renewal_request(socket: &mut tokio::net::TcpStream) {
         let mut request = Vec::new();
         loop {
             let mut chunk = [0; 4096];

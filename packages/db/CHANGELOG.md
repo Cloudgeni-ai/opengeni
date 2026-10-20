@@ -1,5 +1,100 @@
 # @opengeni/db
 
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+- 641e179: A finished command's stored output is now released on its runner in one answered exchange, for foreground and background commands alike. The agent serves a new `OpRelease` request (advertised as `capabilities.op_release`): it drops the operation at once and confirms the release in its answer, so the release settles right where the output is stored, while the agent is live from the command, and nothing about the command is left for a later maintenance pass. When the storing process dies first, the agent's own operation inventory recovers the release, so maintenance never sends such an agent anything to release output. Every request Opengeni sends on its own behalf carries `Opengeni-No-Wake`, which a compute host answers itself instead of waking a sleeping sandbox; an unanswered one records nothing and is left to the agent's next inventory. The agent remembers every operation it has started for longer than Opengeni may resend a start for it, independent of output retention and across an in-place update, so a released operation never runs again. Connected Machine agents without the capability keep the existing final acknowledgement and later observation; a compute sandbox whose agent lacks it is refused as an image built with an older agent.
+- 641e179: The agent now reports the operations it still runs or retains (a new `operation_inventory` agent event), on every connection and again while it holds completed output nobody released, and the API answers each page in that same exchange with the operations to end. Every OpStart carries the connection generation it was dispatched under, which the agent stores with the operation. A command decides by its custody: output Opengeni has not stored is never ended but collected while the agent is talking, and stored output is ended and its release recorded. Work without a command, such as a command deleted with its chat, is ended when it started under an earlier connection generation and is otherwise kept, never ended for its age. So a runner process that comes back after another process took its connection no longer keeps running commands Opengeni already settled, and output whose storing process died is recovered by the agent itself. The agent starts every such exchange, so a sleeping compute sandbox is never woken for it. Agents that do not send the event keep the earlier behaviour.
+
+### Patch Changes
+
+- 641e179: Stopping a background command on a Connected Machine or compute sandbox now sends
+  the cancellation to the runner at once instead of waiting for the next maintenance
+  pass, so the process ends within moments of Stop. Stop answers within its five-second
+  budget; the reconciler still delivers the cancellation when that attempt fails, and
+  the runner's pushed exit settles the command. A stop to a compute sandbox that no
+  host currently serves wakes the sandbox, as any other request to it does.
+- 7dcb1d5: Making room on a full browser controller is now safer. A browser is saved to make room only if it is still idle, active on the same controller and free of other operations at the moment it is claimed, and a browser another request already saved no longer counts as room made. A failure while preparing the save returns the browser to active instead of leaving it stuck suspending. Downloads kept when any browser is saved stay private to the owner of a private chat instead of becoming workspace files, even when another person's request made the room, and are read back as that owner once the request is authorized for the chat. Keeping downloads no longer risks the save expiring before capture. The memory-based browser limit now honours memory limits on the controller's own nested cgroup and its ancestors, wherever the cgroup hierarchy is mounted.
+- 93e20fe: Redeeming a Codex rate-limit reset credit now restarts chats waiting for that account within seconds. The stored usage windows read before the reset are invalidated along with the stored exhaustion deadline, so a woken waiter places on the account instead of waiting again until the old weekly reset; it no longer depends on a later live usage read.
+- 507caf7: Deleting a workspace that holds a connection no longer fails with "connection owner authority is immutable" on databases where PostgreSQL happens to fire the connection's origin foreign key action before the workspace cascade. The origin foreign key now cascades like the workspace one, and a connection's owner authority and origin stay immutable.
+- b8d5b64: A machine's browser limit now follows its memory instead of a flat 64: half of the machine's memory (or its container's limit) at 300 MiB per browser, never under 8, so a 48 GiB machine runs 81 browsers and an 86 GiB one 147. `OPENGENI_BROWSERD_MAX_SESSIONS` still overrides it. When a new browser would exceed the limit, the least recently used browser that has been idle for at least five minutes is saved and stopped to make room; it resumes from its saved working copy the next time it is opened. Nothing changes below the limit.
+- a336e51: Keep session title generation independent of conversation handover. Steer and cancellation no longer wait for a title or cancel it; a durable metadata operation retains the accepted provider account, request custody, usage accounting and human-title precedence across recovery.
+- 523bac6: Clear a Connected Machine session's saved working directory when it is the filesystem root `/` or a Windows `System32` service launch directory left by older agents, so attachments, tool results and generated images work again in those chats. A filesystem or drive root, or anything inside the Windows directory, is never used as a working directory; the machine's reported root applies instead. The agent also moves out of the Windows system directory into the user's home, as it already did for a filesystem root.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- 78bd3fd: Acquire canonical lifecycle parent locks before reserving image operations and artifacts, preventing foreign-key lock-order deadlocks with turn settlement regardless of catalog trigger order.
+- 32c356f: Avoid capability-row writes for subscription administration checks, allowance state reads, and existing task-budget reads. Coalesce API-key last-use telemetry without caching authorization, and schedule allowance maintenance from actual deadlines and membership changes instead of repeatedly rewriting idle workspaces. Preserve live revocation, usage accounting, and mutation fences.
+- 184167c: A forked chat is now the same agent as the one it was forked from. Forks keep the source's connector and built-in tool selection and tool policy, agent configuration, model and execution settings, instructions, provider account authority, code search, Memory and agent access settings and session MCP servers, instead of starting with no tools and default settings. Only the fork's identity, owner, audience, history and runtime state are its own; when someone else forks a chat, it binds to them and leaves out the MCP server credentials the original creator supplied.
+- 6c603cb: A forked chat runs on the same Connected Machine and working directory as the chat it was forked from, when the person forking may use that machine, so its first message no longer fails with an internal sandbox error. Someone else's personal machine is never carried over, and a personal machine still asks its owner for approval in the fork just as it does in any other chat. A chat that runs on Connected Machines but has no machine selected, on a deployment without a managed sandbox, now says so and asks for a machine instead of failing with "no agentId bound".
+- fd7e63f: A forked chat now gets its own workflow identity, the same as every newly created chat, so its agent can wait for input and be woken on schedule instead of failing with "has no Temporal workflow identity". Existing forks without one are repaired by the migration.
+- ac63730: Settle an interrupted agent update when a replacement process starts without an updater receipt, including manual installations. Preserve the distinction between the installed version and a proven successful automatic update.
+- daec93b: Restore background maintenance when the migration owner cannot bypass FORCE RLS.
+  Keep due checks read-only using transactionally maintained private predicate
+  indexes, and admit fixed claim/reaper bodies with narrowly scoped private
+  capabilities. Exercise real PostgreSQL maintenance lifecycles with a
+  NOSUPERUSER/NOBYPASSRLS migration owner. Migrations 0848–0849 require a maintenance
+  rollout because the runtime helper/grant posture contract changes.
+- Updated dependencies [c27cffc]
+- Updated dependencies [93e20fe]
+- Updated dependencies [641e179]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+- Updated dependencies [25c316a]
+  - @opengeni/codemode@4.2.0
+  - @opengeni/subscriptions@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/network@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- 175f595: Treat enrollment lookups in deleted workspaces as missing grants so credential renewal returns the existing reconnect-required response instead of an internal error. Preserve genuine database and tenant-scope failures.
+  - @opengeni/codemode@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/subscriptions@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- a254a76: Read execution-time provider catalog inputs in one scoped transaction instead of repeating serial catalog and connection-list queries. Turn startup and stateless model calls share the same settings-building path. Catalog ordering, retained-model handling, live workspace credential checks and selected model policy remain unchanged; no data is cached across executions.
+- 7837e4f: Use indexed turn lookups when checking the provenance of delivered session updates, preserving exact UUID matching and all existing authority checks.
+- 57e3a3e: Expose actionable Connected Machine credential-expiration diagnostics without overriding live runner authority. The matching native agent pauses refused transport credentials, renews recoverable grants, and persists reconnect-required state only after an explicit permanent renewal denial. Deploy the API and release the updated agent for the complete recovery behavior.
+- f20f60c: Retry transient database connection admission with bounded jittered backoff and
+  recover running turns after PostgreSQL refuses connections with SQLSTATE 53300.
+  Never replay entered callbacks or uncertain commits, and keep permanent data and
+  authentication errors non-retryable. Existing error messages remain unchanged.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- Updated dependencies [afff3f9]
+- Updated dependencies [84688e2]
+- Updated dependencies [cf899f4]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/codemode@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/network@4.1.0
+  - @opengeni/subscriptions@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

@@ -2724,6 +2724,65 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+### Current workspace retry and deliberate empty continuation
+
+A degraded/unrecoverable verdict describes one restore attempt, not a permanent
+ban on the conversation. A new cold election may revalidate the exact CURRENT
+complete archive when its archive generation equals the workspace generation.
+It never implicitly selects `archive.previous` or accepts a generation gap.
+The cold election stamps the backend from the accepted session route; the source
+archive envelope retains its original backend/provenance. Live instances and
+outcome-unknown provider creates cannot be retargeted. Portable host archives can
+restore into a remote provider after an object-store migration: the configured
+store resolves the retained key, byte count and SHA are checked, and the hydrated
+content-tree fingerprint must match before warm publication. Native provider
+checkpoints retain their provider/binding constraints.
+
+The existing session `sandbox-recovery` GET/POST surface also exposes `retry`
+and `continue_fresh` actions to the canonical managed or built-in local human.
+The latter requires `acceptEmptyWorkspace: true`, control of EVERY group member
+under the exclusive workspace control fence, and a quiescent group. Group identity
+is immutable: no private chat is detached to evade another member's authority.
+Mixed-ownership groups require the operator path below. Both actions bind an
+operation UUID to the exact GET `target` (session/group/route/authority/lease
+epochs, generations, archive revision and restore verdict). A repeated identical
+operation replays; stale selections and changed payloads fail. An uncertain POST
+outcome is reconciled by read-only GET, never by automatically issuing new consent.
+
+`retry` retains the archive and clears only the failed attempt verdict so the
+normal verifier can run. `continue_fresh` explicitly authorizes an empty workspace,
+retains the old archive and generation-gap evidence, and writes an immutable
+receipt and `sandbox.recovery.selected` notice to every group member. It neither
+rewrites messages nor rolls back external effects nor replays commands. The normal
+restore/creation path still has to prove readiness. Empty publication advances
+the workspace generation once; its receipt also retains the abandoned revision,
+excluding that revision from ordinary and automatic historical recovery after a
+later provider loss. An operator may still explicitly authorize historical recovery.
+Every future agent attempt receives the discontinuity from its durable receipt
+as a new turn-scoped operational notice at the history tail. Earlier items and
+the legacy session-instruction prefix are never rewritten by this decision;
+compaction does not erase the receipt. Migration 0871 requires
+warning protocol v4 on affected turn claims, so older workers cannot silently
+omit the new reason during a rolling deployment; ordinary sessions are unaffected.
+
+Operators use the same decision seam through:
+
+```sh
+bun scripts/operator/sandbox-recovery.ts preview /private/recovery-scope.json
+bun scripts/operator/sandbox-recovery.ts apply /private/recovery-request.json
+```
+
+The private preview JSON contains `accountId`, `workspaceId`, `sessionId`, and
+`subjectId`. The application database configuration supplies operator authority;
+`subjectId` attributes the audit and is not a grant by itself. The apply JSON adds
+`request: { operationId, action: "retry", target }`, copying the exact preview target.
+For deliberate empty continuation use `action: "continue_fresh"` and also set
+`acceptEmptyWorkspace: true`. Preview is provider-free; apply persists the choice
+but does not dispatch a turn. Retry the chat or send a new message afterwards.
+If the group is active, quiesce its work normally and preview again. Do not edit
+lease JSON, remove archive references, fabricate provider success, or reuse a
+stale target. The historical-checkpoint CLI filename remains a compatibility alias.
+
 An operator may explicitly authorize recovery from an older, verified checkpoint
 after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
 accepts `preview` or `authorize` and a private JSON input file. Preview needs
@@ -2758,8 +2817,9 @@ The selection binds session/group, tenancy and route epochs, lease identity/epoc
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
 The generation gap is not a count of missing edits or files. Conversation and tool
 receipts remain; changes after the checkpoint are unavailable and external effects
-are not undone. Consent never resets to an empty workspace or replays commands
-(the separate system lane below is the only empty-workspace continuation).
+are not undone. Historical checkpoint consent never resets to an empty workspace
+or replays commands; the explicit current-workspace action above and the separate
+system lane below are distinct decisions.
 
 Consent takes the existing workspace tenancy fence exclusively before checking
 complete group membership, including actor-hidden sessions. It then takes the
@@ -3510,7 +3570,7 @@ observation window is never substituted for termination proof.
 box through a non-expiring interaction holder, so before migration 0705 an
 open browser or desktop that nobody used kept its Modal box warm until the
 provider deadline. They now follow the general idle grace
-(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default one minute, never under one minute);
 there is no separate window.
 
 Activity is deliberate and durable: the newest of the interaction holder's
@@ -3566,6 +3626,44 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `released` when holders were released without a save, `not_eligible`,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
+
+**Full browser controllers.** One browser controller runs per workspace and
+placement (a Connected Machine or a box). Its browser limit defaults to half
+of the machine's memory (or the tightest memory limit on the controller's own
+cgroup or any of its ancestors, cgroup v1 or v2, when lower; each hierarchy is
+found through `/proc/self/mountinfo`, so a mount of a non-root cgroup or at
+another mount point is read correctly) at
+300 MiB per browser, about the p90 resident size of live agent browsers, and
+never under 8: 27 browsers on 16 GiB, 81 on 48 GiB, 147 on 86 GiB.
+`OPENGENI_BROWSERD_MAX_SESSIONS` overrides it. When a create reaches a full
+controller, the API saves the least recently used checkpoint-capable browser
+on that same controller instance that has been unused for at least five
+minutes and has no lifecycle operation in flight, through the same private
+checkpoint as an explicit suspend (actor `system:browser-capacity`), then
+retries the create once under its own operation. The candidate is claimed
+under its row lock: the save is prepared only while the browser is still
+active on the same controller instance and generation, still unused since the
+cutoff, and free of other lifecycle operations; a browser that was used, saved
+or changed meanwhile is skipped, and a browser some other request already
+saved never counts as capacity this create freed. Signing the state upload and
+provisioning the controller happen before the save is dispatched, so a failure
+there returns the candidate to active instead of stranding it in
+`suspending`. Up to three candidates are tried; when none can be saved, the
+create fails with the controller's `capacity_exhausted` error as before.
+Nothing happens below the limit. The saved browser resumes from its working
+copy on its next open; a resume that reaches a full controller makes room the
+same way, once, without saving the browser being resumed.
+
+Downloads kept when a browser is saved (by capacity, an explicit suspend or a
+deadline checkpoint) follow the browser's chat, whoever's request stops it:
+a private chat's downloads become files private to that chat's owner, and a
+shared chat's become workspace files. The owner is read with system authority
+from the chat that created the browser, since a capacity save may come from a
+person who cannot see that private chat; the read only decides file
+ownership. Keeping downloads runs inside the save's heartbeat, so slow exports
+never let the transition expire before capture. Listing and saving kept
+downloads read them as the chat's owner only after the request is authorized
+for that chat, and nobody is charged for the capacity save's kept downloads.
 
 **Idle command containment.** An unsupervised retained command (a legacy Modal
 command, or any Docker or local background command) keeps its box warm through

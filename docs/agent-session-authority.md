@@ -176,10 +176,10 @@ Authority never widens down a tree or through a side door:
   Site's sessions and may read, send, steer or control only sessions its own
   Site (or, without a published Site, its own mounted frame) started; anything
   else is a 404. Sessions, turns and schedules started from a Site record
-  which Site (`_opengeniSiteOrigin`), and an agent started from a Site cannot
-  create or change schedules, automations or Site publications, nor read,
-  message, steer or control sessions outside its Site. Its workspace API
-  writes are held to an allowlist (`apps/api/src/site-agent-guard.ts`).
+  which Site (`_opengeniSiteOrigin`). This provenance does not narrow agent
+  permissions: Site and console turns use the same native authority, approval
+  and tool checks. Private console Sites can also reach exact existing chats
+  through owner grants; the page never grants itself access.
 - A session-scoped grant without a signed `firstPartyMcpTools` claim registers
   no first-party tools.
 

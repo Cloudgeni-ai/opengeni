@@ -67,8 +67,8 @@ export async function createManagedOrganization(
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     // This legacy first-organization route delegates to the same self-service
-    // receipt writer. Do not let it consume the one-shot receipt while the
-    // trial is enabled without issuing its transaction-atomic grant.
+    // receipt writer. The trigger now records zero-value Free eligibility;
+    // keep the old GUC only for compatibility with pre-0845 schemas.
     await rawRows(
       tx,
       sql`select pg_catalog.set_config(

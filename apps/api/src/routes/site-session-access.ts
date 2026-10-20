@@ -1,7 +1,6 @@
 import {
   requireAccessGrant,
   requireSessionAuthorization,
-  siteAgentClamp,
   siteViewerForGrant,
   currentSiteSessionOrigin,
   type ApiRouteDeps,
@@ -24,8 +23,8 @@ export function registerSiteSessionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
       workspaceId,
       c.req.method === "GET" ? "sessions:read" : "sessions:control",
     );
-    if (currentSiteSessionOrigin() || (await siteAgentClamp(deps.db, grant))?.clamped)
-      throw new HTTPException(403, { message: "Manage chat access outside the Site" });
+    if (currentSiteSessionOrigin())
+      throw new HTTPException(403, { message: "A Site page cannot manage chat access" });
     const { subjectId } = await siteViewerForGrant(deps.db, grant);
     if (!subjectId) throw new HTTPException(403, { message: "Chat owner authority required" });
     return { workspaceId, siteId, subjectId, grant };

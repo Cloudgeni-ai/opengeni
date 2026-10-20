@@ -108,6 +108,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       holderId: string;
       generation: number;
       operationKind: string;
+      operationId?: string;
     },
   ) {
     if (
@@ -119,7 +120,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       throw new Error("Invalid physical request identity");
     }
     const { accountId, workspaceId } = tenant(scope);
-    const operationId = crypto.randomUUID();
+    const operationId = input.operationId ?? crypto.randomUUID();
     const sessionId =
       scope.kind === "turn"
         ? scope.identity.sessionId
@@ -286,8 +287,40 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       );
       if (authorized?.status !== "active") throw provider.errors.accessLost();
       if (scope.kind === "turn" && !ref) throw provider.errors.accessLost();
+      const operationId = crypto.randomUUID();
+      if (ref?.operationKind === "session_title") {
+        const admitted = await rawRows(
+          tx,
+          sql`
+          update session_title_operations set request_operation_id = ${operationId}::uuid,
+            state = 'dispatching', updated_at = clock_timestamp()
+          where account_id = ${accountId}::uuid and workspace_id = ${workspaceId}::uuid
+            and id = ${ref.operationId}::uuid and source_attempt_id = ${ref.attemptId}::uuid
+            and holder_id = ${ref.holderId} and generation = ${ref.generation}
+            and leased_until > clock_timestamp()
+            and ((state = 'pending' and request_operation_id is null)
+              or (state = 'dispatching' and exists (
+                select 1 from subscription_operation_leases previous
+                where previous.account_id = ${accountId}::uuid and previous.workspace_id = ${workspaceId}::uuid
+                  and previous.operation_id = session_title_operations.request_operation_id
+                  and previous.request_outcome = 'refused')))
+          returning id`,
+        );
+        if (admitted.length !== 1) {
+          const [current] = await rawRows(
+            tx,
+            sql`select id from session_title_operations
+            where account_id = ${accountId}::uuid and workspace_id = ${workspaceId}::uuid
+              and id = ${ref.operationId}::uuid and holder_id = ${ref.holderId}
+              and generation = ${ref.generation} and leased_until > clock_timestamp()`,
+          );
+          if (!current) throw provider.errors.leaseLost();
+          throw provider.errors.requestOutcomeUnknown();
+        }
+      }
       return insertRequestReservation(tx, scope, connectionId, {
         ...request,
+        operationId,
         attemptId: ref?.attemptId ?? crypto.randomUUID(),
         holderId: ref?.holderId ?? `request:${crypto.randomUUID()}`,
         generation: ref?.generation ?? 1,

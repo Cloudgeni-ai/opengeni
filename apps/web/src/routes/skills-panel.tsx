@@ -114,7 +114,7 @@ export function SkillsPanelContent({
       human &&
       (scope === "user" ||
         (scope === "workspace" &&
-          hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin")) ||
+          hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage")) ||
         (scope === "organization" &&
           grant &&
           hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),

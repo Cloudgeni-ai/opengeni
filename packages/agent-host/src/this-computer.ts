@@ -135,6 +135,13 @@ export interface ThisComputerDeps {
    * app with its own agent leaves other agents alone.
    */
   adoptStandaloneAgent?: boolean;
+  /**
+   * Let the Opengeni Browser Chrome extension reach this agent, so agents can
+   * work in the person's own Chrome. Default true. An app whose people don't
+   * use that extension turns it off: its agent then leaves the extension to
+   * any other agent on the computer.
+   */
+  browserExtension?: boolean;
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
   /**
@@ -284,7 +291,10 @@ export class ThisComputer {
 
   constructor(private readonly deps: ThisComputerDeps) {
     this.hostedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
-    this.agentEnv = deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {};
+    this.agentEnv = {
+      ...(deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {}),
+      ...(deps.browserExtension === false ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" } : {}),
+    };
     this.statePath = join(deps.dataDir, "this-computer.json");
     this.state = this.loadState();
     this.agent = new HostedAgent({

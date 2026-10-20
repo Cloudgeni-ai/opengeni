@@ -37,6 +37,8 @@ const withheldMigrations = [
   migration,
   accountBindingsMigration,
   sharingMigration,
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
   admissionDiagnosticsMigration,
   admissionRefusalsMigration,
   receiverExecutionContextMigration,
@@ -118,6 +120,7 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  "0846_independent_session_titles.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
