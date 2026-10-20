@@ -177,7 +177,8 @@ host's memory less `--memory-headroom-mib`).
 
 Processor time is booked the same way. Each sandbox has a CPU request,
 what it is guaranteed while awake (`cpu_request_millis`, in thousandths of
-a processor, all of `vcpus` unless set lower), and may use idle processors
+a processor, a tenth of each of its `vcpus` unless set, up to all of
+them), and may use idle processors
 up to `vcpus` above it, best effort. The requests of awake and waking
 sandboxes, and of VMs the agent does not manage that may run, stay within
 the host's processor capacity (`--cpu-capacity-millis`; by default the
@@ -264,8 +265,8 @@ The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
 `memory.min`, which would have the kernel kill processes rather than slow a
 VM down if the host ever runs short beyond everything unprotected), and
-`cpu.weight` from `cpu_request_millis` (all its processors unless set
-lower, rounded up to 10 millicores), so contended processors are shared by
+`cpu.weight` from `cpu_request_millis` (a tenth of each of its processors
+unless set, rounded up to 10 millicores), so contended processors are shared by
 request and never below it while what is booked fits the host's capacity,
 while `vcpus` stays the ceiling. When something outside the VMs' group
 takes more of the processors than the host keeps back, the capacity falls

@@ -221,6 +221,13 @@ pub const MAX_VCPUS: u8 = 32;
 /// of a processor: what one `cpu.weight` step stands for.
 pub const MIN_CPU_REQUEST_MILLIS: u32 = 10;
 
+/// The processor time a sandbox that sets no request is guaranteed for
+/// each of its virtual processors, in thousandths of a processor: a
+/// tenth, so sandboxes that ask for nothing pack as densely as before
+/// requests counted, each still sure of a share, and burst to all of
+/// their processors when the host has them spare.
+pub const DEFAULT_CPU_REQUEST_MILLIS_PER_VCPU: u32 = 100;
+
 /// A sandbox image built from an OCI image (ADR 19): the BLAKE3 digest of
 /// its ext4 file, written as 64 lowercase hex digits. The same file always
 /// has the same id, on every host, and a host checks a fetched image
@@ -297,8 +304,9 @@ pub struct SandboxConfig {
     /// thousandths of a processor: the host reserves it when the sandbox
     /// wakes and refuses a wake it has no processor time left for, and
     /// shares of contended time follow it. Above it the sandbox may use
-    /// idle processor time up to `vcpus`, best effort. Omitted, it is
-    /// `vcpus` whole processors.
+    /// idle processor time up to `vcpus`, best effort. Omitted, it is a
+    /// tenth of each of its `vcpus`
+    /// ([`DEFAULT_CPU_REQUEST_MILLIS_PER_VCPU`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_request_millis: Option<u32>,
     /// How it sleeps; omitted, it never sleeps.
@@ -373,7 +381,7 @@ impl SandboxConfig {
     #[must_use]
     pub fn cpu_request(&self) -> u32 {
         self.cpu_request_millis
-            .unwrap_or(u32::from(self.vcpus) * 1000)
+            .unwrap_or(u32::from(self.vcpus) * DEFAULT_CPU_REQUEST_MILLIS_PER_VCPU)
             .div_ceil(10)
             * 10
     }

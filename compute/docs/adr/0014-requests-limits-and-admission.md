@@ -45,7 +45,8 @@ pick a VM.
   kernel then kills processes rather than reclaim from a protected group,
   and slowing a VM down is the better failure.
 - Processor time is a request too: `cpu_request_millis`, in thousandths
-  of a processor, all of `vcpus` unless set lower. It is what a sandbox is
+  of a processor, a tenth of each of its `vcpus` unless set, up to all of
+  them. It is what a sandbox is
   guaranteed while awake; above it, it may use idle processors up to
   `vcpus`, best effort. The requests of awake and waking sandboxes, and of
   VMs the agent does not manage that may run (a removed sandbox's until
@@ -309,9 +310,13 @@ pick a VM.
   seconds, never lose data.
 - An awake sandbox always gets its processor request when it wants it,
   and more when processors are idle. A host fills by requests, so a small
-  request packs many awake sandboxes and a whole-vCPU default packs few: a
+  request packs many awake sandboxes and a whole-vCPU request few: a
   host of 8 processors keeps at most 7.5 awake sandboxes of 1000
-  millicores, or 107 of 64 (each booked at 70). A burst above the request
+  millicores, 75 of the default 100 for one vCPU, or 107 of 64 (each
+  booked at 70). The default is small on purpose, as hosted sandboxes'
+  are: sandboxes that ask for nothing pack about as densely as before
+  requests counted, each sure of a share, and a sandbox that needs whole
+  processors under contention asks for them. A burst above the request
   is never promised: next to busy neighbours a sandbox may get only its
   request. Groups made beside the VMs' after the agent starts are not
   counted in its weight until it restarts.

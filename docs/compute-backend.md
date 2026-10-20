@@ -333,7 +333,7 @@ change to compute.
 | `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY` | Control service API (HTTPS outside local/test) and its key |
 | `OPENGENI_COMPUTE_LINK_URL` | The gateway's public `wss://` URL, also the JWT audience |
 | `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (control service default when unset) |
-| `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB`, `..._CPU_REQUEST_MILLIS` |
+| `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB` (all of the memory when unset) and `..._CPU_REQUEST_MILLIS` (a tenth of each vCPU when unset), what each sandbox is guaranteed while awake |
 | `OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS` | How long create and wake wait for the agent |
 
 Defaults are unchanged. Boot fails with a list of the missing settings only

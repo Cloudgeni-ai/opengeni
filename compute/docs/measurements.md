@@ -524,8 +524,9 @@ so a slower archive costs local disk for longer, not a user's wait;
 ### Noisy neighbours
 
 What the agent sets to keep sandboxes apart: each VM's cgroup gets
-`cpu.weight` 100 per processor requested (`cpu_request_millis`, all its
-vCPUs unless set lower), `memory.low` at its memory request and no swap.
+`cpu.weight` 100 per processor requested (`cpu_request_millis`; when this
+was measured, all its vCPUs unless set lower, and since requests became
+guarantees a tenth of each), `memory.low` at its memory request and no swap.
 It sets no limit on disk or network bandwidth and no processor ceiling
 beyond the VM's vCPU count.
 

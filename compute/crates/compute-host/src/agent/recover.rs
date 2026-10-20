@@ -53,12 +53,14 @@ fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
         .and_then(|vcpus| u8::try_from(vcpus).ok())
         .filter(|vcpus| (1..=MAX_VCPUS).contains(vcpus))
         .unwrap_or(MAX_VCPUS);
-    // Within what its processors allow; all of them when it does not tell.
+    // Within what its processors allow; all of them when it does not tell,
+    // since its VM may run with any request up to that.
     let cpu_request_millis = field("cpu_request_millis")
         .and_then(|millis| u32::try_from(millis).ok())
-        .filter(|millis| (MIN_CPU_REQUEST_MILLIS..=u32::from(vcpus) * 1000).contains(millis));
+        .filter(|millis| (MIN_CPU_REQUEST_MILLIS..=u32::from(vcpus) * 1000).contains(millis))
+        .unwrap_or(u32::from(vcpus) * 1000);
     SandboxConfig {
-        cpu_request_millis,
+        cpu_request_millis: Some(cpu_request_millis),
         ..SandboxConfig::new(vcpus, memory_mib, crate::protocol::SleepConfig::default())
     }
 }

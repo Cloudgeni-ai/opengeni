@@ -123,7 +123,7 @@ struct CreateArgs {
     #[arg(long)]
     memory_request_mib: Option<u32>,
     /// Processor time it is guaranteed under contention, in thousandths
-    /// of a processor; defaults to all its processors.
+    /// of a processor; defaults to a tenth of each of its processors.
     #[arg(long)]
     cpu_request_millis: Option<u32>,
     /// Start from the recommended sleep settings instead of never
