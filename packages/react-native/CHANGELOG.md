@@ -1,5 +1,29 @@
 # @opengeni/react-native
 
+## 4.2.0
+
+### Patch Changes
+
+- 8c38fe4: An embedded conversation marks itself read while the person watches it.
+
+  - `@opengeni/react`: `SessionConversation` and `SessionConversationView` acknowledge each delivered reply, question or failure for the signed-in person while the timeline is on screen, the page is visible and the window focused (once per reply, never per streamed token, with `acknowledgedThroughSequence` so a late request never hides a newer reply). Unread state, and notifications a server derives from it, then skip replies the person already saw. A hidden timeline, background tab or unfocused window acknowledges nothing; `readAcknowledgement={false}` turns it off. `useSessionReadAcknowledgement` (from `@opengeni/react/session`) does the same for custom layouts. `createEmbeddedSessionClient` passes an optional `updateSessionAttention` through.
+  - `@opengeni/react-native`: the native session uses the same acknowledgement implementation, which now retries a transient failure once after a short delay and stops after a permanent rejection.
+  - `@opengeni/sdk`: `createSessionProxyHandler` forwards `PUT …/sessions/{sid}/attention` with only `{ unread: false, acknowledgedThroughSequence? }`.
+
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [5252d01]
+- Updated dependencies [e018445]
+- Updated dependencies [a868e17]
+- Updated dependencies [5715a3e]
+- Updated dependencies [64e6d6b]
+- Updated dependencies [47eeb80]
+- Updated dependencies [f6cb82d]
+- Updated dependencies [44dc72a]
+  - @opengeni/contracts@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/react@4.2.0
+
 ## 4.1.3
 
 ### Patch Changes
