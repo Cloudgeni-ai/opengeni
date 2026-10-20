@@ -87,6 +87,7 @@ export class CuaComputerBackend implements ComputerBackend {
     platform: "macos" | "windows" | "linux",
     private readonly parentPid: (pid: number) => number | null,
     actionBatches: boolean,
+    private readonly launchWindowWaitMs: number,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -116,6 +117,8 @@ export class CuaComputerBackend implements ComputerBackend {
       /** A process's parent, to tie a Linux launcher's app to its window.
        * CUA runs in this process, so it sees the same processes. */
       parentPid?: (pid: number) => number | null;
+      /** How long a launch waits for the launched app's first window. */
+      launchWindowWaitMs?: number;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -126,6 +129,7 @@ export class CuaComputerBackend implements ComputerBackend {
         platform,
         options.parentPid ?? procParentPid,
         await runStepsStopsAtStaleTokens(runtime),
+        options.launchWindowWaitMs ?? LAUNCH_WINDOW_WAIT_MS,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -1153,8 +1157,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * descendant counts too. A window that cannot be tied to the launch is never
    * guessed. A window lying within another of the app's windows (part of a
    * panel, such as an Open panel's accessory view) comes after the windows it
-   * lies in. The first window can appear a moment after the process starts,
-   * so discovery is retried briefly. */
+   * lies in. A cold app can take seconds to show its first window after its
+   * process starts, so discovery is retried until the window appears or the
+   * wait runs out; only an app that opens no window waits it out. */
   private async launchedWindows(launched: LaunchedApp): Promise<string[]> {
     const ownsWindow = (processId: number | null): boolean => {
       if (processId === null) return false;
@@ -1168,6 +1173,7 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       return false;
     };
+    const deadline = Date.now() + this.launchWindowWaitMs;
     for (let attempt = 0; ; attempt++) {
       const targets = await this.discover();
       const reported = launched.windows
@@ -1181,8 +1187,11 @@ export class CuaComputerBackend implements ComputerBackend {
         const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
         return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
       }
-      if (attempt >= LAUNCH_WINDOW_RETRIES) return [];
-      await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return [];
+      // Poll quickly at first, when most windows appear, then less often.
+      const pause = attempt < 4 ? LAUNCH_WINDOW_FAST_POLL_MS : LAUNCH_WINDOW_SLOW_POLL_MS;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pause, remaining)));
     }
   }
 
@@ -1275,9 +1284,11 @@ function procParentPid(pid: number): number | null {
   }
 }
 
-/** How long a launch waits for the app's first window: up to a second. */
-const LAUNCH_WINDOW_RETRIES = 4;
-const LAUNCH_WINDOW_RETRY_MS = 250;
+/** How long a launch waits for the app's first window. A cold macOS launch
+ * of a document app (TextEdit to its Open panel) can take several seconds. */
+const LAUNCH_WINDOW_WAIT_MS = 6_000;
+const LAUNCH_WINDOW_FAST_POLL_MS = 250;
+const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
 
 /** The part of a CUA action result naming the windows it saw the action
  * open, as `App ("Title", …); Other` (an untitled window by its app only).
