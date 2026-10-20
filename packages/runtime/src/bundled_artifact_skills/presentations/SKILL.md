@@ -8,6 +8,8 @@ description: Create, inspect, edit, import, and export durable presentation arti
 The durable artifact is the default working deck. It is the same live
 object the user sees in the Artifacts dock and slide editor. Never maintain a
 mutable PPTX shadow or publish a sandbox deck over user edits.
+The exception is a file the user sends to be changed, or a requested file
+format the artifact cannot export; see "Requested PowerPoint files" below.
 
 Read [references/api.md](references/api.md) before editing.
 When using `skill_read`, request that relative path from this Skill; reading
@@ -27,6 +29,21 @@ Skill was installed or explicitly checked out to the filesystem.
 - Use a standalone local PPTX only when the user explicitly asks to manipulate
   sandbox-local bytes and the pinned local runtime is actually available.
   Normal import/export uses workspace `fileId` boundaries without local bytes.
+
+## Requested PowerPoint files
+
+When the user sends a PowerPoint file to be changed and returned, or asks for a
+new PowerPoint file while `opengeni__editable_artifact_export` is unavailable or
+does not list that format, the file itself is the deliverable:
+
+1. Make or edit it in the sandbox with ordinary tools (`python-pptx`;
+   LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Install
+   a missing package with `pip install <package>` if needed.
+2. When editing a sent file, open the original and change only what was asked,
+   keeping its other content, formatting and objects.
+3. Read the result back to check the content.
+4. Publish the file and reply with a short summary and its link. Do not also
+   build a native artifact of the same content.
 
 ## Edit and verify
 

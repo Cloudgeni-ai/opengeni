@@ -8,6 +8,8 @@ description: Create, inspect, calculate, edit, import, and export durable spread
 The durable artifact is the default working workbook. It is the same
 live object the user sees in the Artifacts dock and grid. Never maintain a
 mutable XLSX shadow or publish a sandbox workbook over user edits.
+The exception is a file the user sends to be changed, or a requested file
+format the artifact cannot export; see "Requested Excel or CSV files" below.
 
 Read [references/api.md](references/api.md) before editing.
 When using `skill_read`, request that relative path from this Skill; reading
@@ -28,6 +30,23 @@ Skill was installed or explicitly checked out to the filesystem.
   manipulate sandbox-local bytes and the pinned local runtime is actually
   available. Normal import/export uses workspace `fileId` boundaries without
   local bytes.
+
+## Requested Excel or CSV files
+
+When the user sends an Excel or CSV file to be changed and returned, or asks for
+a new Excel or CSV file while `opengeni__editable_artifact_export` is
+unavailable or does not list that format, the file itself is the deliverable:
+
+1. Make or edit it in the sandbox with ordinary tools (`openpyxl` for a new
+   workbook, the `csv` module for CSV). openpyxl drops charts and images when it
+   saves an existing workbook, so for a sent workbook that has them, edit the
+   cell XML inside the .xlsx package directly. Install a missing package with
+   `pip install <package>` if needed.
+2. When editing a sent file, open the original and change only what was asked,
+   keeping its other content, formatting and objects.
+3. Read the result back to check the content.
+4. Publish the file and reply with a short summary and its link. Do not also
+   build a native artifact of the same content.
 
 ## Edit and verify
 

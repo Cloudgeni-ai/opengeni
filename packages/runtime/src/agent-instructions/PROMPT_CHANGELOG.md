@@ -1,5 +1,23 @@
 # Modular prompt changelog
 
+A Word, Excel, PDF or PowerPoint file the user sends to be changed is now
+edited in the sandbox with ordinary tools (python-docx, openpyxl, pandoc,
+LibreOffice), checked and published, and so is a new file the user asks for in
+such a format unless the artifact export tool lists that format. Before, the
+routing sentence sent "a document or file (for example a DOCX or PDF)" to native
+document artifacts and forbade a sandbox DOCX, but stock deployments export only
+spreadsheet XLSX, and deployments without the artifact materializer export
+nothing. An agent asked for a Word or Excel file built a native artifact and
+then reported that export was unavailable, and a sent DOCX or XLSX the importer
+could not read was returned unchanged. In the everyday-task benchmark these
+cases failed on every run, while the comparison agent passed them with
+python-docx and openpyxl. Native artifacts still serve requested documents,
+edits to existing artifacts and long deliverables. The `documents`,
+`spreadsheets` and `presentations` Skills gain a short procedure for these
+files, and the goal continuation's report clause excludes them from the native
+report contract. Both compositions change identically; legacy prompt digests
+are refreshed for this reviewed change.
+
 Written pieces the person asks for (briefs, letters, plans, reports) are
 answered in chat. A document Artifact is created only when the person asks for
 a document or file (for example a DOCX or PDF), asks to edit an existing
