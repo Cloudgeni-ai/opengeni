@@ -211,18 +211,18 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         // one observation, CUA runs them in one run_steps call, and a replay
         // does not act again. (After native CUA reads, the legacy observation
         // carries no tree, so this runs before them.)
-        const id = (value: string) => ({ kind: "identifier" as const, value });
+        const label = (text: string) => ({ kind: "label" as const, text, exact: true });
         const batch = makeCommand(await supervisor.observe(reference, target.id), {
           type: "batch",
           actions: [
             {
               type: "semantic",
-              locator: id("fixture-text"),
+              locator: label("Fixture text"),
               action: "set_value",
               value: "Batched",
             },
-            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
-            { type: "semantic", locator: id("fixture-increment"), action: "invoke" },
+            { type: "semantic", locator: label("Increment"), action: "invoke" },
+            { type: "semantic", locator: label("Increment"), action: "invoke" },
           ],
         });
         const batchReceipt = await supervisor.action(batch);
