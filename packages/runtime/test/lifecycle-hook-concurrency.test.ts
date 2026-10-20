@@ -79,11 +79,17 @@ describe("beforeAgentStart hook scheduling", () => {
       });
       try {
         await seedStarted.promise;
+        // Keep the seed blocked while pending scheduler continuations drain.
+        await new Promise<void>((resolve) => setImmediate(resolve));
         expect(log).not.toContain("start:codemode-token-renewal-registration");
         expect(log).not.toContain("end:clone");
         expect(sdkUsedSession).toBe(false);
         seedReady.resolve();
         await cloneFinished.promise;
+        // Clone completion wakes this test before the decorator can settle.
+        // Leave the independent client blocked for a turn so a missing
+        // success-path join cannot hide behind its pending continuations.
+        await new Promise<void>((resolve) => setImmediate(resolve));
         expect(log.indexOf("end:seed")).toBeLessThan(
           log.indexOf("start:codemode-token-renewal-registration"),
         );
