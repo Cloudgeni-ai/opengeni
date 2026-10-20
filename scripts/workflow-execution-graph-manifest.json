@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "c399e3160ec200c8a9b4d2078c2a5f4e45d430310b3a7e466466c4e88ed21377"
+      "sha256": "cfec1c45d48c26d1e02cfa3a1a2b2b36fc5541c2986673d35fb68a81c84a5131"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -273,7 +273,13 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "cargo test --workspace",
-      "sha256": "6670c980f74155967c09fd3c8fe0be8c8882ee56bc5b23f56b80ef27fd7f669a"
+      "sha256": "0472457afcd7d85cf00dddf60b569a51a0e4a670237f69eed4789634ca1c9e96"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
+      "step": "Install the pinned nats-server for the agent's wire tests",
+      "sha256": "e25b35e241487667e4e4757f0268f42f7d3463758af56e2b608d027599803ef0"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
