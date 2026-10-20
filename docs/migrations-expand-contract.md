@@ -81,6 +81,16 @@ Steps marked for a later release can wait longer; they cannot go sooner.
 
 ## Recipes
 
+**Concurrent indexes and readers.** The concurrent-index runner lets PostgreSQL
+finish its safe wait for older snapshots (also needed for partial/expression
+indexes when the reader uses another table). It temporarily disables
+`lock_timeout` for `CREATE/DROP INDEX CONCURRENTLY` and restores the caller's
+setting afterwards. Historical `lock-timeout=5s` directive text remains immutable
+and parseable, but does not bound these waits. Ordinary migration DDL still uses
+its five-second lock timeout. A failed or interrupted concurrent build is never
+treated as applied: the next attempt drops an invalid index concurrently and
+rebuilds it before the migration receipt is written. No reader is cancelled.
+
 **Rename a column or table.** Prefer not to: names are cheap, outages are not.
 If you must, add the new column (or table), keep both in sync with a trigger or
 dual writes, backfill, move every reader to the new name, and drop the old one
