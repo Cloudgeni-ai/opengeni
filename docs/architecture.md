@@ -710,6 +710,11 @@ before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result
 retention and consumer-generation acknowledgments remain engine-owned.
+Attempt-owned `run_on` commands use the same bounded observation and durable
+session-command adoption as attached exec. A running receipt transfers custody
+before the API returns; HTTP disconnection never requests a process stop.
+They gain no duration limit. Unix streamed commands remain eligible
+for update handover; browser-controller holds have their own progress reason.
 The same admission proof produces bounded category/count update-blocker
 snapshots. Private controller/session identities never cross into enrollment-wide
 diagnostics. Exact-operation/process-fenced progress persists the snapshot on the
