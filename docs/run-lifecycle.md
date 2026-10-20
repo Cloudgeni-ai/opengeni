@@ -3510,7 +3510,7 @@ observation window is never substituted for termination proof.
 box through a non-expiring interaction holder, so before migration 0705 an
 open browser or desktop that nobody used kept its Modal box warm until the
 provider deadline. They now follow the general idle grace
-(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default one minute, never under one minute);
 there is no separate window.
 
 Activity is deliberate and durable: the newest of the interaction holder's
