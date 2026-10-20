@@ -11,10 +11,12 @@
 //! own name server, which knows the names of the whole private network, is
 //! never asked for a guest.
 //!
-//! Names are resolved by the host once, when the agent starts, and those
-//! addresses are both what guests are told and what the firewalls open, so
-//! the two always agree. A name that moves to another address takes effect
-//! when the agent next starts; its sandboxes keep running meanwhile (ADR 9).
+//! Names are resolved by the host once, when the agent starts: each name
+//! is looked up once however many entries give it, and those addresses are
+//! both what guests are told and what the firewalls open for every port
+//! any of its entries lists, so the two always agree. A name that moves to
+//! another address takes effect when the agent next starts; its sandboxes
+//! keep running meanwhile (ADR 9).
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -167,15 +169,18 @@ impl Ipv4Net {
 /// and what the sandboxes' name server answers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Allowed {
-    /// Each destination range with the ports guests may open there.
+    /// Each destination range, once, with every port guests may open
+    /// there.
     pub open: Vec<(Ipv4Net, Vec<Ports>)>,
     /// Each name with the addresses guests are told.
     pub names: BTreeMap<String, Vec<Ipv4Addr>>,
 }
 
 impl Allowed {
-    /// Resolves `reach`, looking each name up with `lookup`, and checks
-    /// that nothing it opens is a range guests may never reach (`never`).
+    /// Resolves `reach`, looking each name up once with `lookup`, and
+    /// checks that nothing it opens is a range guests may never reach
+    /// (`never`). Entries that lead to the same destination open the
+    /// ports of all of them there.
     ///
     /// # Errors
     ///
@@ -191,17 +196,19 @@ impl Allowed {
             let nets = match &entry.target {
                 Target::Net(net) => vec![*net],
                 Target::Name(name) => {
-                    let mut addresses = lookup(name)?;
-                    addresses.sort_unstable();
-                    addresses.dedup();
-                    addresses.truncate(MAX_ADDRESSES);
-                    if addresses.is_empty() {
-                        return Err(format!("{name} has no IPv4 address"));
-                    }
-                    let names = allowed.names.entry(name.clone()).or_default();
-                    names.extend(&addresses);
-                    names.sort_unstable();
-                    names.dedup();
+                    let addresses = if let Some(known) = allowed.names.get(name) {
+                        known.clone()
+                    } else {
+                        let mut addresses = lookup(name)?;
+                        addresses.sort_unstable();
+                        addresses.dedup();
+                        addresses.truncate(MAX_ADDRESSES);
+                        if addresses.is_empty() {
+                            return Err(format!("{name} has no IPv4 address"));
+                        }
+                        allowed.names.insert(name.clone(), addresses.clone());
+                        addresses
+                    };
                     addresses
                         .into_iter()
                         .map(|address| Ipv4Net {
@@ -217,10 +224,26 @@ impl Allowed {
                         "--reach {entry}: {net} is in {closed}, which sandboxes may never reach"
                     ));
                 }
-                allowed.open.push((net, entry.ports.clone()));
+                allowed.open_ports(net, &entry.ports);
             }
         }
         Ok(allowed)
+    }
+
+    /// Adds `ports` to what guests may open at `net`.
+    fn open_ports(&mut self, net: Ipv4Net, ports: &[Ports]) {
+        let index = if let Some(index) = self.open.iter().position(|(known, _)| *known == net) {
+            index
+        } else {
+            self.open.push((net, Vec::new()));
+            self.open.len() - 1
+        };
+        let open = &mut self.open[index].1;
+        for ports in ports {
+            if !open.contains(ports) {
+                open.push(*ports);
+            }
+        }
     }
 
     /// One nftables rule per destination, each `prefix` followed by the
@@ -334,19 +357,20 @@ mod tests {
             ])
         })
         .unwrap();
-        assert_eq!(asked, ["api.example", "api.example"]);
+        // Asked once, though two entries give it.
+        assert_eq!(asked, ["api.example"]);
         assert_eq!(
             allowed.names["api.example"],
             [Ipv4Addr::new(100, 70, 0, 1), Ipv4Addr::new(100, 70, 0, 2)]
         );
         let rules = allowed.accept_rules("iifname \"tap0\"");
-        assert!(
-            rules
-                .contains("iifname \"tap0\" ip daddr 100.70.0.1/32 tcp dport { 443, 9443 } accept")
-        );
-        assert!(rules.contains("ip daddr 100.70.0.2/32 tcp dport { 9445 } accept"));
+        for address in ["100.70.0.1", "100.70.0.2"] {
+            assert!(rules.contains(&format!(
+                "iifname \"tap0\" ip daddr {address}/32 tcp dport {{ 443, 9443, 9445 }} accept"
+            )));
+        }
         assert!(rules.contains("ip daddr 10.9.0.0/24 tcp dport { 22 } accept"));
-        assert_eq!(rules.lines().count(), 5);
+        assert_eq!(rules.lines().count(), 3);
         assert!(
             allowed
                 .describe()
@@ -355,6 +379,38 @@ mod tests {
         assert_eq!(
             Allowed::resolve(&[], &never, |_| unreachable!()).unwrap(),
             Allowed::default()
+        );
+    }
+
+    #[test]
+    fn a_name_given_twice_opens_every_port_at_every_address_it_is_answered_with() {
+        // A name server that answers each lookup with another address, as
+        // round-robin DNS does.
+        let reach: Vec<Reach> = [
+            "api.example:443",
+            "API.example.:8443",
+            "100.70.0.1:22",
+            "100.70.0.1:22,23",
+        ]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+        let mut answers = [Ipv4Addr::new(100, 70, 0, 1), Ipv4Addr::new(100, 70, 0, 2)]
+            .into_iter()
+            .cycle();
+        let allowed = Allowed::resolve(&reach, &[], |_| Ok(vec![answers.next().unwrap()])).unwrap();
+        let told = &allowed.names["api.example"];
+        assert_eq!(told, &[Ipv4Addr::new(100, 70, 0, 1)]);
+        let port = |port| Ports {
+            first: port,
+            last: port,
+        };
+        assert_eq!(
+            allowed.open,
+            [(
+                net("100.70.0.1/32"),
+                vec![port(443), port(8443), port(22), port(23)]
+            )]
         );
     }
 

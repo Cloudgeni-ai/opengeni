@@ -42,7 +42,10 @@ use super::{GATEWAY_IP, NetError, in_namespace};
 pub const PORT: u16 = 53;
 /// How long one upstream has to answer one query.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long a guest's TCP connection may sit without a query.
+/// How long a guest's TCP connection may sit without a query, and how long
+/// it may take to accept an answer: a guest that stops reading loses its
+/// connection, and with it the connection's place among
+/// [`MAX_CONNECTIONS`].
 const TCP_IDLE: Duration = Duration::from_secs(10);
 /// The largest UDP query read from a guest; queries are a few dozen bytes.
 const MAX_QUERY: usize = 4096;
@@ -51,7 +54,8 @@ const MAX_QUERY: usize = 4096;
 /// socket, shared by every sandbox on it (as guest ports' connections do).
 const MAX_IN_FLIGHT: usize = 64;
 /// TCP connections one sandbox may hold to its name server at once; more
-/// are closed at once.
+/// are closed at once. Each ends within [`TCP_IDLE`] of the guest going
+/// quiet or ceasing to read.
 const MAX_CONNECTIONS: usize = 16;
 /// How long guests may keep an answer the host gives itself.
 const TTL: u32 = 60;
@@ -148,7 +152,7 @@ impl NameServer {
             ),
             AbortOnDrop(
                 self.runtime
-                    .spawn(serve_tcp(tcp, Arc::clone(&self.answers))),
+                    .spawn(serve_tcp(tcp, Arc::clone(&self.answers), TCP_IDLE)),
             ),
         ];
         served.insert(
@@ -396,8 +400,9 @@ async fn serve_udp(socket: UdpSocket, answers: Arc<Answers>) {
     }
 }
 
-/// Answers one namespace's TCP connections.
-async fn serve_tcp(listener: TcpListener, answers: Arc<Answers>) {
+/// Answers one namespace's TCP connections, each until it sits `idle`
+/// ([`TCP_IDLE`]); see [`serve_connection`].
+async fn serve_tcp(listener: TcpListener, answers: Arc<Answers>, idle: Duration) {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -411,7 +416,7 @@ async fn serve_tcp(listener: TcpListener, answers: Arc<Answers>) {
                 }
                 let answers = Arc::clone(&answers);
                 connections.spawn(async move {
-                    let _ = serve_connection(stream, &answers).await;
+                    let _ = serve_connection(stream, &answers, idle).await;
                 });
             }
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -419,17 +424,26 @@ async fn serve_tcp(listener: TcpListener, answers: Arc<Answers>) {
     }
 }
 
-/// Answers each query on one TCP connection until the guest ends it or
-/// sends nothing for [`TCP_IDLE`].
-async fn serve_connection(mut stream: TcpStream, answers: &Answers) -> io::Result<()> {
-    while let Ok(read) = timeout(TCP_IDLE, read_message(&mut stream)).await {
+/// Answers each query on one TCP connection until the guest ends it,
+/// sends nothing for `idle`, or takes longer than `idle` to accept an
+/// answer.
+async fn serve_connection(
+    mut stream: TcpStream,
+    answers: &Answers,
+    idle: Duration,
+) -> io::Result<()> {
+    while let Ok(read) = timeout(idle, read_message(&mut stream)).await {
         let Some(query) = read? else {
             break;
         };
         let Some(answer) = answers.answer(&query, true).await else {
             break;
         };
-        write_message(&mut stream, &answer).await?;
+        let Ok(written) = timeout(idle, write_message(&mut stream, &answer)).await else {
+            tracing::debug!("a guest stopped reading its name server's answers");
+            break;
+        };
+        written?;
     }
     Ok(())
 }
@@ -584,6 +598,7 @@ mod tests {
         let serving = tokio::spawn(serve_tcp(
             listener,
             Arc::new(server_of(&[("api.example", &[API])], vec![at])),
+            TCP_IDLE,
         ));
         let mut guest = TcpStream::connect(name_server).await.unwrap();
         write_message(&mut guest, &query(1, "example.com", TYPE_A))
@@ -597,6 +612,70 @@ mod tests {
             .unwrap();
         let local = read_message(&mut guest).await.unwrap().unwrap();
         assert!(local.ends_with(&API.octets()));
+        serving.abort();
+    }
+
+    #[tokio::test]
+    async fn guests_that_stop_reading_answers_lose_their_connections() {
+        // Small buffers on both sides, so that a guest that never reads
+        // blocks the name server's writes after a few hundred answers.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_send_buffer_size(4096).unwrap();
+        socket.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let listener = socket.listen(64).unwrap();
+        let name_server = listener.local_addr().unwrap();
+        let idle = Duration::from_millis(300);
+        let serving = tokio::spawn(serve_tcp(
+            listener,
+            Arc::new(server_of(&[("api.example", &[API])], Vec::new())),
+            idle,
+        ));
+        let mut batch = Vec::new();
+        for id in 0..4000 {
+            let asked = query(id, "api.example", TYPE_A);
+            batch.extend_from_slice(&u16::try_from(asked.len()).unwrap().to_be_bytes());
+            batch.extend_from_slice(&asked);
+        }
+        let batch = Arc::new(batch);
+        // Every connection a sandbox may hold, each sending queries
+        // without ever reading an answer, and kept open.
+        let mut stalled = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4096).unwrap();
+            let mut guest = socket.connect(name_server).await.unwrap();
+            let batch = Arc::clone(&batch);
+            stalled.push(tokio::spawn(async move {
+                let _ = guest.write_all(&batch).await;
+                sleep(Duration::from_secs(60)).await;
+                drop(guest);
+            }));
+        }
+        // Once their writes have stalled for `idle`, their places are free
+        // again, and a guest that reads is answered.
+        let answered = timeout(Duration::from_secs(5), async {
+            loop {
+                sleep(idle).await;
+                let Ok(mut guest) = TcpStream::connect(name_server).await else {
+                    continue;
+                };
+                if write_message(&mut guest, &query(1, "api.example", TYPE_A))
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                if let Ok(Ok(Some(answer))) = timeout(idle, read_message(&mut guest)).await {
+                    return answer;
+                }
+            }
+        })
+        .await
+        .expect("a stalled guest kept its connection");
+        assert!(answered.ends_with(&API.octets()));
+        for guest in stalled {
+            guest.abort();
+        }
         serving.abort();
     }
 }
