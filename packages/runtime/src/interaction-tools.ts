@@ -993,11 +993,12 @@ export function createInteractionAttemptToolDefinitions(
     return published;
   };
   // Whether a ComputerSession runs a computer_act batch as one operation.
-  // The computer's controller reports it, so every call to the same
-  // controller picks the same way and two tries of one batch cannot send its
-  // actions under both ways' operation IDs. A yes is kept; a no is asked
-  // again, since an agent update brings a new controller. An unreadable or
-  // not yet reported answer sends nothing (see actInComputerBatch).
+  // The computer fixes the answer for the session's life, across agent
+  // updates, so every try of one batch, concurrent or retried, picks the same
+  // way and cannot send its actions under both ways' operation IDs. A yes is
+  // kept; a no is asked again, since a new session may say yes. An
+  // unreadable or not yet reported answer sends nothing (see
+  // actInComputerBatch).
   const actionBatchSupport = new Map<string, Promise<boolean>>();
   const supportsActionBatches = (computerSessionId: string): Promise<boolean> => {
     let known = actionBatchSupport.get(computerSessionId);
@@ -2664,11 +2665,11 @@ async function actInComputerBatch(
     }
   };
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
-  // The two ways derive different operation IDs. Every call to one
-  // controller picks the same way, from what that controller reports. A
-  // retried call still runs the way its first try did, even if an agent
-  // update changed the answer since: both first receipts are read before
-  // anything is sent, and running the other way would send the actions again.
+  // The two ways derive different operation IDs. The computer fixes its
+  // answer for the session's life, so every try of one batch picks the same
+  // way. A recorded receipt still decides first: both first receipts are read
+  // before anything is sent, and running the other way would send the actions
+  // again.
   const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
   const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
   const [nativePrior, firstStepPrior] = await Promise.all([

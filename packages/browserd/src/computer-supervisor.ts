@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   ComputerNativeCommand,
@@ -93,6 +93,8 @@ type Runtime = {
   environmentLease: ComputerEnvironmentLease;
   journal: SqliteComputerOperationJournal;
   driver: ComputerSupervisorDriver;
+  /** What the session reports; see pinActionBatches. */
+  capabilities: ComputerSessionCapabilities;
   controller: ComputerInteractionController;
   lifecycle: "active" | "ending";
 };
@@ -241,7 +243,7 @@ export class ComputerSupervisor {
         adapter: runtime.driver.adapterId,
         seatId: runtime.environmentLease.seatId,
         displayId: runtime.environmentLease.displayId,
-        capabilities: runtime.driver.capabilities,
+        capabilities: runtime.capabilities,
       }));
   }
 
@@ -472,6 +474,7 @@ export class ComputerSupervisor {
         displayId,
         environment,
       });
+      const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities);
       let runtime: Runtime | undefined;
       const controllerDriver = driver;
       const controller = journal.withRecoveredRecords(
@@ -503,6 +506,7 @@ export class ComputerSupervisor {
         environmentLease,
         journal,
         driver,
+        capabilities,
         controller,
         lifecycle: "active",
       };
@@ -557,7 +561,7 @@ export class ComputerSupervisor {
       adapter: runtime.driver.adapterId,
       seatId: runtime.environmentLease.seatId,
       displayId: runtime.environmentLease.displayId,
-      capabilities: runtime.driver.capabilities,
+      capabilities: runtime.capabilities,
       targets: await runtime.driver.listTargets(),
     };
   }
@@ -684,4 +688,39 @@ function boundedPositiveInteger(value: number, label: string): number {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+/**
+ * Whether a session runs a computer_act batch as one operation is fixed for
+ * the session's life, kept beside its operation journal. The two ways send a
+ * batch under different operation ids, so every try of one batch, including
+ * concurrent tries and tries on either side of an agent update, must choose
+ * the same way. An update that adds batch support applies to new sessions. A
+ * session that began with batches and lost support keeps reporting them; its
+ * batches are then refused before anything runs, instead of a retry repeating
+ * actions one by one.
+ */
+async function pinActionBatches(
+  sessionDirectory: string,
+  capabilities: ComputerSessionCapabilities,
+): Promise<ComputerSessionCapabilities> {
+  const path = join(sessionDirectory, "action-batches.json");
+  let pinned: boolean;
+  try {
+    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as { actionBatches?: unknown }).actionBatches !== "boolean"
+    )
+      throw new Error("computer session batch mode record is invalid");
+    pinned = (value as { actionBatches: boolean }).actionBatches;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    pinned = capabilities.actionBatches === true;
+    const staged = `${path}.${process.pid}.tmp`;
+    await writeFile(staged, JSON.stringify({ actionBatches: pinned }), { mode: 0o600 });
+    await rename(staged, path);
+  }
+  return { ...capabilities, actionBatches: pinned };
 }

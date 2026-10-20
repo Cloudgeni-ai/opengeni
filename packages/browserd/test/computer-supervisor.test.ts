@@ -285,6 +285,53 @@ describe("ComputerSupervisor", () => {
     }
   });
 
+  test.each([false, true])(
+    "keeps a session's batch mode across agent updates (began with batches: %s)",
+    async (initially) => {
+      const rootDirectory = await mkdtemp("/tmp/og-computer-batch-mode-");
+      const open = async (actionBatches: boolean) =>
+        await ComputerSupervisor.open({
+          rootDirectory,
+          environmentAllocator: fixtureEnvironmentAllocator(),
+          createDriver: async (context) => {
+            const driver = new FixtureComputerDriver(
+              context.computerSessionId,
+              context.controllerGeneration,
+            );
+            Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches } });
+            return driver;
+          },
+        });
+      let supervisor = await open(initially);
+      try {
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          initially,
+        );
+      } finally {
+        await supervisor.close();
+      }
+      // The updated agent reports the other answer; the open session keeps its own.
+      supervisor = await open(!initially);
+      try {
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          initially,
+        );
+        expect(supervisor.listSessions()[0]?.capabilities.actionBatches).toBe(initially);
+        await supervisor.endSession(
+          { computerSessionId, controllerGeneration },
+          { removeState: true },
+        );
+        // A new session takes what the computer supports now.
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          !initially,
+        );
+      } finally {
+        await supervisor.close();
+        await rm(rootDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("displaces other shared-seat helpers when a new ComputerSession is created", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-displace-");
     const drivers: FixtureComputerDriver[] = [];
