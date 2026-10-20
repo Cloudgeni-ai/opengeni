@@ -4,10 +4,9 @@ The macOS and Linux adapters use CUA Driver source revision
 `39d06ca98e45c3fbf106458f7d8de782f60526c8`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
 fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`), including its non-invalidating
-preview capture and cursor support. `@trycua/cua-driver` 0.36.0 supplies the private-worker
+preview capture and cursor support. `@trycua/cua-driver` 0.37.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. Windows uses
-the published SDK's native runtime in process, so it stays on 0.36 until the
-0.37 SDK is published. CUA is the default on macOS, on
+the published SDK's native runtime in process. CUA is the default on macOS, on
 Windows and for explicitly selected isolated Linux desktops. Linux host desktops
 retain the native default.
 
