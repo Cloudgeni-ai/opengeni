@@ -368,7 +368,10 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
                 {speed.id === "standard" ? null : (
                   <ZapIcon
                     aria-hidden
-                    className={cn("size-3.5 shrink-0", speed.id === selectedSpeed.id && "fill-current")}
+                    className={cn(
+                      "size-3.5 shrink-0",
+                      speed.id === selectedSpeed.id && "fill-current",
+                    )}
                   />
                 )}
                 {speed.label}
