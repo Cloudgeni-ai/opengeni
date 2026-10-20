@@ -1084,6 +1084,8 @@ describe("CUA desktop boundary", () => {
     class LaunchFixture extends Fixture {
       launched = false;
       listings = 0;
+      /** Listings after launch that still lack the app's window. */
+      listingsBeforeWindow = 1;
       reportWindows = false;
       // Linux reports the launcher process; the app's window belongs to its
       // child, and an unrelated window appears at the same time.
@@ -1104,7 +1106,11 @@ describe("CUA desktop boundary", () => {
           });
         }
         const response = await super.callTool(name, argumentsJson);
-        if (name === "list_windows" && this.launched && ++this.listings > 1) {
+        if (
+          name === "list_windows" &&
+          this.launched &&
+          ++this.listings > this.listingsBeforeWindow
+        ) {
           const data = JSON.parse(response.structuredJson!);
           // Another app opens a window at the same time, listed first.
           if (this.linux)
@@ -1164,6 +1170,33 @@ describe("CUA desktop boundary", () => {
       }
     }
 
+    // A window already there is observed at once, and a cold app's window,
+    // seconds late on macOS, is waited for instead of observing the action's
+    // own target. Neither waits out the whole window wait.
+    for (const [listingsBeforeWindow, atLeast, below] of [
+      [0, 0, 250],
+      [7, 1_000, 4_000],
+    ] as const) {
+      const fixture = new LaunchFixture();
+      fixture.listingsBeforeWindow = listingsBeforeWindow;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        const elapsed = performance.now() - started;
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(elapsed).toBeGreaterThanOrEqual(atLeast);
+        expect(elapsed).toBeLessThan(below);
+      } finally {
+        await backend.close();
+      }
+    }
+
     // The controller records the launched window's observation in the receipt.
     {
       const fixture = new LaunchFixture();
@@ -1204,19 +1237,48 @@ describe("CUA desktop boundary", () => {
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
       name === "launch_app" ? result({ pid: 78, windows: [] }) : await original(name, json);
-    const backend = await CuaComputerBackend.open(fixture);
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 300 });
     try {
       const target = (await backend.targets())[0]!;
       const observation = await backend.observe(target.id);
+      const started = Date.now();
       const launched = await backend.dispatch({
         ...command(observation),
         action: { type: "launch", applicationId: "Menu Bar Helper" },
       });
       expect(launched?.target.id).toBe(target.id);
+      // It waits out the window wait, and no longer.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+      expect(Date.now() - started).toBeLessThan(2_000);
     } finally {
       await backend.close();
     }
-  });
+
+    // The wait does not hold the queue: previews and observations run between
+    // window searches, and closing ends the wait.
+    const windowless = new Fixture();
+    const listed = windowless.callTool.bind(windowless);
+    windowless.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await listed(name, json);
+    const waiting = await CuaComputerBackend.open(windowless);
+    try {
+      const target = (await waiting.targets())[0]!;
+      const before = await waiting.observe(target.id);
+      const started = performance.now();
+      const launching = waiting.dispatch({
+        ...command(before),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waiting.observe(target.id);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      await waiting.close();
+      await launching;
+      expect(performance.now() - started).toBeLessThan(2_000);
+    } finally {
+      await waiting.close();
+    }
+  }, 20_000);
 
   test("a launch observes the app's own window before a window lying within it", async () => {
     // A document app launching to its Open panel reports the panel's
@@ -1449,7 +1511,8 @@ describe("CUA desktop boundary", () => {
         ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
           result({ pid: 42, bundle_id: "com.apple.TextEdit", windows: [] }))
         : await original(name, json);
-    const backend = await CuaComputerBackend.open(fixture);
+    // These apps open no window here, so the launch need not wait for one.
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 50 });
     try {
       expect((await backend.capabilities()).appLaunch).toBe(true);
       const target = (await backend.targets())[0]!;
@@ -1558,7 +1621,9 @@ describe("CUA desktop boundary", () => {
             // Linux reports the launcher process it started the app through.
             result(platform === "linux" ? { launcher_pid: 92 } : { pid: 42, windows: [] }))
           : await platformCall(name, json);
-      const other = await CuaComputerBackend.open(platformFixture, platform);
+      const other = await CuaComputerBackend.open(platformFixture, platform, {
+        launchWindowWaitMs: 50,
+      });
       try {
         expect((await other.capabilities()).appLaunch).toBe(true);
         const target = (await other.targets())[0]!;
