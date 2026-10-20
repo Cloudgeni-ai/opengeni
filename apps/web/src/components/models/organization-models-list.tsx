@@ -1,4 +1,5 @@
 import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
@@ -265,6 +266,7 @@ function useWorkspaceSnapshots(
 
 export function OrganizationModelsList({
   client,
+  organizationId,
   organizationDefaults,
   accountRules,
   modelLabel,
@@ -290,6 +292,7 @@ export function OrganizationModelsList({
   onConnect,
 }: {
   client: OpenGeniBrowserClient;
+  organizationId?: string | undefined;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
   /** The organization's account rules and every workspace's; owners and admins only, otherwise null. */
@@ -432,6 +435,14 @@ export function OrganizationModelsList({
 
   const orgRows = administrator ? (
     <>
+      {organizationId ? (
+        <ConnectedSubscriptionUsagePool
+          client={client}
+          scope="organization"
+          id={organizationId}
+          provider="codex"
+        />
+      ) : null}
       <OrganizationCodexRows
         codex={orgCodex}
         labels={labels}
@@ -439,6 +450,14 @@ export function OrganizationModelsList({
         onOpen={(id) => onOpenAccount(accountKey("codex", id, true))}
         onConnect={() => onConnect()}
       />
+      {claudeEnabled && organizationId ? (
+        <ConnectedSubscriptionUsagePool
+          client={client}
+          scope="organization"
+          id={organizationId}
+          provider="claude"
+        />
+      ) : null}
       {claudeEnabled ? (
         <ClaudeAccountRows
           claude={orgClaude}

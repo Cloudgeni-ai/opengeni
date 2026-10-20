@@ -12,6 +12,7 @@
  * persisted refresh and fences quota observations.
  */
 import { sql } from "drizzle-orm";
+import { withSubscriptionUsageReading } from "./usage-reading";
 import type { SubscriptionCoreOperationLeaseRef } from "./operations";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
@@ -1581,7 +1582,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         current !== null &&
         quotaCapacity(current, observedNow).kind === "exhausted" &&
         quotaCapacity(next, observedNow).kind !== "exhausted";
-      const stored = storedQuotaDocument(next);
+      const stored = withSubscriptionUsageReading(storedQuotaDocument(next), observation);
       const observedAt = new Date(next.observedAt ?? Date.now()).toISOString();
       await tx.execute(
         sql`insert into subscription_connection_quota (

@@ -1,4 +1,5 @@
 import { t } from "@/lib/console-text";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -1112,6 +1113,7 @@ export function WorkspaceModelsPageBody({
         {scopePicker}
         <OrganizationModelsList
           client={client}
+          organizationId={organizationId}
           organizationDefaults={organizationAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
@@ -1227,6 +1229,12 @@ export function WorkspaceModelsPageBody({
                   workspaceName={workspaceName}
                   scope={labels.everyone}
                 />
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
+                />
                 <CodexAccountRows
                   codex={codex}
                   places={codexPlaces}
@@ -1234,6 +1242,14 @@ export function WorkspaceModelsPageBody({
                   onKeptForPeople={reportKeptForPeople}
                 />
                 <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
                 {claudeEnabled ? (
                   <ClaudeAccountRows
                     claude={claude}

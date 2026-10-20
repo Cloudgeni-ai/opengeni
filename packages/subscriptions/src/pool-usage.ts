@@ -280,16 +280,11 @@ export function buildSubscriptionUsagePool(
           availablePaces.some((pace) => pace.fallback)
             ? "Last-reset average fallback"
             : "Observed percentage movements",
-          "UTC hour-of-week profile (last 7 days; uncovered hours use observed average)",
-          availablePaces.some((pace) => pace.callShape)
-            ? "attributed calls shape covered intervals"
-            : "reading-based hourly shape",
+          historyDays >= 7
+            ? "last 7 days"
+            : `${Math.max(1, Math.ceil(historyDays))} days of history`,
           `same-hours weekly trend ${trend.toFixed(2)}x`,
           ...(id === "five_hour" ? [`last-hour adjustment ${recent.toFixed(2)}x`] : []),
-          "combined scaling bounded 0.5–2x; spikes damped; capacity-weighted demand redistribution",
-          ...(accounts.some((account) => account.weightBasis === "plan_estimate")
-            ? ["includes relative plan estimates"]
-            : []),
         ].join("; ");
         forecast = simulate(
           accounts,

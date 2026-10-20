@@ -13,6 +13,63 @@ configured endpoint.
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
+## Pooled subscription limits
+
+Settings → Models shows one limits pool per provider: organization administrators
+see the organization's shared accounts; a workspace sees its effective accounts,
+including the owner's personal accounts only in their own Personal workspace.
+Limits belong to provider accounts, not workspaces. Each pool has weekly and
+5-hour views, capacity-sized account bars, reported remaining percentages and
+reset times. No monetary or absolute usage unit is returned by the pooled API.
+SuperGrok is omitted because its current adapter reports only a billing window.
+Claude setup-token accounts without usage access remain visibly unreported.
+
+Weights estimate relative capacity from attributed call usage divided by stable
+percentage movement, independently per window. Calibration requires three stable
+samples, six calls, ten percentage points and an hour of coverage; median and
+dispersion checks reject outliers. Provider-boundary fallback estimates are
+Codex Plus/unknown 1 and Pro 10, Claude Pro/unknown 1 and Max 5 (explicit Max 20x
+is 20). An unspecified Max tier conservatively uses 5. These are estimates, not
+provider promises; outside use and model mix can bias calibration.
+
+The forecast uses actual percentage movement, including use outside Opengeni.
+Attributed calls shape covered intervals with a uniform floor for outside use.
+It builds a UTC hour-of-week profile from up to seven days, compares the same
+completed hours this calendar week and last week, and applies damped trend
+scaling. The 5-hour projection additionally uses the last full hour. Combined
+scaling is bounded to 0.5–2x; spikes are winsorized. Missing hours use the observed
+average. Sparse history falls back to average pace since the inferred last reset,
+only when positive usage and elapsed time are known. Without sufficient evidence,
+it reports an unavailable forecast rather than assuming no use.
+
+Simulation walks hourly boundaries and exact account resets through the last
+upcoming reset. Demand is distributed by relative capacity and reassigned from
+depleted accounts; it assumes that work can use other accounts, not that every
+model is entitled everywhere. Run-out reports the first exhaustion and next
+reset; unused is capacity discarded at each account's first reset, with the
+lowest aggregate point measured before refill. Times display in the viewer's
+timezone. Stale, unknown or already-reset observations never imply a full pool.
+
+`subscription_usage_readings` retains original endpoint/header observations in
+the private schema, including organization Codex inspection without changing
+allocator quota. Identical observation timestamps deduplicate retries; new
+fetches with unchanged percentages remain observations. `subscription_usage_calls`
+is a content-free private projection of attributed call measurements, not a
+billing ledger. Both retain 30 days with bounded maintenance deletes; reads use
+14 days to support same-hours comparisons. The public read returns no call rows,
+session identities, monetary amounts or absolute units.
+
+`model_call_facts.connection_id` is the canonical account ID used by Codex and
+Claude Models lists, in both scopes. Facts have no age-based prune job, but writes
+are best-effort; old unattributed facts, deleted workspaces and deleted accounts
+can leave gaps. Thus seven complete days are not guaranteed. Only known attributed
+facts are backfilled, never fabricated percentage readings. New deployments
+accumulate observation history after rollout and show their actual basis.
+
+Both pool endpoints use existing account-list authorization and a client-scoped
+shared-query cache. They read stored data only; the Models page's Refresh action
+owns live provider checks and invalidates the pool after those checks finish.
+
 ## Configuring inference
 
 Turn inference uses two OpenAI-shaped HTTP APIs: **Responses**

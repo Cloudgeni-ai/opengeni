@@ -348,7 +348,7 @@ describe("subscription usage pool forecast", () => {
         data.calls.push({ connectionId: "a", at: start + minutes * 60_000, units: 10 });
     }
     const shaped = result(data);
-    expect(shaped.forecast.basis).toContain("attributed calls shape covered intervals");
+    expect(shaped.forecast.basis).toContain("Observed percentage movements");
     expect(shaped.forecast.basis).toContain("last-hour adjustment 0.50x");
     const scaled = structuredClone(data);
     scaled.calls.forEach((call) => {

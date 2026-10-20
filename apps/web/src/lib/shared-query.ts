@@ -43,9 +43,12 @@ export {
  */
 export function invalidateSubscriptionAccountQueries(client: object): Promise<void> {
   return Promise.all(
-    [["codex-accounts"], ["subscription-pool"], ["supergrok-accounts"]].map((prefix) =>
-      invalidateSharedQueries(client, prefix),
-    ),
+    [
+      ["codex-accounts"],
+      ["subscription-pool"],
+      ["supergrok-accounts"],
+      ["subscription-usage-pools"],
+    ].map((prefix) => invalidateSharedQueries(client, prefix)),
   ).then(() => undefined);
 }
 
