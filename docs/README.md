@@ -38,6 +38,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Provider-neutral subscription account contract (target behaviour, requirement IDs, decision log) | `docs/subscription-accounts.md` | Provider subscription docs describe current behaviour and link here for the shared target; `docs/subscription-accounts-inventory.md` holds the entry-point inventory and Codex audit. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
+| Excel add-in: manifest, pane, sign-in, live workbook relay and `excel_run` | `docs/excel-addin.md` | `docs/architecture.md` and `docs/mcp-surfaces.md` should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
 | Launch monitoring and alert first actions | `docs/launch-monitoring.md` | Deployment-specific dashboard, alert-channel and verified rollout links stay in the private ops delivery record. |
 | Organization tenancy authority, activation, and rollback boundary | `docs/organization-tenancy.md` | `docs/deployment.md` owns the operator cutover procedure; `docs/architecture.md`, `AGENTS.md`, and chart/config comments should link instead of restating the boundary, the preconditions, or the pre-activation opt-out switch. |

@@ -1,6 +1,6 @@
 ---
 name: spreadsheets
-description: Create, inspect, calculate, edit, import, and export durable spreadsheet artifacts and explicit XLSX/CSV file boundaries. Use for workbooks, formulas, analyses, tables, calculations, and spreadsheet visual QA. Do not use for controlling a live Excel application.
+description: Create, inspect, calculate, edit, import, and export durable spreadsheet artifacts and explicit XLSX/CSV file boundaries. Use for workbooks, formulas, analyses, tables, calculations, and spreadsheet visual QA. Not for a workbook open in Excel; use excel_run there.
 ---
 
 # Spreadsheets

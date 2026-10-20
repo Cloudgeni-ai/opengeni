@@ -3925,6 +3925,7 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "excel_run"
   | "secret_search"
   | "secret_save"
   | "secret_get"
@@ -6432,10 +6433,14 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
+/** `office`: the Opengeni add-in for Excel, signed in from its task pane. */
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux" | "office";
 
 export type NativeAppAuthorizeInput = {
-  /** Exactly `<registered scheme>://auth/callback`. */
+  /**
+   * Exactly `<registered scheme>://auth/callback`, or for the Office add-in the
+   * deployment's own `<web origin>/office/auth-callback.html`.
+   */
   redirectUri: string;
   /** Base64url SHA-256 of the app's code verifier. */
   codeChallenge: string;

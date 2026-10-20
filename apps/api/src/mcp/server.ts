@@ -16,6 +16,7 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
+import { registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   sessionChatUrl,
@@ -1123,6 +1124,18 @@ export function buildOpenGeniMcpServer(
       },
       attempt: () => exactAgentCommandContext(grant, sessionId),
       json,
+    });
+  }
+  // Office.js code in a workbook the person has open with the Opengeni add-in.
+  if (sessionId !== null) {
+    registerExcelTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
     });
   }
   // PolicyMcpServer applies each tool's own permission contract. Register this

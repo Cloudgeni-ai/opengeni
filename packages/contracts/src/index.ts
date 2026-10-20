@@ -1064,6 +1064,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "excel_run",
   "secret_search",
   "secret_save",
   "secret_get",
