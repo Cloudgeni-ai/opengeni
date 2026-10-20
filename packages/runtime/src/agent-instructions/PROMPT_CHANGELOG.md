@@ -177,18 +177,21 @@ rule turned one search into several sequential round trips, so the rule now
 says a found tool stays callable by name and that several capabilities can be
 searched in one response or loaded together through `names`.
 
-Compact discovery. Ranked hits are descriptors, not schemas. An explicitly
-configured decision model selects and loads the relevant definitions in the
-same search; without it, exact-name loading is a separate step. The instructions
-make that distinction and use the existing list tool for an on-demand group
+Compact discovery. Search loads its strongest match and leaves alternatives as
+descriptors. An explicitly configured decision model can select definitions for
+ambiguous queries; strong matches skip that inference. Exact ties and queries
+without resource evidence stay compact and require exact-name loading. The
+instructions distinguish loaded tools from suggestions and use the existing list tool for an on-demand group
 directory. Definitions and receipts are frozen after the originating result,
 never inserted into a changing earlier prompt or top-level tool block.
 
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ Describe the action, resource and useful context in `tool_search`; a configured decision model selects and loads relevant tools.
-+ When the result says `schemasLoaded: false`, it contains compact candidates only: load chosen exact names with `tool_search({query: '', names: [...]})` before calling them.
-+ Known exact names bypass ranking and the decision model.
++ Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches.
++ Check the match: ranking is not certainty.
++ With `schemasLoaded: true`, `tools` have loaded schemas but `suggestions` are unloaded alternatives.
++ With `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them.
++ Known exact names bypass ranking and inference.
 + Once its schema is in context, call the tool by name or through `tool_invoke`; do not rediscover it unless its schema is no longer in context.
 + When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.
 + Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`.

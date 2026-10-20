@@ -67,7 +67,22 @@ const pool = baseline.inspectSearchableTools().map((t) => ({ ...t, type: "functi
 const cases = (
   (await Bun.file(queries).json()) as Array<{ id: string; query: string; expected: string[] }>
 ).filter((_, i) => i % 3 === 0);
-const client = new OpenAI({ apiKey, baseURL });
+let decisionReceipts: Array<{ provider?: string; costUsd?: number }> = [];
+const client = new OpenAI({
+  apiKey,
+  baseURL,
+  fetch: async (url, init) => {
+    const response = await fetch(url, init);
+    if (response.ok) {
+      const result = (await response.clone().json()) as {
+        provider?: string;
+        usage?: { cost?: number };
+      };
+      decisionReceipts.push({ provider: result.provider, costUsd: result.usage?.cost });
+    }
+    return response;
+  },
+});
 const effort = option("decision-reasoning") ?? "none";
 if (!["none", "minimal", "low", "medium", "high", "xhigh"].includes(effort))
   throw new Error("Unsupported decision reasoning effort");
@@ -79,7 +94,7 @@ const provider = {
 } as ResolvedModelProvider;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const metadata = {
-  version: 2,
+  version: 3,
   catalogSha256: hash(raw),
   queriesSha256: hash(cases),
   model,
@@ -101,7 +116,12 @@ if (!prior && baselinePath) {
         r.id === c.id && r.arm === "before" && r.query === c.query,
     );
     if (!row) throw new Error(`Baseline lacks case ${c.id}`);
-    rows.push({ ...row, expected: c.expected, correct: c.expected.includes(row.firstTool) });
+    rows.push({
+      ...row,
+      expected: c.expected,
+      correct: c.expected.includes(row.firstTool),
+      decisionModelCostUsd: row.decisionCalls === 0 ? 0 : row.decisionModelCostUsd,
+    });
   }
 }
 for (const c of cases)
@@ -110,6 +130,7 @@ for (const c of cases)
     let decisionCalls = 0,
       decisionInputTokens = 0,
       decisionOutputTokens = 0;
+    decisionReceipts = [];
     const choose = createToolDecisionModel(
       { client, provider, modelId: decisionModel },
       {
@@ -248,6 +269,10 @@ for (const c of cases)
       decisionInputTokens,
       decisionOutputTokens,
       mainModelCostUsd,
+      decisionModelCostUsd: decisionReceipts.every((r) => typeof r.costUsd === "number")
+        ? decisionReceipts.reduce((sum, r) => sum + r.costUsd!, 0)
+        : null,
+      decisionProviders: [...new Set(decisionReceipts.map((r) => r.provider).filter(Boolean))],
       ms: performance.now() - started,
       trace,
     };
@@ -295,6 +320,11 @@ console.log(
             meanResultTokens: mean("resultTokens"),
             meanMs: mean("ms"),
             meanMainModelCostUsd: mean("mainModelCostUsd"),
+            meanDecisionModelCostUsd: selected.every(
+              (r) => typeof r.decisionModelCostUsd === "number",
+            )
+              ? mean("decisionModelCostUsd")
+              : null,
           },
         ];
       }),

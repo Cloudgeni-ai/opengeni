@@ -44,6 +44,9 @@ const OPERATIONS = [
   "send post deliver",
   "run execute trigger",
 ].map((group) => new Set(words(group)));
+const GENERIC_QUERY_TERMS = new Set(words("tool capability operation details available"));
+const isResourceTerm = (token: string) =>
+  !OPERATIONS.some((group) => group.has(token)) && !GENERIC_QUERY_TERMS.has(token);
 
 type Field = { frequencies: Map<string, number>; length: number };
 type Document = {
@@ -51,6 +54,7 @@ type Document = {
   fields: Field[];
   terms: Set<string>;
   operation: Set<string> | undefined;
+  resources: string[];
 };
 
 function field(text: string): Field {
@@ -83,6 +87,7 @@ function document(tool: Tool): Document {
     fields,
     terms: new Set(fields.flatMap((f) => [...f.frequencies.keys()])),
     operation: OPERATIONS.find((group) => operationWord && group.has(operationWord)),
+    resources: [...new Set(nameWords.filter(isResourceTerm))],
   };
 }
 
@@ -115,8 +120,15 @@ export class ToolSearchIndex {
     // Explicit separate requests share a result page rather than allowing the
     // longer clause to crowd the other one out. Do not split ordinary prose "and".
     const clauses = query.split(/[;\n]+/).filter((part) => words(part).length > 0);
-    if (clauses.length <= 1) return this.rankClause(query, limit);
-    const rankings = clauses.map((clause) => this.rankClause(clause, limit));
+    if (clauses.length <= 1)
+      return this.rankClause(query)
+        .slice(0, limit)
+        .map((hit) => hit.tool);
+    const rankings = clauses.map((clause) =>
+      this.rankClause(clause)
+        .slice(0, limit)
+        .map((hit) => hit.tool),
+    );
     const result: Tool[] = [];
     for (let rank = 0; rank < limit && result.length < limit; rank++) {
       for (const ranking of rankings) {
@@ -128,13 +140,49 @@ export class ToolSearchIndex {
     return result;
   }
 
-  private rankClause(query: string, limit: number): Tool[] {
+  /**
+   * A deterministic fast path, not a probability or execution decision. Require
+   * resource evidence in the name/capability sentence and separation from the
+   * runner-up. Every explicit clause must be clear to skip an optional decision
+   * model. This does not gate the no-model best-match-first path. The agent can reject a
+   * loaded match and choose an unloaded suggestion.
+   */
+  strongMatches(query: string): Tool[] {
+    const clauses = query.split(/[;\n]+/).filter((part) => words(part).length > 0);
+    const selected: Tool[] = [];
+    for (const clause of clauses) {
+      const hits = this.rankClause(clause);
+      const best = hits[0];
+      if (!best || best.resourceCoverage < 0.5 || (hits[1] && best.score < hits[1].score * 1.25))
+        return [];
+      if (!selected.includes(best.tool)) selected.push(best.tool);
+    }
+    return selected;
+  }
+
+  /** Best-match-first disclosure without pretending rank is calibrated certainty. */
+  bestMatches(query: string): Tool[] {
+    const selected: Tool[] = [];
+    for (const clause of query.split(/[;\n]+/).filter((part) => words(part).length > 0)) {
+      const hits = this.rankClause(clause);
+      const best = hits[0];
+      // Operation-only/no-resource queries and exact ties remain compact.
+      if (!best || best.resourceCoverage === 0 || hits[1]?.score === best.score) return [];
+      if (!selected.includes(best.tool)) selected.push(best.tool);
+    }
+    return selected;
+  }
+
+  private rankClause(
+    query: string,
+  ): Array<{ tool: Tool; score: number; resourceCoverage: number }> {
     const tokens = [...new Set(words(query))];
     if (!tokens.length) return [];
     const queryWeights = new Map(tokens.map((token) => [token, 1]));
     const operation = tokens
       .map((token) => OPERATIONS.find((group) => group.has(token)))
       .find(Boolean);
+    const resourceTokens = tokens.filter(isResourceTerm);
     for (const synonym of operation ?? [])
       if (!queryWeights.has(synonym)) queryWeights.set(synonym, 0.25);
     const weights = [4, 2, 0.5, 0.5];
@@ -159,11 +207,22 @@ export class ToolSearchIndex {
         const namedTerms = tokens.filter((token) => doc.fields[0]!.frequencies.has(token)).length;
         score *= 1 + namedTerms / tokens.length;
         if (operation && doc.operation === operation) score *= 1.5;
-        return { tool: doc.tool, score };
+        const queryCoverage = resourceTokens.length
+          ? resourceTokens.filter(
+              (token) =>
+                doc.fields[0]!.frequencies.has(token) || doc.fields[1]!.frequencies.has(token),
+            ).length / resourceTokens.length
+          : 0;
+        // Verbose queries should not lose their clear identity match merely
+        // because they also explain context. Measure both directions.
+        const nameCoverage = doc.resources.length
+          ? doc.resources.filter((token) => resourceTokens.includes(token)).length /
+            doc.resources.length
+          : 0;
+        const resourceCoverage = Math.max(queryCoverage, nameCoverage);
+        return { tool: doc.tool, score, resourceCoverage };
       })
       .filter((hit) => hit.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((hit) => hit.tool);
+      .sort((a, b) => b.score - a.score);
   }
 }

@@ -1298,10 +1298,14 @@ fallback for native `web_search`.
 
 All three progressive-disclosure transports (`codex_native`, `openai_native`,
 `generic_dispatch`) expose the same stable ordinary `tool_search`, `tool_list`
-and `tool_invoke` functions. Ranked discovery returns compact descriptors, not
-every candidate's schema. Exact `names` loads complete schemas. With a configured
-decision model, search first retrieves a wider candidate set, asks that model
-which tools directly satisfy the request, and loads only those selected schemas.
+and `tool_invoke` functions. Ranked discovery loads the strongest match per
+explicit query clause and returns compact alternatives, not every candidate's
+schema. Exact ties, operation-only queries and no matches stay compact. Exact
+`names` loads complete schemas. An optional decision model handles ambiguous
+searches from a wider candidate set; strong lexical matches skip inference.
+Rank is not calibrated certainty: the agent should check a loaded match and can
+load an alternative by name. With `schemasLoaded:true`, only the receipt's
+`tools` have loaded schemas; its `suggestions` remain compact.
 The original SDK tool objects remain in the execution registry; remembered names
 bind through `resolveMissingFunctionTool`, with approvals unchanged.
 
@@ -1317,11 +1321,15 @@ deployment-owned provider model. It reuses the normal single-model-call client,
 minimal supported reasoning effort, cancellation and provider retries. No new
 timeout, concurrency quota or request cap is added. Internal inference is
 deployment-paid; `tool_discovery.*` usage events retain input, cached input,
-output and provider-cost estimates per workspace/session/turn. It never silently
-borrows a customer's key or subscription. Embedders may instead pass an admitted
+output and provider-cost estimates per workspace/session/turn. These are telemetry
+events, not customer-credit debits: the discovery path does not invoke model-usage
+settlement, and the usage-event billing trigger covers only knowledge-query
+embedding events. External hosts may apply their own telemetry policy. It never
+silently borrows a customer's key or subscription. Embedders may instead pass an admitted
 `BuildAgentOptions.toolSearchDecisionModel` callback or use `createToolDecisionModel`
-with their own usage hook. Unset, failed or invalid model selection falls back to
-compact candidates; `schemasLoaded:false` explicitly requires exact-name loading.
+with their own usage hook. Unset, failed or invalid model selection uses the same
+best-match-first lexical path. If no match can be loaded, `schemasLoaded:false`
+explicitly requires exact-name loading.
 Cancellation propagates rather than being mistaken for an outage.
 
 Classification is origin, not transport. The same first-request set is eager on

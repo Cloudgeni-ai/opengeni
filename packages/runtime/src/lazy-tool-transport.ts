@@ -19,6 +19,7 @@ import {
   searchToolPool,
   rankToolPool,
   parseSearchArgs,
+  toolsNamedInQuery,
 } from "./codex-tool-search";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolDecisionModel } from "./tool-discovery-decision";
@@ -73,7 +74,7 @@ const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registrati
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
-  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. A configured decision model selects relevant tools and loads only their schemas. Otherwise returns compact ranked candidates with schemasLoaded:false: pass chosen exact names with query:'' to load them. Known exact names bypass search and the decision model. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups; browse one if search misses. Discovery never grants access.";
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest match and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
 const INVOKE_DESCRIPTION =
   "Invoke a tool whose complete schema was loaded by tool_search or an entry-tool disclosure. Pass its exact name and put its arguments in the nested arguments object.";
 
@@ -548,8 +549,9 @@ export class LazyToolRuntime {
 
   /** One decision and one detached receipt per call; never recompute historical output. */
   async prepareSearch(rawArguments: unknown, signal?: AbortSignal): Promise<GenericSearchMarker> {
+    signal?.throwIfAborted();
     const { query, names, limit } = parseSearchArgs(rawArguments);
-    if (names !== undefined || !this.decisionModel) {
+    if (names !== undefined) {
       return {
         version: 2,
         output: this.genericSearchOutput(rawArguments),
@@ -558,6 +560,27 @@ export class LazyToolRuntime {
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
+    const named = toolsNamedInQuery(pool.filter(isFunctionTool), query).map((t) => t.name);
+    const clear = this.decisionModel
+      ? this.searchIndex
+          .strongMatches(query)
+          .filter(isFunctionTool)
+          .map((t) => t.name)
+      : [];
+    const strongest = this.searchIndex
+      .bestMatches(query)
+      .filter(isFunctionTool)
+      .map((t) => t.name);
+    if (named.length || clear.length || !this.decisionModel) {
+      const chosen = named.length ? named : clear.length ? clear : strongest;
+      return chosen.length
+        ? this.selectedSearch(chosen, rawArguments, true)
+        : {
+            version: 2,
+            output: this.genericSearchOutput(rawArguments),
+            tools: [],
+          };
+    }
     // Wider recall than the model-facing result page, not an execution quota.
     const candidates = this.searchIndex.rank(query, Math.max(40, limit));
     if (!candidates.length)
@@ -580,16 +603,31 @@ export class LazyToolRuntime {
     } catch {
       // Cancellation belongs to the owning turn, not the recovery path.
       signal?.throwIfAborted();
+      const fallback = strongest.length
+        ? this.selectedSearch(strongest, rawArguments, true)
+        : {
+            version: 2 as const,
+            output: this.genericSearchOutput(rawArguments),
+            tools: [],
+          };
       return {
-        version: 2,
+        ...fallback,
         output: JSON.stringify({
-          ...JSON.parse(this.genericSearchOutput(rawArguments)),
+          ...JSON.parse(fallback.output),
           fallback: "decision_model_unavailable",
         }),
-        tools: [],
       };
     }
     signal?.throwIfAborted();
+    return this.selectedSearch(chosen, rawArguments, false);
+  }
+
+  private selectedSearch(
+    chosen: readonly string[],
+    rawArguments: unknown,
+    alternatives: boolean,
+  ): GenericSearchMarker {
+    const { limit } = parseSearchArgs(rawArguments);
     // Resolve again after inference: revoked identities cannot be disclosed.
     // The existing disclosure byte budgets still apply, but automatic family
     // helpers are not a decision-model selection and do not enter its result.
@@ -603,6 +641,14 @@ export class LazyToolRuntime {
         tools: selected.map(toolDescriptor),
         schemasLoaded: selected.length > 0,
         unavailable: chosen.filter((name) => !selected.some((t) => t.name === name)),
+        ...(alternatives
+          ? {
+              suggestions: this.matches(rawArguments)
+                .filter(isFunctionTool)
+                .filter((t) => !selected.some((s) => s.name === t.name))
+                .map(toolDescriptor),
+            }
+          : {}),
       }),
       tools: structuredClone(
         selected

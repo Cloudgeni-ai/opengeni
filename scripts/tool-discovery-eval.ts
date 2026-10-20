@@ -70,39 +70,93 @@ const tools = catalogTools.filter((tool) => searchable.has((tool as Tool & { nam
 const name = (t: Tool) => (t as Tool & { name: string }).name;
 // Deterministic BPE counts, not API-billed usage or model-specific wrapper tokens.
 const tokens = (s: string) => encode(s).length;
+const selectedResultsPath = option("decision-results");
+const selectedResults = selectedResultsPath
+  ? await Bun.file(selectedResultsPath).json()
+  : undefined;
+if (
+  selectedResults &&
+  selectedResults.metadata.catalogSha256 !== createHash("sha256").update(catalogText).digest("hex")
+)
+  throw new Error("Decision results belong to a different catalog");
 const fullOutput = (ts: Tool[]) => JSON.stringify({ tools: ts });
 const percentile = (xs: number[], fraction: number) =>
   [...xs].sort((a, b) => a - b)[Math.max(0, Math.ceil(xs.length * fraction) - 1)] ?? 0;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-const rows = cases.map((c) => {
-  const missing = c.expected.filter((n) => !searchable.has(n));
-  if (missing.length) return { id: c.id, source: c.source, missing };
-  const before = legacySearchTools(tools, { query: c.query });
-  const started = performance.now();
-  const after = runtime.matches({ query: c.query });
-  const searchMs = performance.now() - started;
-  const metrics = (hits: Tool[], output: string) => {
-    const names = hits.map(name);
-    return {
-      top1: c.expected.includes(names[0] ?? ""),
-      top3: names.slice(0, 3).some((n) => c.expected.includes(n)),
-      recall3: c.expected.filter((n) => names.slice(0, 3).includes(n)).length / c.expected.length,
-      resultTokens: tokens(output),
-      wronglyIncluded: names.filter((n) => !c.expected.includes(n)).length,
-      top: names.slice(0, 3),
+const rows = await Promise.all(
+  cases.map(async (c) => {
+    const missing = c.expected.filter((n) => !searchable.has(n));
+    if (missing.length) return { id: c.id, source: c.source, missing };
+    const before = legacySearchTools(tools, { query: c.query });
+    const started = performance.now();
+    const after = runtime.matches({ query: c.query });
+    const searchMs = performance.now() - started;
+    const metrics = (hits: Tool[], output: string) => {
+      const names = hits.map(name);
+      return {
+        top1: c.expected.includes(names[0] ?? ""),
+        top3: names.slice(0, 3).some((n) => c.expected.includes(n)),
+        recall3: c.expected.filter((n) => names.slice(0, 3).includes(n)).length / c.expected.length,
+        resultTokens: tokens(output),
+        wronglyIncluded: names.filter((n) => !c.expected.includes(n)).length,
+        top: names.slice(0, 3),
+      };
     };
-  };
-  return {
-    id: c.id,
-    source: c.source,
-    query: c.query,
-    expected: c.expected,
-    multiIntent: c.multiIntent ?? false,
-    before: metrics(before, fullOutput(before)),
-    after: metrics(after, runtime.genericSearchOutput({ query: c.query })),
-    searchMs,
-  };
-});
+    const measurePrepared = (prepared: Awaited<ReturnType<LazyToolRuntime["prepareSearch"]>>) => {
+      const receipt = JSON.parse(prepared.output);
+      const descriptors = [...receipt.tools, ...(receipt.suggestions ?? [])];
+      const hits = descriptors
+        .map((t) => tools.find((tool) => name(tool) === t.name))
+        .filter(Boolean) as Tool[];
+      const result = metrics(
+        hits,
+        prepared.output + (prepared.tools?.length ? JSON.stringify({ tools: prepared.tools }) : ""),
+      );
+      return {
+        ...result,
+        schemasLoaded: prepared.tools?.length ?? 0,
+        wronglyLoaded: (prepared.tools ?? []).filter((t) => !c.expected.includes(String(t.name)))
+          .length,
+      };
+    };
+    const defaultResult = measurePrepared(await runtime.prepareSearch({ query: c.query }));
+    let decisionResult: ReturnType<typeof measurePrepared> | undefined;
+    if (selectedResults) {
+      const row = selectedResults.rows.find(
+        (entry: { id: string; query: string }) => entry.id === c.id && entry.query === c.query,
+      );
+      if (!row) throw new Error(`Decision results lack matching case ${c.id}`);
+      const replay = new LazyToolRuntime(
+        "generic_dispatch",
+        servers,
+        undefined,
+        servers,
+        new Set(),
+        () => serverIds,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        async () => row.selected,
+      );
+      replay.refresh(catalogTools);
+      decisionResult = measurePrepared(await replay.prepareSearch({ query: c.query }));
+    }
+    return {
+      id: c.id,
+      source: c.source,
+      query: c.query,
+      expected: c.expected,
+      multiIntent: c.multiIntent ?? false,
+      before: metrics(before, fullOutput(before)),
+      after: metrics(after, runtime.genericSearchOutput({ query: c.query })),
+      default: defaultResult,
+      ...(decisionResult ? { decision: decisionResult } : {}),
+      searchMs,
+    };
+  }),
+);
 const measured = rows.filter((r) => "before" in r && r.before && r.after);
 const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
 if (!list || list.type !== "function") throw new Error("Missing directory tool");
@@ -128,7 +182,9 @@ do {
 const summary = (source?: string) => {
   const selected = measured.filter((r) => !source || r.source === source);
   return Object.fromEntries(
-    (["before", "after"] as const).map((arm) => {
+    (
+      ["before", "after", "default", ...(selectedResults ? ["decision" as const] : [])] as const
+    ).map((arm) => {
       const ms = selected.map((r) => r[arm]!);
       return [
         arm,
@@ -138,6 +194,16 @@ const summary = (source?: string) => {
           top3: mean(ms.map((m) => Number(m.top3))),
           recall3: mean(ms.map((m) => m.recall3)),
           meanWronglyIncluded: mean(ms.map((m) => m.wronglyIncluded)),
+          ...(arm === "default" || arm === "decision"
+            ? {
+                meanLoadedTools: mean(
+                  ms.map((m) => ("schemasLoaded" in m ? Number(m.schemasLoaded) : 0)),
+                ),
+                meanWronglyLoaded: mean(
+                  ms.map((m) => ("wronglyLoaded" in m ? Number(m.wronglyLoaded) : 0)),
+                ),
+              }
+            : {}),
           meanResultTokens: mean(ms.map((m) => m.resultTokens)),
           p95ResultTokens: percentile(
             ms.map((m) => m.resultTokens),

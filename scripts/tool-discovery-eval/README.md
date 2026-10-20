@@ -5,12 +5,13 @@
 Improve the existing search/list/invoke path, not a second discovery API:
 
 - Field-aware lexical retrieval separates names and capability sentences from long operational guidance. It indexes the exact authorized deferred pool.
-- Ordinary search returns compact candidates. An explicitly configured **decision model** can select a small set from the first 40 candidates and load those schemas in the same call. Known exact names bypass inference.
+- Ordinary search loads the strongest match per explicit query clause and returns compact alternatives. No-match, operation-only and exact-tie queries stay compact. Known exact names bypass ranking and inference. This avoids making every no-model search pay for a second load call.
+- An explicitly configured **decision model** handles ambiguous searches from the first 40 candidates. Strong lexical matches skip inference. The bypass requires resource coverage of at least 0.5 and a score at least 1.25 times the runner-up for every explicit clause. These are transparent heuristics, **not calibrated confidence probabilities**; the no-model default does not pretend its best-ranked choice is certain.
 - `tool_list({view:"groups"})` is an on-demand directory; pass a returned `group` to browse it. Opaque connections stay together under compact display keys with a representative tool, rather than exposing long identity hashes or hundreds of tiny groups.
 - Schemas are not shortened or inferred. Selected definitions are frozen on the search call and disclosed after its result. They never enter a changing earlier prompt or top-level tools block.
-- There is no default paid model, embedding index, extra credential, new inference timeout or concurrency quota. Unconfigured/unavailable selection returns compact lexical candidates plus exact-name loading.
+- There is no default paid model, embedding index, extra credential, new inference timeout or concurrency quota. Unconfigured/unavailable selection uses the same best-match-first lexical path. Only selected schemas are loaded; alternatives remain compact.
 
-The decision model gives the strongest retrieval results here, but is **not a universal latency win**. Keep the model configurable. The fast-provider result is promising, not permission to route every deployment to that provider. The unconfigured fallback is cheaper in result tokens but can require an extra agent round trip.
+**Recommendation:** ship best-match-first without a paid model as the default. It was faster than the old path on both task sets in both repeats. For deployments prioritizing accuracy, the measured conditional GPT-OSS-120B low / fast route also beat the old path on both sets in both repeats and improved accuracy further. Keep it explicitly configured: this is not permission to route every deployment to that account/provider. It is slower than the new no-model default, and small repeated development samples do not guarantee a production latency win.
 
 ## Dataset and method (October 20, 2026)
 
@@ -25,13 +26,23 @@ Both arms use the same authorized-pool classification. Catalog B is a full appli
 
 Queries were frozen before scoring each catalog. A later label audit corrected seven catalog B expected sets: six omitted valid alternatives/explicitly requested capabilities and one labeled a prerequisite instead of the requested tool. The same evaluator performed this post-hoc adjudication, not an independent reviewer. Every arm is rescored with the corrected sets; original-label sensitivity appears below. This is a small development evaluation, **not a held-out generalization claim**.
 
-`legacy-ranking.ts` freezes BM25, exact-name promotion, disclosure budgets and interaction-family expansion from baseline `cbb55f394`. Top-1/top-3 mean that an acceptable expected identity is first/among the first three. They do not prove all parts of a multi-action request are satisfied. Off-label counts are relative to the curated expected sets, not a universal judgment that every extra tool is useless. Lexical off-label hits are unloaded suggestions; decision-model extras become loaded schemas.
+`legacy-ranking.ts` freezes BM25, exact-name promotion, disclosure budgets and interaction-family expansion from baseline `cbb55f394`. Top-1/top-3 mean that an acceptable expected identity is first/among the first three. They do not prove all parts of a multi-action request are satisfied. Off-label counts are relative to the curated expected sets, not a universal judgment that every extra tool is useless. Runtime top-3 includes compact alternatives after loaded matches; loaded off-label counts below distinguish them from schemas actually disclosed.
 
-Token counts use `gpt-tokenizer@4.1.0`, `o200k_base` BPE of serialized JSON. They are comparable payload sizes, not provider-billed tokens. Full selected payload counts include the compact receipt **and** selected schema JSON, excluding provider declaration wrappers. Latencies are single-run wall-clock observations, not isolated throughput benchmarks or confidence intervals. Models and providers are nondeterministic.
+Token counts use `gpt-tokenizer@4.1.0`, `o200k_base` BPE of serialized JSON. They are comparable payload sizes, not provider-billed tokens. Full selected payload counts include the compact receipt **and** selected schema JSON, excluding provider declaration wrappers. Latencies are observed wall-clock samples, not isolated throughput benchmarks or confidence intervals. Models and providers are nondeterministic. Eval-only `gpt-tokenizer` and `openai` are root devDependencies; OpenAI remains the same 6.47.0 already resolved by the runtime, with no runtime version change.
 
 ## Retrieval results
 
-Each cell is top-1 / top-3 over 60 queries.
+Each cell is top-1 / top-3 over 60 queries. First, the actual current runtime paths:
+
+| Runtime path | A: 605 deferred tools | B: 1,079 tools |
+| --- | ---: | ---: |
+| Before | 60.0% / 76.7% | 51.7% / 70.0% |
+| Default: best lexical match + compact alternatives | 78.3% / 88.3% | 66.7% / 83.3% |
+| Conditional fast selection + lexical bypass | 88.3% / 95.0% | 95.0% / 98.3% |
+
+The conditional row replays the captured pinned-Cerebras selections through the real runtime, including strong-match bypass and schema budgets. It is not a fresh provider call or a latency measurement. Some lexical bypasses are wrong: conditional selection on A has lower top-1 than asking the selector on every query. It is a deliberate speed/accuracy tradeoff, not hidden by reporting only pure-selector results.
+
+For comparison, isolated ranking and selection on **every query**, without the runtime bypass:
 
 | Method | A: 605 deferred tools | B: 1,079 tools |
 | --- | ---: | ---: |
@@ -54,11 +65,13 @@ Original-label B sensitivity (top-1/top-3): baseline 46.7/68.3%, lexical 60.0/78
 | Result path | A mean tokens | B mean tokens | A/B off-label tools per search |
 | --- | ---: | ---: | ---: |
 | Before: full results | 6,671 | 5,913 | 6.92 / 6.95 |
+| Default: receipt + strongest schemas + compact alternatives | 1,221 | 718 | 0.25 / 0.35 loaded |
+| Conditional fast: receipt + selected schemas + alternatives | 1,232 | 768 | 0.12 / 0.05 loaded |
 | Lexical compact candidates only | 381 | 275 | 6.83 / 6.87 |
 | Nano receipt + selected schemas | 1,451 | 892 | 0.13 / 0.25 |
 | Cerebras receipt + selected schemas | 1,087 | 798 | 0.02 / 0.05 |
 
-Before p95 payloads are 18,098 / 23,287 tokens; lexical compact p95 is 454 / 330. Nano full selected p95 is 8,478 / 3,207; Cerebras is 6,290 / 2,975. A genuinely needed large schema remains large. The tiny receipt alone (about 52–67 tokens for these decision arms) is **not** the total context cost.
+Before p95 payloads are 18,098 / 23,287 tokens; default p95 is 4,042 / 1,341; conditional fast p95 is 4,854 / 1,584. Compact-only p95 is 454 / 330. All-query nano full selected p95 is 8,478 / 3,207; all-query Cerebras is 6,290 / 2,975. Compact-only off-label candidates are not loaded schemas. The default loads 1.10 / 1.02 schemas per query; conditional selection loads 1.13 / 1.05. A genuinely needed large schema remains large. The tiny receipt alone (about 52–67 tokens for the all-query decision arms) is **not** the total context cost.
 
 | Decision route | A mean / p95 | B mean / p95 | A / B USD per search |
 | --- | ---: | ---: | ---: |
@@ -74,20 +87,50 @@ Lexical retrieval p95 was about 6 ms. The optional embedding probe used Transfor
 
 GPT-5.4 mini ran every third frozen query: 20 cases per catalog. It could search/list/load and request the first domain tool, but the harness intercepted that call **before execution**, with empty task arguments. These are live discovery-only simulations, not completed user tasks or production rollout results. Time includes main-agent and selector network/inference time through the first requested domain call. Calls count discovery operations before that call. Repeating an identical discovery request ends a stalled case rather than an unbounded loop.
 
-The same baseline trajectories are reused across after arms. Runs were sequential per arm and arms ran concurrently, not randomized repeated trials. The final exact-name recovery implementation was used for after arms; group-only presentation changes do not affect these search-only traces.
+The revised best-match-first runtime was run twice on the same 20 cases. Repeat 1 reused the original baseline; repeat 2 freshly interleaved before/default within each case. Conditional-fast arms reused the corresponding baseline. Cases ran sequentially within each process, with the two catalogs running concurrently. These are repeated measurements of **20 distinct cases**, not 40 independent tasks or randomized trials.
+
+Aggregates over both repeats (40 observations per path per catalog):
+
+| Catalog / path | Correct first tool | Discovery calls | Mean total time | Mean received discovery tokens |
+| --- | ---: | ---: | ---: | ---: |
+| A before | 60.0% | 1.35 | 3.14 s | 5,884 |
+| A default, no model | 75.0% | 1.15 | 2.57 s | 1,280 |
+| A conditional fast | 92.5% | 1.00 | 2.81 s | 1,018 |
+| B before | 75.0% | 1.75 | 3.38 s | 6,351 |
+| B default, no model | 85.0% | 1.25 | 2.58 s | 1,253 |
+| B conditional fast | 97.5% | 1.10 | 2.75 s | 660 |
+
+Repeat-level results expose the variance rather than selecting the better run:
+
+| Catalog / path | Correct, repeat 1 / 2 | Calls, repeat 1 / 2 | Seconds, repeat 1 / 2 | Tokens, repeat 1 / 2 |
+| --- | ---: | ---: | ---: | ---: |
+| A before | 60% / 60% | 1.35 / 1.35 | 3.03 / 3.26 | 5,649 / 6,118 |
+| A default | 80% / 70% | 1.10 / 1.20 | 2.60 / 2.53 | 1,046 / 1,515 |
+| A conditional fast | 90% / 95% | 1.00 / 1.00 | 2.95 / 2.68 | 791 / 1,246 |
+| B before | 75% / 75% | 2.20 / 1.30 | 3.86 / 2.91 | 5,723 / 6,978 |
+| B default | 85% / 85% | 1.15 / 1.35 | 2.68 / 2.49 | 1,180 / 1,326 |
+| B conditional fast | 100% / 95% | 1.05 / 1.15 | 2.79 / 2.70 | 629 / 690 |
+
+Both new paths are faster than their corresponding old baseline in each repeat. Calls improve in aggregate; **B's no-model repeat 2 takes one extra discovery call across 20 cases** (1.35 vs 1.30), while still finishing faster. The smallest observed conditional-fast margin is only 85 ms on A repeat 1, so do not promise a durable latency advantage from this sample.
+
+The conditional-fast route is `openai/gpt-oss-120b:nitro`, low reasoning, via the normal OpenRouter route. Repeat 2 captured actual provider/cost receipts: all 10 A and 13 B selector calls used Cerebras. This is observed routing, not a runtime provider pin. Selector cost averaged $0.001272 / $0.000703 per task, or $0.002543 / $0.001081 per actual selector call. Main-agent plus selector cost averaged **$0.003341 / $0.002596 per task**, against $0.005868 / $0.006536 before. No-model repeat-2 main-agent costs were $0.002455 / $0.002446. Repeat 1 did not record actual selector costs/providers; no total-cost claim is made for it.
+
+### Rejected initial compact-only design
+
+The original draft forced exact-name loading without a selector and used the selector on every non-exact query. It made A slower and was revised, not recommended. Retained measurements:
 
 | Catalog / path | Correct first tool | Discovery calls | Mean total time | Mean received discovery tokens |
 | --- | ---: | ---: | ---: | ---: |
 | A before | 60% | 1.35 | 3.03 s | 5,649 |
-| A lexical-only | 90% | 2.00 | 3.93 s | 1,393 |
+| A compact-only, no model | 90% | 2.00 | 3.93 s | 1,393 |
 | A nano | 90% | 1.15 | 4.27 s | 1,331 |
 | A fast GPT-OSS-120B `:nitro`, low | 75% | 1.00 | 3.54 s | 698 |
 | B before | 75% | 2.20 | 3.86 s | 5,723 |
-| B lexical-only | 95% | 2.00 | 3.81 s | 1,010 |
+| B compact-only, no model | 95% | 2.00 | 3.81 s | 1,010 |
 | B nano | 90% | 1.05 | 3.59 s | 864 |
 | B fast GPT-OSS-120B `:nitro`, low | 90% | 1.10 | 3.16 s | 751 |
 
-These measurements do **not** support "always faster" or "never returns unnecessary tools." They show improved first-tool accuracy and much smaller payloads, with fewer calls when selection is configured. Lexical-only uses two discovery calls in this sample; the agent itself can be a stronger final selector than a small model. Provider/agent/query variation remains important. Task-run billed main-agent costs exclude selector charges; use the separate per-search costs above rather than claiming those are total task costs.
+Neither the initial nor revised measurements support "always faster" or "never returns unnecessary tools." The compact-only agent can be a stronger final selector than best-match-first, but pays another round trip. That rejected accuracy/latency tradeoff remains visible here. Initial task-run main-agent costs excluded selector charges.
 
 A separate observational baseline reported 2.20 discovery calls before the first domain tool over 44 human-driven turns. Most surrounding traffic was QA/simulation, not representative customer use. That figure is context only; it is not causally comparable to these paired simulations, and its coincidence with the B scripted baseline is not validation.
 
@@ -101,12 +144,12 @@ New search receipts freeze selected definitions once. Replaying them never calls
 
 ## Failure behavior and remaining risks
 
-- Unconfigured, failed or invalid selection falls back to compact candidates and exact-name loading, without dumping raw provider errors. Revoked selections disclose no schema. Exact names still work during an outage. Cancellation propagates. Existing schema budgets still apply; a selected schema can be too large to disclose.
+- Unconfigured, failed or invalid selection uses best-match-first lexical disclosure and compact alternatives, without dumping raw provider errors. Exact ties/no-resource queries remain compact. Revoked selections disclose no schema. Exact names still work during an outage. Cancellation propagates. Existing schema budgets still apply; a selected schema can be too large to disclose.
 - Selection is probabilistic and can omit a needed tool or include an unwanted one. The first 40 lexical candidates are a recall constraint. A selector cannot rescue a missing candidate.
 - Tool descriptions and query text are untrusted classification data. Only exact candidate IDs can resolve, and selection never grants authorization or executes tools. This is not a claim of prompt-injection immunity.
 - Existing original SDK tool objects, validation and approvals remain authoritative. A valid invocation is rewritten before normal dispatch; it is not executed inside a router tool.
-- Usage is recorded through the ordinary deployment provider and `tool_discovery.*` events, including malformed responses. The worker refuses to silently bill a customer-owned key/subscription for internal inference. Accounting persistence, cancellation and interrupted-run recovery deserve normal release scrutiny.
-- The paid selector is opt-in. Without configuring it, compact results can add a second agent turn. The new ordinary controls, optional config field and frozen-history version are model-facing changes and require review before merge.
+- Usage is recorded through the ordinary deployment provider and `tool_discovery.*` events, including malformed responses. The worker refuses to silently borrow a customer-owned key/subscription. **These events do not debit customer credits.** `recordUsageEvent` in `packages/db/src/index.ts` writes telemetry; customer model charges require the explicit `settleModelUsage` / `applyCreditDebitUpToBalance` path in `packages/core/src/billing/model-usage-settlement.ts`, which discovery never calls. The usage-event debit trigger in migration `0552_usage_allowances.sql` applies only to `knowledge_query` / `document.query_embedding_cost`; the host export trigger exports telemetry, not a debit. External hosts can apply their own policy. Accounting persistence, cancellation and interrupted-run recovery deserve normal release scrutiny.
+- The paid selector is opt-in, and static model-facing descriptions are identical with or without it. The new ordinary controls, optional config field and frozen-history version are model-facing changes and require review before merge.
 
 ## Reproduce
 
@@ -120,11 +163,14 @@ bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
   --out decision.json --model YOUR_MODEL --candidates 40 --reasoning none
 # OpenRouter-only optional routing experiment: --provider cerebras/fp16 --reasoning low
+# Replay those selections through the actual conditional runtime, including bypass:
+bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
+  --decision-results decision.json > runtime.json
 
 bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
   --out trajectories.json --model YOUR_AGENT_MODEL --decision-model YOUR_DECISION_MODEL \
   --decision-reasoning none --implementation YOUR_REVISION
-# --decision-model none evaluates compact lexical + exact-name loading.
+# --decision-model none evaluates best-match-first + compact alternatives.
 # --reuse-baseline prior.json requires the same main model, case IDs and query text.
 
 # Optional separate, pinned Transformers.js installation; no app dependency.

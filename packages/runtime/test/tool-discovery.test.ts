@@ -321,6 +321,38 @@ function decisionRuntime(decision: ToolDecisionModel) {
 }
 
 describe("decision selection", () => {
+  test("control descriptions and schemas do not vary with decision-model configuration", () => {
+    const plain = new LazyToolRuntime("generic_dispatch", new Set());
+    const configured = decisionRuntime(async () => []);
+    const controls = (runtime: LazyToolRuntime) =>
+      runtime.controlTools
+        .filter((t) => t.type === "function")
+        .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+    expect(controls(configured)).toEqual(controls(plain));
+  });
+  test("strong matches load without inference and alternatives remain unloaded", async () => {
+    const runtime = decisionRuntime(async () => {
+      throw new Error("must bypass inference");
+    });
+    runtime.refresh([
+      candidate("tasks__get", "Get task details"),
+      candidate("tasks__delete", "Delete task"),
+    ]);
+    const result = await runtime.prepareSearch({ query: "get task details" });
+    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
+    expect(JSON.parse(result.output)).toMatchObject({
+      schemasLoaded: true,
+      suggestions: [{ name: "tasks__delete" }],
+    });
+  });
+  test("the no-model default loads the strongest match but leaves exact ties compact", async () => {
+    const runtime = new LazyToolRuntime("generic_dispatch", new Set());
+    runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+    expect((await runtime.prepareSearch({ query: "get task" })).tools?.map((t) => t.name)).toEqual([
+      "tasks__get",
+    ]);
+    expect((await runtime.prepareSearch({ query: "task" })).tools).toEqual([]);
+  });
   test("selects only authorized candidates, returns a compact receipt and freezes selected schemas", async () => {
     let calls = 0;
     const runtime = decisionRuntime(async (input) => {
@@ -330,7 +362,7 @@ describe("decision selection", () => {
       return ["tasks__get"];
     });
     runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__list", "List tasks")]);
-    const selected = await runtime.prepareSearch({ query: "get task" });
+    const selected = await runtime.prepareSearch({ query: "task" });
     expect(calls).toBe(1);
     expect(JSON.parse(selected.output)).toMatchObject({
       schemasLoaded: true,
@@ -347,12 +379,12 @@ describe("decision selection", () => {
       calls++;
       throw new Error("provider secret diagnostic");
     });
-    runtime.refresh([candidate("tasks__get", "Get task")]);
+    runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
     expect((await runtime.prepareSearch({ query: "", names: ["tasks__get"] })).tools).toHaveLength(
       1,
     );
     expect(calls).toBe(0);
-    const fallback = await runtime.prepareSearch({ query: "get task" });
+    const fallback = await runtime.prepareSearch({ query: "task" });
     expect(calls).toBe(1);
     expect(JSON.parse(fallback.output)).toMatchObject({
       schemasLoaded: false,
@@ -361,16 +393,35 @@ describe("decision selection", () => {
     expect(fallback.tools).toEqual([]);
     expect(fallback.output).not.toContain("secret");
     const invalid = decisionRuntime(async () => ["not_authorized"]);
-    invalid.refresh([candidate("tasks__get", "Get task")]);
-    expect((await invalid.prepareSearch({ query: "get task" })).tools).toEqual([]);
+    invalid.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+    expect((await invalid.prepareSearch({ query: "task" })).tools).toEqual([]);
+  });
+  test("an unavailable selector retains the usable best-match-first fallback", async () => {
+    let calls = 0;
+    const runtime = decisionRuntime(async () => {
+      calls++;
+      throw new Error("private provider diagnostic");
+    });
+    runtime.refresh([
+      candidate("tasks__get", "Get task"),
+      candidate("tasks__get_details", "Get task"),
+    ]);
+    const result = await runtime.prepareSearch({ query: "get task" });
+    expect(calls).toBe(1);
+    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
+    expect(JSON.parse(result.output)).toMatchObject({
+      fallback: "decision_model_unavailable",
+      schemasLoaded: true,
+    });
+    expect(result.output).not.toContain("private");
   });
   test("revocation during inference cannot disclose the old tool; cancellation is not a fallback", async () => {
     const runtime = decisionRuntime(async () => {
       runtime.refresh([]);
       return ["tasks__get"];
     });
-    runtime.refresh([candidate("tasks__get", "Get task")]);
-    const revoked = await runtime.prepareSearch({ query: "get task" });
+    runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+    const revoked = await runtime.prepareSearch({ query: "task" });
     expect(revoked.tools).toEqual([]);
     expect(JSON.parse(revoked.output).schemasLoaded).toBe(false);
     const controller = new AbortController();
@@ -378,10 +429,8 @@ describe("decision selection", () => {
       controller.abort();
       throw new Error("stopped");
     });
-    cancelled.refresh([candidate("tasks__get", "Get task")]);
-    await expect(
-      cancelled.prepareSearch({ query: "get task" }, controller.signal),
-    ).rejects.toThrow();
+    cancelled.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+    await expect(cancelled.prepareSearch({ query: "task" }, controller.signal)).rejects.toThrow();
   });
   test("decision format validates whole IDs and leaves the catalog prefix unchanged across queries", () => {
     const candidates = [{ name: "tasks__get", description: "Get task", inputFields: ["id"] }];
@@ -415,9 +464,14 @@ describe("decision selection", () => {
   });
 });
 
-test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
-  "%s: one decision search then execute, exactly one inference, stable prefix",
-  async (transport) => {
+test.each(
+  (["codex_native", "openai_native", "generic_dispatch"] as const).flatMap((transport) => [
+    { transport, decision: false },
+    { transport, decision: true },
+  ]),
+)(
+  "%j: one search then execute, no redundant inference, stable prefix",
+  async ({ transport, decision }) => {
     let decisions = 0,
       executions = 0;
     const target = tool({
@@ -435,7 +489,11 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
         return "read";
       },
     }) as Tool;
-    const agent = new Agent({ name: "discovery", model: "scripted", tools: [target] });
+    const agent = new Agent({
+      name: "discovery",
+      model: "scripted",
+      tools: [target, candidate("tasks__get", "Read a task")],
+    });
     const runtime = installLazyToolRuntime(
       agent,
       transport,
@@ -449,13 +507,15 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
       undefined,
       undefined,
       undefined,
-      async () => {
-        decisions++;
-        return ["tasks__read"];
-      },
+      decision
+        ? async () => {
+            decisions++;
+            return ["tasks__read"];
+          }
+        : undefined,
     );
     const model = new ScriptedModel([
-      [call("find", "tool_search", { query: "read a task" })],
+      [call("find", "tool_search", { query: decision ? "task" : "read task" })],
       [call("invoke", "tool_invoke", { name: "tasks__read", arguments: { id: 7 } })],
       [done],
     ]);
@@ -472,7 +532,7 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     });
     for await (const event of result.toStream()) void event;
     await result.completed;
-    expect(decisions).toBe(1);
+    expect(decisions).toBe(decision ? 1 : 0);
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).toContain('"required"');
     for (let i = 1; i < model.requests.length; i++) {
@@ -508,10 +568,14 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
         return "read";
       },
     }) as Tool;
-    const agent = new Agent({ name: "discovery", model: "scripted", tools: [target] });
+    const agent = new Agent({
+      name: "discovery",
+      model: "scripted",
+      tools: [target, candidate("tasks__get", "Read a task")],
+    });
     const runtime = installLazyToolRuntime(agent, transport, new Set());
     const model = new ScriptedModel([
-      [call("find", "tool_search", { query: "read a task" })],
+      [call("find", "tool_search", { query: "task" })],
       [call("load", "tool_search", { query: "", names: ["tasks__read"] })],
       [call("invoke", "tool_invoke", { name: "tasks__read", arguments: { id: 7 } })],
       [done],

@@ -347,10 +347,13 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 Progressive discovery uses the same authorized deferred pool on every transport.
 Field-aware retrieval weights names and capability sentences separately from
-long operational descriptions. A configured decision model selects relevant
-tools from a wider shortlist and loads only their schemas; without one, search
-returns compact candidates with `schemasLoaded:false`. Exact `names` bypasses
-both ranking and inference. Past results and schema snapshots are frozen and
+long operational descriptions. Search loads the strongest match per explicit
+query clause and returns compact alternatives in `suggestions`; ranking is not
+certainty. Exact ties, operation-only queries and no matches stay compact.
+An optional decision model selects from a wider shortlist for ambiguous searches;
+strong lexical matches skip inference. With `schemasLoaded:true`, only `tools`
+have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
+inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
