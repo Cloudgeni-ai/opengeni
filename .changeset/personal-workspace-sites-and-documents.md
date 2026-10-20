@@ -1,7 +1,6 @@
 ---
 "@opengeni/db": patch
-"@opengeni/api": patch
-"@opengeni/web": patch
+"@opengeni/api-router": patch
 ---
 
 Sites and documents work in Personal workspaces. The owner can now create, open and edit documents, spreadsheets and presentations there; they used to be refused because a Personal workspace has no membership row. Publishing an Only me Site from a Personal workspace (every Site an agent makes there) now shares it with that one-person workspace as it publishes, instead of stopping at a "Share this Site with the workspace first" notice with no way to share. On their published Site the owner is a member again: they can open members-only and invited Sites, and their Site AI chats run as themselves rather than as an outside visitor.
