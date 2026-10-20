@@ -1204,7 +1204,7 @@ const SettingsSchema = z.object({
   // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
   // timeout (~minutes) — and a box between turns sits with NO active connection,
   // so that idle clock runs and Modal idle-reaps the box LONG before Opengeni's
-  // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
+  // own reaper waits out sandboxIdleGraceMs to resume+persist+terminate
   // it. The observed failure: every drain logs "drainable box already gone
   // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
   // Modal's idle-reap is a SECOND reaper racing Opengeni's — and it wins. The fix:
@@ -1516,11 +1516,12 @@ const SettingsSchema = z.object({
   // dial — when the user navigates away the box keeps refcount 0, but it survives
   // this whole window so a "glanced away then came back" re-arms the SAME warm box
   // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
-  // skips a re-armed box). Default 15min so a brief detour never cold-creates a
-  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim.
+  // skips a re-armed box). Default 1min: a box restores from its workspace
+  // snapshot when the next turn comes later, so a long warm tail mostly bills an
+  // idle box. Raise it to trade warm cost for warm resumes after longer pauses.
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
-  sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(60_000),
   // Idle command containment. A legacy retained background command (a dev
   // server, a command whose output is still draining, a stopped command the
   // provider no longer answers for) keeps its box warm through a non-expiring
@@ -1530,8 +1531,8 @@ const SettingsSchema = z.object({
   // request, no held wait_for_input, no other holder or writer, measured from
   // durable turn/holder/admission facts - the reaper checkpoints the workspace,
   // stops the box and settles those commands `lost` with reason
-  // `idle_containment`. Default 30min: twice the default
-  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // `idle_containment`. Default 30min: well above the idle
+  // grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
   // the deadline path has to act. Set 0 to disable new idle enrollments without
@@ -5410,7 +5411,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ...parsed,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"

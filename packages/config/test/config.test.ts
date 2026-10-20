@@ -2825,7 +2825,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(250_001);
-    expect(settings.sandboxIdleGraceMs).toBe(150_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
   });
 
   test("default rotation lead reserves the larger ordinary capture when drain timeout is shorter", () => {
@@ -2857,8 +2857,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       },
       () => getSettings(),
     );
-    // Derived strictly between the 150s idle grace and the 250.001s lead.
-    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+    // Derived strictly between the 60s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(155_000);
   });
 
   test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
@@ -2921,8 +2921,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         .sandboxIdleCommandContainmentMs,
     ).toBe(2_400_000);
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
-    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "60000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(60000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
     ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
@@ -2948,10 +2948,17 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
     // A derived window that cannot fit disables idle containment instead of
     // failing boot: these idle timeouts boot exactly as before.
+    // A long explicit idle grace leaves no room under these idle timeouts.
     for (const seconds of ["960", "1000"]) {
       expect(
-        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
-          .sandboxIdleCommandContainmentMs,
+        withEnv(
+          {
+            ...modal,
+            OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+            OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds,
+          },
+          () => getSettings(),
+        ).sandboxIdleCommandContainmentMs,
       ).toBeUndefined();
     }
     // Without an explicit idle timeout the hard lifetime governs and 30m fits.
@@ -3121,7 +3128,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       providerIdleTimeoutMs: null,
       rotationLeadMs: null,
     });
-    expect(settings.sandboxIdleGraceMs).toBe(900_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
   });
 
