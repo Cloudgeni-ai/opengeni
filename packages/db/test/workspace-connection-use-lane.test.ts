@@ -135,6 +135,33 @@ function useInput(fixture: Fixture, connectionId: string) {
 }
 
 describe("workspace connection use lane (migration 0279)", () => {
+  test("connection use keeps one tenant scope for the linked-turn lookup", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const driver = (db as unknown as { $client: postgres.Sql }).$client;
+    const previous = driver.options.debug;
+    const queries: string[] = [];
+    const samples: { statements: number; ms: number }[] = [];
+    driver.options.debug = (_connection, query) => queries.push(query);
+    try {
+      for (let i = 0; i < 12; i++) {
+        queries.length = 0;
+        const started = performance.now();
+        const resolution = await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
+        samples.push({ statements: queries.length, ms: performance.now() - started });
+        expect(resolution.status).toBe("authorized");
+        expect(queries.filter((query) => /^begin\b/i.test(query))).toHaveLength(1);
+        expect(queries).toHaveLength(5);
+        expect(queries.some((query) => /^savepoint\b/i.test(query))).toBe(false);
+      }
+      if (process.env.OPENGENI_BENCH_CONNECTION_USE === "1")
+        console.log("connection-use", JSON.stringify({ samples, queries }));
+    } finally {
+      driver.options.debug = previous;
+    }
+  });
+
   test("declares one rolling redefinition with the workspace lane and re-pinned posture", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

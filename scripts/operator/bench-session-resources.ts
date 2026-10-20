@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnection, createServer } from "node:net";
 import type postgres from "postgres";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb } from "@opengeni/db";
+import { bootstrapWorkspace, createDb, getSessionEventSequence } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability, currentTraceContext } from "@opengeni/observability";
 import { startTestServices, testSettings } from "@opengeni/testing";
@@ -25,6 +25,7 @@ type Sample = {
   wireDescribes: number;
   phases: Record<string, number>;
   queries: Record<string, number>;
+  timeline?: { atMs: number; query: string }[];
 };
 const count = Number(process.env.OPENGENI_BENCH_SAMPLES ?? "15");
 if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error("Invalid samples");
@@ -86,6 +87,7 @@ try {
     // Driver debug text is parameterized; never retain parameters or requests.
     const key = query.replace(/\s+/gu, " ").slice(0, 300);
     sample.queries[key] = (sample.queries[key] ?? 0) + 1;
+    sample.timeline?.push({ atMs: performance.now(), query: key });
   };
   const observability = createObservability(settings, { component: "api" });
   const startSpan = observability.startSpan.bind(observability);
@@ -113,6 +115,9 @@ try {
   server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    // Match the production API listener so its 15-second SSE heartbeat is not
+    // cut off by Bun's shorter default idle timeout in this local fixture.
+    idleTimeout: 255,
     fetch: (request) => {
       const sample = byRequest.get(request.headers.get("x-benchmark-request") ?? "");
       return sample ? activeSample.run(sample, () => app.fetch(request)) : app.fetch(request);
@@ -181,8 +186,71 @@ try {
     });
     await request("get", `${prefix}/sessions/${session.id}`);
     await request("list", `${prefix}/sessions`);
+    await request(
+      "list-summary-roots",
+      `${prefix}/sessions?view=page&projection=summary&limit=4&parentSessionId=null&includePinned=false&includeTotals=true&sortBy=updatedAt&archiveStatus=active`,
+    );
+    await request(
+      "list-summary-pins",
+      `${prefix}/sessions?view=page&projection=summary&limit=1&pinsOnly=true`,
+    );
+    await request(
+      "list-summary-project",
+      `${prefix}/sessions?view=page&projection=summary&limit=4&parentSessionId=null&channelId=null&includePinned=false&sortBy=updatedAt&archiveStatus=active`,
+    );
     await request("events-poll", `${prefix}/sessions/${session.id}/events?after=0`);
     await request("draft", `${prefix}/new-session-draft`);
+    if (process.env.OPENGENI_BENCH_IDLE_STREAM === "1" && index === count - 1) {
+      const after = await getSessionEventSequence(client.db, grant.workspaceId, session.id);
+      const id = crypto.randomUUID();
+      const started = performance.now();
+      const cpu = process.cpuUsage();
+      const sample: Sample = {
+        route: "idle-stream-32s",
+        ms: 0,
+        cpuMs: 0,
+        statements: 0,
+        transactions: 0,
+        savepoints: 0,
+        wireResponseCycles: 0,
+        wireDescribes: 0,
+        phases: {},
+        queries: {},
+        timeline: [],
+      };
+      byRequest.set(id, sample);
+      currentWireSample = sample;
+      const abort = new AbortController();
+      // Measurement window only; this does not change application deadlines.
+      const stop = setTimeout(() => abort.abort(), 32_000);
+      try {
+        const response = await fetch(
+          new URL(`${prefix}/sessions/${session.id}/events/stream?after=${after}`, server!.url),
+          {
+            headers: { authorization: `Bearer ${token}`, "x-benchmark-request": id },
+            signal: abort.signal,
+          },
+        );
+        if (!response.ok) throw new Error(`Idle stream: ${response.status}`);
+        const reader = response.body!.getReader();
+        while (!(await reader.read()).done) {
+          /* drain heartbeats */
+        }
+      } catch (error) {
+        if (!abort.signal.aborted) throw error;
+      } finally {
+        clearTimeout(stop);
+        abort.abort();
+        byRequest.delete(id);
+        currentWireSample = undefined;
+        sample.ms = performance.now() - started;
+        const used = process.cpuUsage(cpu);
+        sample.cpuMs = (used.user + used.system) / 1000;
+        for (const entry of sample.timeline!) entry.atMs -= started;
+        samples.push(sample);
+      }
+      if (sample.ms < 31_000) throw new Error("Idle stream closed before the measurement window");
+    }
   }
   const percentile = (values: number[], p: number) =>
     [...values].sort((a, b) => a - b)[Math.ceil(values.length * p) - 1]!;
