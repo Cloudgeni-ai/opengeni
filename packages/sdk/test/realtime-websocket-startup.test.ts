@@ -260,6 +260,16 @@ describe("WebSocket startup cleanup (controlled browser primitives)", () => {
     expectReleased(f);
   });
 
+  test("connected callback cancellation preserves its reason and releases every track", async () => {
+    const f = fixture();
+    const reason = new Error("controlled connected callback abort");
+    f.input.onConnectionHealth = (state) => {
+      if (state === "connected") f.abort.abort(reason);
+    };
+    await expect(createRealtimeWebsocketTransportStarter()(f.input)).rejects.toBe(reason);
+    expectReleased(f);
+  });
+
   test("late capture module resolution does not reconnect disposed capture", async () => {
     const module = Promise.withResolvers<void>();
     moduleReady = module.promise;

@@ -203,6 +203,7 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
       await capture;
       throwIfAborted(input.signal);
       input.onConnectionHealth("connected");
+      throwIfAborted(input.signal);
 
       return {
         peerConnection: null as unknown as RTCPeerConnection,
