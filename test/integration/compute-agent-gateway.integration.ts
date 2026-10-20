@@ -598,7 +598,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
     expect(await getLiveEnrollmentConnection(db, kept.workspaceId, kept.agentId)).toBeNull();
   }, 30_000);
 
-  test("a request whose host link ends is delivered again through the replica the agent returns on", async () => {
+  async function handoff(replayVersion: 1 | 2) {
     if (!available) return;
     // A second API replica on the same NATS and database.
     const second = await startComputeAgentGateway({
@@ -614,22 +614,30 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const agent = await sandboxAgent();
       const instance = crypto.randomUUID();
       const scope = `agent.${agent.workspaceId}.${agent.agentId}.connection.${instance}`;
+      const tokens = Array.from({ length: 64 }, () => crypto.randomUUID());
       const subscribe = (link: TestComputeHostLink, s: number) => {
         link.send({ t: "sub", s, sid: 1, subject: `${scope}.rpc` });
         link.send({ t: "sub", s, sid: 2, subject: `${scope}.rpc.>` });
       };
-      const pong = (frame: Extract<GatewayFrame, { t: "msg" }>, replay: boolean) => {
+      const pong = (frame: Extract<GatewayFrame, { t: "msg" }>) => {
         const request = ControlRequest.decode(frame.payload);
+        if (request.op?.$case !== "ping") throw new Error("expected a ping request");
+        const ping = request.op.ping;
         return {
           payload: ControlResponse.encode(
             ControlResponse.fromPartial({
               requestId: request.requestId,
-              result: { $case: "ping", ping: {} },
+              result: {
+                $case: "ping",
+                ping: {
+                  nonce: ping.nonce,
+                  controlReplayTokens:
+                    replayVersion === 2 && ping.controlReplayWindowMs !== "0" ? tokens : [],
+                },
+              },
             }),
           ).finish(),
-          ...(replay
-            ? { headers: [["Opengeni-Control-Replay", "1"]] as Array<[string, string]> }
-            : {}),
+          headers: [["Opengeni-Control-Replay", String(replayVersion)]] as Array<[string, string]>,
         };
       };
 
@@ -646,11 +654,15 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       subscribe(lost, 1);
       // The agent answers the transport's capability probe; the request then
       // reaches the host, and the link ends before the agent answers it.
-      const deliveredBeforeHandOff: string[] = [];
+      const deliveredBeforeHandOff: Array<{ subject: string; payload: Uint8Array }> = [];
       stops.push(
         answerRequests(lost, 1, (frame) => {
-          if (frame.subject === `${scope}.rpc`) return pong(frame, true);
-          deliveredBeforeHandOff.push(frame.subject);
+          const request = ControlRequest.decode(frame.payload);
+          // Both versions negotiate on the base subject; a v1 operation also
+          // uses that subject, so distinguish the batch probe by its payload.
+          if (request.op?.$case === "ping" && request.op.ping.controlReplayWindowMs !== "0")
+            return pong(frame);
+          deliveredBeforeHandOff.push({ subject: frame.subject, payload: frame.payload });
           return null;
         }),
       );
@@ -678,6 +690,13 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const deadline = Date.now() + 5_000;
       while (deliveredBeforeHandOff.length === 0 && Date.now() < deadline) await Bun.sleep(10);
       expect(deliveredBeforeHandOff).toHaveLength(1);
+      if (replayVersion === 2) {
+        expect(
+          deliveredBeforeHandOff[0]!.subject.startsWith(`${scope}.rpc.replay.${tokens[0]}.`),
+        ).toBe(true);
+      } else {
+        expect(deliveredBeforeHandOff[0]!.subject).toBe(`${scope}.rpc`);
+      }
 
       // The sandbox is handed over to host h2 (a hand-off keeps its memory, so
       // its agent keeps its connection): the link to the first replica ends,
@@ -688,11 +707,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         "h2",
         `ws://127.0.0.1:${secondApi.port}/v1/compute/agent-link`,
       );
-      const deliveredAfterHandOff: string[] = [];
+      const deliveredAfterHandOff: Array<{ subject: string; payload: Uint8Array }> = [];
       stops.push(
         answerRequests(handedOver, 1, (frame) => {
-          deliveredAfterHandOff.push(frame.subject);
-          return pong(frame, frame.subject === `${scope}.rpc`);
+          deliveredAfterHandOff.push({ subject: frame.subject, payload: frame.payload });
+          return pong(frame);
         }),
       );
       expect(
@@ -706,10 +725,20 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       subscribe(handedOver, 1);
 
       const response = await request;
-      expect(response.error).toBeUndefined();
-      expect(response.result?.$case).toBe("ping");
-      // The same delivery, so the agent's journal would join a duplicate.
-      expect(deliveredAfterHandOff).toEqual([deliveredBeforeHandOff[0]]);
+      if (replayVersion === 2) {
+        expect(response.error).toBeUndefined();
+        expect(response.result).toMatchObject({ $case: "ping", ping: { nonce: "1" } });
+        // The same identity, timing and payload, so the journal joins a duplicate.
+        expect(deliveredAfterHandOff).toEqual([deliveredBeforeHandOff[0]!]);
+      } else {
+        // An old-wire v1 peer is deliberately one-shot. Losing its link does
+        // not prove non-execution, and must not cause another delivery.
+        expect(response.error?.code).toBe(ErrorCode.ERROR_CODE_TIMEOUT);
+        expect(response.error?.detail ?? {}).not.toHaveProperty("_never_sent");
+        await Bun.sleep(300);
+        expect(deliveredAfterHandOff).toEqual([]);
+        expect(deliveredBeforeHandOff).toHaveLength(1);
+      }
       expect(Date.now() - startedAt).toBeLessThan(10_000);
       handedOver.close();
     } finally {
@@ -717,6 +746,14 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       await second.close().catch(() => undefined);
       secondApi.stop(true);
     }
+  }
+
+  test("a request whose host link ends is delivered again through the replica the agent returns on", async () => {
+    await handoff(2);
+  }, 60_000);
+
+  test("a legacy v1 request whose host link ends is never redelivered after handoff", async () => {
+    await handoff(1);
   }, 60_000);
 
   test("a finished command's output is released in one exchange through the link, housekeeping never reaches the sleeping sandbox, and the agent's own inventory recovers the rest", async () => {
@@ -823,7 +860,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
             woke.push(frame.subject);
           }
           const request = ControlRequest.decode(frame.payload);
-          // The transport's replay negotiation.
+          // Deliberately a legacy v1 peer: output release stays one-shot.
           if (request.op?.$case === "ping")
             return {
               payload: ControlResponse.encode(
