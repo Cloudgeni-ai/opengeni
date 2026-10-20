@@ -49,6 +49,7 @@ import {
 } from "@opengeni/runtime";
 import {
   listFleet,
+  buildFleetContextForSession,
   provisionSandbox,
   runOnSandbox,
   swapActiveSandbox,
@@ -527,6 +528,27 @@ async function seedPersonalMachineChat(sandboxBackend: "none" | "selfhosted") {
 }
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("command custody remains independent of a personal-machine human subject", async () => {
+    if (!available) return;
+    const { ctx } = await seedFleet();
+    const commandAttempt = {
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+    };
+    const built = await buildFleetContextForSession(
+      { db },
+      {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        commandAttempt,
+      },
+    );
+    expect(built.commandAttempt).toEqual(commandAttempt);
+    expect(built.subjectId).toBeUndefined();
+    expect(built.attemptAuthority).toBeUndefined();
+  });
   test("a personal Connected Machine remains operational from another authorized workspace", async () => {
     if (!available) return;
     const {

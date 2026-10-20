@@ -4,6 +4,7 @@ import {
   describeAgentRuntime,
   runnerConflict,
   RUNNER_CONFLICT_ACTIVE_MS,
+  UPDATE_HOLD_ATTENTION_MS,
 } from "../src/components/machines/machine-status";
 import type { MachineView } from "../src/types/machines";
 import { createOpenGeniText } from "../src/messages/runtime";
@@ -59,6 +60,52 @@ function update(overrides: Partial<Update>): Update {
 }
 
 describe("describeAgentRuntime", () => {
+  test("long update holds use hours and days, not thousands of minutes", () => {
+    for (const [hours, duration] of [
+      [17, "17h"],
+      [72, "3d"],
+    ] as const) {
+      const status = describeAgentRuntime(
+        englishText,
+        runtime({
+          versionState: "updating",
+          update: update({
+            status: "waiting_for_idle",
+            errorCode: "update_busy_work",
+            requestedAt: new Date(NOW - hours * 3_600_000).toISOString(),
+          }),
+        }),
+        NOW,
+      );
+      expect(status.status).toContain(duration);
+      expect(status.action).toBeNull();
+    }
+  });
+  test("a prolonged update hold shows its cause without offering to interrupt work", () => {
+    for (const [errorCode, cause] of [
+      ["update_busy_interactions", "browser or computer-use sessions"],
+      ["update_busy_uploads", "file upload"],
+      ["update_busy_work", "doesn't report which one"],
+    ] as const) {
+      const status = describeAgentRuntime(
+        englishText,
+        runtime({
+          versionState: "updating",
+          update: update({
+            status: "waiting_for_idle",
+            errorCode,
+            requestedAt: new Date(NOW - UPDATE_HOLD_ATTENTION_MS).toISOString(),
+            updatedAt: new Date(NOW).toISOString(),
+          }),
+        }),
+        NOW,
+      );
+      expect(status.status).toContain("10m");
+      expect(status.tone).toBe("attention");
+      expect(status.note).toContain(cause!);
+      expect(status.action).toBeNull();
+    }
+  });
   test("lost cleanup explains the cause and recovery without hiding the retry", () => {
     for (const errorCode of ["update_cleanup_unconfirmed", "update_state_unavailable"]) {
       const status = describeAgentRuntime(

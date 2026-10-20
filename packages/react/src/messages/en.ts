@@ -1545,6 +1545,15 @@ export const englishMessages = {
   "machines.machineStatus.updateNow": "Update now",
   "machines.machineStatus.updatesToTargetWhenCurrent":
     "Updates to {target} when current work finishes",
+  "machines.machineStatus.updateHeldDuration": "Update to {target} waiting for {duration}",
+  "machines.machineStatus.waitingForInteractions":
+    "Waiting for browser or computer-use sessions on this machine to end. They won't be closed for the update.",
+  "machines.machineStatus.waitingForUploads":
+    "Waiting for a file upload to finish. The update will continue automatically; the upload will not be interrupted.",
+  "machines.machineStatus.waitingForWork":
+    "Waiting for commands, file operations or interaction sessions on this machine to finish. The machine doesn't report which one. Nothing will be stopped.",
+  "machines.machineStatus.waitingForIdleProof":
+    "Waiting for the machine to confirm it can update without interrupting work. The update will continue automatically.",
   "machines.machineStatus.updateToTargetFailed": "Update to {target} failed",
   "machines.machineStatus.updateToTargetPostponedOpen":
     "Update to {target} postponed: open browsers would close",

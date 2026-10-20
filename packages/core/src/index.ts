@@ -87,6 +87,7 @@ export * from "./default-session-model";
 export * from "./sandbox/compute-plane";
 export * from "./sandbox/output-release";
 export * from "./sandbox/fleet";
+export * from "./sandbox/agent-background-commands";
 export * from "./sandbox/routing";
 export * from "./sandbox/runtime-settings";
 

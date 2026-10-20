@@ -402,7 +402,7 @@ export interface SelfhostedSessionDeps {
    * Without it, the instance resolveOperationAdmission reports is used. */
   liveConnectionInstance?: () => Promise<string | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
-   * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
+   * bounded wait. Omitted for direct/Channel-A callers, which remain terminal. */
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
@@ -1262,6 +1262,13 @@ export class SelfhostedSession {
     return await this.execInternal(args, false);
   }
 
+  /** Structured counterpart of execCommand: a bounded observation may yield
+   * only after the existing session ledger accepts custody. Never a process
+   * deadline. Callers without adoption hooks remain terminal. */
+  async execWithYield(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    return await this.execInternal(args, true);
+  }
+
   /** Internal controller transport: stream private request bytes over the
    * existing command channel, never through argv, environment or host files. */
   async execWithInput(
@@ -1756,7 +1763,7 @@ export class SelfhostedSession {
    *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.execInternal(args, true);
+    const result = await this.execWithYield(args);
     if (result.backgroundCommandId && result.backgroundOpId) {
       const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [

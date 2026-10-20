@@ -58,8 +58,10 @@ import {
   type SelfhostedOpStreamDeps,
   type SelfhostedOperationAdmission,
   type SelfhostedOperationResourcePolicy,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "./routing";
+import { directRequestAbandonCommand, relayConfigFromSettings } from "./routing";
+import { agentBackgroundCommandDeps } from "./agent-background-commands";
 import { createSecretResolver } from "../domain/vaults/secret-resolver";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
 
@@ -84,6 +86,9 @@ export type FleetContext = {
   subjectId?: string;
   /** Only an explicit human move request may consent for the running turn. */
   consentToCurrentTurn?: boolean;
+  /** Exact live attempt for command custody, independent of personal-machine
+   * access authority or whether a human initiated this turn. */
+  commandAttempt?: { turnId: string; attemptId: string; executionGeneration: number };
   attemptAuthority?: {
     turnId: string;
     attemptId: string;
@@ -117,6 +122,7 @@ export async function buildFleetContextForSession(
     sessionId: string;
     subjectId?: string;
     attemptAuthority?: FleetContext["attemptAuthority"];
+    commandAttempt?: FleetContext["commandAttempt"];
   },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
@@ -125,6 +131,7 @@ export async function buildFleetContextForSession(
     workspaceId: ctx.workspaceId,
     ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
     ...(ctx.attemptAuthority ? { attemptAuthority: ctx.attemptAuthority } : {}),
+    ...(ctx.commandAttempt ? { commandAttempt: ctx.commandAttempt } : {}),
     sessionId: ctx.sessionId,
     sessionBackend: session.sandboxBackend,
     sessionGroupId: session.sandboxGroupId,
@@ -167,6 +174,16 @@ export type FleetSandboxEntry = {
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
   hasDisplay?: boolean;
   lastSeenAt?: string | null;
+  /** Running version and the accepted update's retained progress. No command
+   * text, private session identifiers, or other connection's work is exposed. */
+  agentVersion?: string | null;
+  agentUpdate?: {
+    status: NonNullable<EnrollmentRecord["agentUpdate"]>["status"];
+    targetVersion: string | null;
+    waitingReason: string | null;
+    requestedAt: string | null;
+    updatedAt: string | null;
+  } | null;
   /** Orthogonal truth dimensions. `liveness` is only their conservative UI
    * projection and is never evidence for a specific dimension. */
   providerStatus: "not_created" | "creating" | "exists" | "missing" | "unknown";
@@ -197,6 +214,30 @@ export type FleetListResult = {
   activeEpoch: number;
   sandboxes: FleetSandboxEntry[];
 };
+
+/** Project only already-authorized enrollment progress, never connection
+ * coordinates or private command/session data. */
+export function fleetAgentProgress(
+  enrollment: Pick<EnrollmentRecord, "agentVersion" | "agentUpdate">,
+): Pick<FleetSandboxEntry, "agentVersion" | "agentUpdate"> {
+  const update = enrollment.agentUpdate;
+  return {
+    agentVersion: enrollment.agentVersion,
+    agentUpdate: update
+      ? {
+          status: update.status,
+          targetVersion: update.targetVersion,
+          waitingReason:
+            update.status === "waiting_for_idle" ||
+            (update.status === "failed" && update.errorCode?.startsWith("update_busy"))
+              ? update.errorCode
+              : null,
+          requestedAt: update.requestedAt,
+          updatedAt: update.updatedAt,
+        }
+      : null,
+  };
+}
 
 /** A swap/attach outcome the tool returns. On a rejection, `code` carries the
  *  typed reason (issue #341 typed diagnostics) alongside the human `reason`. */
@@ -543,6 +584,7 @@ export async function listFleet(
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
+      ...fleetAgentProgress(enrollment),
       providerStatus:
         probe.liveness === "online"
           ? "exists"
@@ -949,9 +991,21 @@ export type RunOnResult = {
   bytesWritten?: number;
   reason?: string;
   notice?: string;
+  /** Present only after the session command ledger accepted a running exec. */
+  commandId?: string;
+  state?: "running";
 };
 
 export type RunOnSelfhostedMachine = {
+  /** Session-owned commands may yield into the existing durable ledger.
+   * Direct callers without these hooks retain terminal semantics. */
+  backgroundCommands?: Pick<
+    SelfhostedSessionDeps,
+    "adoptBackgroundCommand" | "captureBackgroundCommandOutput" | "settleBackgroundCommand"
+  >;
+  /** Observation wait, not an execution deadline. Omit for the runtime default. */
+  yieldTimeMs?: number;
+  abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   workspaceId: string;
   agentId: string;
   /** Exact live daemon pinned for this operation. */
@@ -1069,6 +1123,7 @@ export async function executeRunOnSelfhostedMachine(
   target: string,
   op: RunOnOp,
 ): Promise<RunOnResult> {
+  let commandRetained = false;
   const session = new SelfhostedSession({
     workspaceId: machine.workspaceId,
     agentId: machine.agentId,
@@ -1078,6 +1133,23 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.abandonCommand ? { abandonCommand: machine.abandonCommand } : {}),
+    ...machine.backgroundCommands,
+    ...(machine.backgroundCommands?.adoptBackgroundCommand
+      ? {
+          adoptBackgroundCommand: async (command) => {
+            const adopted = await machine.backgroundCommands!.adoptBackgroundCommand!(command);
+            commandRetained = true;
+            return adopted;
+          },
+          settleBackgroundCommand: async (command) => {
+            await machine.backgroundCommands?.settleBackgroundCommand?.(command);
+            if (command.outcome === "exited") {
+              await session.clearSecretFilesForAttempt().catch(() => undefined);
+            }
+          },
+        }
+      : {}),
     ...(machine.operationResourcePolicy !== undefined
       ? { operationResourcePolicy: machine.operationResourcePolicy }
       : {}),
@@ -1109,23 +1181,37 @@ export async function executeRunOnSelfhostedMachine(
         dialect: null,
         use: secretUse,
       });
-      let res: Awaited<ReturnType<typeof session.exec>>;
+      let res: Awaited<ReturnType<typeof session.exec>> | undefined;
       try {
-        res = await runWithSecretCarry(
-          prepared?.carry ?? null,
-          async () =>
-            await session.exec({
-              cmd: prepared?.text ?? op.cmd,
-              ...(op.workdir ? { workdir: op.workdir } : {}),
-            }),
+        res = await runWithSecretCarry(prepared?.carry ?? null, () =>
+          session.execWithYield({
+            cmd: prepared?.text ?? op.cmd,
+            ...(op.workdir ? { workdir: op.workdir } : {}),
+            ...(machine.yieldTimeMs !== undefined ? { yieldTimeMs: machine.yieldTimeMs } : {}),
+          }),
         );
       } finally {
-        // A one-off has no attempt-end cleanup on this machine: remove the
-        // `secretfile` scope it wrote (SEC-4) with the filesystem op, which
-        // works on every host OS and skips command admission. Best effort.
-        if (prepared?.carry && hasSecretFileReference(prepared.carry)) {
+        // Retained work still owns its private files. Only a terminal one-off
+        // or an observed terminal settlement may clean them up here.
+        if (!commandRetained && prepared?.carry && hasSecretFileReference(prepared.carry)) {
           await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
+      }
+      if (res.backgroundCommandId) {
+        return {
+          target,
+          kind: "exec",
+          ok: true,
+          state: "running",
+          commandId: res.backgroundCommandId,
+          stdout: res.stdout,
+          stderr: res.stderr,
+          exitCode: null,
+          timedOut: false,
+          deadlineMs,
+          notice:
+            "Command is still running. Use command_read or command_wait with this commandId; do not restart it.",
+        };
       }
       const timedOut = res.timedOut === true;
       const hasTerminalExit = res.exitCode !== null;
@@ -1399,6 +1485,16 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      ...(ctx.commandAttempt
+        ? {
+            backgroundCommands: agentBackgroundCommandDeps(services.db, services.bus, {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              sessionId: ctx.sessionId,
+              backgroundCommandAttempt: ctx.commandAttempt,
+            }),
+          }
+        : { abandonCommand: directRequestAbandonCommand(services.db, ctx) }),
       operationResourcePolicy: enrollment.operationPolicy,
       operationResourcePolicySupported:
         enrollment.agentCapabilities.operationResourcePolicy === true,

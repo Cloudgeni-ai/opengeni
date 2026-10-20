@@ -2084,7 +2084,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     if let Some(backend) = browser_control.as_ref() {
                         busy_code = match backend.begin_update(&update.operation_id).await {
                             Ok(true) => None,
-                            Ok(false) => Some("update_busy_work"),
+                            Ok(false) => Some("update_busy_interactions"),
                             Err(_) => Some("update_state_unavailable"),
                         };
                     }
@@ -4180,7 +4180,10 @@ mod tests {
         let mut replies = client.subscribe("audit.interaction.out").await.unwrap();
         let mut events = client.subscribe(link.events_subject()).await.unwrap();
         client.flush().await.unwrap();
-        for (state, code) in [(0, "update_busy_work"), (1, "update_state_unavailable")] {
+        for (state, code) in [
+            (0, "update_busy_interactions"),
+            (1, "update_state_unavailable"),
+        ] {
             backend.0.store(state, Ordering::Release);
             let operation_id = uuid::Uuid::new_v4().to_string();
             let request = ControlRequest {

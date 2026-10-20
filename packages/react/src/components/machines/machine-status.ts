@@ -32,6 +32,25 @@ export type AgentRuntimeStatus = {
 /** An update request the agent has not confirmed after this long can be resent. */
 export const UPDATE_CONFIRMATION_GRACE_MS = 30_000;
 
+/** Attention only: this never cancels work or changes update admission. */
+export const UPDATE_HOLD_ATTENTION_MS = 10 * 60_000;
+
+function updateWaitingReason(t: OpenGeniText, code: string | null): string {
+  switch (code) {
+    case "update_busy_interactions":
+    case "update_busy_browsers":
+      return t("machines.machineStatus.waitingForInteractions");
+    case "update_busy_uploads":
+      return t("machines.machineStatus.waitingForUploads");
+    case "update_busy_work":
+      // Older agents also used this for interaction sessions. Do not invent
+      // an exact culprit from their ambiguous receipt.
+      return t("machines.machineStatus.waitingForWork");
+    default:
+      return t("machines.machineStatus.waitingForIdleProof");
+  }
+}
+
 /** A busy machine postpones an update instead of interrupting work. The agent
  * reports this as a retryable `update_busy_*` result; it is not a failure. */
 export function isPostponedUpdate(errorCode: string | null | undefined): boolean {
@@ -101,12 +120,26 @@ export function describeAgentRuntime(
       }
       case "accepted":
         return { ...base, status: t("machines.machineStatus.updatingToTarget", { target }) };
-      case "waiting_for_idle":
+      case "waiting_for_idle": {
+        // Progress may change its reason without resetting the original hold.
+        const heldMs = Math.max(0, now - new Date(update.requestedAt).getTime());
+        const minutes = Math.floor(heldMs / 60_000);
+        const duration =
+          minutes < 60
+            ? t("lib.format.minutes", { count: minutes })
+            : minutes < 1440
+              ? t("lib.format.hours", { count: Math.floor(minutes / 60) })
+              : t("lib.format.days", { count: Math.floor(minutes / 1440) });
         return {
           ...base,
-          tone: "waiting",
-          status: t("machines.machineStatus.updatesToTargetWhenCurrent", { target }),
+          tone: heldMs >= UPDATE_HOLD_ATTENTION_MS ? "attention" : "waiting",
+          status:
+            heldMs >= UPDATE_HOLD_ATTENTION_MS
+              ? t("machines.machineStatus.updateHeldDuration", { target, duration })
+              : t("machines.machineStatus.updatesToTargetWhenCurrent", { target }),
+          note: blocked ?? updateWaitingReason(t, update.errorCode),
         };
+      }
       case "downloading":
         return { ...base, status: `Downloading ${target}…` };
       case "verifying":

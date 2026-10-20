@@ -125,6 +125,10 @@ pages or guarantee graceful completion for a permanently stuck controller.
   exit. Transient exit-observation failures recover per producer rather than
   permanently disabling updates. Unconfirmed cleanup reports its producer and
   recovery steps in the response and agent log; no blanket reset bypasses it.
+  A controller that cannot hand over browser/computer sessions reports
+  `update_busy_interactions`, distinct from uploads and other work. Unix streamed
+  commands, including one-off commands, already participate in update handover;
+  Windows waits rather than interrupting live commands.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task
