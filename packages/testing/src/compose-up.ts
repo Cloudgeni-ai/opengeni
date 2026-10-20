@@ -1,4 +1,4 @@
-export {};
+import { dockerPullFailureSummary, emitAcquisitionDiagnostic } from "./acquisition-diagnostics";
 
 const [projectName, composeFile, encodedImages] = Bun.argv.slice(2);
 
@@ -203,6 +203,7 @@ async function pullImage(image: string): Promise<string | null> {
     const stderr = new TextDecoder().decode(result.stderr).trim();
     if (stderr) console.error(stderr);
     if (result.exitCode === 0) return null;
+    emitAcquisitionDiagnostic(dockerPullFailureSummary(stderr));
     lastFailure = stderr || `docker pull exited ${result.exitCode}`;
     if (!isRetryablePullError(lastFailure) || attempt === 3) break;
     console.error(`transient pull failure for ${image}; retrying (${attempt}/3)`);

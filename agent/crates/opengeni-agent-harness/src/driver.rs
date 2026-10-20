@@ -70,6 +70,7 @@ impl Op {
         match self {
             Op::Ping => PreparedOp::Control(Box::new(ReqOp::Ping(v1::PingRequest {
                 nonce: REQUEST_SEQ.load(Ordering::Relaxed),
+                ..Default::default()
             }))),
             Op::ExecEcho => PreparedOp::Exec {
                 request: v1::ExecRequest {

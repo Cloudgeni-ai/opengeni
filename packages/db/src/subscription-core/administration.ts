@@ -266,6 +266,8 @@ export async function readSubscriptionCoreWorkspacePool(
     workspaceId: string;
     /** Session picker only: include shared accounts assigned to the scoped caller. */
     includeOwnPeopleScope?: boolean;
+    /** Limits overview only: include every available source, not just the selected inference source. */
+    includeAllAvailableConnections?: boolean;
   },
 ): Promise<SubscriptionCoreWorkspacePool> {
   const providerId = subscriptionCoreProviderId(provider);
@@ -376,22 +378,24 @@ export async function readSubscriptionCoreWorkspacePool(
           : entry.entries.length > 0
             ? entry.entries.some((policy) => policy.pool === "organization")
             : !entry.local;
-  const connections = pools.filter(inEffectiveSource).map(({ row, entries, local }) => {
-    // The switch placement reads: under the automatic source any enabled
-    // copy in this workspace serves (both pools are admitted), otherwise the
-    // effective pool's copy.
-    const shown =
-      settings.inferenceSource === "automatic"
-        ? entries
-        : entries.filter((entry) => entry.pool === effectiveSource);
-    return {
-      row,
-      source: local ? ("workspace" as const) : ("organization" as const),
-      poolAllocatorEnabled:
-        entries.length === 0 ||
-        (shown.length > 0 ? shown : entries).some((entry) => entry.allocator),
-    };
-  });
+  const connections = pools
+    .filter((entry) => input.includeAllAvailableConnections || inEffectiveSource(entry))
+    .map(({ row, entries, local }) => {
+      // The switch placement reads: under the automatic source any enabled
+      // copy in this workspace serves (both pools are admitted), otherwise the
+      // effective pool's copy.
+      const shown =
+        settings.inferenceSource === "automatic"
+          ? entries
+          : entries.filter((entry) => entry.pool === effectiveSource);
+      return {
+        row,
+        source: local ? ("workspace" as const) : ("organization" as const),
+        poolAllocatorEnabled:
+          entries.length === 0 ||
+          (shown.length > 0 ? shown : entries).some((entry) => entry.allocator),
+      };
+    });
   return {
     connections,
     primaryConnectionId,
@@ -610,7 +614,13 @@ export type SubscriptionCoreWorkspaceView = {
 export async function readSubscriptionCoreWorkspaceView(
   db: Database,
   provider: SubscriptionCoreProvider,
-  input: { accountId: string; workspaceId: string; viewerSubjectId?: string | null },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    viewerSubjectId?: string | null;
+    /** Limits overview only; availability and canonical row visibility still apply. */
+    includeAllAvailableConnections?: boolean;
+  },
 ): Promise<SubscriptionCoreWorkspaceView> {
   return await withRlsContext(
     db,

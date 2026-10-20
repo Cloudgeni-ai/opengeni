@@ -484,14 +484,40 @@ describe.skipIf(!enabled)("independent title native request custody", () => {
                   }),
                 )} where id = ${connectionId}::uuid`;
               expect((await codex.getToken()).accessToken).toBe("fixture-access-v2");
-              codex.onUsageHeaders?.({
+              const checkedAt = new Date();
+              const reading = {
                 primaryUsedPercent: 12,
                 secondaryUsedPercent: 25,
                 primaryResetAt: new Date(Date.now() + 3_600_000),
                 secondaryResetAt: new Date(Date.now() + 7_200_000),
-                checkedAt: new Date(),
+                checkedAt,
+              };
+              codex.onUsageHeaders?.(reading);
+              await flush();
+              codex.onUsageHeaders?.({
+                ...reading,
+                primaryUsedPercent: 11,
+                checkedAt: new Date(checkedAt.getTime() - 60_000),
               });
               await flush();
+              // A refresh can race the response from the older bearer. Both
+              // that original reading and an out-of-order one remain history.
+              await shared.admin`update subscription_connections set refresh_generation = refresh_generation + 1
+                where id = ${connectionId}::uuid`;
+              codex.onUsageHeaders?.({
+                ...reading,
+                primaryUsedPercent: 13,
+                checkedAt: new Date(checkedAt.getTime() + 1),
+              });
+              await flush();
+              const history =
+                await shared.admin`select used_percent from opengeni_private.subscription_usage_readings
+                where connection_id = ${connectionId}::uuid and window_id = 'primary' order by observed_at`;
+              expect(history.map((row) => Number(row.used_percent))).toEqual([11, 12, 13]);
+              const [latest] =
+                await shared.admin`select (quota->'windows'->0->>'usedPercent')::int as used
+                from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
+              expect(latest!.used).toBe(12);
             }
             const request = { requestId: context.nextRequestId!(), transportAttempt: 1 };
             await context.beforeProviderDispatch!(request);

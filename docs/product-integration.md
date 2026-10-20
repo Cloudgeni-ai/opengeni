@@ -868,7 +868,7 @@ The old `opengeni-product-integration` Pack is not needed or restored.
 
 Control Opengeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
-`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. An agent
+`[]` for none, or explicit IDs such as `"builtin:documents"`. An agent
 that starts from `capabilities: "none"` has no default bundles: create freezes
 an omitted selection as `[]`, and only an explicit list opts in. Selection
 only narrows each bundle's normal inclusion conditions and grants no tool
@@ -881,7 +881,7 @@ This does not disable workspace-authored/installed Skills or your inline
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
 
-`builtin:opengeni-schedules` provides schedule-creation guidance when
+`builtin:schedules` provides schedule-creation guidance when
 `scheduled_tasks_create` is configured. Like other bundles, it can be excluded
 by an explicit selection and does not grant tool permissions.
 
@@ -891,7 +891,7 @@ already omits the bundled guides; for any other agent, put
 `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
 only the product's own inline Skills and intended tools, and use a workspace
 whose shared Skills match that product. For example, a documents-capable bot
-can select only `builtin:opengeni-documents`. Removing bundled guides does not
+can select only `builtin:documents`. Removing bundled guides does not
 remove mandatory runtime rules or independently authorized Skill/tool surfaces.
 
 The external backend owns its reusable Skills. Store and version them with the
@@ -975,7 +975,12 @@ const { user, tenant } = await verifyToolRequest(request); // throws ToolRequest
 On every session the `createSession` hook creates, the proxy attaches the
 server as a per-session `mcpServers` entry with an HS256 bearer token for the
 user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
-explicit list). It rotates that token through `mcpCredentialUpdates` on every
+explicit list). Name the everyday tools the agent should have from its first
+model request with `toolServer.eager` (for example
+`eager: ["search_posts", "get_post"]`): the agent can call them without a
+`tool_search` round trip, while the rest of the server's tools stay searchable.
+Keep that list short and stable, since every listed schema is part of each
+request; `eager: true` puts every tool on it. It rotates that token through `mcpCredentialUpdates` on every
 send, steer, composer submit, approval decision, and human-input answer, only
 for sessions that carry this exact server, and only when the chat's creator acts
 (tools act as the creator, also in shared chats). Tokens last 24 hours by default.

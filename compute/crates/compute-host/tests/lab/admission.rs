@@ -107,7 +107,8 @@ async fn check_guarantees(agent: &Agent, sandbox: Id) {
             })
         })
         .await;
-    assert_eq!(cgroup_value(sandbox, "cpu.weight"), "100");
+    // One vCPU and no request: a tenth of a processor.
+    assert_eq!(cgroup_value(sandbox, "cpu.weight"), "10");
     assert_eq!(cgroup_value(sandbox, "memory.low"), (512 * MIB).to_string());
     assert_eq!(cgroup_value(sandbox, "memory.zswap.max"), "0");
     assert_eq!(cgroup_value(sandbox, "memory.swap.max"), "0");

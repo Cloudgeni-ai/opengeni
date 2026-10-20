@@ -3,6 +3,7 @@
  * small bridge (`window.opengeniDesktop`); everything here degrades to the
  * plain web when it is absent or lacks a capability.
  */
+import { OPENGENI_DESKTOP_APP_HEADER } from "@opengeni/contracts";
 import {
   getDesktopBridge,
   hasDesktopCapability,
@@ -22,6 +23,14 @@ export const windowControlsInPage = desktopBridge?.platform === "macos";
 
 export function desktopCapability(capability: DesktopCapability): DesktopBridge | null {
   return hasDesktopCapability(desktopBridge, capability) ? desktopBridge : null;
+}
+
+/**
+ * Marks the console's API requests inside the desktop app, so a sign-in that
+ * finishes in the person's browser brings them back to the app.
+ */
+export function desktopAppHeaders(): Record<string, string> {
+  return desktopBridge ? { [OPENGENI_DESKTOP_APP_HEADER]: desktopBridge.platform } : {};
 }
 
 declare global {

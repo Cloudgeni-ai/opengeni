@@ -17,6 +17,8 @@ import {
   sessionWorkflowWakesDue,
   siteAuthMaintenanceDue,
   subscriptionPlanMaintenanceDue,
+  subscriptionUsageHistoryPruneDue,
+  pruneSubscriptionUsageHistory,
   workspacePauseTimerDue,
   type Database,
 } from "@opengeni/db";
@@ -66,6 +68,7 @@ export const INTERNAL_MAINTENANCE_JOBS = [
   "sandbox-idle-checkpoint",
   "browser-deadline-checkpoint",
   "subscription-plan-maintenance",
+  "subscription-usage-retention",
 ] as const;
 export type InternalMaintenanceJob = (typeof INTERNAL_MAINTENANCE_JOBS)[number];
 
@@ -144,6 +147,17 @@ export async function internalMaintenanceCadences(input: {
   const jobs = new Set(input.jobs ?? INTERNAL_MAINTENANCE_JOBS);
   const taskQueue = settings.temporalTaskQueue;
   const cadences: MaintenanceCadence[] = [];
+  if (jobs.has("subscription-usage-retention")) {
+    cadences.push({
+      job: "subscription-usage-retention",
+      periodMs: 60_000,
+      hasWork: async () => await subscriptionUsageHistoryPruneDue(db),
+      start: async () => {
+        await pruneSubscriptionUsageHistory(db);
+        return "started";
+      },
+    });
+  }
   if (settings.subscriptionPlansEnabled && jobs.has("subscription-plan-maintenance")) {
     cadences.push({
       job: "subscription-plan-maintenance",

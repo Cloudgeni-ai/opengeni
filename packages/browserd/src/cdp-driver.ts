@@ -452,7 +452,11 @@ export type AgentBrowserDriverOptions = {
   downloadEvents?: {
     begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
     progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
-    reject(guid: string, failureCode: string): Promise<void>;
+    reject(
+      guid: string,
+      failureCode: string,
+      cancellation: "confirmed" | "uncertain",
+    ): Promise<void>;
   };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
@@ -2045,14 +2049,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
               filePath,
+              // Browser events and replies share this connection in order, so
+              // a reply proves every earlier download event was delivered.
+              ...(state === "completed"
+                ? {
+                    eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
+                  }
+                : {}),
             })
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
-              await connection
+              const cancelled = await connection
                 .send("Browser.cancelDownload", { guid, ...this.contextScope() })
-                .catch(() => undefined);
-              await this.downloadEvents?.reject(guid, cancelReason);
+                .then(
+                  () => true,
+                  () => false,
+                );
+              await this.downloadEvents?.reject(
+                guid,
+                cancelReason,
+                cancelled ? "confirmed" : "uncertain",
+              );
             })
             .catch(() => undefined);
         }),
@@ -4059,7 +4077,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
 
-    const sourceFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+    // A cross-origin frame renders in its own process: its frame tree, file
+    // chooser interception and chooser events belong to that frame's session.
+    const frameSessionId = this.oopifForFrame(state, frameId)?.sessionId ?? state.sessionId;
+    const sourceFrame = flattenFrameTree(await this.frameTree(frameSessionId)).find(
       (frame) => frame.id === frameId,
     );
     if (!sourceFrame) {
@@ -4076,7 +4097,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.setInterceptFileChooserDialog",
         { enabled: true },
         {
-          sessionId: state.sessionId,
+          sessionId: frameSessionId,
         },
       );
     } catch (error) {
@@ -4091,7 +4112,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const abort = new AbortController();
     const chooser = connection
       .waitForEvent("Page.fileChooserOpened", {
-        sessionId: state.sessionId,
+        sessionId: frameSessionId,
         timeoutMs: DEFAULT_ACTION_TIMEOUT_MS,
         signal: abort.signal,
         predicate: (params) => params.frameId === frameId,
@@ -4111,7 +4132,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "upload control was clicked but no file chooser was confirmed; inspect the page before continuing",
         );
       }
-      const currentFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+      const currentFrame = flattenFrameTree(await this.frameTree(frameSessionId)).find(
         (frame) => frame.id === frameId,
       );
       if (currentFrame?.loaderId !== sourceFrame.loaderId) {
@@ -4148,7 +4169,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.setInterceptFileChooserDialog",
         { enabled: false },
         {
-          sessionId: state.sessionId,
+          sessionId: frameSessionId,
         },
       );
     }
@@ -4241,7 +4262,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "unsupported",
         `these files total ${formatMegabytes(totalBytes)}; without file access this Chrome can ` +
           `receive at most ${formatMegabytes(ATTACHED_TRANSFER_UPLOAD_MAX_BYTES)} per upload. ` +
-          'The person can turn on "Allow access to file URLs" for the Opengeni extension in ' +
+          'The person can turn on "Allow access to file URLs" for the browser extension in ' +
           "chrome://extensions to upload larger files",
       );
     }

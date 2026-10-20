@@ -330,6 +330,13 @@ pub struct HostView {
     pub epoch: u64,
     pub memory_mib: u64,
     pub memory_free_mib: u64,
+    /// Processor time in millicores it guarantees sandboxes at once now;
+    /// absent from a host that does not guarantee it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u64>,
+    /// Processor time in millicores a wake can still reserve on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_free_millis: Option<u64>,
     pub disk_free_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
@@ -591,23 +598,28 @@ async fn hosts<S: Store>(
         .view()
         .hosts()
         .into_iter()
-        .map(|known| HostView {
-            name: known.target.name,
-            zone: known.info.zone,
-            profile: known.info.profile,
-            cpu_template: known.info.cpu_template,
-            state: match known.state {
-                HostState::Live => "live",
-                HostState::Draining => "draining",
-                HostState::Lost => "lost",
+        .map(|known| {
+            let cpu_millis = crate::view::cpu_millis(&known.info, &known.capacity);
+            HostView {
+                name: known.target.name,
+                zone: known.info.zone,
+                profile: known.info.profile,
+                cpu_template: known.info.cpu_template,
+                state: match known.state {
+                    HostState::Live => "live",
+                    HostState::Draining => "draining",
+                    HostState::Lost => "lost",
+                }
+                .into(),
+                epoch: known.target.epoch.0,
+                memory_mib: known.info.memory_mib,
+                memory_free_mib: known.capacity.memory_free_mib,
+                cpu_millis,
+                cpu_free_millis: cpu_millis.and(known.capacity.cpu_free_millis),
+                disk_free_mib: known.capacity.disk_free_mib,
+                sandboxes: known.capacity.sandboxes,
+                awake: known.capacity.awake,
             }
-            .into(),
-            epoch: known.target.epoch.0,
-            memory_mib: known.info.memory_mib,
-            memory_free_mib: known.capacity.memory_free_mib,
-            disk_free_mib: known.capacity.disk_free_mib,
-            sandboxes: known.capacity.sandboxes,
-            awake: known.capacity.awake,
         })
         .collect();
     Ok(Json(hosts))

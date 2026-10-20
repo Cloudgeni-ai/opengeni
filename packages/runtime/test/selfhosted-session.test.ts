@@ -588,6 +588,42 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     });
   });
 
+  test("exec_command without a shell runs PowerShell on a Windows machine", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "C:/Users/user/project" });
+
+    await session.execCommand({ cmd: "Get-ChildItem" });
+    await session.execCommand({ cmd: "dir", shell: "cmd.exe" });
+    await session.exec({ cmd: "echo internal" });
+
+    const requests = [0, 1, 2].map((index) => streamedExecRequest(mock, index));
+    expect(requests[0]).toMatchObject({
+      command: [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-ChildItem",
+      ],
+      shell: false,
+    });
+    // An explicit shell is honoured as before.
+    expect(requests[1]).toMatchObject({
+      command: ["cmd.exe", "/D", "/S", "/C", "dir"],
+      shell: false,
+    });
+    // Internal Channel-A commands keep the machine's own default shell.
+    expect(requests[2]).toMatchObject({ command: ["echo internal"], shell: true });
+  });
+
+  test("exec_command without a shell keeps the machine default off Windows", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    await session.execCommand({ cmd: "ls" });
+    expect(streamedExecRequest(mock)).toMatchObject({ command: ["ls"], shell: true });
+  });
+
   test("exec surfaces $HOSTNAME from the machine", async () => {
     const mock = new MockAgentResponder({ hostname: "the-vm" });
     const res = await sessionWith(mock).exec({ cmd: "echo $HOSTNAME" });
@@ -1371,7 +1407,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1381,7 +1417,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "retry-connection",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
@@ -1408,7 +1444,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1418,7 +1454,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "shared-connect",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     const [first, second] = await Promise.all([
@@ -1444,7 +1480,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1465,7 +1501,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1486,6 +1522,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
             ping: {
               nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
               agentMonotonicMs: "1",
+              controlReplayTokens: [],
             },
           },
         };
@@ -1510,7 +1547,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const startedAt = Date.now();
     const res = await rpc.request(
       "agent.x.y.rpc",
-      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
+      } as ControlRequest,
       {
         timeoutMs: 50,
         // The agent restarted after the first delivery found no responder.
@@ -1663,6 +1704,27 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
       expect(mock.requests.some((request) => request.req.op?.$case === "opStart")).toBe(false);
     },
   );
+
+  test("Windows exec_command splices secrets for the PowerShell it runs", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "C:/Users/user/project" });
+    const prepared = await prepareSecretExec("Write-Output '{{secret:Canary}}'", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () => session.execCommand({ cmd: prepared!.text }));
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual([
+      "powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      'Write-Output "${env:OPENGENI_SECRET_0}"',
+    ]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+  });
 
   test("commands without references are byte-identical (machine default shell)", async () => {
     const mock = new MockAgentResponder();

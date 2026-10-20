@@ -20,6 +20,7 @@ import {
 import {
   callDesktop,
   CuaFailure,
+  runSteps,
   walkIncompleteness,
   Windows,
   WindowState,
@@ -85,6 +86,8 @@ export class CuaComputerBackend implements ComputerBackend {
     permissions: { accessibility: boolean; screen_recording: boolean },
     platform: "macos" | "windows" | "linux",
     private readonly parentPid: (pid: number) => number | null,
+    actionBatches: boolean,
+    private readonly launchWindowWaitMs: number,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -100,6 +103,9 @@ export class CuaComputerBackend implements ComputerBackend {
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
+      // CUA runs a batch as one run_steps call where that call can stop at a
+      // stale token (see dispatchBatch); elsewhere each action is its own.
+      actionBatches,
       parallelApps: false,
     };
   }
@@ -111,6 +117,8 @@ export class CuaComputerBackend implements ComputerBackend {
       /** A process's parent, to tie a Linux launcher's app to its window.
        * CUA runs in this process, so it sees the same processes. */
       parentPid?: (pid: number) => number | null;
+      /** How long a launch waits for the launched app's first window. */
+      launchWindowWaitMs?: number;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -120,6 +128,9 @@ export class CuaComputerBackend implements ComputerBackend {
         permissions,
         platform,
         options.parentPid ?? procParentPid,
+        await runStepsStopsAtStaleTokens(runtime),
+        options.launchWindowWaitMs ??
+          (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
       );
       await backend.startSession(backend.session);
       return backend;
@@ -212,29 +223,19 @@ export class CuaComputerBackend implements ComputerBackend {
         await this.target(command.targetId);
         return;
       }
+      if (command.action.type === "batch") {
+        await this.batchSteps(command);
+        return;
+      }
       await this.operations(command);
     });
   }
 
   dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
+    if (command.action.type === "launch")
+      return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "launch") {
-        await this.target(command.targetId);
-        const launched = await this.launch(command.action.applicationId);
-        // The app is running: the launch succeeded whatever happens next. Its
-        // windows become targets when discovery works. The receipt observes
-        // the launched app's window, so the caller can act on it directly,
-        // or the action's own target when no window of the app is found.
-        try {
-          for (const windowTarget of await this.launchedWindows(launched)) {
-            const reading = await this.observeTarget(windowTarget).catch(() => null);
-            if (reading) return reading;
-          }
-          return await this.observeTarget(command.targetId);
-        } catch {
-          return null;
-        }
-      }
+      if (command.action.type === "batch") return await this.dispatchBatch(command);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -290,23 +291,101 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      // Post-action observation failure cannot turn a delivered action into a
-      // pre-dispatch rejection. The controller retains its completed receipt.
-      try {
-        // CUA names the windows it saw the action open. Nothing else proves
-        // that a window appearing meanwhile is the action's.
-        const opened = report
-          ? await this.openedWindow(acted, known, report).catch(() => null)
-          : null;
-        if (opened) {
-          const reading = await this.observeTarget(opened).catch(() => null);
-          if (reading) return reading;
-        }
-        return await this.observeTarget(command.targetId);
-      } catch {
-        return null;
-      }
+      return await this.observeAfter(command.targetId, acted, known, report);
     });
+  }
+
+  /** The window an action left in front: the one CUA reports it opened, or
+   * its own. A failed read cannot turn a delivered action into a pre-dispatch
+   * rejection, so it observes nothing and the receipt still completes. */
+  private async observeAfter(
+    targetId: string,
+    acted: Target,
+    known: Set<string>,
+    report: string,
+  ): Promise<ComputerBackendObservation | null> {
+    try {
+      // CUA names the windows it saw the action open. Nothing else proves
+      // that a window appearing meanwhile is the action's.
+      const opened = report
+        ? await this.openedWindow(acted, known, report).catch(() => null)
+        : null;
+      if (opened) {
+        const reading = await this.observeTarget(opened).catch(() => null);
+        if (reading) return reading;
+      }
+      return await this.observeTarget(targetId);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Each action of a batch as its CUA step. Every one is checked against the
+   * observation the batch names, the only state its refs come from, before
+   * any of them runs. */
+  private async batchSteps(command: ComputerBackendActionCommand): Promise<Operation[]> {
+    if (command.action.type !== "batch") throw new Error("not a batch");
+    const { actions } = command.action;
+    const steps: Operation[] = [];
+    for (const [index, action] of actions.entries()) {
+      try {
+        const operations = await this.operations({ ...command, action }, index > 0);
+        if (operations.length !== 1)
+          throw unsupported("This action cannot run as one step of a batch");
+        steps.push(operations[0]!);
+      } catch (error) {
+        if (!(error instanceof ComputerBackendError) || actions.length === 1) throw error;
+        const refused = new ComputerBackendError(
+          error.code,
+          `Action ${index + 1} of the batch: ${error.message}. No action of the batch ran.`,
+          error.retryable,
+          false,
+        );
+        throw refused;
+      }
+    }
+    return steps;
+  }
+
+  /** A batch runs as one CUA run_steps call: CUA paces the steps for a batch
+   * and the window is observed once, after the last one. A batch CUA stopped
+   * part way says how many actions completed, so the caller can report each. */
+  private async dispatchBatch(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
+    const steps = await this.batchSteps(command);
+    this.observations.delete(command.targetId);
+    const acted = await this.target(command.targetId);
+    const known = new Set(this.targetsById.keys());
+    const outcome = await runSteps(this.runtime, {
+      ...this.args(acted),
+      // Each step was checked against the batch's observation. A token CUA
+      // finds stale names an element of a window that changed since: the
+      // batch stops there instead of acting on a lookalike CUA finds again.
+      refind_stale: false,
+      steps: steps.map((step) => ({ tool: step.name, args: step.args })),
+    });
+    if (outcome.kind === "completed")
+      return await this.observeAfter(
+        command.targetId,
+        acted,
+        known,
+        openedWindowsReport(outcome.windowChanges),
+      );
+    const message = `CUA stopped the batch at action ${outcome.completed + 1}: ${outcome.message}`;
+    if (outcome.completed === 0 && outcome.definite)
+      throw new ComputerBackendError(outcome.code ?? "driver_failed", message, false, false);
+    const stopped = new ComputerBackendError(
+      outcome.definite ? (outcome.code ?? "driver_failed") : "outcome_unknown",
+      message,
+      false,
+      true,
+    );
+    stopped.details = {
+      batchActionsCompleted: outcome.completed,
+      batchStoppedActionState: outcome.definite ? "failed" : "outcome_unknown",
+    };
+    throw stopped;
   }
 
   close(): Promise<void> {
@@ -767,7 +846,14 @@ export class CuaComputerBackend implements ComputerBackend {
     };
   }
 
-  private async operations(command: ComputerBackendActionCommand): Promise<Operation[]> {
+  /** The CUA calls for one action. `laterInBatch` marks an action that runs
+   * after earlier actions of its batch changed the window: the observation
+   * still names its element, but not the element's state or the focus. */
+  private async operations(
+    command: ComputerBackendActionCommand,
+    laterInBatch = false,
+  ): Promise<Operation[]> {
+    if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
       throw unsupported("CUA click continuation is unavailable");
     }
@@ -930,7 +1016,8 @@ export class CuaComputerBackend implements ComputerBackend {
       const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))
         throw unsupported("CUA element does not advertise this semantic action");
-      if (node.states.includes("disabled"))
+      // An earlier action of the batch can enable it; CUA refuses it if not.
+      if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
       if (action.action === "set_value") {
         if (action.value === undefined)
@@ -968,8 +1055,10 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     // Window-scoped delivery never falls back to the foreground desktop. An
     // observed focused element is carried when CUA supplies that information.
+    // After earlier actions of a batch the focus may have moved (clicking a
+    // field focuses it), so the keys go to whatever has the focus then.
     const focused =
-      observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
+      !laterInBatch && observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
         ? { element_token: observed.focusedRef }
         : {};
     if (action.action === "type")
@@ -1048,14 +1137,75 @@ export class CuaComputerBackend implements ComputerBackend {
     };
   }
 
+  /** Launch an app, then observe its window, so the caller can act on it
+   * directly, or the action's own target when no window of the app is found.
+   * Once the app runs, the launch succeeded whatever happens next. A cold app
+   * can take seconds to show its first window, so its windows are searched
+   * until one appears or the wait runs out. Each search is its own step in the
+   * serialized queue, so previews, human input and close are not held up
+   * between searches. A macOS document app launched in the background may
+   * stay running without any window; one that still shows none after a while
+   * is launched once more, which CUA delivers as a reopen, the way a Dock
+   * click asks a running app for its window (or Open panel), still without
+   * taking focus. */
+  private async dispatchLaunch(
+    command: ComputerBackendActionCommand,
+    applicationId: string,
+  ): Promise<ComputerBackendObservation | null> {
+    let launched = await this.run(async () => {
+      await this.target(command.targetId);
+      return await this.launch(applicationId);
+    });
+    try {
+      const started = performance.now();
+      const deadline = started + this.launchWindowWaitMs;
+      let reopenAt =
+        this.identity.platform === "macos" && launched.pid !== null
+          ? started + MACOS_LAUNCH_REOPEN_AFTER_MS
+          : Number.POSITIVE_INFINITY;
+      for (let attempt = 0; ; attempt++) {
+        const current = launched;
+        const found = await this.run(async () => {
+          const windows = await this.launchedWindows(current);
+          for (const windowTarget of windows) {
+            const reading = await this.observeTarget(windowTarget).catch(() => null);
+            if (reading) return { windows: windows.length, reading };
+          }
+          return { windows: windows.length, reading: null };
+        });
+        if (found.reading) return found.reading;
+        // A window that exists but cannot be read will not become readable by
+        // waiting for it.
+        if (found.windows > 0) break;
+        const now = performance.now();
+        const remaining = deadline - now;
+        if (remaining <= 0 || this.closing) break;
+        if (now >= reopenAt) {
+          reopenAt = Number.POSITIVE_INFINITY;
+          const reopened = await this.run(() => this.launch(applicationId)).catch(() => null);
+          if (reopened)
+            launched = { ...launched, windows: [...launched.windows, ...reopened.windows] };
+          continue;
+        }
+        // Poll quickly at first, when most windows appear, then less often.
+        const pause = attempt < 4 ? LAUNCH_WINDOW_FAST_POLL_MS : LAUNCH_WINDOW_SLOW_POLL_MS;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pause, remaining, Math.max(0, reopenAt - now))),
+        );
+      }
+      return await this.run(() => this.observeTarget(command.targetId));
+    } catch {
+      return null;
+    }
+  }
+
   /** The targets of the launched app's windows, best first: the windows the
    * launch reported, then the listed windows of its process. On Linux the app
    * may run as a child of the launcher process CUA reports, so a window of a
    * descendant counts too. A window that cannot be tied to the launch is never
    * guessed. A window lying within another of the app's windows (part of a
    * panel, such as an Open panel's accessory view) comes after the windows it
-   * lies in. The first window can appear a moment after the process starts,
-   * so discovery is retried briefly. */
+   * lies in. */
   private async launchedWindows(launched: LaunchedApp): Promise<string[]> {
     const ownsWindow = (processId: number | null): boolean => {
       if (processId === null) return false;
@@ -1069,22 +1219,16 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       return false;
     };
-    for (let attempt = 0; ; attempt++) {
-      const targets = await this.discover();
-      const reported = launched.windows
-        .map((window) => `cua:window:${window.pid}:${window.window_id}`)
-        .filter((id) => this.targetsById.has(id));
-      const owned = targets
-        .filter((target) => ownsWindow(target.processId))
-        .map((target) => target.id);
-      const candidates = [...new Set([...reported, ...owned])];
-      if (candidates.length) {
-        const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
-        return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
-      }
-      if (attempt >= LAUNCH_WINDOW_RETRIES) return [];
-      await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
-    }
+    const targets = await this.discover();
+    const reported = launched.windows
+      .map((window) => `cua:window:${window.pid}:${window.window_id}`)
+      .filter((id) => this.targetsById.has(id));
+    const owned = targets
+      .filter((target) => ownsWindow(target.processId))
+      .map((target) => target.id);
+    const candidates = [...new Set([...reported, ...owned])];
+    const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
+    return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
   }
 
   /** The element a locator names. A ref from an earlier observation of the
@@ -1176,9 +1320,18 @@ function procParentPid(pid: number): number | null {
   }
 }
 
-/** How long a launch waits for the app's first window: up to a second. */
-const LAUNCH_WINDOW_RETRIES = 4;
-const LAUNCH_WINDOW_RETRY_MS = 250;
+/** How long a launch waits for the app's first window. A cold macOS launch
+ * of a document app (TextEdit to its Open panel) can take several seconds;
+ * there the launched process reliably owns its window. On Linux and Windows a
+ * launch often hands off to a process that cannot be tied to it (D-Bus
+ * activation, a single-instance app, a stub executable), so a longer wait
+ * would mostly be spent on windows it can never find. */
+const MACOS_LAUNCH_WINDOW_WAIT_MS = 6_000;
+/** How long a launched macOS app may show no window before it is reopened. */
+const MACOS_LAUNCH_REOPEN_AFTER_MS = 2_000;
+const LAUNCH_WINDOW_WAIT_MS = 1_000;
+const LAUNCH_WINDOW_FAST_POLL_MS = 250;
+const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
 
 /** The part of a CUA action result naming the windows it saw the action
  * open, as `App ("Title", …); Other` (an untitled window by its app only).
@@ -1296,4 +1449,16 @@ async function readPermissions(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** Whether this CUA's run_steps can be told to stop at a stale element token
+ * rather than act on a lookalike it finds again by role and label. */
+async function runStepsStopsAtStaleTokens(runtime: CuaDesktopRuntime): Promise<boolean> {
+  if (!runtime.listToolsJson) return false;
+  const { tools } = JSON.parse(await runtime.listToolsJson()) as {
+    tools: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[];
+  };
+  return tools.some(
+    (tool) => tool.name === "run_steps" && tool.inputSchema?.properties?.refind_stale !== undefined,
+  );
 }

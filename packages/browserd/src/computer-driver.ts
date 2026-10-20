@@ -216,6 +216,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
+      this.assertActionBatch(command, client);
       await client.validate(nativeCommand(command));
     } catch (error) {
       throw predispatchError(error, this.typedSecrets.merged());
@@ -230,6 +231,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
+      this.assertActionBatch(command, client);
       const native = nativeCommand(materialized);
       const observation = await client.dispatch(native).catch(async (error: unknown) => {
         // A pasted value stays on the seat clipboard, where clipboard reads
@@ -249,9 +251,13 @@ export class ComputerDriver implements ComputerInteractionDriver {
         const code = interactionErrorCode(error.code);
         const message = driverErrorMessage(error.message, secretValues);
         if (!error.dispatched) {
-          throw new InteractionDefiniteDriverError(code, message, error.retryable);
+          const definite = new InteractionDefiniteDriverError(code, message, error.retryable);
+          definite.details = error.details;
+          throw definite;
         }
-        throw new InteractionOutcomeUnknownDriverError(code, message, false);
+        const unknown = new InteractionOutcomeUnknownDriverError(code, message, false);
+        unknown.details = error.details;
+        throw unknown;
       }
       throw error;
     }
@@ -437,6 +443,16 @@ export class ComputerDriver implements ComputerInteractionDriver {
         false,
       );
     }
+  }
+
+  private assertActionBatch(command: ComputerActionCommand, client: ComputerBackend): void {
+    if (command.action.type === "batch" && client.initialCapabilities.actionBatches !== true)
+      throw new ComputerBackendError(
+        "unsupported",
+        "this computer runs a batch one action at a time; send each action separately",
+        false,
+        false,
+      );
   }
 
   private projectObservation(observation: ComputerBackendObservation): ComputerObservationValue {

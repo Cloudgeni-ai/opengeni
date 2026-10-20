@@ -15,6 +15,7 @@ import type {
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
+  SubscriptionUsagePoolsResponse,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -101,6 +102,7 @@ import type {
   AgentInstructionReviewListResponse,
 } from "./knowledge";
 import type {
+  DuplicateWorkspaceArtifactRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
@@ -277,6 +279,8 @@ import type {
   CodexRealtimeWebrtcResponse,
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -874,7 +878,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected Opengeni API does not support ${feature}`);
+  return new Error(`The connected API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -1144,8 +1148,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
             for (const segment of path) {
               target = (target as Record<string, unknown>)[segment];
             }
-            if (typeof target !== "function")
-              throw new TypeError("Opengeni tool path is not callable");
+            if (typeof target !== "function") throw new TypeError("Tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -2392,7 +2395,26 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  /**
+   * Open (or rotate) the provider WebSocket of an active realtime mode. The
+   * response carries a short-lived client secret and the provider session.
+   */
+  async negotiateRealtimeWebsocket(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRealtimeWebsocketRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeWebsocketResponse> {
+    return await this.requestJson<SessionRealtimeWebsocketResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/realtime/websocket`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateGatewayRealtime(
     workspaceId: string,
     sessionId: string,
@@ -2408,7 +2430,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token from a connected SuperGrok account. */
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateXaiSubscriptionRealtime(
     workspaceId: string,
     sessionId: string,
@@ -5435,6 +5457,20 @@ export class OpenGeniClient {
     );
   }
 
+  /** Pooled account limits and forecasts; does not contact providers. */
+  async getWorkspaceSubscriptionUsagePools(
+    workspaceId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/subscription-usage-pools`);
+  }
+
+  /** Organization subscription limits; uses the account-list administrator boundary. */
+  async getOrganizationSubscriptionUsagePools(
+    organizationId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/organizations/${organizationId}/subscription-usage-pools`);
+  }
+
   async listClaudeSubscriptionAccounts(
     workspaceId: string,
   ): Promise<ClaudeSubscriptionAccountsResponse> {
@@ -7530,6 +7566,7 @@ export class OpenGeniClient {
             ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
             sha256,
+            ...(input.appShot ? { appShot: input.appShot } : {}),
           },
           { signal },
         ),
@@ -8418,6 +8455,22 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Copies a Site's current version into a new Site you own, with the same visibility. */
+  async duplicateWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    request: DuplicateWorkspaceArtifactRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/duplicate`,
       request,
       undefined,
       options,
@@ -11577,7 +11630,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "Opengeni is temporarily unavailable — retry.",
+    displayMessage: "The workspace is temporarily unavailable — retry.",
   });
 }
 
@@ -11614,7 +11667,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "The request could not be confirmed — reconcile before retrying.",
   });
 }
 

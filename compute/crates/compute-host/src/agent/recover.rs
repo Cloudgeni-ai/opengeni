@@ -13,7 +13,9 @@ use futures::StreamExt;
 use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::observe::{Alarm, alarm_event};
-use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
+use crate::protocol::{
+    Id, MAX_MEMORY_MIB, MAX_VCPUS, MIN_CPU_REQUEST_MILLIS, MIN_MEMORY_MIB, SandboxConfig,
+};
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
@@ -34,6 +36,35 @@ fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
     }
 }
 
+/// The size of a sandbox whose record cannot be read whole, from the
+/// parts of it that can (`loose`): its memory, processors and CPU request
+/// where they still tell a value a sandbox may have, and otherwise the
+/// most any sandbox may have, since its VM may still run with it. A value
+/// out of range is as unknown as a missing one: rounding it into range
+/// could count the VM at less than it runs with.
+fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
+    let config = loose.and_then(|record| record.get("config"));
+    let field = |name: &str| config.and_then(|config| config.get(name)?.as_u64());
+    let memory_mib = field("memory_mib")
+        .and_then(|mib| u32::try_from(mib).ok())
+        .filter(|mib| (MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(mib))
+        .unwrap_or(MAX_MEMORY_MIB);
+    let vcpus = field("vcpus")
+        .and_then(|vcpus| u8::try_from(vcpus).ok())
+        .filter(|vcpus| (1..=MAX_VCPUS).contains(vcpus))
+        .unwrap_or(MAX_VCPUS);
+    // Within what its processors allow; all of them when it does not tell,
+    // since its VM may run with any request up to that.
+    let cpu_request_millis = field("cpu_request_millis")
+        .and_then(|millis| u32::try_from(millis).ok())
+        .filter(|millis| (MIN_CPU_REQUEST_MILLIS..=u32::from(vcpus) * 1000).contains(millis))
+        .unwrap_or(u32::from(vcpus) * 1000);
+    SandboxConfig {
+        cpu_request_millis: Some(cpu_request_millis),
+        ..SandboxConfig::new(vcpus, memory_mib, crate::protocol::SleepConfig::default())
+    }
+}
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
         self.recover_strays(strays).await;
@@ -45,7 +76,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 // Its VM may still run.
                 let size = self.retained_size(&record).await;
-                self.unmanaged(id, size);
+                self.unmanaged(id, size, record.config.vcpus);
                 continue;
             }
             // Nothing is done for a sandbox, not even looking at its VM,
@@ -57,7 +88,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
                     self.block(id, format!("record not known to be durable: {error}"));
                     let size = self.retained_size(&record).await;
-                    self.unmanaged(id, size);
+                    self.unmanaged(id, size, record.config.vcpus);
                     continue;
                 }
             };
@@ -69,7 +100,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
                 let size = self.retained_size(&record).await;
-                self.unmanaged(id, size);
+                self.unmanaged(id, size, record.config.vcpus);
                 self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
@@ -117,7 +148,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
                     self.block(id, format!("disk length unknown: {error}"));
                     let size = self.retained_size(&record).await;
-                    self.unmanaged(id, size);
+                    self.unmanaged(id, size, record.config.vcpus);
                 }
             }
         }
@@ -158,7 +189,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // Its VM may still run as the user its ordinal names,
                     // behind the host link its ordinal names: no other
                     // sandbox may get that ordinal, and it may hold as much
-                    // memory as its record still tells, or any sandbox can.
+                    // memory and be guaranteed as much processor time as
+                    // its record still tells, or any sandbox can.
                     let loose = self.loose_record(stray.id).await;
                     let ordinal = self.unreadable_ordinal(stray.id, loose.as_ref()).await;
                     match ordinal {
@@ -173,14 +205,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
                     self.block(stray.id, problem.to_string());
-                    let mib = loose
-                        .as_ref()
-                        .and_then(|record| record.get("config")?.get("memory_mib")?.as_u64())
-                        .map_or(MAX_MEMORY_MIB, |mib| {
-                            u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
-                        });
-                    let config =
-                        SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
+                    let config = loose_config(loose.as_ref());
                     // Only a sandbox whose disk is in the store has no VM
                     // that may hold its local disk open.
                     let remote = loose
@@ -189,7 +214,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         == Some("remote");
                     let disk = Paths::new(&self.root, stray.id).disk;
                     let size = self.retained_size_of(&config, None, disk, !remote).await;
-                    self.unmanaged(stray.id, size);
+                    self.unmanaged(stray.id, size, config.vcpus);
                 }
             }
         }
@@ -214,6 +239,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // the sandbox cannot be taken back.
             let live = !matches!(vm, Ok(None));
             let size = live.then(|| self.record_size(&record));
+            let vcpus = record.config.vcpus;
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
@@ -230,7 +256,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
                     self.block(id, format!("not recovered: {error}"));
                     if let Some(size) = size {
-                        self.unmanaged(id, size);
+                        self.unmanaged(id, size, vcpus);
                     }
                 }
             }
@@ -303,15 +329,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Counts the VM of sandbox `id`, of `size`, which may still run,
-    /// against the admission budget at its full size while this agent does
-    /// not manage it, and books what it may still write to local disk: a
-    /// save an earlier agent may have started, and its guest disk's growth.
-    /// Both last until a removal ends it.
-    fn unmanaged(&mut self, id: Id, size: Size) {
+    /// against the admission budget at its full size, and against the
+    /// processor budget at all its `vcpus`, since the agent that started it
+    /// set its weight, which may stand for any request up to them, while
+    /// this agent does not manage it; and books what it may still write to
+    /// local disk: a save an earlier agent may have started, and its guest
+    /// disk's growth. Both last until a removal ends it.
+    fn unmanaged(&mut self, id: Id, size: Size, vcpus: u8) {
         self.inputs([
             Input::Unmanaged {
                 sandbox: id.0,
                 bytes: size.limit,
+                cpu: u64::from(vcpus) * 1000,
             },
             Input::Writes {
                 key: id.0,
@@ -802,6 +831,68 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         for alarm in alarms {
             let event = alarm_event(what.clone()).with("compute.sandbox.id", id.to_string());
             self.observer.alarm(alarm, event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record that cannot be read whole counts its VM at what its parts
+    /// still tell, and otherwise at the most any sandbox may have.
+    #[test]
+    fn an_unreadable_record_counts_what_it_still_tells_or_the_most() {
+        let told = serde_json::json!({
+            "config": {"vcpus": 4, "memory_mib": 2048, "cpu_request_millis": 250},
+            "disk": "not what a record holds",
+        });
+        let config = loose_config(Some(&told));
+        assert_eq!((config.vcpus, config.memory_mib), (4, 2048));
+        assert_eq!(config.cpu_request(), 250);
+        // Its processors, but no request: all of them, as before requests.
+        let processors = serde_json::json!({"config": {"vcpus": 4}});
+        let config = loose_config(Some(&processors));
+        assert_eq!(config.cpu_request(), 4000);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        // Nothing: the most.
+        let config = loose_config(None);
+        assert_eq!(config.vcpus, MAX_VCPUS);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
+        // Out of range, too high or too low, it is unknown: the most,
+        // never rounded into range, which could count less than the VM
+        // runs with.
+        let wild = serde_json::json!({"config": {"vcpus": 900, "cpu_request_millis": 99_999_999}});
+        let config = loose_config(Some(&wild));
+        assert_eq!(config.vcpus, MAX_VCPUS);
+        assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
+        assert_eq!(
+            loose_config(Some(&serde_json::json!({"config": {"vcpus": 0}}))).vcpus,
+            MAX_VCPUS
+        );
+        let zeros = serde_json::json!({
+            "config": {"vcpus": 4, "memory_mib": 0, "cpu_request_millis": 0},
+        });
+        let config = loose_config(Some(&zeros));
+        assert_eq!(config.vcpus, 4);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), 4000);
+        let small = serde_json::json!({
+            "config": {"vcpus": 2, "memory_mib": 64, "cpu_request_millis": 9},
+        });
+        let config = loose_config(Some(&small));
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), 2000);
+        // Every value it does keep is one a sandbox may have.
+        for config in [
+            loose_config(Some(&told)),
+            loose_config(Some(&wild)),
+            loose_config(Some(&zeros)),
+            loose_config(Some(&small)),
+            loose_config(None),
+        ] {
+            assert!(config.validate().is_ok(), "{config:?}");
         }
     }
 }

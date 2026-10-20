@@ -215,6 +215,9 @@ describe("Slack integration authority", () => {
       false,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["connections:write"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canInstallOpenGeniSlackBot(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
       true,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["workspace:admin"]), "workspace-a")).toBe(

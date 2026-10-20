@@ -8,6 +8,8 @@ import {
 } from "@opengeni/core";
 import {
   createDb,
+  createScheduledTaskRun,
+  getSession,
   getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
   type DbClient,
@@ -57,11 +59,11 @@ function settings() {
   return testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
 }
 
-function scheduler() {
+function scheduler(overrides: Parameters<typeof testSettings>[0] = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
-        settings: settings(),
+        settings: { ...settings(), ...overrides },
         db: client.db,
         bus: new MemoryEventBus(),
         wakeSessionWorkflow: async () => undefined,
@@ -106,16 +108,18 @@ async function createWithKey(
   workspace: Fixture,
   key: AccessGrant,
   schedule: Record<string, unknown>,
+  agentConfig: Record<string, unknown> = {},
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
 ) {
   return await createValidatedScheduledTask({
-    settings: settings(),
+    settings: { ...settings(), ...settingsOverrides },
     db: client.db,
     objectStorage: null,
     grant: key,
     payload: CreateScheduledTaskRequest.parse({
       name: "Embedded digest",
       schedule,
-      agentConfig: { prompt: "Summarize today's activity" },
+      agentConfig: { prompt: "Summarize today's activity", ...agentConfig },
     }),
   });
 }
@@ -220,6 +224,116 @@ describe("organization API key scheduled tasks", () => {
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ status: "failed", error: "machine_target_unavailable" });
+  }, 180_000);
+
+  test("workspace default resolves for fresh runs while queued recovery keeps accepted placement", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const key = organizationKey(workspace);
+    await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "managed" } })} where id = ${workspace.workspaceId}`;
+    const task = await createWithKey(
+      workspace,
+      key,
+      { type: "manual" },
+      { executionTarget: "workspace_default" },
+      { sandboxBackend: "local" },
+    );
+    const first = await scheduler({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+    }).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `default-first:${crypto.randomUUID()}`,
+    });
+    expect(first.action).toBe("start");
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run!.id,
+    });
+    expect(accepted?.resolvedMachineTarget).toBeNull();
+    expect(accepted?.task.agentConfig.executionTarget).toBe("workspace_default");
+    const recoveryRunId = crypto.randomUUID();
+    const recoveryProducer = `default-recovery:${crypto.randomUUID()}`;
+    await createScheduledTaskRun(client.db, {
+      runId: recoveryRunId,
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+      taskExecutionDigest: task.executionDigest,
+      triggerType: "scheduled",
+      producerKey: recoveryProducer,
+      acceptedExecutionSnapshot: {
+        ...accepted!,
+        generatedSessionBinding: {
+          ...accepted!.generatedSessionBinding!,
+          createIdempotencyKey: `scheduled-task-run:${recoveryRunId}`,
+        },
+      },
+    });
+    // The configured machine was removed after acceptance. Accepted managed
+    // work stays managed, while a new occurrence visibly refuses that target.
+    await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: crypto.randomUUID() } })} where id = ${workspace.workspaceId}`;
+    const recovered = await scheduler({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+    }).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: recoveryProducer,
+    });
+    expect(recovered.action).toBe("start");
+    if (recovered.action !== "start") throw new Error("expected recovered session");
+    expect(await getSession(client.db, workspace.workspaceId, recovered.sessionId)).toMatchObject({
+      sandboxBackend: "local",
+      activeSandboxId: null,
+    });
+    const fresh = await scheduler({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+    }).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `default-next:${crypto.randomUUID()}`,
+    });
+    expect(fresh).toMatchObject({ action: "blocked", reason: "machine_target_unavailable" });
+
+    await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "managed" } })} where id = ${workspace.workspaceId}`;
+    expect(
+      await scheduler().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `managed-disabled:${crypto.randomUUID()}`,
+      }),
+    ).toMatchObject({ action: "blocked", reason: "machine_target_unavailable" });
+
+    // An explicit managed schedule does not follow the broken default.
+    const pinned = await createWithKey(
+      workspace,
+      key,
+      { type: "manual" },
+      { sandboxBackend: "none" },
+    );
+    expect(
+      await scheduler({
+        sandboxBackend: "local",
+        sandboxOwnershipEnabled: true,
+        sandboxSelfhostedEnabled: true,
+      }).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: pinned.id,
+        triggerType: "scheduled",
+        producerKey: `explicit:${crypto.randomUUID()}`,
+      }),
+    ).toMatchObject({ action: "start" });
   }, 180_000);
 
   test("a task naming a model the catalog no longer offers is a visible terminal run", async () => {

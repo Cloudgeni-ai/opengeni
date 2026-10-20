@@ -127,6 +127,10 @@ export type ThisComputerErrorCode =
 
 export interface ThisComputerStatus {
   state: ThisComputerState;
+  /** An existing background service stays independent of the desktop app. */
+  management?: "service" | "app";
+  /** The permission-bearing app, when it differs from the desktop shell. */
+  permissionAppName?: string;
   /** A connect, pause or resume is in progress. */
   busy: boolean;
   /** The last failure, in plain words, until the next successful action. */
@@ -135,6 +139,12 @@ export interface ThisComputerStatus {
   errorCode?: ThisComputerErrorCode;
   /** The computer's name as agents see it. */
   machineName: string;
+  /**
+   * When linked to this workspace (connected or paused), the computer's
+   * enrollment id, as agents see it in their list of machines. Absent from
+   * older apps.
+   */
+  enrollmentId?: string;
   /** While the agent downloads during setup, how much has arrived, from 0 to 1. */
   setupProgress?: number;
   /**

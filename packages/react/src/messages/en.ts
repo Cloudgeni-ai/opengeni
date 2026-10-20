@@ -75,6 +75,16 @@ export const englishMessages = {
   "artifacts.artifactChrome.tryAgain": "Try again",
   "artifacts.artifactChrome.uppercaseSliceSharedEditor": "{upperCase}{slice} · shared editor",
   "artifacts.artifactChrome.versionRevision": "Version {revision}",
+  "artifacts.artifactDownload.document": "Document",
+  "artifacts.artifactDownload.download": "Download",
+  "artifacts.artifactDownload.downloadDocumentAsDocx": "Download document as DOCX",
+  "artifacts.artifactDownload.downloadFailedTryAgain": "Download failed. Try again.",
+  "artifacts.artifactDownload.downloadPresentationAsPptx": "Download presentation as PPTX",
+  "artifacts.artifactDownload.preparing": "Preparing…",
+  "artifacts.artifactDownload.presentation": "Presentation",
+  "artifacts.artifactDownload.waitForDocumentChangesTo": "Wait for document changes to sync",
+  "artifacts.artifactDownload.waitForPresentationChangesTo":
+    "Wait for presentation changes to sync",
   "artifacts.artifactSurface.document": "Document",
   "artifacts.artifactSurface.presentation": "Presentation",
   "artifacts.artifactSurface.spreadsheet": "Spreadsheet",
@@ -543,6 +553,10 @@ export const englishMessages = {
   "commands.registry.thisSessionHasNoGoal": "This session has no goal to control.",
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
+  "composer.appShotSummary": "{app} · App-shot",
+  "composer.appShotTextIncluded":
+    "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
+  "composer.appShotNoText": "Only the screenshot: this window shared no text.",
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
@@ -1320,6 +1334,8 @@ export const englishMessages = {
     "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
+  "lib.providerRecovery.opengeniToolServiceUnavailable":
+    "Opengeni’s tool service is temporarily unavailable",
   "lib.providerRecovery.aRequiredMcpServerIs": "A required MCP server is unreachable",
   "lib.providerRecovery.aRequiredMcpServerIsn": "A required MCP server isn't responding",
   "lib.providerRecovery.aServiceThisTurnDepends":
@@ -1545,15 +1561,46 @@ export const englishMessages = {
   "machines.machineStatus.updateNow": "Update now",
   "machines.machineStatus.updatesToTargetWhenCurrent":
     "Updates to {target} when current work finishes",
-  "machines.machineStatus.updateHeldDuration": "Update to {target} waiting for {duration}",
+  "machines.machineStatus.updateHeldDuration": "Update to {target} has been waiting {duration}",
   "machines.machineStatus.waitingForInteractions":
-    "Waiting for browser or computer-use sessions on this machine to end. They won't be closed for the update.",
+    "Waiting for browser or computer-use work to finish. It will not be stopped for the update.",
   "machines.machineStatus.waitingForUploads":
-    "Waiting for a file upload to finish. The update will continue automatically; the upload will not be interrupted.",
-  "machines.machineStatus.waitingForWork":
-    "Waiting for commands, file operations or interaction sessions on this machine to finish. The machine doesn't report which one. Nothing will be stopped.",
-  "machines.machineStatus.waitingForIdleProof":
-    "Waiting for the machine to confirm it can update without interrupting work. The update will continue automatically.",
+    "Waiting for file uploads to finish. They will not be stopped for the update.",
+  "machines.machineStatus.waitingForUnspecifiedWork":
+    "The machine reports unfinished work but does not identify it. Nothing will be stopped for the update.",
+  "machines.machineStatus.reportedBlockers":
+    "Last reported {duration} ago: {details}. Nothing will be stopped for the update.",
+  "machines.machineStatus.offlineUpdateReport":
+    "Machine not connected; showing its last update report",
+  "machines.machineStatus.blockerOtherWork": "Other work",
+  "machines.machineStatus.blockerNativeCounters": "Machine work (overlapping counters)",
+  "machines.machineStatus.blockerPreviousUpdate":
+    "An earlier update still holds the controller fence",
+  "machines.machineStatus.blockerCount": "{label}: {count}",
+  "machines.machineStatus.blockerBrowserAction": "Browser action",
+  "machines.machineStatus.blockerBrowserSession": "Browser session that would close on restart",
+  "machines.machineStatus.blockerBrowserCreation": "Browser opening",
+  "machines.machineStatus.blockerBrowserClosing": "Browser closing",
+  "machines.machineStatus.blockerBrowserRecovery": "Browser recovery",
+  "machines.machineStatus.blockerBrowserAuth": "Browser sign-in",
+  "machines.machineStatus.blockerBrowserTransfer": "Browser state transfer",
+  "machines.machineStatus.blockerComputerAction": "Computer action",
+  "machines.machineStatus.blockerVirtualDesktop": "Open virtual desktop",
+  "machines.machineStatus.blockerComputerSession": "Computer session changing state",
+  "machines.machineStatus.blockerComputerCreation": "Computer session opening",
+  "machines.machineStatus.blockerComputerClosing": "Computer session closing",
+  "machines.machineStatus.blockerSeatTransfer": "Desktop changing owners",
+  "machines.machineStatus.blockerControllerRequest": "Browser or computer request",
+  "machines.machineStatus.blockerControllerLifecycle": "Browser or computer session changing state",
+  "machines.machineStatus.blockerStream": "Open screen stream",
+  "machines.machineStatus.blockerProducer": "Screen-stream work or cleanup",
+  "machines.machineStatus.blockerUpload": "File upload",
+  "machines.machineStatus.blockerNativeRequest": "Machine request",
+  "machines.machineStatus.blockerNativeOperation": "Command or retained result",
+  "machines.machineStatus.blockerQueuedRequest": "Queued machine request",
+  "machines.machineStatus.blockerQueuedOperation": "Queued command",
+  "machines.machineStatus.blockerCleanup": "Cleanup not yet confirmed",
+  "machines.machineStatus.blockerUnknown": "Work not identified by this version",
   "machines.machineStatus.updateToTargetFailed": "Update to {target} failed",
   "machines.machineStatus.updateToTargetPostponedOpen":
     "Update to {target} postponed: open browsers would close",
@@ -1736,6 +1783,7 @@ export const englishMessages = {
   "modelPickerModel.searchModelsOrProviders": "Search models or providers",
   "modelPickerModel.searchModelsOrProviders2": "Search models or providers…",
   "modelPickerModel.selected": "Selected",
+  "modelPickerModel.speed": "Speed",
   "modelPickerModel.supergrokXaiPlan": "SuperGrok / xAI plan",
   "modelPickerModel.thinking": "Thinking",
   "modelPickerModel.thinkingEffort": "Thinking effort",
@@ -1787,6 +1835,7 @@ export const englishMessages = {
   "modelPolicy.routeUnknown": "Route unknown",
   "modelPolicy.standard": "Standard",
   "modelPolicy.supergrokSubscriptionExternalBilling": "SuperGrok subscription · external billing",
+  "modelPolicy.ultrafast": "Ultrafast",
   "modelPolicy.unavailable": "Unavailable",
   "modelPolicy.unsupported": "Unsupported",
   "modelPolicy.usesCredits": "Uses credits",
@@ -1955,6 +2004,7 @@ export const englishMessages = {
   "native.timeline.activity.thought": "Thought",
   "native.timeline.composer.errorDismiss": "{error} Dismiss",
   "native.timeline.composer.fast": "Fast",
+  "native.timeline.composer.ultrafast": "Ultrafast",
   "native.timeline.composer.stopAndTranscribe": "Stop and transcribe",
   "native.timeline.decisions.approve": "Approve",
   "native.timeline.decisions.approved": "Approved",
@@ -2413,6 +2463,7 @@ export const englishMessages = {
   "realtime.realtimeControl.audioMuted": "audio muted",
   "realtime.realtimeControl.audioOutputBlocked": "Audio output blocked",
   "realtime.realtimeControl.billedToYourAiGateway": "Billed to your AI Gateway",
+  "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
   "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
@@ -2482,6 +2533,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceModelUnavailable": "Voice model unavailable",
   "realtime.realtimeControl.voiceUnavailable": "Voice unavailable",
   "realtime.realtimeControl.yourGateway": "Your Gateway",
+  "realtime.realtimeControl.yourElevenlabs": "Your ElevenLabs",
   "realtime.sessionRealtime.codexLive": "Codex Live",
   "realtime.sessionRealtime.codexRealtimeControllerFailedTo":
     "Codex realtime controller failed to load",
@@ -3012,6 +3064,8 @@ export const englishMessages = {
   "thisComputer.later": "Finish later",
   "thisComputer.ready": "Agents can use {machineName}",
   "thisComputer.reconnecting": "Connecting {machineName}…",
+  "thisComputer.serviceConnecting":
+    "Waiting for the existing agent to report its connection and permissions.",
   "thisComputer.paused": "{machineName} is paused",
   "thisComputer.resume": "Resume",
   "thisComputer.pause": "Pause",
@@ -3021,6 +3075,12 @@ export const englishMessages = {
     "Agents won't be able to use {machineName} anymore. You can turn it on again any time.",
   "thisComputer.cancel": "Cancel",
   "thisComputer.pauseHint": "You can also pause it from the {tray}.",
+  "thisComputer.existingService":
+    "Use the existing Opengeni agent. Its installation and permissions stay in place, and it keeps running when you quit this app.",
+  "thisComputer.servicePauseHint":
+    "Pause stops the background agent until you resume it, even after you log in again or restart. Quitting this app leaves it running.",
+  "thisComputer.servicePermissions":
+    "Choose Opengeni Agent in System Settings. After changing its permissions, pause and resume the agent to apply them. Pausing stops its current work.",
   "thisComputer.resumeHint": "You can also resume it from the {tray}.",
   "thisComputer.finishSetup": "Finish setting up",
   "thisComputer.finishSetupDetail": "Let agents see your screen and use the mouse and keyboard.",
@@ -3863,6 +3923,8 @@ export const englishMessages = {
   "timeline.toolStep.withdrawNotification.running": "Withdrawing a notification",
   "timeline.toolStep.workInBrowser.done": "Worked in the browser",
   "timeline.toolStep.workInBrowser.running": "Working in the browser",
+  "timeline.toolStep.workInExcel.done": "Worked in Excel",
+  "timeline.toolStep.workInExcel.running": "Working in Excel",
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",

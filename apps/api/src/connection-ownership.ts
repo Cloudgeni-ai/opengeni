@@ -12,8 +12,7 @@ import { HTTPException } from "hono/http-exception";
 export function requireProviderConsentInBrowser(access: AccessGrantAuthorization): void {
   if (isVerifiedDelegatedHumanAuthorization(access))
     throw new HTTPException(403, {
-      message:
-        "Signing in to a provider has to be done by the person in the Opengeni app in a browser.",
+      message: "Signing in to a provider has to be done by the person in the app in a browser.",
     });
 }
 

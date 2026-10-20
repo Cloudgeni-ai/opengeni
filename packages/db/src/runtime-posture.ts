@@ -222,6 +222,8 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
   "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[])",
+  "read_slack_bot_workspace_access(uuid, uuid, uuid)",
   "read_organization_slack_bot_access(uuid, uuid, uuid)",
   "list_organization_slack_bots(uuid, uuid)",
   "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
@@ -279,6 +281,11 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",
   "subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // Migration 0871: the usage-history capture triggers and the appender they
+  // run as their owner (triggers fire without the writing role holding EXECUTE).
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
   // Migration 0712: owner-only trigger functions of the provider cutover
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
@@ -961,10 +968,17 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
   "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
   "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
+  "read_subscription_usage_history(uuid, uuid, text, text, uuid[])",
+  "append_subscription_usage_reading(uuid, uuid, text, jsonb)",
+  "prune_subscription_usage_history()",
+  "subscription_usage_history_prune_due()",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */
 export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
+  "capture_usage_reading()",
+  "append_usage_reading(uuid, uuid, jsonb)",
+  "capture_usage_call()",
   "subscription_core_writer_context(text, uuid, uuid, text)",
   "grant_subscription_core_owner_capability(text, text, uuid, uuid, text, uuid)",
   "drop_subscription_core_owner_capabilities(text, uuid)",

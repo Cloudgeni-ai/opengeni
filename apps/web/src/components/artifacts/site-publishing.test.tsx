@@ -266,6 +266,17 @@ test("unavailable, forbidden and Only me Sites show one notice instead of the fo
   await act(async () => button(privateNone.host, "Share with workspace")!.click());
   expect(shared).toBe(1);
   await privateNone.unmount();
+
+  // A Personal workspace has nobody to share with: publishing shares it.
+  const personal = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    site: { id: "site", title: "Team CRM", visibility: "private" },
+    personalWorkspace: true,
+  });
+  expect(personal.host.textContent).not.toContain("Share this Site with the workspace first");
+  expect(personal.host.querySelector("input")).not.toBeNull();
+  await personal.unmount();
 });
 
 test("take down asks for a reason, and a taken-down Site offers Restore", async () => {
@@ -572,5 +583,60 @@ test("a non-admin's first publish leaves limits to the workspace default", async
   await flush();
   expect(calls.updates).toHaveLength(1);
   expect(calls.updates[0]).not.toHaveProperty("limitProfile");
+  await page.unmount();
+});
+
+test("the header's Publish button is only for a Site that isn't on the web", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = async (load: Parameters<typeof module.SitePublishButton>[0]["load"]) =>
+    await act(async () => root.render(<module.SitePublishButton load={load} onOpen={() => {}} />));
+  await render({ state: "none" });
+  expect(host.textContent).toBe("Publish");
+  await render({ state: "ready", publication: published({ status: "unpublished" }) });
+  expect(host.textContent).toBe("Publish");
+  // Once published or taken down, its address and settings are in Settings.
+  await render({ state: "ready", publication: published() });
+  expect(host.textContent).toBe("");
+  await render({ state: "ready", publication: published({ status: "suspended" }) });
+  expect(host.textContent).toBe("");
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("in Settings a published Site's form has no back link and Discard restores the saved values", async () => {
+  const { client } = fakeClient();
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: published() },
+    layout: "panel",
+  });
+  expect(page.host.textContent).toContain("Web address");
+  expect(page.host.textContent).not.toContain("Team CRM");
+  // Nothing to save or discard until something changes.
+  expect(button(page.host, "Save changes")).toBeUndefined();
+  expect(button(page.host, "Discard")).toBeUndefined();
+  await act(async () => typeInto(page.host.querySelector("input")!, "team-crm-new"));
+  await waitForCheck();
+  expect(button(page.host, "Save changes")).toBeDefined();
+  await act(async () => button(page.host, "Discard")!.click());
+  await flush();
+  expect(page.host.querySelector("input")?.value).toBe("team-crm-4k9x");
+  expect(button(page.host, "Save changes")).toBeUndefined();
+  await page.unmount();
+});
+
+test("in Settings a first publish offers Publish without Cancel", async () => {
+  const { client } = fakeClient();
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    layout: "panel",
+  });
+  expect(page.host.textContent).toContain("Publish to web");
+  expect(button(page.host, "Publish")).toBeDefined();
+  expect(button(page.host, "Cancel")).toBeUndefined();
+  expect(button(page.host, "Discard")).toBeUndefined();
   await page.unmount();
 });

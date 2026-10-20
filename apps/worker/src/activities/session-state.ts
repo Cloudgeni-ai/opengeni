@@ -1,3 +1,4 @@
+import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./agent-turn/provider-recovery-policy";
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
@@ -318,7 +319,7 @@ export function createSessionStateActivities(
       (!Number.isSafeInteger(providerRecoveryCount) ||
         providerRecoveryCount <= 0 ||
         providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata ?? {}) + 1 ||
-        providerRecoveryCount > providerRecoveryLimit(providerFailureCode) ||
+        providerRecoveryCount > (providerRecoveryLimit(providerFailureCode) ?? Infinity) ||
         typeof providerFailureCode !== "string" ||
         !/^[a-z][a-z0-9_]{0,63}$/.test(providerFailureCode))
     ) {
@@ -358,7 +359,12 @@ export function createSessionStateActivities(
             : (providerFailureCode ?? "claimed_attempt_database_failure"),
         ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
         ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
-        ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
+        // The internal setup wire count is a CAS witness only. Preserve the
+        // existing model-provider budget and clock while our API is unavailable.
+        ...(providerRecoveryCount !== undefined &&
+        providerFailureCode !== FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
+          ? { providerRecoveryCount }
+          : {}),
         ...(providerRecoveryContinueDelayMs !== undefined
           ? { retryAfterMs: providerRecoveryContinueDelayMs }
           : {}),
@@ -383,7 +389,9 @@ export function createSessionStateActivities(
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,
-                providerRecoveryCount,
+                ...(providerFailureCode !== FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
+                  ? { providerRecoveryCount }
+                  : {}),
                 ...(providerFailureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
                   ? {
                       providerCondition: "overloaded",

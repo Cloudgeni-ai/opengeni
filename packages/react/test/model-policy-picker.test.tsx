@@ -1403,6 +1403,97 @@ describe("ModelPolicyPicker", () => {
   });
 });
 
+describe("Ultrafast speed choice", () => {
+  const sol = MODELS[0]!;
+  const withUltrafast = (runnable: boolean, billingMultiplierBps?: number): ClientModel => ({
+    ...sol,
+    capabilities: {
+      ...sol.capabilities!,
+      latencyModes: [
+        ...sol.capabilities!.latencyModes,
+        {
+          id: "ultrafast",
+          upstream: "supported",
+          runnable,
+          ...(billingMultiplierBps ? { billingMultiplierBps } : {}),
+        },
+      ],
+    },
+  });
+
+  async function menu(model: ClientModel, latencyMode: "standard" | "fast" | "ultrafast") {
+    const changes: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode={latencyMode}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={(mode) => changes.push(mode)}
+      />,
+    );
+    return { container, changes };
+  }
+
+  test("a model offering Ultrafast replaces the Fast toggle with a Speed choice", async () => {
+    const { container, changes } = await menu(withUltrafast(true, 60_000), "ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+    const group = container.querySelector('[role="radiogroup"][aria-label="Speed"]')!;
+    expect(group).toBeTruthy();
+    const options = [...group.querySelectorAll('[role="radio"]')];
+    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast", "Ultrafast"]);
+    expect(options.map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+      "true",
+    ]);
+    // The plan counts Ultrafast against its usage limits.
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "8× usage",
+    );
+    await act(async () => (options[1] as HTMLButtonElement).click());
+    expect(changes).toEqual(["fast"]);
+  });
+
+  test("metered routes show the rate multiple", async () => {
+    const { container } = await menu(
+      { ...withUltrafast(true, 60_000), id: "gpt-6.1-sol", provider: "openai", source: "opengeni" },
+      "ultrafast",
+    );
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "6× rate",
+    );
+  });
+
+  test("without a runnable Ultrafast the Fast toggle stays", async () => {
+    const { container } = await menu(withUltrafast(false), "standard");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="model-picker-speed"]')).toBeNull();
+  });
+
+  test("the composer trigger marks Ultrafast", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[withUltrafast(true)]}
+        model={sol.id}
+        effort="medium"
+        latencyMode="ultrafast"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="model-picker-ultrafast-icon"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeNull();
+  });
+});
+
 describe("model identity outside settings", () => {
   test("ModelName shows the clean name and maker mark for any connection scope", async () => {
     const container = await mount(

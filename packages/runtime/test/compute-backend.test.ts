@@ -300,12 +300,21 @@ class FakeAgentPlane implements ComputeAgentPlane {
         if (this.sessions.get(base.split(".")[2] ?? "") !== base.split(".")[4]) {
           throw Object.assign(new Error("503 no responders"), { code: "503" });
         }
-        const answer = await fake.request(base, ControlRequest.decode(payload), {
-          timeoutMs: opts.timeout,
-        });
+        const request = ControlRequest.decode(payload);
+        const answer = await fake.request(base, request, { timeoutMs: opts.timeout });
+        // A replay v2 agent issues single-use delivery tokens to a batch ping.
+        if (
+          request.op?.$case === "ping" &&
+          request.op.ping.controlReplayWindowMs !== "0" &&
+          answer.result?.$case === "ping"
+        ) {
+          answer.result.ping.controlReplayTokens = Array.from({ length: 64 }, () =>
+            crypto.randomUUID(),
+          );
+        }
         return {
           data: ControlResponse.encode(answer).finish(),
-          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "2" : "") },
         };
       },
     };

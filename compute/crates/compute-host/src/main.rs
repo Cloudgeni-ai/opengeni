@@ -15,6 +15,7 @@ use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
+use compute_host::cpu_share::ProcessorShare;
 use compute_host::fleet::{FleetConfig, Leased, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
@@ -122,7 +123,7 @@ struct CreateArgs {
     #[arg(long)]
     memory_request_mib: Option<u32>,
     /// Processor time it is guaranteed under contention, in thousandths
-    /// of a processor; defaults to all its processors.
+    /// of a processor; defaults to a tenth of each of its processors.
     #[arg(long)]
     cpu_request_millis: Option<u32>,
     /// Start from the recommended sleep settings instead of never
@@ -253,6 +254,22 @@ struct ServeArgs {
     /// deeper in the background. Defaults to a sixteenth of the capacity.
     #[arg(long)]
     memory_buffer_mib: Option<u64>,
+    /// Processor time, in millicores, this host guarantees its sandboxes
+    /// at once: every sandbox awake or waking reserves its CPU request
+    /// from it, and a wake that does not fit is refused at once as host
+    /// full. Above it the host overcommits: requests then hold only in
+    /// proportion. Kept as given, whatever the VMs' group gets. Defaults
+    /// to the processors the VMs may run on, a thousand per processor,
+    /// less `--cpu-headroom-millis`, and no more than the VMs' group gets
+    /// with every group beside and above it busy, read again every few
+    /// seconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    cpu_capacity_millis: Option<u64>,
+    /// Processor time, in millicores, kept back from sandboxes for the
+    /// agent, its pagers and the rest of the host when the capacity comes
+    /// from the processors. Defaults to a sixteenth of them, at least 500.
+    #[arg(long)]
+    cpu_headroom_millis: Option<u64>,
     /// Local disk never booked for saves: room for records, logs and
     /// anything else written beside them. Every VM not saved yet books
     /// what its next save may write; a wake that would book more than is
@@ -312,16 +329,22 @@ struct ServeArgs {
     /// sandbox. Must not be used for anything else.
     #[arg(long, default_value = "198.18.0.0/15")]
     network_pool: Ipv4Net,
-    /// Let sandboxes reach this host's local network (private and shared
-    /// ranges). The host itself, metadata services and other sandboxes
-    /// stay blocked.
-    #[arg(long)]
-    trusted: bool,
+    /// A destination beyond the internet that sandboxes may open TCP
+    /// connections to, and its ports: `DESTINATION:PORTS`, the destination
+    /// a DNS name, an address or `address/prefix`, the ports a list such as
+    /// `443,9443-9445`. The host resolves a name when the agent starts, and
+    /// sandboxes' name server answers it with those addresses. Nothing else
+    /// on the host's local or overlay network is reachable, and never the
+    /// host, metadata services or other sandboxes. Repeatable.
+    #[arg(long = "reach")]
+    reach: Vec<compute_host::net::Reach>,
     /// Another range sandboxes may not reach, such as the host's public
     /// address where the cloud maps it onto a private one. Repeatable.
     #[arg(long = "block")]
     blocked: Vec<Ipv4Net>,
-    /// A name server for guests; repeatable, at most two are used.
+    /// A name server the host asks for sandboxes, tried in order;
+    /// repeatable. Use public ones: whatever names it knows, sandboxes can
+    /// look up.
     #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
     dns: Vec<Ipv4Addr>,
     /// A running sandbox whose VM uses at least this percent of one
@@ -654,6 +677,14 @@ fn host_policy(
         // samples keeps a sandbox from being pushed deeper to make room.
         busy_grace: args.busy_window + 2 * sample_every,
     });
+    // Those its VMs may run on.
+    let processors = compute_host::cpu_share::processors(&args.cgroup);
+    let cpu = cpu_budget(
+        processors,
+        args.cpu_capacity_millis,
+        args.cpu_headroom_millis,
+    )?;
+    policy.cpu_budget = Some(cpu);
     policy.memory = memory_policy(
         memory_profile,
         args.memory_low_mib,
@@ -688,7 +719,8 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         profile
     };
     let sample_every = Duration::from_secs(1);
-    let policy = host_policy(&args, memory_profile, sample_every)?;
+    let mut policy = host_policy(&args, memory_profile, sample_every)?;
+    let share = processor_share(&args, &policy);
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
         retained: args.retained_firecracker,
@@ -698,6 +730,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
+    let processor_share = guarantee_vm_processors(share, &mut policy)?;
     check_huge_pages(memory_profile)?;
     check_zswap(memory_profile.compress && !args.no_compress)?;
     raise_open_file_limit();
@@ -712,6 +745,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         memory_profile: memory_profile.to_string(),
         cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
         memory_bytes: budget,
+        cpu_millis: policy.cpu_budget,
     })?;
     let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
     // A host in a fleet keeps agent links for the sandboxes that run
@@ -742,7 +776,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         pool,
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,
-            trusted: args.trusted,
+            reach: args.reach,
             blocked: args.blocked,
             dns: args.dns,
         }),
@@ -765,6 +799,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         summary_every: HostConfig::SUMMARY_EVERY,
         lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
         agent_link,
+        processor_share,
     };
     // Boxed: the agent and everything it was given are large.
     Box::pin(run_with_store(
@@ -952,6 +987,88 @@ fn admission_budget(
     total.saturating_sub(headroom)
 }
 
+/// Millicores a host of `processors` guarantees its sandboxes at once:
+/// `capacity` when given, otherwise its processors less `headroom`, by
+/// default a sixteenth of them, at least 500 millicores.
+fn cpu_budget(
+    processors: usize,
+    capacity: Option<u64>,
+    headroom: Option<u64>,
+) -> anyhow::Result<u64> {
+    if let Some(capacity) = capacity {
+        return Ok(capacity);
+    }
+    let total = u64::try_from(processors)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1000);
+    let headroom = headroom.unwrap_or((total / 16).max(500));
+    let budget = total.saturating_sub(headroom);
+    anyhow::ensure!(
+        budget > 0,
+        "a processor headroom of {headroom} millicores leaves sandboxes none of this host's \
+         {total}: lower --cpu-headroom-millis or give --cpu-capacity-millis"
+    );
+    Ok(budget)
+}
+
+/// The VMs' processor share, when the host guarantees processor time: of
+/// `policy`'s budget, kept as given when the operator gave it.
+fn processor_share(args: &ServeArgs, policy: &HostPolicy) -> Option<ProcessorShare> {
+    let share = ProcessorShare::new(args.cgroup.clone(), policy.cpu_budget?);
+    Some(if args.cpu_capacity_millis.is_some() {
+        share.stated()
+    } else {
+        share
+    })
+}
+
+/// Gives the VMs' group the processor `share` that covers the host's
+/// budget against the groups beside and above it (see
+/// [`compute_host::cpu_share`]), and sets `policy`'s budget to what the
+/// host guarantees with it; returns the share, which the agent keeps up
+/// to date as those groups change.
+fn guarantee_vm_processors(
+    share: Option<ProcessorShare>,
+    policy: &mut HostPolicy,
+) -> anyhow::Result<Option<ProcessorShare>> {
+    let Some(share) = share else {
+        return Ok(None);
+    };
+    let budget = share.budget();
+    let applied = share.apply().with_context(|| {
+        format!(
+            "setting the processor share of {}",
+            share.cgroup().display()
+        )
+    })?;
+    if applied.capacity == budget && applied.whole(budget) {
+        tracing::info!(
+            capacity_millis = applied.capacity,
+            weight = applied.weight,
+            processors_millis = applied.processors,
+            "guaranteed processor capacity"
+        );
+    } else if applied.capacity > applied.gets {
+        tracing::warn!(
+            capacity_millis = applied.capacity,
+            gets_millis = applied.gets,
+            weight = applied.weight,
+            "the processor capacity given is more than the VMs get with every group beside \
+             them busy: requests then hold only in proportion"
+        );
+    } else {
+        tracing::warn!(
+            capacity_millis = applied.capacity,
+            budget_millis = budget,
+            weight = applied.weight,
+            "with every group beside and above them busy the VMs get less than the processor \
+             budget; guaranteeing what they get"
+        );
+    }
+    policy.cpu_budget = Some(applied.capacity);
+    Ok(Some(share))
+}
+
 /// The least default low watermark on 4 KiB pages.
 const DEFAULT_LOW_WATERMARK_MIN: u64 = 512 << 20;
 
@@ -1059,6 +1176,19 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// A host keeps a sixteenth of its processors back, at least half of
+    /// one, unless told otherwise.
+    #[test]
+    fn processor_capacity_keeps_headroom_back() {
+        assert_eq!(cpu_budget(16, None, None).unwrap(), 15_000);
+        assert_eq!(cpu_budget(64, None, None).unwrap(), 60_000);
+        assert_eq!(cpu_budget(2, None, None).unwrap(), 1500);
+        assert_eq!(cpu_budget(8, None, Some(2000)).unwrap(), 6000);
+        // Given outright, overcommitted or not.
+        assert_eq!(cpu_budget(8, Some(32_000), None).unwrap(), 32_000);
+        assert!(cpu_budget(1, None, Some(1000)).is_err());
+    }
 
     /// A host on 4 KiB pages relieves memory pressure without being told
     /// to: its sandboxes may use more than they are guaranteed.

@@ -58,6 +58,7 @@ const RECOVERY_CODES: ReadonlySet<string> = new Set([
   "upstream_connectivity_unavailable",
   "mcp_transport_timeout",
   "mcp_transport_unavailable",
+  "first_party_mcp_setup_unavailable",
   "sandbox_command_start_unavailable",
   "retained_attachment_unavailable",
   "turn_execution_policy_definition_mismatch",
@@ -119,8 +120,11 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
     condition: condition(record, code),
     modelLabel: text(record.modelLabel),
     providerLabel: text(record.providerLabel),
-    attempt,
-    maxAttempts: count(record.maxProviderRecoveryCount) ?? DEFAULT_MAX_ATTEMPTS,
+    attempt: code === "first_party_mcp_setup_unavailable" ? null : attempt,
+    maxAttempts:
+      code === "first_party_mcp_setup_unavailable"
+        ? null
+        : (count(record.maxProviderRecoveryCount) ?? DEFAULT_MAX_ATTEMPTS),
     modelRoute: MODEL_CODES.has(code),
     ...(SANDBOX_WAIT_CODES.has(code)
       ? {
@@ -154,6 +158,8 @@ export function providerRecoverySubject(t: OpenGeniText, facts: ProviderRecovery
       return t("lib.providerRecovery.opengeniCanTReachAn");
     case "mcp_transport_timeout":
       return t("lib.providerRecovery.aRequiredMcpServerIsn");
+    case "first_party_mcp_setup_unavailable":
+      return t("lib.providerRecovery.opengeniToolServiceUnavailable");
     case "mcp_transport_unavailable":
       return t("lib.providerRecovery.aRequiredMcpServerIs");
     case "sandbox_command_start_unavailable":

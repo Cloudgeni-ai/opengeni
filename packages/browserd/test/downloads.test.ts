@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { BrowserDownloadStore } from "../src";
 
@@ -77,7 +78,9 @@ describe("BrowserDownloadStore", () => {
       totalBytes: 10,
       filePath: path,
     });
-    expect((await store.completedFile(firstDownloadId)).path).toBe(path);
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "%PDF bytes",
+    );
     expect((await store.get(firstDownloadId))?.filename).toBe("report.pdf");
     await store.close();
     // An orphan Chromium left behind is swept; the named file is retained.
@@ -87,6 +90,568 @@ describe("BrowserDownloadStore", () => {
       "%PDF bytes",
     );
     await expect(readFile(join(reopened.filesDirectory, "stray.pdf.crdownload"))).rejects.toThrow();
+    await reopened.close();
+  });
+
+  test("keeps each download's bytes when a later one replaces its name", async () => {
+    const rootDirectory = await newRoot();
+    let next = 0;
+    const ids = [firstDownloadId, secondDownloadId];
+    const open = async () =>
+      await BrowserDownloadStore.open({
+        rootDirectory,
+        browserSessionId,
+        controllerGeneration,
+        createId: () => ids[next++]!,
+      });
+    const store = await open();
+    const path = join(store.filesDirectory, "report.pdf");
+    const save = async (guid: string, bytes: string) => {
+      await store.begin({ guid, targetId: null, suggestedFilename: "report.pdf" });
+      // Chromium writes a partial file and renames it over the final name.
+      await rename(await partial(store, guid, bytes), path);
+      await store.progress({
+        guid,
+        state: "completed",
+        receivedBytes: bytes.length,
+        totalBytes: bytes.length,
+        filePath: path,
+      });
+    };
+    await save("first-guid", "first report");
+    await save("second-guid", "second, longer report");
+    const read = async (current: BrowserDownloadStore, id: string) =>
+      await readFile((await current.completedFile(id)).path, "utf8");
+    expect(await read(store, firstDownloadId)).toBe("first report");
+    expect(await read(store, secondDownloadId)).toBe("second, longer report");
+    expect(await readFile(path, "utf8")).toBe("second, longer report");
+    await store.close();
+
+    const reopened = await open();
+    expect(await reopened.get(firstDownloadId)).toMatchObject({ status: "completed" });
+    expect(await read(reopened, firstDownloadId)).toBe("first report");
+    expect(await read(reopened, secondDownloadId)).toBe("second, longer report");
+    expect(await readFile(path, "utf8")).toBe("second, longer report");
+    await reopened.close();
+  });
+
+  test("refuses bytes that replaced a download before they were kept", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.pdf");
+    await store.begin({ guid: "early", targetId: null, suggestedFilename: "report.pdf" });
+    // Another download with the same name finished first and replaced the file.
+    await writeFile(path, "someone else's longer bytes");
+    await store.progress({
+      guid: "early",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.list())[0]).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    // The other download's file is left in place.
+    expect(await readFile(path, "utf8")).toBe("someone else's longer bytes");
+    await store.close();
+  });
+
+  test("refuses both downloads when equal-sized bytes replaced one before it was kept", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    // Chromium saved the first file, then the second replaced it before the
+    // first completion was handled. Both are five bytes.
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    const complete = async (guid: string) =>
+      await store.progress({
+        guid,
+        state: "completed",
+        receivedBytes: 5,
+        totalBytes: 5,
+        filePath: path,
+      });
+    await complete("first");
+    // Not settled while the other download with its name is still running.
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await expect(store.completedFile(firstDownloadId)).rejects.toThrow("in progress");
+    await complete("second");
+    for (const id of [firstDownloadId, secondDownloadId]) {
+      expect(await store.get(id)).toMatchObject({
+        status: "failed",
+        failureCode: "download_integrity_failed",
+      });
+    }
+    await store.close();
+  });
+
+  test("refuses an equal-sized replacement on a file system without hard links", async () => {
+    const link = spyOn(fsPromises, "link").mockImplementation(async () => {
+      throw Object.assign(new Error("hard links are not supported"), { code: "ENOTSUP" });
+    });
+    try {
+      const { store } = await fixture();
+      const path = join(store.filesDirectory, "report.txt");
+      await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+      await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+      await writeFile(path, "AAAAA");
+      await rename(await partial(store, "second", "BBBBB"), path);
+      for (const guid of ["first", "second"]) {
+        await store.progress({
+          guid,
+          state: "completed",
+          receivedBytes: 5,
+          totalBytes: 5,
+          filePath: path,
+        });
+      }
+      expect(link).toHaveBeenCalled();
+      for (const id of [firstDownloadId, secondDownloadId]) {
+        expect(await store.get(id)).toMatchObject({
+          status: "failed",
+          failureCode: "download_integrity_failed",
+        });
+      }
+      await store.close();
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  test("sees a same-name download announced before the event barrier", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    // The second download replaced the first file before the first
+    // completion was handled; its begin event was still on its way.
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+      eventBarrier: () => barrier,
+    });
+    void store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    release();
+    await Bun.sleep(0);
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect(await store.get(firstDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    await store.close();
+  });
+
+  test("a peer finished over quota fails a held download whose file it replaced", async () => {
+    const { store } = await fixture({ maxFileBytes: 8, maxSessionBytes: 8 });
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    // Chromium reports the second completion before the caller rejects it.
+    await expect(
+      store.progress({
+        guid: "second",
+        state: "completed",
+        receivedBytes: 5,
+        totalBytes: 5,
+        filePath: path,
+      }),
+    ).resolves.toEqual({ cancelReason: "download_quota_exceeded" });
+    await store.reject("second", "download_quota_exceeded");
+    expect(await store.get(firstDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    await store.close();
+  });
+
+  test("an unconfirmed cancellation keeps a held download waiting for its peer", async () => {
+    const { store } = await fixture({ maxFileBytes: 8, maxSessionBytes: 16 });
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    await expect(
+      store.progress({ guid: "second", state: "inProgress", receivedBytes: 9, totalBytes: 9 }),
+    ).resolves.toEqual({ cancelReason: "download_quota_exceeded" });
+    // Chromium refused the cancellation, so the second download may still
+    // have saved a file.
+    await store.reject("second", "download_quota_exceeded", "uncertain");
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect(await store.get(firstDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    await store.close();
+  });
+
+  test("names that may be one file on disk are treated as the same name", async () => {
+    const { store } = await fixture();
+    // On a case-insensitive file system both names are this one file.
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "REPORT.TXT" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    for (const id of [firstDownloadId, secondDownloadId]) {
+      expect(await store.get(id)).toMatchObject({
+        status: "failed",
+        failureCode: "download_integrity_failed",
+      });
+    }
+    await store.close();
+  });
+
+  test("names that differ can still be one file on disk", async () => {
+    const { store } = await fixture();
+    // NTFS treats both lowercase sigmas as one name.
+    const path = join(store.filesDirectory, "σ.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "σ.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "ς.txt" });
+    await writeFile(path, "AAAAA");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    for (const guid of ["first", "second"]) {
+      await store.progress({
+        guid,
+        state: "completed",
+        receivedBytes: 5,
+        totalBytes: 5,
+        filePath: path,
+      });
+    }
+    for (const id of [firstDownloadId, secondDownloadId]) {
+      expect(await store.get(id)).toMatchObject({
+        status: "failed",
+        failureCode: "download_integrity_failed",
+      });
+    }
+    await store.close();
+  });
+
+  test("a download still receiving data after the barrier does not hold a completion", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "small", targetId: null, suggestedFilename: "small.txt" });
+    await store.begin({ guid: "large", targetId: null, suggestedFilename: "large.bin" });
+    const path = join(store.filesDirectory, "small.txt");
+    await rename(await partial(store, "small", "small"), path);
+    await store.progress({
+      guid: "small",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    // Any running download may be saved as the same file, until Chromium
+    // shows it still receiving data.
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({
+      guid: "large",
+      state: "inProgress",
+      receivedBytes: 10,
+      totalBytes: 100,
+    });
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe("small");
+    expect((await store.get(secondDownloadId))?.status).toBe("in_progress");
+    await store.close();
+  });
+
+  test("a completion waits for a running download of another name to settle", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "first.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "second.txt" });
+    const firstPath = join(store.filesDirectory, "first.txt");
+    const secondPath = join(store.filesDirectory, "second.txt");
+    await rename(await partial(store, "first", "first"), firstPath);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: firstPath,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await rename(await partial(store, "second", "second"), secondPath);
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 6,
+      totalBytes: 6,
+      filePath: secondPath,
+    });
+    const read = async (id: string) => await readFile((await store.completedFile(id)).path, "utf8");
+    expect(await read(firstDownloadId)).toBe("first");
+    expect(await read(secondDownloadId)).toBe("second");
+    await store.close();
+  });
+
+  test("a held download settles when a same-name peer is cancelled", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    await rename(await partial(store, "first", "AAAAA"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({ guid: "second", state: "canceled", receivedBytes: 2, totalBytes: 5 });
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe("AAAAA");
+    await store.close();
+  });
+
+  test("settles overlapping same-name downloads once both bytes are known", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "first", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "second", targetId: null, suggestedFilename: "report.txt" });
+    await rename(await partial(store, "first", "AAAAA"), path);
+    await store.progress({
+      guid: "first",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await rename(await partial(store, "second", "BBBBB"), path);
+    await store.progress({
+      guid: "second",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    const read = async (id: string) => await readFile((await store.completedFile(id)).path, "utf8");
+    expect(await read(firstDownloadId)).toBe("AAAAA");
+    expect(await read(secondDownloadId)).toBe("BBBBB");
+    await store.close();
+  });
+
+  test("a late completion of a rejected download leaves another download's file", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "rejected", targetId: null, suggestedFilename: "report.txt" });
+    await store.begin({ guid: "kept", targetId: null, suggestedFilename: "report.txt" });
+    await store.reject("rejected", "download_quota_exceeded", "confirmed");
+    await rename(await partial(store, "kept", "kept bytes"), path);
+    await store.progress({
+      guid: "rejected",
+      state: "completed",
+      receivedBytes: 10,
+      totalBytes: 10,
+      filePath: path,
+    });
+    expect(await readFile(path, "utf8")).toBe("kept bytes");
+    await store.progress({
+      guid: "kept",
+      state: "completed",
+      receivedBytes: 10,
+      totalBytes: 10,
+      filePath: path,
+    });
+    expect(await readFile((await store.completedFile(secondDownloadId)).path, "utf8")).toBe(
+      "kept bytes",
+    );
+    await store.close();
+  });
+
+  test("a late rejected completion leaves the file of a download announced after it", async () => {
+    const { store } = await fixture();
+    const path = join(store.filesDirectory, "report.txt");
+    await store.begin({ guid: "rejected", targetId: null, suggestedFilename: "report.txt" });
+    await store.reject("rejected", "download_quota_exceeded", "uncertain");
+    // Chromium finished the rejected download, then announced and saved a
+    // second one under the same name before the store saw either event.
+    await writeFile(path, "AAAAA");
+    const kept = await partial(store, "kept", "kept bytes");
+    await rename(kept, path);
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => (releaseBarrier = resolve));
+    const late = store.progress({
+      guid: "rejected",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+      eventBarrier: async () => await barrier,
+    });
+    const begun = store.begin({ guid: "kept", targetId: null, suggestedFilename: "report.txt" });
+    await late;
+    await begun;
+    releaseBarrier();
+    await store.list();
+    expect(await readFile(path, "utf8")).toBe("kept bytes");
+    await store.progress({
+      guid: "kept",
+      state: "completed",
+      receivedBytes: 10,
+      totalBytes: 10,
+      filePath: path,
+    });
+    expect(await store.get(secondDownloadId)).toMatchObject({ status: "completed" });
+    expect(await readFile((await store.completedFile(secondDownloadId)).path, "utf8")).toBe(
+      "kept bytes",
+    );
+    expect(await readFile(path, "utf8")).toBe("kept bytes");
+    await store.close();
+  });
+
+  for (const savedMeanwhile of [false, true]) {
+    test(`cleanup without hard links puts back another file${savedMeanwhile ? " but never over a newer one" : ""}`, async () => {
+      const realRename = fsPromises.rename;
+      const realCopyFile = fsPromises.copyFile;
+      const { store } = await fixture({ maxFileBytes: 5, maxSessionBytes: 20 });
+      const path = join(store.filesDirectory, "report.txt");
+      const link = spyOn(fsPromises, "link").mockImplementation(async () => {
+        throw Object.assign(new Error("hard links are not supported"), { code: "ENOTSUP" });
+      });
+      // Chromium saves another file under the name just before it is moved
+      // aside, and possibly a third one before it is put back.
+      const renameSpy = spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+        if (String(to).includes(".discard-")) {
+          await writeFile(`${path}.next`, "BBBBB");
+          await realRename(`${path}.next`, path);
+        }
+        await realRename(from, to);
+      });
+      const copySpy = spyOn(fsPromises, "copyFile").mockImplementation(async (from, to, mode) => {
+        if (savedMeanwhile) await writeFile(path, "CCCCC");
+        await realCopyFile(from, to, mode);
+      });
+      try {
+        await store.begin({ guid: "over", targetId: null, suggestedFilename: "report.txt" });
+        await writeFile(path, "ten bytes!");
+        await store.progress({
+          guid: "over",
+          state: "completed",
+          receivedBytes: 10,
+          totalBytes: 10,
+          filePath: path,
+        });
+        await store.reject("over", "download_quota_exceeded");
+        await store.list();
+        expect(renameSpy).toHaveBeenCalled();
+        expect(link).toHaveBeenCalled();
+        expect(await readFile(path, "utf8")).toBe(savedMeanwhile ? "CCCCC" : "BBBBB");
+        await store.close();
+      } finally {
+        link.mockRestore();
+        renameSpy.mockRestore();
+        copySpy.mockRestore();
+      }
+    });
+  }
+
+  test("a download of unknown size still receiving data does not hold a completion", async () => {
+    const { store } = await fixture();
+    await store.begin({ guid: "small", targetId: null, suggestedFilename: "small.txt" });
+    await store.begin({ guid: "stream", targetId: null, suggestedFilename: "stream.bin" });
+    const path = join(store.filesDirectory, "small.txt");
+    await rename(await partial(store, "small", "small"), path);
+    await store.progress({
+      guid: "small",
+      state: "completed",
+      receivedBytes: 5,
+      totalBytes: 5,
+      filePath: path,
+    });
+    // Nothing received yet, size unknown: it may still be saved as this file.
+    await store.progress({ guid: "stream", state: "inProgress", receivedBytes: 0, totalBytes: 0 });
+    expect((await store.get(firstDownloadId))?.status).toBe("in_progress");
+    await store.progress({ guid: "stream", state: "inProgress", receivedBytes: 7, totalBytes: 0 });
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe("small");
+    expect((await store.get(secondDownloadId))?.status).toBe("in_progress");
+    await store.close();
+  });
+
+  test("adopts a named download completed before downloads were kept apart", async () => {
+    const rootDirectory = await newRoot();
+    const open = async () =>
+      await BrowserDownloadStore.open({
+        rootDirectory,
+        browserSessionId,
+        controllerGeneration,
+        createId: () => firstDownloadId,
+      });
+    const store = await open();
+    const path = join(store.filesDirectory, "notes.txt");
+    await store.begin({ guid: "older", targetId: null, suggestedFilename: "notes.txt" });
+    await writeFile(path, "older bytes");
+    await store.progress({
+      guid: "older",
+      state: "completed",
+      receivedBytes: 11,
+      totalBytes: 11,
+      filePath: path,
+    });
+    await store.close();
+    // An earlier version kept only Chromium's file.
+    await rm(join(rootDirectory, "stored"), { recursive: true, force: true });
+    const reopened = await open();
+    expect(await readFile((await reopened.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "older bytes",
+    );
+    expect(await readFile(path, "utf8")).toBe("older bytes");
     await reopened.close();
   });
 
@@ -346,6 +911,13 @@ async function fixture(
     ...options,
   });
   return { store };
+}
+
+/** A partial file as Chromium writes it before renaming it into place. */
+async function partial(store: BrowserDownloadStore, guid: string, bytes: string) {
+  const path = join(store.filesDirectory, `Unconfirmed ${guid}.crdownload`);
+  await writeFile(path, bytes);
+  return path;
 }
 
 async function newRoot(): Promise<string> {

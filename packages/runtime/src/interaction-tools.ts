@@ -992,6 +992,48 @@ export function createInteractionAttemptToolDefinitions(
     }
     return published;
   };
+  // Whether a ComputerSession runs a computer_act batch as one operation.
+  // The computer fixes the answer for the session's life, across agent
+  // updates, so every try of one batch, concurrent or retried, picks the same
+  // way and cannot send its actions under both ways' operation IDs. A yes is
+  // kept; a no is asked again, since a new session may say yes. An
+  // unreadable or not yet reported answer sends nothing (see
+  // actInComputerBatch).
+  const actionBatchSupport = new Map<string, Promise<boolean>>();
+  const supportsActionBatches = (computerSessionId: string): Promise<boolean> => {
+    let known = actionBatchSupport.get(computerSessionId);
+    if (!known) {
+      known = Promise.resolve()
+        .then(() => input.transport.getComputerSession(input.workspaceId, computerSessionId))
+        .then(
+          (session) => {
+            if (!session.capabilities)
+              throw new Error(
+                "this computer session has not reported what it supports yet, so the batch was not sent; retry the call",
+              );
+            return session.capabilities.actionBatches === true;
+          },
+          (error: unknown) => {
+            throw new Error(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+                0,
+                8_192,
+              ),
+            );
+          },
+        )
+        .then((supported) => {
+          if (!supported) actionBatchSupport.delete(computerSessionId);
+          return supported;
+        })
+        .catch((error: unknown) => {
+          actionBatchSupport.delete(computerSessionId);
+          throw error;
+        });
+      actionBatchSupport.set(computerSessionId, known);
+    }
+    return known;
+  };
   const currentTab = new CurrentBrowserTab({
     listLiveSessions: async () =>
       filterDiscoveredSessions(
@@ -2228,6 +2270,7 @@ export function createInteractionAttemptToolDefinitions(
           value,
           action.actions,
           context.operationId,
+          () => supportsActionBatches(value.computerSessionId),
         );
       }
       // A launch acts on no window's contents, and an action that names the
@@ -2601,6 +2644,8 @@ async function actInComputerBatch(
   value: z.output<typeof ComputerActInput>,
   actions: ComputerAction[],
   operationId: string,
+  /** Whether the computer runs the whole batch as one operation. */
+  runsNatively: () => Promise<boolean> = async () => false,
 ): Promise<z.output<typeof ComputerActionBatchReceipt>> {
   type Observation = z.output<typeof ComputerObservation>;
   type Receipt = z.output<typeof ComputerActionReceipt>;
@@ -2620,6 +2665,34 @@ async function actInComputerBatch(
     }
   };
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // The two ways derive different operation IDs. The computer fixes its
+  // answer for the session's life, so every try of one batch picks the same
+  // way. A recorded receipt still decides first: both first receipts are read
+  // before anything is sent, and running the other way would send the actions
+  // again.
+  const nativeOperationId = derivedOperationId("computer-batch", operationId, "all");
+  const firstStepOperationId = derivedOperationId("computer-batch", operationId, "0");
+  const [nativePrior, firstStepPrior] = await Promise.all([
+    recorded(nativeOperationId),
+    recorded(firstStepOperationId),
+  ]);
+  let nativeBatch: boolean;
+  if (typeof nativePrior === "object") nativeBatch = true;
+  else if (typeof firstStepPrior === "object") nativeBatch = false;
+  else {
+    nativeBatch = await runsNatively();
+    if ((nativeBatch ? firstStepPrior : nativePrior) === "unknown")
+      throw new Error(
+        "whether an earlier try of this batch already ran could not be read, so it was not sent; retry the call",
+      );
+  }
+  if (nativeBatch)
+    return await actInComputerNativeBatch(transport, workspaceId, value, actions, {
+      operationId: nativeOperationId,
+      prior: nativePrior,
+      observe,
+      recorded,
+    });
   let generation = value.expectedTargetGeneration;
   let observationId = value.expectedObservationId;
   let observation: Observation | null = null;
@@ -2628,10 +2701,12 @@ async function actInComputerBatch(
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
-    if (generation === undefined || observationId == null) {
+    if (index === 0 && typeof firstStepPrior === "object") {
+      receipt = firstStepPrior;
+    } else if (generation === undefined || observationId == null) {
       // Read the recorded receipt first: a fresh read replaces the latest
       // observation, which would make a recovered receipt's fence stale.
-      const prior = await recorded(stepOperationId);
+      const prior = index === 0 ? firstStepPrior : await recorded(stepOperationId);
       if (typeof prior === "object") {
         receipt = prior;
       } else {
@@ -2740,6 +2815,113 @@ async function actInComputerBatch(
     steps,
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
+  };
+}
+
+/**
+ * Run a computer_act batch as one operation on a computer that supports it:
+ * the computer checks every action against the one observation the batch
+ * names, runs them in order and observes the target once. A batch it stopped
+ * part way says in its error details how many actions completed, so each
+ * action is still reported as it would be one at a time.
+ */
+async function actInComputerNativeBatch(
+  transport: InteractionTransport,
+  workspaceId: string,
+  value: z.output<typeof ComputerActInput>,
+  actions: ComputerAction[],
+  batch: {
+    operationId: string;
+    /** The batch's recorded receipt, read before this call sends anything. */
+    prior: z.output<typeof ComputerActionReceipt> | "absent" | "unknown";
+    observe: () => Promise<z.output<typeof ComputerObservation>>;
+    recorded: (
+      operationId: string,
+    ) => Promise<z.output<typeof ComputerActionReceipt> | "absent" | "unknown">;
+  },
+): Promise<z.output<typeof ComputerActionBatchReceipt>> {
+  const entries = actions.map((action) => {
+    if (action.type !== "semantic" && action.type !== "keyboard")
+      throw new Error(`a batch runs semantic and keyboard actions, not ${action.type}`);
+    return action;
+  });
+  let receipt = typeof batch.prior === "object" ? batch.prior : null;
+  let generation = value.expectedTargetGeneration;
+  let observationId = value.expectedObservationId ?? null;
+  if (!receipt && (generation === undefined || observationId === null)) {
+    // The recorded receipt was read first: a fresh read replaces the latest
+    // observation, which would make a recovered receipt's fence stale.
+    if (observationId !== null) {
+      // The batch names its observation: the target list gives the
+      // generation without reading the window again, which would retire the
+      // refs the caller holds.
+      generation = (
+        await transport.listComputerTargets(workspaceId, value.computerSessionId)
+      ).targets.find((target) => target.id === value.targetId)?.targetGeneration;
+    }
+    if (generation === undefined || observationId === null) {
+      const current = await batch.observe();
+      generation ??= current.target.targetGeneration;
+      observationId ??= current.observationId;
+    }
+  }
+  if (!receipt) {
+    try {
+      receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
+        operationId: batch.operationId,
+        targetId: value.targetId,
+        expectedTargetGeneration: generation!,
+        expectedObservationId: observationId,
+        expectedFrameId: null,
+        action: { type: "batch", actions: entries },
+      });
+    } catch (error) {
+      // A retried call, or a lost reply: the recorded receipt says what ran.
+      const prior = await batch.recorded(batch.operationId);
+      if (typeof prior !== "object") throw error;
+      receipt = prior;
+    }
+  }
+  const { operationId, state, error } = receipt;
+  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  if (state === "completed") {
+    for (let index = 0; index < actions.length; index++)
+      steps.push({ operationId, state, error: null });
+  } else {
+    const { batchActionsCompleted, batchStoppedActionState, ...details } = error?.details ?? {};
+    const completed =
+      typeof batchActionsCompleted === "number" && Number.isInteger(batchActionsCompleted)
+        ? Math.min(Math.max(batchActionsCompleted, 0), actions.length - 1)
+        : 0;
+    for (let index = 0; index < completed; index++)
+      steps.push({ operationId, state: "completed", error: null });
+    steps.push({
+      operationId,
+      state: batchStoppedActionState === "failed" ? "failed" : state,
+      error: error && {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        ...(Object.keys(details).length ? { details } : {}),
+      },
+    });
+  }
+  let observation = receipt.observation;
+  if (observation === null && state !== "completed") {
+    // Show the state the stopped batch left.
+    try {
+      observation = await batch.observe();
+    } catch {
+      // The receipt shows no state; the caller observes when it needs one.
+    }
+  }
+  return {
+    type: "batch",
+    targetId: value.targetId,
+    actionCount: actions.length,
+    steps,
+    observation,
+    observationPrecedesStop: false,
   };
 }
 
@@ -2931,7 +3113,7 @@ function chooseAttachedProfile(
   if (!chosen) {
     throw new OpenGeniApiError(
       409,
-      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
       { code: "attached_browser_unavailable", retryable: false },
     );
   }
@@ -3971,7 +4153,7 @@ function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
-    throw new Error("First-party MCP URL cannot be projected to the Opengeni API base URL");
+    throw new Error("First-party MCP URL cannot be projected to the API base URL");
   }
   url.pathname = url.pathname.slice(0, -suffix.length) || "/";
   url.search = "";

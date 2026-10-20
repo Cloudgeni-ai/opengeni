@@ -5697,7 +5697,9 @@ export const sessionRealtimeModes = pgTable(
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
         'workspace-gateway/openai/gpt-realtime-2.1',
         'workspace-gateway/openai/gpt-realtime-mini',
-        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+        'workspace-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-elevenlabs/eleven_realtime_v1_max',
+        'workspace-elevenlabs/eleven_realtime_v1_mini'
       )`,
     ),
     endReasonValid: check(
@@ -6226,6 +6228,8 @@ export const files = pgTable(
     sha256: text("sha256"),
     bucket: text("bucket").notNull(),
     objectKey: text("object_key").notNull(),
+    /** An app-shot's capture (AppShotCapture); written with the upload, never changed. */
+    appShot: jsonb("app_shot"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -11761,6 +11765,10 @@ export const enrollments = pgTable(
     agentUpdateTargetVersion: text("agent_update_target_version"),
     agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
     agentUpdateErrorCode: text("agent_update_error_code"),
+    agentUpdateBlockers: jsonb("agent_update_blockers")
+      .$type<Array<{ kind: string; count: number }>>()
+      .notNull()
+      .default([]),
     agentUpdateRetryable: boolean("agent_update_retryable").notNull().default(false),
     agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
     agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),

@@ -28,6 +28,7 @@ import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { isPreemptedModelResponse } from "./model-preemption";
+import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -604,20 +605,25 @@ export function normalizeSdkEvent(
     });
   } else if (item.type === "tool_call_output_item") {
     const retainedMcpResult = mcpResultFromCustomData(item.customData);
+    const output =
+      "toolOutputOverride" in options
+        ? options.toolOutputOverride
+        : normalizeToolOutputForEvent(
+            options.toolOutputTransform
+              ? options.toolOutputTransform(retainedMcpResult ?? item.output)
+              : (retainedMcpResult ?? item.output),
+          );
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: toolCallIdFromSdkItem(item.rawItem) ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
-        output:
-          "toolOutputOverride" in options
-            ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(
-                options.toolOutputTransform
-                  ? options.toolOutputTransform(retainedMcpResult ?? item.output)
-                  : (retainedMcpResult ?? item.output),
-              ),
+        output,
+        // The shell intentionally returns a legible fault instead of throwing
+        // into the SDK's generic "Please try again" wrapper. Keep that text for
+        // the model, but do not present uncertain execution as a successful tool.
+        ...(isConnectedMachineOutcomeUnknownOutput(output) ? { error: true } : {}),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }

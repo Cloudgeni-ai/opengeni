@@ -25,6 +25,7 @@ import {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
 } from "./gateway-realtime-transport";
+import { createRealtimeWebsocketTransportStarter } from "./realtime-websocket-transport";
 import type { SessionRealtimeModel, WorkspaceRealtimeModelCatalogResponse } from "./types";
 
 /** Exact backend-facing methods required by the batteries-included realtime SDK. */
@@ -35,7 +36,17 @@ export type SessionRealtimeClientLike = CodexRealtimeControllerClient & {
   ): Promise<WorkspaceRealtimeModelCatalogResponse>;
 };
 
-export type SessionRealtimeTransportKind = "codex" | "gateway" | "xai-subscription" | "azure-live";
+/**
+ * Codex Live and Azure live voice negotiate WebRTC; every other voice model is
+ * reached over one provider WebSocket. `gateway` and `xai-subscription` are
+ * deprecated names that are no longer returned.
+ */
+export type SessionRealtimeTransportKind =
+  | "codex"
+  | "azure-live"
+  | "websocket"
+  | "gateway"
+  | "xai-subscription";
 
 /** Provider-neutral names for the existing, battle-tested controller projection. */
 export type SessionRealtimeController = CodexRealtimeController;
@@ -60,14 +71,12 @@ export function sessionRealtimeTransportKind(
 ): SessionRealtimeTransportKind {
   if (model === "opengeni-azure/gpt-live-1") return "azure-live";
   if (model === "gpt-live-1-boulder-alpha") return "codex";
-  if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-subscription";
-  return "gateway";
+  return "websocket";
 }
 
 /**
- * Compose the exact current controller with its existing Codex Live or AI
- * Gateway transport. Wire, ledger, delegation, recovery, and lifecycle
- * semantics remain owned by the existing implementations below this facade.
+ * Compose the controller with the model's transport. Wire, ledger, delegation,
+ * recovery, and lifecycle semantics are shared by every transport.
  */
 export function createSessionRealtimeController(
   options: CreateSessionRealtimeControllerOptions,
@@ -83,17 +92,16 @@ export function createSessionRealtimeController(
             createPeerConnection: options.createPeerConnection,
           }),
         }
-      : transport === "gateway"
-        ? { startTransport: createGatewayRealtimeTransportStarter() }
-        : transport === "xai-subscription"
-          ? { startTransport: createXaiSubscriptionRealtimeTransportStarter() }
-          : {}),
+      : transport === "codex"
+        ? {}
+        : { startTransport: createRealtimeWebsocketTransportStarter() }),
   });
 }
 
 export {
   createCodexRealtimeController,
   createGatewayRealtimeTransportStarter,
+  createRealtimeWebsocketTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
   hasStoredSessionRealtimeOwnerProof,
   sessionRealtimeOwnerStorageKey,
@@ -117,6 +125,7 @@ export {
   projectSessionRealtimeLifecycle,
 } from "./codex-realtime-controller";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
+export { isSessionRealtimeModel, SESSION_REALTIME_MODELS } from "./codex-realtime-lifecycle";
 
 export {
   CodexRealtimeMicrophoneError,
@@ -178,6 +187,7 @@ export type {
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
   GatewayRealtimeInitialItem,
+  RealtimeWebsocketProtocol,
   RenewSessionRealtimeRequest,
   SessionRealtimeEndReason,
   SessionRealtimeLedgerEntry,
@@ -185,6 +195,9 @@ export type {
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
   SessionRealtimeState,
+  SessionRealtimeWebsocketInitialItem,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
   WorkspaceRealtimeModelCatalogItem,

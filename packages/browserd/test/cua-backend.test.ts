@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { CUA_DESKTOP_TOOLS } from "@opengeni/contracts";
+import {
+  CUA_DESKTOP_TOOLS,
+  CUA_WINDOWS_DESKTOP_TOOLS,
+  parseSecretReference,
+  referenceKey,
+} from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { CuaComputerBackend } from "../src/cua/backend";
@@ -1079,6 +1084,8 @@ describe("CUA desktop boundary", () => {
     class LaunchFixture extends Fixture {
       launched = false;
       listings = 0;
+      /** Listings after launch that still lack the app's window. */
+      listingsBeforeWindow = 1;
       reportWindows = false;
       // Linux reports the launcher process; the app's window belongs to its
       // child, and an unrelated window appears at the same time.
@@ -1099,7 +1106,11 @@ describe("CUA desktop boundary", () => {
           });
         }
         const response = await super.callTool(name, argumentsJson);
-        if (name === "list_windows" && this.launched && ++this.listings > 1) {
+        if (
+          name === "list_windows" &&
+          this.launched &&
+          ++this.listings > this.listingsBeforeWindow
+        ) {
           const data = JSON.parse(response.structuredJson!);
           // Another app opens a window at the same time, listed first.
           if (this.linux)
@@ -1159,6 +1170,33 @@ describe("CUA desktop boundary", () => {
       }
     }
 
+    // A window already there is observed at once, and a cold app's window,
+    // seconds late on macOS, is waited for instead of observing the action's
+    // own target. Neither waits out the whole window wait.
+    for (const [listingsBeforeWindow, atLeast, below] of [
+      [0, 0, 250],
+      [7, 1_000, 4_000],
+    ] as const) {
+      const fixture = new LaunchFixture();
+      fixture.listingsBeforeWindow = listingsBeforeWindow;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        const elapsed = performance.now() - started;
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(elapsed).toBeGreaterThanOrEqual(atLeast);
+        expect(elapsed).toBeLessThan(below);
+      } finally {
+        await backend.close();
+      }
+    }
+
     // The controller records the launched window's observation in the receipt.
     {
       const fixture = new LaunchFixture();
@@ -1194,24 +1232,86 @@ describe("CUA desktop boundary", () => {
       }
     }
 
+    // A macOS app that keeps running without a window is launched once more,
+    // which CUA sends as a reopen, and the window that answers is observed.
+    {
+      class ReopenFixture extends LaunchFixture {
+        override listingsBeforeWindow = Number.POSITIVE_INFINITY;
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const launches = this.calls.filter((call) => call.name === "launch_app").length;
+          const response = await super.callTool(name, argumentsJson);
+          // The window answers the second launch, the reopen.
+          if (name === "launch_app" && launches === 1) this.listingsBeforeWindow = this.listings;
+          return response;
+        }
+      }
+      const fixture = new ReopenFixture();
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(fixture.calls.filter((call) => call.name === "launch_app")).toHaveLength(2);
+        // The reopen waits for a slow first window, and then answers at once.
+        expect(performance.now() - started).toBeGreaterThanOrEqual(2_000);
+        expect(performance.now() - started).toBeLessThan(4_000);
+      } finally {
+        await backend.close();
+      }
+    }
+
     // An app that opens no window leaves the action's own target observed.
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
       name === "launch_app" ? result({ pid: 78, windows: [] }) : await original(name, json);
-    const backend = await CuaComputerBackend.open(fixture);
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 300 });
     try {
       const target = (await backend.targets())[0]!;
       const observation = await backend.observe(target.id);
+      const started = Date.now();
       const launched = await backend.dispatch({
         ...command(observation),
         action: { type: "launch", applicationId: "Menu Bar Helper" },
       });
       expect(launched?.target.id).toBe(target.id);
+      // It waits out the window wait, and no longer.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+      expect(Date.now() - started).toBeLessThan(2_000);
     } finally {
       await backend.close();
     }
-  });
+
+    // The wait does not hold the queue: previews and observations run between
+    // window searches, and closing ends the wait.
+    const windowless = new Fixture();
+    const listed = windowless.callTool.bind(windowless);
+    windowless.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await listed(name, json);
+    const waiting = await CuaComputerBackend.open(windowless);
+    try {
+      const target = (await waiting.targets())[0]!;
+      const before = await waiting.observe(target.id);
+      const started = performance.now();
+      const launching = waiting.dispatch({
+        ...command(before),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waiting.observe(target.id);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      await waiting.close();
+      await launching;
+      expect(performance.now() - started).toBeLessThan(2_000);
+    } finally {
+      await waiting.close();
+    }
+  }, 20_000);
 
   test("a launch observes the app's own window before a window lying within it", async () => {
     // A document app launching to its Open panel reports the panel's
@@ -1444,7 +1544,8 @@ describe("CUA desktop boundary", () => {
         ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
           result({ pid: 42, bundle_id: "com.apple.TextEdit", windows: [] }))
         : await original(name, json);
-    const backend = await CuaComputerBackend.open(fixture);
+    // These apps open no window here, so the launch need not wait for one.
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 50 });
     try {
       expect((await backend.capabilities()).appLaunch).toBe(true);
       const target = (await backend.targets())[0]!;
@@ -1553,7 +1654,9 @@ describe("CUA desktop boundary", () => {
             // Linux reports the launcher process it started the app through.
             result(platform === "linux" ? { launcher_pid: 92 } : { pid: 42, windows: [] }))
           : await platformCall(name, json);
-      const other = await CuaComputerBackend.open(platformFixture, platform);
+      const other = await CuaComputerBackend.open(platformFixture, platform, {
+        launchWindowWaitMs: 50,
+      });
       try {
         expect((await other.capabilities()).appLaunch).toBe(true);
         const target = (await other.targets())[0]!;
@@ -1767,5 +1870,338 @@ describe("CUA desktop boundary", () => {
     await backend.close();
     expect(fixture.calls.filter((call) => call.name === "end_session")).toHaveLength(1);
     expect(fixture.stopped).toBe(true);
+  });
+
+  describe("a batch runs as one run_steps call", () => {
+    class BatchFixture extends Fixture {
+      override listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+      /** What run_steps answers; null runs every step. */
+      reply: Record<string, unknown> | null = null;
+      /** Window-change lines of the last step. */
+      windowChanges: string[] = [];
+      opens: { pid: number; window_id: number; title: string }[] = [];
+      ran = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "run_steps") {
+          this.calls.push({ name, args });
+          this.ran = true;
+          const steps = args.steps as unknown[];
+          if (this.reply) return result(this.reply, true);
+          return result({
+            ok: true,
+            total: steps.length,
+            executed: steps.length,
+            failed_step: null,
+            steps: steps.map((_, index) => ({
+              index,
+              ok: true,
+              message: "done",
+              ...(index === steps.length - 1 && this.windowChanges.length
+                ? { window_changes: this.windowChanges }
+                : {}),
+            })),
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows" && this.ran) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens)
+            data.windows.push({
+              ...window,
+              app_name: "Fixture",
+              bounds: { x: 300, y: 50, width: 200, height: 100 },
+            });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const batch = (observation: ComputerBackendObservation): ComputerBackendActionCommand => ({
+      ...command(observation),
+      action: {
+        type: "batch",
+        actions: [
+          {
+            type: "semantic",
+            locator: { kind: "ref", ref: observation.roots[0]!.ref },
+            action: "invoke",
+          },
+          { type: "keyboard", action: "type", value: "hello" },
+          { type: "keyboard", action: "press", value: "enter" },
+        ],
+      },
+    });
+    const open = async (fixture: BatchFixture) => {
+      const backend = await CuaComputerBackend.open(fixture);
+      const target = (await backend.targets())[0]!;
+      return { backend, observation: await backend.observe(target.id) };
+    };
+    const mutations = (fixture: Fixture) =>
+      fixture.calls.filter((call) =>
+        ["click", "type_text", "press_key", "hotkey", "set_value"].includes(call.name),
+      );
+
+    test("every action is checked against the batch's observation and sent at once", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        expect(backend.initialCapabilities.actionBatches).toBe(true);
+        expect((await backend.capabilities()).actionBatches).toBe(true);
+        await backend.validate(batch(observation));
+        const after = await backend.dispatch(batch(observation));
+        expect(after?.target.id).toBe("cua:window:42:1");
+        const calls = fixture.calls.filter((call) => call.name === "run_steps");
+        expect(calls).toHaveLength(1);
+        expect(mutations(fixture)).toHaveLength(0);
+        const { steps, ...window } = calls[0]!.args as {
+          steps: { tool: string; args: Record<string, unknown> }[];
+        };
+        // A stale token stops the batch: CUA does not act on a lookalike.
+        expect(window).toMatchObject({ pid: 42, window_id: 1, refind_stale: false });
+        expect(steps.map((step) => step.tool)).toEqual(["click", "type_text", "press_key"]);
+        expect(steps[0]!.args.element_token).toBe(observation.roots[0]!.ref);
+        // Earlier actions may have moved the focus: later keys go where it is.
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+        expect(steps[1]!.args.text).toBe("hello");
+        expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a CUA whose run_steps cannot stop at a stale token runs batches one action at a time", async () => {
+      for (const listToolsJson of [
+        async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+        undefined,
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.listToolsJson = listToolsJson as BatchFixture["listToolsJson"];
+        const backend = await CuaComputerBackend.open(fixture);
+        try {
+          expect(backend.initialCapabilities.actionBatches).toBe(false);
+          expect((await backend.capabilities()).actionBatches).toBe(false);
+        } finally {
+          await backend.close();
+        }
+      }
+    });
+
+    test("a batch whose last action opened a window observes that window", async () => {
+      const fixture = new BatchFixture();
+      fixture.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      fixture.windowChanges = ['🪟 Action opened new window(s): Fixture ("Untitled").'];
+      const { backend, observation } = await open(fixture);
+      try {
+        expect((await backend.dispatch(batch(observation)))?.target.id).toBe("cua:window:42:2");
+      } finally {
+        await backend.close();
+      }
+      // Without CUA's report, a window that appeared is not the batch's.
+      const unreported = new BatchFixture();
+      unreported.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      const second = await open(unreported);
+      try {
+        expect((await second.backend.dispatch(batch(second.observation)))?.target.id).toBe(
+          "cua:window:42:1",
+        );
+      } finally {
+        await second.backend.close();
+      }
+    });
+
+    test("an action that fails the batch's checks sends nothing", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const invalid = batch(observation);
+        if (invalid.action.type !== "batch") throw new Error("not a batch");
+        invalid.action.actions[1] = {
+          type: "semantic",
+          locator: { kind: "ref", ref: "s404:404" },
+          action: "invoke",
+        };
+        const failure = await backend.dispatch(invalid).catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toStartWith("Action 2 of the batch: ");
+        expect(fixture.ran).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a batch CUA stopped says how far it got", async () => {
+      const step = (index: number, fields: Record<string, unknown>) => ({
+        ok: true,
+        total: 3,
+        executed: index + 1,
+        failed_step: index,
+        steps: [
+          ...Array.from({ length: index }, (_, done) => ({ index: done, ok: true, message: "ok" })),
+          { index, ok: false, ...fields },
+        ],
+      });
+      for (const { reply, expected, details } of [
+        // Nothing ran: refused before the first step.
+        {
+          reply: { ok: false, code: "invalid_batch", executed: 0, failed_step: 1, detail: "bad" },
+          expected: { code: "invalid_action", dispatched: false },
+          details: undefined,
+        },
+        // The first step's element was never found: nothing ran.
+        {
+          reply: step(0, { phase: "find", code: "not_found", message: "no such element" }),
+          expected: { code: "driver_failed", dispatched: false },
+          details: undefined,
+        },
+        // The first step was refused with a refusal code: nothing ran.
+        {
+          reply: step(0, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: false },
+          details: undefined,
+        },
+        // A later action failed without proof it did nothing.
+        {
+          reply: step(1, { phase: "action", message: "did not confirm" }),
+          expected: { code: "outcome_unknown", dispatched: true },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        },
+        // A later action was refused: the earlier ones still ran.
+        {
+          reply: step(2, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: true },
+          details: { batchActionsCompleted: 2, batchStoppedActionState: "failed" },
+        },
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.reply = reply;
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend.dispatch(batch(observation)).catch((error) => error);
+          expect(failure).toMatchObject(expected);
+          expect(failure.details).toEqual(details);
+        } finally {
+          await backend.close();
+        }
+      }
+    });
+
+    test("the receipt of a stopped batch keeps how many actions completed", async () => {
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 3,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message: "did not confirm" },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: "hello" },
+              { type: "keyboard", action: "press", value: "enter" },
+            ],
+          },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error).toMatchObject({
+          code: "outcome_unknown",
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a stopped batch's message does not show a typed secret CUA clipped", async () => {
+      const secret = `synthetic-${"0123456789".repeat(44)}`;
+      // CUA keeps the first 300 characters of a step's text, marks the cut
+      // and adds its own advice after it.
+      const message = `${`Typed ${secret}`.slice(0, 300)}... To run it, send the batch again.`;
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 2,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message, hint: `Check ${secret}` },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const raw = "{{secret:Desk/token}}";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: raw },
+            ],
+          },
+          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.message).toBe(
+          "CUA stopped the batch at action 2: Typed [secret]... To run it, send the batch again. Check [secret]",
+        );
+        expect(JSON.stringify(receipt)).not.toContain(secret.slice(0, 12));
+      } finally {
+        await backend.close();
+      }
+    });
   });
 });

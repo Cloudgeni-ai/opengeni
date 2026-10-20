@@ -1,4 +1,7 @@
 import { t } from "@/lib/console-text";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { ModelsRefreshControl } from "./models-refresh-control";
+import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -11,6 +14,7 @@ import {
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
 import type {
   ModelAccountSettingValues,
   OrganizationModelProviderKind,
@@ -332,11 +336,14 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
+  // A shared workspace's provider key decides what every session runs on: a
+  // setting. Members connect their own accounts instead.
+  const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
   const workspaceGateway = (id: GatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
-    canManageConnection: canManageConnections,
+    canManageConnection: canManageWorkspaceKeys,
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
     enabled,
@@ -564,7 +571,7 @@ export function WorkspaceModelsPageBody({
       );
     }
     return (GATEWAYS as readonly string[]).includes(provider)
-      ? gateways[provider as GatewayId].connected
+      ? canManageWorkspaceKeys && gateways[provider as GatewayId].connected
       : false;
   };
   const providerLoading = (provider: string): boolean =>
@@ -1109,6 +1116,7 @@ export function WorkspaceModelsPageBody({
         {scopePicker}
         <OrganizationModelsList
           client={client}
+          organizationId={organizationId}
           organizationDefaults={organizationAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
@@ -1224,6 +1232,12 @@ export function WorkspaceModelsPageBody({
                   workspaceName={workspaceName}
                   scope={labels.everyone}
                 />
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
+                />
                 <CodexAccountRows
                   codex={codex}
                   places={codexPlaces}
@@ -1231,6 +1245,14 @@ export function WorkspaceModelsPageBody({
                   onKeptForPeople={reportKeptForPeople}
                 />
                 <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
                 {claudeEnabled ? (
                   <ClaudeAccountRows
                     claude={claude}
@@ -1280,6 +1302,19 @@ export function WorkspaceModelsPageBody({
                       key={workspaceId}
                       workspaceId={workspaceId}
                       canManage={canManageConnections && organizationAdmin}
+                      onConnectionChange={connectionChanged}
+                    />
+                  </Section>
+                ) : null}
+                {workspacePage ? (
+                  <Section
+                    title="Voice"
+                    description="Use your own ElevenLabs key for Eleven Realtime voices in this workspace."
+                  >
+                    <ElevenLabsVoiceConnection
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageWorkspaceKeys}
                       onConnectionChange={connectionChanged}
                     />
                   </Section>
@@ -1334,6 +1369,17 @@ export function WorkspaceModelsPageBody({
   return (
     <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
+        {!key && !view ? <ModelsRefreshControl client={client} /> : null}
+        {organizationAdmin
+          ? orgCodex.accounts.map((candidate) => (
+              <OrganizationCodexDetailPrefetch
+                key={candidate.id}
+                client={client}
+                organizationId={orgId}
+                account={candidate}
+              />
+            ))
+          : null}
         {page}
       </div>
     </ModelsListLabelProvider>

@@ -18,7 +18,9 @@ use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, Servi
 use tracing::info;
 
 use crate::browser_bridge;
-use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, StartArgs};
+use crate::cli::{
+    ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, ServiceStatusArgs, StartArgs,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchdInstallAction {
@@ -105,8 +107,16 @@ pub fn stop(args: &ServiceScopeArgs) -> Result<(), String> {
 }
 
 /// Prints the ordinary background service status.
-pub fn show_status(args: &ServiceScopeArgs) -> Result<(), String> {
-    status(scope(args))
+pub fn show_status(args: &ServiceStatusArgs) -> Result<(), String> {
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&inspect(scope(&args.scope))?).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    } else {
+        status(scope(&args.scope))
+    }
 }
 
 /// Dispatches a `service` subcommand. Returns a human-facing result string on
@@ -118,7 +128,7 @@ pub fn run(args: &ServiceArgs) -> Result<(), String> {
         ServiceAction::Uninstall(a) => uninstall(scope(a)),
         ServiceAction::Start(a) => lifecycle("start", scope(a)),
         ServiceAction::Stop(a) => lifecycle("stop", scope(a)),
-        ServiceAction::Status(a) => status(scope(a)),
+        ServiceAction::Status(a) => show_status(a),
     }
 }
 
@@ -945,11 +955,7 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
 fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => {
-            let unit = service::ids::SYSTEMD_UNIT;
-            match install_scope {
-                ServiceScope::User => systemctl(&["--user", action, unit])?,
-                ServiceScope::System => systemctl(&[action, unit])?,
-            }
+            systemctl(&systemd_lifecycle_args(action, install_scope))?;
             println!("{action}ed the opengeni-agent service.");
             Ok(())
         }
@@ -971,7 +977,11 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
                     )?;
                 }
             } else {
-                run_tool("launchctl", &["bootout", &target])?;
+                // Disable first: logout/login must not silently undo a pause.
+                run_tool("launchctl", &["disable", &target])?;
+                if capture("launchctl", &["print", &target]).is_ok() {
+                    run_tool("launchctl", &["bootout", &target])?;
+                }
             }
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
@@ -979,13 +989,118 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
         ServiceBackend::WindowsTask => {
             windows_user_scope(install_scope)?;
             if action == "start" {
-                crate::windows_task::install(&spec_for(install_scope)?, false)
+                crate::windows_task::resume()
             } else {
                 crate::windows_task::stop()
             }
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
+}
+
+fn systemd_lifecycle_args(action: &str, install_scope: ServiceScope) -> Vec<&'static str> {
+    let mut args = if install_scope == ServiceScope::User {
+        vec!["--user"]
+    } else {
+        vec![]
+    };
+    args.extend([
+        if action == "start" {
+            "enable"
+        } else {
+            "disable"
+        },
+        "--now",
+        service::ids::SYSTEMD_UNIT,
+    ]);
+    args
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceInspection {
+    schema_version: u32,
+    installed: bool,
+    enabled: bool,
+    running: bool,
+    /// The configured launch identity, not the inspecting helper's executable.
+    binary_path: Option<String>,
+}
+
+fn launchd_disabled(output: &str, label: &str) -> bool {
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&format!("\"{label}\" => "))
+            .is_some_and(|value| {
+                matches!(
+                    value.trim_end_matches([',', ';']).trim(),
+                    "true" | "disabled"
+                )
+            })
+    })
+}
+
+fn inspect(install_scope: ServiceScope) -> Result<ServiceInspection, String> {
+    let mut result = ServiceInspection {
+        schema_version: 1,
+        installed: false,
+        enabled: false,
+        running: false,
+        binary_path: None,
+    };
+    match ServiceSpec::backend() {
+        ServiceBackend::Launchd => {
+            let plist = service::launchd_plist_path(&home()?);
+            result.installed = plist.exists();
+            if result.installed {
+                result.binary_path = Some(
+                    capture(
+                        "/usr/bin/plutil",
+                        &[
+                            "-extract",
+                            "ProgramArguments.0",
+                            "raw",
+                            "-o",
+                            "-",
+                            &plist.to_string_lossy(),
+                        ],
+                    )?
+                    .trim()
+                    .to_string(),
+                );
+                let domain = format!("gui/{}", unsafe_uid());
+                let disabled = capture("launchctl", &["print-disabled", &domain])?;
+                result.enabled = !launchd_disabled(&disabled, service::ids::LAUNCHD_LABEL);
+                let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
+                result.running = capture("launchctl", &["print", &target]).is_ok_and(|output| {
+                    output.lines().any(|line| line.trim() == "state = running")
+                });
+            }
+        }
+        ServiceBackend::Systemd => {
+            let unit = service::ids::SYSTEMD_UNIT;
+            let mut args = if install_scope == ServiceScope::User {
+                vec!["--user"]
+            } else {
+                vec![]
+            };
+            args.extend([
+                "show",
+                unit,
+                "--property=LoadState,UnitFileState,ActiveState",
+            ]);
+            let output = capture_systemctl(&args)?;
+            result.installed = output.lines().any(|line| line == "LoadState=loaded");
+            result.enabled = output.lines().any(|line| line == "UnitFileState=enabled");
+            result.running = output.lines().any(|line| line == "ActiveState=active");
+        }
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            (result.installed, result.enabled, result.running) = crate::windows_task::inspect();
+        }
+        ServiceBackend::Unsupported => return Err(service::unsupported_backend().to_string()),
+    }
+    Ok(result)
 }
 
 fn status(install_scope: ServiceScope) -> Result<(), String> {
@@ -1114,6 +1229,52 @@ mod tests {
     use super::*;
     use crate::cli::ServiceScopeArgs;
     use std::fs;
+
+    #[test]
+    fn explicit_pause_and_resume_persist_without_replacing_systemd_definition() {
+        assert_eq!(
+            systemd_lifecycle_args("stop", ServiceScope::User),
+            ["--user", "disable", "--now", "opengeni-agent.service"]
+        );
+        assert_eq!(
+            systemd_lifecycle_args("start", ServiceScope::System),
+            ["enable", "--now", "opengeni-agent.service"]
+        );
+    }
+
+    #[test]
+    fn launchd_pause_inspection_matches_only_the_exact_service_override() {
+        let label = service::ids::LAUNCHD_LABEL;
+        assert!(launchd_disabled(
+            &format!("disabled services = {{\n  \"{label}\" => true\n}}"),
+            label
+        ));
+        assert!(!launchd_disabled(&format!("\"{label}\" => false"), label));
+        assert!(launchd_disabled(&format!("\"{label}\" => disabled"), label));
+        assert!(!launchd_disabled(&format!("\"{label}\" => enabled"), label));
+        assert!(!launchd_disabled(
+            &format!("\"{label}.other\" => true"),
+            label
+        ));
+        assert!(!launchd_disabled("disabled services = {}", label));
+    }
+
+    #[test]
+    fn service_inspection_is_versioned_and_keeps_paused_distinct_from_missing() {
+        let value = serde_json::to_value(ServiceInspection {
+            schema_version: 1,
+            installed: true,
+            enabled: false,
+            running: false,
+            binary_path: Some("/Applications/Agent.app/Contents/MacOS/agent".into()),
+        })
+        .unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["installed"], true);
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["running"], false);
+        assert!(value["binaryPath"].as_str().unwrap().contains("Agent.app"));
+    }
 
     #[test]
     fn scope_maps_system_flag() {

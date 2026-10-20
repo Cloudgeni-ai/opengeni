@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
+  WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListQuery,
@@ -27,6 +29,7 @@ import {
 } from "@opengeni/core";
 import {
   createWorkspaceArtifact,
+  duplicateWorkspaceArtifact,
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
   listWorkspaceArtifacts,
@@ -141,6 +144,12 @@ function provenance(subjectId: string, idempotencyKey: string) {
     sourceExecutionGeneration: null,
     sourceToolName: null,
   };
+}
+
+/** "Board (copy)", kept within the title limit. */
+function copyTitle(title: string): string {
+  const suffix = " (copy)";
+  return `${title.slice(0, WORKSPACE_ARTIFACT_TITLE_MAX_CHARS - suffix.length).trimEnd()}${suffix}`;
 }
 
 async function canReadProvenanceSession(
@@ -505,6 +514,56 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             true,
           ),
         ),
+      );
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // A new Site from this Site's current version: the same HTML, source and
+  // requested tools, owned by the caller, with the original's visibility. Its
+  // publication, Site Data and history stay with the original.
+  app.post(`${base}/:artifactId/duplicate`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
+    const request = await body(context, DuplicateWorkspaceArtifactRequest);
+    const sourceId = artifactId(context);
+    try {
+      const viewer = await siteViewerForGrant(deps.db, grant);
+      return context.json(
+        await mutationResponse(
+          deps,
+          grant,
+          await duplicateWorkspaceArtifact(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            viewer,
+            sourceArtifactId: sourceId,
+            artifactId: crypto.randomUUID(),
+            ...(request.title === undefined ? {} : { title: request.title }),
+            defaultTitle: copyTitle,
+            slugFor: (title, id) =>
+              `${(normalizeWorkspaceArtifactSlug(title) || "artifact").slice(0, 87)}-${id.slice(0, 8)}`,
+            resolveAudience: async (visibility) =>
+              await resolveNewSiteAudience({
+                db: deps.db,
+                settings: deps.settings,
+                grant,
+                viewer,
+                requested: visibility,
+                sourceSessionId: null,
+              }),
+            // Its own operation namespace: the key cannot replay a create or another Site's copy.
+            ...provenance(grant.subjectId, `duplicate:${sourceId}:${request.idempotencyKey}`),
+          }),
+        ),
+        201,
       );
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);

@@ -32,7 +32,7 @@ export function legacyInteractionCapacityFailure(
   const ended = surface === "browser" ? "browser sessions" : "computer sessions";
   return {
     code: "capacity_exhausted",
-    message: `This machine is already running its limit of Opengeni ${sessions}. End ${ended} that are no longer needed, then open a new one; retrying will not help until one ends.`,
+    message: `This machine is already running its limit of ${sessions}. End ${ended} that are no longer needed, then open a new one; retrying will not help until one ends.`,
     retryable: false,
   };
 }

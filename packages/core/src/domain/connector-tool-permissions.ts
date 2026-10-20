@@ -58,6 +58,12 @@ import {
   settingsWithApiIntegrationServers,
 } from "./capabilities";
 
+export class ConnectorConnectionRequiredError extends HTTPException {
+  constructor() {
+    super(409, { message: "Connect an account to manage its tool permissions" });
+  }
+}
+
 type Input = {
   db: Database;
   settings: Settings;
@@ -236,7 +242,7 @@ async function resolveTarget(input: Input) {
   );
   const connection = visible.find((candidate) => candidate.id === binding?.connectionId) ?? null;
   if (ref && !connection) {
-    throw new HTTPException(409, { message: "Reconnect this connector to manage its tools" });
+    throw new ConnectorConnectionRequiredError();
   }
   if (connection?.subjectId && !input.personalOwnerVerified)
     throw new HTTPException(403, {

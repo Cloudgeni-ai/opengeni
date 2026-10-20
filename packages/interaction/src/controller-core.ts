@@ -21,6 +21,8 @@ export class InteractionDefiniteDriverError extends Error {
   /** Optional page or screen state the driver observed after the failure, so
    * the caller can act on it without another observation round trip. */
   observation: unknown = null;
+  /** Optional structured facts about the failure, kept in the receipt's error. */
+  details: InteractionError["details"] = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -38,6 +40,8 @@ export class InteractionDefiniteDriverError extends Error {
 export class InteractionOutcomeUnknownDriverError extends Error {
   /** Optional state observed after the failure; see InteractionDefiniteDriverError. */
   observation: unknown = null;
+  /** Optional structured facts; see InteractionDefiniteDriverError. */
+  details: InteractionError["details"] = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -450,7 +454,12 @@ export class InteractionControllerCore<
             dispatchedAt,
             this.timestamp(),
             this.failureObservation(error.observation, command),
-            { code: error.code, message: error.message, retryable: error.retryable },
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
           ),
         );
       }
@@ -463,7 +472,12 @@ export class InteractionControllerCore<
             dispatchedAt,
             this.timestamp(),
             this.failureObservation(error.observation, command),
-            { code: error.code, message: error.message, retryable: error.retryable },
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
           ),
         );
       }
@@ -502,7 +516,7 @@ export class InteractionControllerCore<
     if (!target) {
       throw new InteractionControllerError(
         "target_not_found",
-        `${this.adapter.resourceLabel} target does not exist`,
+        `${this.adapter.resourceLabel} target ${JSON.stringify(targetId)} does not exist; list the current targets and use one of their ids`,
       );
     }
     const parsed = this.adapter.parseTarget(target);

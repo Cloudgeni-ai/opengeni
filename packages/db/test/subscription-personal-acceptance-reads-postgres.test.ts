@@ -51,6 +51,7 @@ import {
   MAINTENANCE_PROBE_OWNER_ROUTINES,
 } from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
 import {
   stageVaultPolicyColumns,
   withoutAbsentLaterPosture,
@@ -750,6 +751,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
+      ...ABSENT_USAGE_HISTORY_POSTURE,
+      // Selected-workspace Slack bot access arrives in the withheld 0864.
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();

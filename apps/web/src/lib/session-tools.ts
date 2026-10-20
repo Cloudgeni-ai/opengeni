@@ -99,6 +99,7 @@ const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> 
   inbox_tidy: "Tidy your inbox",
   set_other_session_title: "Rename another session",
   run_on: "Choose where work runs",
+  excel_run: "Work in your Excel workbooks",
 };
 
 // Admin access tools are granted only through a session's admin access, never

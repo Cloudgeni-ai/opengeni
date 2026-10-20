@@ -112,6 +112,9 @@ const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
 // well below the 1 MiB RPC payload ceiling.
 const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
 
+/** Windows PowerShell ships with every supported Windows release; `pwsh` may not. */
+const WINDOWS_EXEC_COMMAND_SHELL = "powershell.exe";
+
 /**
  * Builds the exact argv for an explicitly selected shell.
  *
@@ -1763,7 +1766,7 @@ export class SelfhostedSession {
    *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.execWithYield(args);
+    const result = await this.execWithYield(this.withExecCommandDefaultShell(args));
     if (result.backgroundCommandId && result.backgroundOpId) {
       const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
@@ -1784,6 +1787,21 @@ export class SelfhostedSession {
     return result.backgroundChildrenStopped
       ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
       : formatted;
+  }
+
+  /**
+   * `exec_command` with no `shell` runs PowerShell on a Windows machine.
+   *
+   * The machine's own default there is `cmd.exe` (`ComSpec`), but agents writing
+   * commands for Windows write PowerShell, and the rest of this session already
+   * treats PowerShell as the Windows dialect (secret splicing forces it). Choosing
+   * it here, as direct argv, makes the default the same for every enrolled agent
+   * version. An explicit `shell` is always honoured, and internal Channel-A
+   * callers (`exec`) keep the machine default they were written for.
+   */
+  private withExecCommandDefaultShell(args: SelfhostedExecArgs): SelfhostedExecArgs {
+    if (args.shell?.trim() || this.hostOs() !== "windows") return args;
+    return { ...args, shell: WINDOWS_EXEC_COMMAND_SHELL };
   }
 
   /**
@@ -2510,7 +2528,7 @@ export class SelfhostedSession {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
       resourcePolicy: undefined,
-      op: { $case: "ping", ping: { nonce } },
+      op: { $case: "ping", ping: { nonce, controlReplayWindowMs: "0" } },
     };
     const res = await this.controlRpc.request(admission.subject, req, {
       timeoutMs: this.timeoutMs,
@@ -3087,8 +3105,8 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. Opengeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the machine's agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. The platform did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

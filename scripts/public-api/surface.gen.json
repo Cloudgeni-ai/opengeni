@@ -1400,6 +1400,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/organizations/:organizationId/subscription-usage-pools",
+      "sdk": [
+        "OpenGeniClient.getOrganizationSubscriptionUsagePools"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionUsagePoolsResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/supergrok/accounts",
       "sdk": [
         "OpenGeniClient.listOrganizationSuperGrokAccounts"
@@ -6543,6 +6554,19 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+      "sdk": [
+        "OpenGeniClient.duplicateWorkspaceArtifact"
+      ],
+      "request": [
+        "DuplicateWorkspaceArtifactRequest"
+      ],
+      "response": [
+        "WorkspaceArtifactMutationResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
       "sdk": [
@@ -8137,6 +8161,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+      "sdk": [
+        "OpenGeniClient.negotiateRealtimeWebsocket"
+      ],
+      "request": [
+        "SessionRealtimeWebsocketRequest"
+      ],
+      "response": [
+        "SessionRealtimeWebsocketResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/retention",
       "sdk": [
@@ -8827,6 +8864,17 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/subscription-usage-pools",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceSubscriptionUsagePools"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionUsagePoolsResponse"
+      ]
     },
     {
       "method": "GET",
@@ -9836,6 +9884,7 @@
       "sandbox.operation.completed",
       "sandbox.operation.failed",
       "sandbox.operation.started",
+      "sandbox.recovery.selected",
       "session.agent.updated",
       "session.command.backgrounded",
       "session.command.finished",
@@ -10591,6 +10640,42 @@
         "$.updatedAt": "string!",
         "$.workspaceId": "string! null",
         "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
+      }
+    },
+    "AppShotCapture": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.app": "string!",
+        "$.browser": "object?",
+        "$.browser.profiles": "array?",
+        "$.browser.profiles[]": "object",
+        "$.browser.profiles[].deviceId": "string!",
+        "$.browser.profiles[].name": "string!",
+        "$.browser.url": "string!",
+        "$.bundleId": "string?",
+        "$.capturedAt": "string!",
+        "$.computer": "object?",
+        "$.computer.name": "string!",
+        "$.computer.sandboxId": "string?",
+        "$.platform": "ref(AppShotPlatform)!",
+        "$.text": "string?",
+        "$.textTruncated": "boolean?",
+        "$.title": "string!",
+        "$.window": "object?",
+        "$.window.processId": "integer!",
+        "$.window.windowId": "integer!"
+      }
+    },
+    "AppShotPlatform": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"linux\\\"\",\"\\\"macos\\\"\",\"\\\"windows\\\"\"]"
       }
     },
     "AppendArchivedSessionEventsRequest": {
@@ -12231,7 +12316,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
       }
     },
     "CancelBillingSubscriptionRequest": {
@@ -13293,49 +13378,27 @@
         "$.updatedAt": "string! null"
       }
     },
-    "ComputerAction": {
+    "ComputerActionBatch": {
       "io": [
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
-        "$|type=semantic": "object",
-        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
-        "$|type=semantic.locator": "ref(ComputerLocator)!",
-        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
-        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
-        "$|type=semantic.value|0": "string",
-        "$|type=semantic.value|1": "number",
-        "$|type=semantic.value|2": "boolean",
-        "$|type=pointer": "object",
-        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
-        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
-        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
-        "$|type=pointer.clickCount|0": "const=[\"1\"]",
-        "$|type=pointer.clickCount|1": "const=[\"2\"]",
-        "$|type=pointer.continuationOfOperationId": "string?",
-        "$|type=pointer.deltaX": "number?",
-        "$|type=pointer.deltaY": "number?",
-        "$|type=pointer.endX": "number?",
-        "$|type=pointer.endY": "number?",
-        "$|type=pointer.frameId": "string!",
-        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
-        "$|type=pointer.x": "number!",
-        "$|type=pointer.y": "number!",
-        "$|type=keyboard": "object",
-        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
-        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
-        "$|type=keyboard.value": "string!",
-        "$|type=clipboard": "object",
-        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
-        "$|type=clipboard.text": "string?",
-        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
-        "$|type=focus": "object",
-        "$|type=focus.targetId": "string!",
-        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
-        "$|type=launch": "object",
-        "$|type=launch.applicationId": "string!",
-        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]"
+        "$": "object",
+        "$.actions": "array!",
+        "$.actions[]": "union=[\"type=keyboard\",\"type=semantic\"]",
+        "$.actions[]|type=semantic": "object",
+        "$.actions[]|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$.actions[]|type=semantic.locator": "ref(ComputerLocator)!",
+        "$.actions[]|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$.actions[]|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$.actions[]|type=semantic.value|0": "string",
+        "$.actions[]|type=semantic.value|1": "number",
+        "$.actions[]|type=semantic.value|2": "boolean",
+        "$.actions[]|type=keyboard": "object",
+        "$.actions[]|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$.actions[]|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$.actions[]|type=keyboard.value": "string!",
+        "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
     "ComputerActionReceipt": {
@@ -13385,12 +13448,58 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "ref(ComputerAction)!",
+        "$.action": "ref(ComputerActionRequestAction)!",
         "$.expectedFrameId": "string! null",
         "$.expectedObservationId": "string! null",
         "$.expectedTargetGeneration": "string!",
         "$.operationId": "string!",
         "$.targetId": "string!"
+      }
+    },
+    "ComputerActionRequestAction": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"type=batch\",\"type=clipboard\",\"type=focus\",\"type=keyboard\",\"type=launch\",\"type=pointer\",\"type=semantic\"]",
+        "$|type=semantic": "object",
+        "$|type=semantic.action": "enum!=[\"\\\"collapse\\\"\",\"\\\"decrement\\\"\",\"\\\"deselect\\\"\",\"\\\"expand\\\"\",\"\\\"focus\\\"\",\"\\\"increment\\\"\",\"\\\"invoke\\\"\",\"\\\"scroll_into_view\\\"\",\"\\\"select\\\"\",\"\\\"set_value\\\"\",\"\\\"show_menu\\\"\"]",
+        "$|type=semantic.locator": "ref(ComputerLocator)!",
+        "$|type=semantic.type": "const!=[\"\\\"semantic\\\"\"]",
+        "$|type=semantic.value": "union?=[\"0\",\"1\",\"2\"]",
+        "$|type=semantic.value|0": "string",
+        "$|type=semantic.value|1": "number",
+        "$|type=semantic.value|2": "boolean",
+        "$|type=pointer": "object",
+        "$|type=pointer.action": "enum!=[\"\\\"click\\\"\",\"\\\"double_click\\\"\",\"\\\"drag\\\"\",\"\\\"move\\\"\",\"\\\"scroll\\\"\"]",
+        "$|type=pointer.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
+        "$|type=pointer.clickCount": "union?=[\"0\",\"1\"]",
+        "$|type=pointer.clickCount|0": "const=[\"1\"]",
+        "$|type=pointer.clickCount|1": "const=[\"2\"]",
+        "$|type=pointer.continuationOfOperationId": "string?",
+        "$|type=pointer.deltaX": "number?",
+        "$|type=pointer.deltaY": "number?",
+        "$|type=pointer.endX": "number?",
+        "$|type=pointer.endY": "number?",
+        "$|type=pointer.frameId": "string!",
+        "$|type=pointer.type": "const!=[\"\\\"pointer\\\"\"]",
+        "$|type=pointer.x": "number!",
+        "$|type=pointer.y": "number!",
+        "$|type=keyboard": "object",
+        "$|type=keyboard.action": "enum!=[\"\\\"press\\\"\",\"\\\"type\\\"\"]",
+        "$|type=keyboard.type": "const!=[\"\\\"keyboard\\\"\"]",
+        "$|type=keyboard.value": "string!",
+        "$|type=clipboard": "object",
+        "$|type=clipboard.operation": "enum!=[\"\\\"clear\\\"\",\"\\\"copy\\\"\",\"\\\"paste\\\"\",\"\\\"write\\\"\"]",
+        "$|type=clipboard.text": "string?",
+        "$|type=clipboard.type": "const!=[\"\\\"clipboard\\\"\"]",
+        "$|type=focus": "object",
+        "$|type=focus.targetId": "string!",
+        "$|type=focus.type": "const!=[\"\\\"focus\\\"\"]",
+        "$|type=launch": "object",
+        "$|type=launch.applicationId": "string!",
+        "$|type=launch.type": "const!=[\"\\\"launch\\\"\"]",
+        "$|type=batch": "ref(ComputerActionBatch)"
       }
     },
     "ComputerClipboard": {
@@ -13605,6 +13714,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.actionBatches": "boolean?",
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
@@ -14323,6 +14433,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appShot": "ref(AppShotCapture)?",
         "$.contentType": "string!",
         "$.filename": "string!",
         "$.scope": "ref(ConnectionOwnership)?",
@@ -15424,6 +15535,16 @@
         "$.source": "ref(TimelineAnnotationSource)!"
       }
     },
+    "DuplicateWorkspaceArtifactRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.idempotencyKey": "string!",
+        "$.title": "string?"
+      }
+    },
     "EditSessionQueueItemRequest": {
       "io": [
         "input"
@@ -15788,6 +15909,7 @@
       "shape": {
         "$": "object",
         "$.access": "ref(FileAccess)?",
+        "$.appShot": "ref(AppShotCapture)?",
         "$.bucket": "string!",
         "$.contentType": "string!",
         "$.createdAt": "string!",
@@ -16133,9 +16255,15 @@
         "$.initialItems[]": "ref(GatewayRealtimeInitialItem)",
         "$.instructions": "string!",
         "$.modeVersion": "integer!",
+        "$.protocol": "ref(RealtimeWebsocketProtocol)!",
+        "$.protocols": "array!",
+        "$.protocols[]": "string",
         "$.replay": "const!=[\"false\"]",
+        "$.sessionUpdate": "object! null",
+        "$.sessionUpdate{}": "unknown",
         "$.startupFenceSequence": "integer!",
         "$.token": "string!",
+        "$.transcriptAudioTags": "boolean?",
         "$.upstreamModelId": "string!",
         "$.url": "string!"
       }
@@ -18976,7 +19104,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"fast\\\"\",\"\\\"priority\\\"\",\"\\\"standard\\\"\"]"
+        "$": "enum=[\"\\\"fast\\\"\",\"\\\"priority\\\"\",\"\\\"standard\\\"\",\"\\\"ultrafast\\\"\"]"
       }
     },
     "ListApiIntegrationsResponse": {
@@ -19449,12 +19577,24 @@
         "$": "enum=[\"\\\"consent_required\\\"\",\"\\\"display_unavailable\\\"\",\"\\\"enrolling\\\"\",\"\\\"offline\\\"\",\"\\\"online\\\"\",\"\\\"reconnecting\\\"\"]"
       }
     },
+    "MachineUpdateBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.count": "integer!",
+        "$.kind": "string!"
+      }
+    },
     "MachineUpdateState": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "object",
+        "$.blockers": "array?",
+        "$.blockers[]": "ref(MachineUpdateBlocker)",
         "$.completedAt": "string! null",
         "$.errorCode": "string! null",
         "$.expectedBinarySha256": "string! null",
@@ -20609,7 +20749,9 @@
       "shape": {
         "$": "object",
         "$.enabled": "boolean!",
-        "$.generation": "integer!"
+        "$.generation": "integer!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "OpenMachinePrivacySettingsRequest": {
@@ -22472,6 +22614,14 @@
         "$.secret": "string?"
       }
     },
+    "RealtimeWebsocketProtocol": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"ai-gateway\\\"\",\"\\\"openai\\\"\"]"
+      }
+    },
     "ReasoningEffort": {
       "io": [
         "input",
@@ -23191,9 +23341,13 @@
         "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
         "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
+        "$.freshWorkspaceAvailable": "boolean?",
+        "$.groupSessionCount": "integer?",
         "$.operationId": "string! null",
         "$.reason": "string! null",
+        "$.retryAvailable": "boolean?",
         "$.status": "enum!=[\"\\\"blocked\\\"\",\"\\\"consent_accepted\\\"\",\"\\\"eligible\\\"\",\"\\\"restored\\\"\",\"\\\"restoring\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.target": "ref(SandboxRecoveryTarget)?",
         "$.version": "const!=[\"1\"]"
       }
     },
@@ -23202,10 +23356,20 @@
         "input"
       ],
       "shape": {
-        "$": "object",
-        "$.acceptHistoricalCheckpoint": "const!=[\"true\"]",
-        "$.operationId": "string!",
-        "$.selection": "ref(SandboxRecoverySelection)!"
+        "$": "union=[\"acceptHistoricalCheckpoint=true\",\"action=continue_fresh\",\"action=retry\"]",
+        "$|acceptHistoricalCheckpoint=true": "object",
+        "$|acceptHistoricalCheckpoint=true.acceptHistoricalCheckpoint": "const!=[\"true\"]",
+        "$|acceptHistoricalCheckpoint=true.operationId": "string!",
+        "$|acceptHistoricalCheckpoint=true.selection": "ref(SandboxRecoverySelection)!",
+        "$|action=retry": "object",
+        "$|action=retry.action": "const!=[\"\\\"retry\\\"\"]",
+        "$|action=retry.operationId": "string!",
+        "$|action=retry.target": "ref(SandboxRecoveryTarget)!",
+        "$|action=continue_fresh": "object",
+        "$|action=continue_fresh.acceptEmptyWorkspace": "const!=[\"true\"]",
+        "$|action=continue_fresh.action": "const!=[\"\\\"continue_fresh\\\"\"]",
+        "$|action=continue_fresh.operationId": "string!",
+        "$|action=continue_fresh.target": "ref(SandboxRecoveryTarget)!"
       }
     },
     "SandboxRecoveryResponse": {
@@ -23237,6 +23401,26 @@
         "$.sandboxGroupId": "string!",
         "$.sessionId": "string!",
         "$.version": "const!=[\"1\"]",
+        "$.workspaceGeneration": "integer!"
+      }
+    },
+    "SandboxRecoveryTarget": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveGeneration": "integer! null",
+        "$.authorityEpoch": "integer!",
+        "$.leaseEpoch": "integer!",
+        "$.leaseId": "string!",
+        "$.restoreCompletedAt": "string! null",
+        "$.restoreStatus": "string!",
+        "$.revision": "string! null",
+        "$.routeEpoch": "integer!",
+        "$.sandboxGroupId": "string!",
+        "$.sessionId": "string!",
         "$.workspaceGeneration": "integer!"
       }
     },
@@ -23456,6 +23640,7 @@
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -23492,6 +23677,7 @@
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
+        "$.executionTarget": "const?=[\"\\\"workspace_default\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
         "$.knowledgeSource": "ref(KnowledgeSourceSyncAction)?",
@@ -24129,7 +24315,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -24817,7 +25003,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
+        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-elevenlabs/eleven_realtime_v1_max\\\"\",\"\\\"workspace-elevenlabs/eleven_realtime_v1_mini\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
       }
     },
     "SessionRealtimeMutationResponse": {
@@ -24847,6 +25033,47 @@
         "$": "object",
         "$.code": "string!",
         "$.message": "string!"
+      }
+    },
+    "SessionRealtimeWebsocketRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.browserInstanceId": "string!",
+        "$.expectedConnectionEpoch": "integer!",
+        "$.expectedVersion": "integer!",
+        "$.operationId": "string!",
+        "$.ownerKey": "string!",
+        "$.realtimeId": "string!",
+        "$.rotate": "boolean!"
+      }
+    },
+    "SessionRealtimeWebsocketResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionEpoch": "integer!",
+        "$.connectionId": "string!",
+        "$.expiresAt": "integer! null",
+        "$.initialItems": "array!",
+        "$.initialItems[]": "ref(GatewayRealtimeInitialItem)",
+        "$.instructions": "string!",
+        "$.modeVersion": "integer!",
+        "$.protocol": "ref(RealtimeWebsocketProtocol)!",
+        "$.protocols": "array!",
+        "$.protocols[]": "string",
+        "$.replay": "const!=[\"false\"]",
+        "$.sessionUpdate": "object! null",
+        "$.sessionUpdate{}": "unknown",
+        "$.startupFenceSequence": "integer!",
+        "$.token": "string!",
+        "$.transcriptAudioTags": "boolean?",
+        "$.upstreamModelId": "string!",
+        "$.url": "string!"
       }
     },
     "SessionRetention": {
@@ -26195,6 +26422,49 @@
         "$.activeCredentialId": "string! null",
         "$.rotationEnabled": "boolean!",
         "$.rotationStrategy": "const!=[\"\\\"sharded\\\"\"]"
+      }
+    },
+    "SubscriptionUsagePool": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string! null",
+        "$.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
+        "$.windows": "array!",
+        "$.windows[]": "object",
+        "$.windows[].accounts": "array!",
+        "$.windows[].accounts[]": "object",
+        "$.windows[].accounts[].id": "string!",
+        "$.windows[].accounts[].label": "string!",
+        "$.windows[].accounts[].observedAt": "string! null",
+        "$.windows[].accounts[].remainingPercent": "number! null",
+        "$.windows[].accounts[].resetsAt": "string! null",
+        "$.windows[].accounts[].weight": "number!",
+        "$.windows[].accounts[].weightBasis": "enum!=[\"\\\"observed\\\"\",\"\\\"plan_estimate\\\"\"]",
+        "$.windows[].forecast": "object!",
+        "$.windows[].forecast.basis": "string!",
+        "$.windows[].forecast.historyDays": "number!",
+        "$.windows[].forecast.kind": "enum!=[\"\\\"insufficient_history\\\"\",\"\\\"runs_out\\\"\",\"\\\"unused\\\"\"]",
+        "$.windows[].forecast.lowestPercent": "number! null",
+        "$.windows[].forecast.nextResetAt": "string! null",
+        "$.windows[].forecast.runsOutAt": "string! null",
+        "$.windows[].forecast.unusedPercent": "number! null",
+        "$.windows[].forecast.utilizationPercent": "number? null",
+        "$.windows[].id": "enum!=[\"\\\"five_hour\\\"\",\"\\\"weekly\\\"\"]",
+        "$.windows[].remainingPercent": "number! null"
+      }
+    },
+    "SubscriptionUsagePoolsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.checkedAt": "string!",
+        "$.pools": "array!",
+        "$.pools[]": "ref(SubscriptionUsagePool)"
       }
     },
     "SupersedePreferenceRegistryRequest": {
@@ -27554,7 +27824,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.enabled": "boolean!"
+        "$.enabled": "boolean!",
+        "$.workspaceIds": "array? null",
+        "$.workspaceIds[]": "string"
       }
     },
     "UpdateOrganizationAgentAdminAccessRequest": {
@@ -28126,6 +28398,7 @@
         "$.busySend": "ref(WorkspaceBusySend)?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
+        "$.defaultExecutionTarget": "ref(WorkspaceDefaultExecutionTarget)? null",
         "$.defaultSandboxImage": "string? null",
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
@@ -29276,6 +29549,19 @@
         "$.remaining": "integer!"
       }
     },
+    "WorkspaceDefaultExecutionTarget": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=machine\",\"kind=managed\"]",
+        "$|kind=managed": "object",
+        "$|kind=managed.kind": "const!=[\"\\\"managed\\\"\"]",
+        "$|kind=machine": "object",
+        "$|kind=machine.kind": "const!=[\"\\\"machine\\\"\"]",
+        "$|kind=machine.targetSandboxId": "string!"
+      }
+    },
     "WorkspaceGatewayCustomModel": {
       "io": [
         "output"
@@ -29989,7 +30275,7 @@
         "$.description": "string!",
         "$.id": "ref(SessionRealtimeModel)!",
         "$.label": "string!",
-        "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your Gateway\\\"\"]",
+        "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
         "$.unavailableCode": "string? null",
         "$.unavailableReason": "string! null"
@@ -30474,6 +30760,7 @@
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "ApproveSlackUserLinkAccessRequest": "type",
+      "AppShotCapture": "type",
       "ArtifactCatalogItem": "type",
       "ArtifactCatalogKind": "type",
       "ArtifactCatalogListOptions": "type",
@@ -30715,6 +31002,7 @@
       "ComposerDraft": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",
@@ -30801,6 +31089,7 @@
       "CreatePreferenceRegistryProposalRequest": "type",
       "CreatePrReviewAppRegistrationRequest": "type",
       "CreatePrReviewRepositoryBindingRequest": "type",
+      "createRealtimeWebsocketTransportStarter": "value",
       "CreateRigRequest": "type",
       "CreateScheduledTaskRequest": "type",
       "createSessionProxyHandler": "value",
@@ -30876,6 +31165,7 @@
       "DocumentStatus": "type",
       "DocumentVisibility": "type",
       "DraftTimelineAnnotation": "type",
+      "DuplicateWorkspaceArtifactRequest": "type",
       "EditableArtifactListResource": "type",
       "EditableArtifactMaterializationFormat": "type",
       "EditableArtifactMaterializationJobResource": "type",
@@ -31122,12 +31412,14 @@
       "InteractionSemanticSnapshot": "type",
       "InteractionSessionListOptions": "type",
       "InteractionTransport": "type",
+      "isConnectedMachineOutcomeUnknownOutput": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
+      "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
       "KnowledgeEntryContent": "type",
@@ -31534,6 +31826,7 @@
       "ReadEditableArtifactMaterializationOptions": "type",
       "ReadEditableArtifactResourceOptions": "type",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeWebsocketProtocol": "type",
       "ReasoningEffort": "type",
       "RecordingAvailablePayload": "type",
       "RecordingCapability": "type",
@@ -31612,6 +31905,7 @@
       "SandboxRecoveryRequest": "type",
       "SandboxRecoveryResponse": "type",
       "SandboxRecoverySelection": "type",
+      "SandboxRecoveryTarget": "type",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "SaveAgentLearningSettingsRequest": "type",
       "SaveComposerDraftRequest": "type",
@@ -31647,6 +31941,7 @@
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
       "SESSION_EVENT_TYPES": "value",
+      "SESSION_REALTIME_MODELS": "value",
       "SESSION_SCOPE_HEADER": "value",
       "SESSION_SEQUENCE_HEADER": "value",
       "SessionAdminAccess": "type",
@@ -31727,6 +32022,9 @@
       "SessionRealtimeMutationResponse": "type",
       "SessionRealtimeState": "type",
       "SessionRealtimeStopInstruction": "type",
+      "SessionRealtimeWebsocketInitialItem": "type",
+      "SessionRealtimeWebsocketRequest": "type",
+      "SessionRealtimeWebsocketResponse": "type",
       "SessionRetention": "type",
       "SessionRetryRequest": "type",
       "SessionRetryResponse": "type",
@@ -31893,6 +32191,8 @@
       "SubscriptionPlan": "type",
       "SubscriptionPlanCatalog": "type",
       "SubscriptionPoolSettings": "type",
+      "SubscriptionUsagePool": "type",
+      "SubscriptionUsagePoolsResponse": "type",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",
       "SuperGrokAccountsResponse": "type",
@@ -32703,6 +33003,7 @@
     },
     "@opengeni/sdk/gateway-realtime-transport": {
       "createGatewayRealtimeTransportStarter": "value",
+      "createRealtimeWebsocketTransportStarter": "value",
       "createXaiSubscriptionRealtimeTransportStarter": "value"
     },
     "@opengeni/sdk/github-repositories": {
@@ -32830,6 +33131,7 @@
       "BrowserWorkingCopyRefusal": "type",
       "COMPUTER_CONTROL_WEBSOCKET_PROTOCOL": "value",
       "ComputerAction": "type",
+      "ComputerActionBatch": "type",
       "ComputerActionReceipt": "type",
       "ComputerActionRequest": "type",
       "ComputerClipboard": "type",
@@ -33100,6 +33402,7 @@
       "CreateCodexRealtimeControllerOptions": "type",
       "createCodexRealtimeV3Bridge": "value",
       "createGatewayRealtimeTransportStarter": "value",
+      "createRealtimeWebsocketTransportStarter": "value",
       "createSessionRealtimeController": "value",
       "CreateSessionRealtimeControllerOptions": "type",
       "createXaiSubscriptionRealtimeTransportStarter": "value",
@@ -33110,10 +33413,13 @@
       "GatewayRealtimeConnectResponse": "type",
       "GatewayRealtimeInitialItem": "type",
       "hasStoredSessionRealtimeOwnerProof": "value",
+      "isSessionRealtimeModel": "value",
       "parseCodexRealtimeV3Event": "value",
       "projectSessionRealtimeLifecycle": "value",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeWebsocketProtocol": "type",
       "RenewSessionRealtimeRequest": "type",
+      "SESSION_REALTIME_MODELS": "value",
       "SessionRealtimeClientLike": "type",
       "SessionRealtimeController": "type",
       "SessionRealtimeControllerSnapshot": "type",
@@ -33133,12 +33439,18 @@
       "SessionRealtimeState": "type",
       "sessionRealtimeTransportKind": "value",
       "SessionRealtimeTransportKind": "type",
+      "SessionRealtimeWebsocketInitialItem": "type",
+      "SessionRealtimeWebsocketRequest": "type",
+      "SessionRealtimeWebsocketResponse": "type",
       "startCodexRealtimeWebrtc": "value",
       "StartCodexRealtimeWebrtcOptions": "type",
       "SyncSessionRealtimeLedgerRequest": "type",
       "SyncSessionRealtimeLedgerResponse": "type",
       "WorkspaceRealtimeModelCatalogItem": "type",
       "WorkspaceRealtimeModelCatalogResponse": "type"
+    },
+    "@opengeni/sdk/realtime-websocket-transport": {
+      "createRealtimeWebsocketTransportStarter": "value"
     },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
@@ -34803,6 +35115,7 @@
       "ModelPickerMenuGroup": "type",
       "modelPickerMenuView": "value",
       "ModelPickerMenuView": "type",
+      "ModelPickerSpeed": "type",
       "ModelPickerThinking": "type",
       "ModelPolicyPickerMessages": "type",
       "SCOPED_BILLING_HINTS": "value"
@@ -34903,6 +35216,7 @@
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
       "NewSessionRealtimeControl": "value",
+      "prestartSessionRealtime": "value",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",
@@ -35109,6 +35423,7 @@
       "CODEX_LIVE_MODEL": "value",
       "codexRealtimeAdmissionAllowed": "value",
       "codexRealtimeAdmissionBlocker": "value",
+      "prestartSessionRealtime": "value",
       "RealtimeControllerClient": "type",
       "RealtimeModelOption": "type",
       "SessionRealtimeControllerFactory": "type",
@@ -35964,6 +36279,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -36055,6 +36371,7 @@
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
+      "getOrganizationSubscriptionUsagePools",
       "getOrganizationUsageSummary",
       "getOrganizationUsageWorkspacePage",
       "getPreferenceRegistry",
@@ -36111,6 +36428,7 @@
       "getWorkspaceModelCatalog",
       "getWorkspaceRealtimeModelCatalog",
       "getWorkspaceState",
+      "getWorkspaceSubscriptionUsagePools",
       "gitDiff",
       "gitLog",
       "gitReadBatch",
@@ -36253,6 +36571,7 @@
       "moveQueueItem",
       "negotiateCodexRealtimeWebrtc",
       "negotiateGatewayRealtime",
+      "negotiateRealtimeWebsocket",
       "negotiateXaiSubscriptionRealtime",
       "observeBrowserTarget",
       "observeComputerTarget",
@@ -36675,6 +36994,7 @@
       "downloadCatalogAsset",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -36764,6 +37084,7 @@
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
+      "getOrganizationSubscriptionUsagePools",
       "getOrganizationUsageSummary",
       "getOrganizationUsageWorkspacePage",
       "getPreferenceRegistry",
@@ -36819,6 +37140,7 @@
       "getWorkspaceModelCatalog",
       "getWorkspaceRealtimeModelCatalog",
       "getWorkspaceState",
+      "getWorkspaceSubscriptionUsagePools",
       "gitDiff",
       "gitLog",
       "gitReadBatch",
@@ -36959,6 +37281,7 @@
       "moveQueueItem",
       "negotiateCodexRealtimeWebrtc",
       "negotiateGatewayRealtime",
+      "negotiateRealtimeWebsocket",
       "negotiateXaiSubscriptionRealtime",
       "observeBrowserTarget",
       "observeComputerTarget",
@@ -37394,6 +37717,7 @@
       "downloadEditableArtifactMaterialization",
       "downloadRetainedArtifact",
       "downloadRetainedScreenshot",
+      "duplicateWorkspaceArtifact",
       "editQueueItem",
       "enableCapability",
       "enableMachineScreenControl",
@@ -37489,6 +37813,7 @@
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
+      "getOrganizationSubscriptionUsagePools",
       "getOrganizationUsageSummary",
       "getOrganizationUsageWorkspacePage",
       "getPreferenceRegistry",
@@ -37548,6 +37873,7 @@
       "getWorkspaceModelCatalog",
       "getWorkspaceRealtimeModelCatalog",
       "getWorkspaceState",
+      "getWorkspaceSubscriptionUsagePools",
       "gitDiff",
       "gitLog",
       "gitReadBatch",
@@ -37696,6 +38022,7 @@
       "moveQueueItem",
       "negotiateCodexRealtimeWebrtc",
       "negotiateGatewayRealtime",
+      "negotiateRealtimeWebsocket",
       "negotiateXaiSubscriptionRealtime",
       "observeBrowserTarget",
       "observeComputerTarget",
@@ -38972,6 +39299,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -39259,6 +39589,9 @@
       "getOrganizationServiceAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationServiceAccount\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationUsageSummary": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationUsageSummary\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -39435,6 +39768,9 @@
       ],
       "getWorkspaceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateGetOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "gitDiff": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39881,6 +40217,9 @@
       ],
       "negotiateGatewayRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "negotiateRealtimeWebsocket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "negotiateXaiSubscriptionRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41402,6 +41741,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41677,6 +42019,9 @@
       "getOrganizationServiceAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationServiceAccount\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationUsageSummary": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationUsageSummary\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41844,6 +42189,9 @@
       ],
       "getWorkspaceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateGetOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "gitDiff": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42272,6 +42620,9 @@
       ],
       "negotiateGatewayRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "negotiateRealtimeWebsocket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "negotiateXaiSubscriptionRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43629,6 +43980,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43886,6 +44240,9 @@
       "getOrganizationServiceAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationServiceAccount\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationUsageSummary": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationUsageSummary\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -44050,6 +44407,9 @@
       ],
       "getWorkspaceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateGetOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "gitDiff": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44454,6 +44814,9 @@
       ],
       "negotiateGatewayRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "negotiateRealtimeWebsocket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "negotiateXaiSubscriptionRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -46004,6 +46367,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46273,6 +46639,9 @@
       "getOrganizationServiceAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationServiceAccount\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationUsageSummary": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationUsageSummary\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46437,6 +46806,9 @@
       ],
       "getWorkspaceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateGetOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "gitDiff": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -46859,6 +47231,9 @@
       ],
       "negotiateGatewayRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "negotiateRealtimeWebsocket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "negotiateXaiSubscriptionRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48200,6 +48575,9 @@
       "downloadRetainedScreenshot": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownloadOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedScreenshotDownload\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "duplicateWorkspaceArtifact": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"DuplicateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "editQueueItem": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditSessionQueueItemRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionQueueMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -48469,6 +48847,9 @@
       "getOrganizationServiceAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationServiceAccount\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationUsageSummary": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationUsageSummary\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -48633,6 +49014,9 @@
       ],
       "getWorkspaceState": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateGetOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceStateResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getWorkspaceSubscriptionUsagePools": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SubscriptionUsagePoolsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "gitDiff": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GitDiffResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49055,6 +49439,9 @@
       ],
       "negotiateGatewayRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "negotiateRealtimeWebsocket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionRealtimeWebsocketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "negotiateXaiSubscriptionRealtime": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"GatewayRealtimeConnectResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

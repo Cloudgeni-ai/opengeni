@@ -35,6 +35,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 mod admission;
+mod cpu;
 mod disk;
 mod memory;
 mod ready;
@@ -155,6 +156,8 @@ impl Host {
                 "RUST_LOG",
                 std::env::var("COMPUTE_TEST_LOG").unwrap_or_else(|_| "info".into()),
             )
+            // The log is a file, read by tests: plain text, not colours.
+            .env("NO_COLOR", "1")
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -964,34 +967,293 @@ fn listen_everywhere() -> (TcpListener, u16) {
     (listener, port)
 }
 
-/// On a trusted host guests reach the local network; on any other host the
-/// same address is blocked. Either way the host, the metadata service and
-/// other sandboxes stay out of reach. Runs only when
-/// `COMPUTE_TEST_LAN_TARGET` names a listening `address:port` on the
-/// host's local network (not the host).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn only_trusted_hosts_let_guests_reach_the_local_network() {
-    let Some(lab) = lab() else { return };
-    let Some(target) = std::env::var_os("COMPUTE_TEST_LAN_TARGET") else {
-        skip(
-            "lan",
-            "set COMPUTE_TEST_LAN_TARGET to a listener on the host's local network",
+/// A service on the host's local network: a network namespace of its own
+/// on the host, reached over a veth pair as another machine on the local
+/// network would be, listening on two ports, with two names in the host's
+/// `/etc/hosts` that no public name server knows. Gone when dropped.
+struct LocalService {
+    namespace: String,
+    host_end: String,
+    listener: Child,
+    /// The name a host lists with `--reach`, and one it does not.
+    names: [String; 2],
+}
+
+/// The local service's address, and the host's on the same link.
+const SERVICE: &str = "10.250.0.2";
+const SERVICE_PEER: &str = "10.250.0.1";
+/// The service's ports: one a host lists, one it does not.
+const LISTED: u16 = 18_080;
+const UNLISTED: u16 = 18_081;
+
+impl LocalService {
+    fn start() -> Self {
+        let pid = std::process::id();
+        let namespace = format!("lab-lan-{pid}");
+        let host_end = format!("lablan{}", pid % 100_000);
+        let run = |args: &[&str]| {
+            let status = Command::new(args[0]).args(&args[1..]).status().unwrap();
+            assert!(status.success(), "{args:?}: {status}");
+        };
+        let inside = |args: &[&str]| {
+            let mut all = vec!["ip", "netns", "exec", namespace.as_str()];
+            all.extend(args);
+            run(&all);
+        };
+        run(&["ip", "netns", "add", &namespace]);
+        run(&[
+            "ip", "link", "add", &host_end, "type", "veth", "peer", "name", "lan0", "netns",
+            &namespace,
+        ]);
+        run(&[
+            "ip",
+            "addr",
+            "add",
+            &format!("{SERVICE_PEER}/30"),
+            "dev",
+            &host_end,
+        ]);
+        run(&["ip", "link", "set", &host_end, "up"]);
+        inside(&["ip", "link", "set", "lo", "up"]);
+        inside(&["ip", "addr", "add", &format!("{SERVICE}/30"), "dev", "lan0"]);
+        inside(&["ip", "link", "set", "lan0", "up"]);
+        inside(&["ip", "route", "add", "default", "via", SERVICE_PEER]);
+        let program = format!(
+            "import select, socket\nls = []\nfor port in ({LISTED}, {UNLISTED}):\n    s = socket.socket()\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"{SERVICE}\", port))\n    s.listen(512)\n    ls.append(s)\nwhile True:\n    for s in select.select(ls, [], [])[0]:\n        s.accept()[0].close()"
         );
-        return;
+        let listener = Command::new("ip")
+            .args(["netns", "exec", &namespace, "python3", "-c", &program])
+            .spawn()
+            .unwrap();
+        let names = [
+            format!("lan-{pid}.compute-test.invalid"),
+            format!("hidden-{pid}.compute-test.invalid"),
+        ];
+        let mut hosts = std::fs::read_to_string("/etc/hosts").unwrap();
+        if !hosts.ends_with('\n') {
+            hosts.push('\n');
+        }
+        for name in &names {
+            hosts.extend([SERVICE, " ", name.as_str(), "\n"]);
+        }
+        std::fs::write("/etc/hosts", hosts).unwrap();
+        let service = Self {
+            namespace,
+            host_end,
+            listener,
+            names,
+        };
+        // The positive control: both ports answer from the host.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        for port in [LISTED, UNLISTED] {
+            while std::net::TcpStream::connect((SERVICE, port)).is_err() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the local service never answered on {port}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        service
+    }
+}
+
+impl Drop for LocalService {
+    fn drop(&mut self) {
+        let _ = self.listener.kill();
+        let _ = self.listener.wait();
+        if let Ok(hosts) = std::fs::read_to_string("/etc/hosts") {
+            let mut kept = String::new();
+            for line in hosts.lines() {
+                if !self.names.iter().any(|name| line.ends_with(name.as_str())) {
+                    kept.extend([line, "\n"]);
+                }
+            }
+            let _ = std::fs::write("/etc/hosts", kept);
+        }
+        let _ = Command::new("ip")
+            .args(["link", "del", &self.host_end])
+            .status();
+        let _ = Command::new("ip")
+            .args(["netns", "del", &self.namespace])
+            .status();
+    }
+}
+
+/// Asks the name server at the first argument about each name after it,
+/// over UDP and over TCP, and the guest's own resolver too, printing
+/// `server name udp=A tcp=A libc=A`: the first IPv4 address each found, or
+/// `none`.
+const RESOLVE: &str = r#"
+import socket, struct, sys
+def query(name):
+    q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+    for label in name.split("."):
+        q += bytes([len(label)]) + label.encode()
+    return q + b"\0" + struct.pack(">HH", 1, 1)
+def first_a(answer):
+    if len(answer) < 12 or answer[3] & 15:
+        return "none"
+    count = struct.unpack(">H", answer[6:8])[0]
+    at = 12
+    while answer[at]:
+        at += answer[at] + 1
+    at += 5
+    for _ in range(count):
+        if answer[at] & 0xc0 == 0xc0:
+            at += 2
+        else:
+            while answer[at]:
+                at += answer[at] + 1
+            at += 1
+        kind, _, _, length = struct.unpack(">HHIH", answer[at:at + 10])
+        at += 10
+        if kind == 1 and length == 4:
+            return socket.inet_ntoa(answer[at:at + 4])
+        at += length
+    return "none"
+server = sys.argv[1]
+for name in sys.argv[2:]:
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.settimeout(5)
+    u.sendto(query(name), (server, 53))
+    try:
+        answer, source = u.recvfrom(4096)
+        udp = first_a(answer) if source[0] == server else "wrong-source"
+    except OSError:
+        udp = "unanswered"
+    try:
+        t = socket.create_connection((server, 53), 5)
+        q = query(name)
+        t.sendall(struct.pack(">H", len(q)) + q)
+        data = b""
+        while len(data) < 2 or len(data) < 2 + struct.unpack(">H", data[:2])[0]:
+            chunk = t.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        tcp = first_a(data[2:])
+    except OSError:
+        tcp = "unanswered"
+    try:
+        libc = socket.gethostbyname(name)
+    except OSError:
+        libc = "none"
+    print(server, name, "udp=" + udp, "tcp=" + tcp, "libc=" + libc, flush=True)
+"#;
+
+/// A private name server, as an overlay network's, that an older host
+/// could have told a guest about: sandboxes may not reach it.
+const PRIVATE_NAME_SERVER: &str = "100.100.100.100";
+
+/// The first sandbox's names: its resolver uses its gateway; a public
+/// name resolves through the public name servers; the name only the host
+/// knows never does; and the listed name resolves to the service, by every
+/// path, exactly when `listed`.
+///
+/// A guest still told a private name server, as one booted under an older
+/// host is, gets the same answers from it, by every path, since its
+/// queries are answered by its own name server; a public name server it
+/// asks directly answers for itself, so knows no listed name.
+async fn check_names(client: &Client, service: &LocalService, listed: bool) {
+    let [name, hidden] = &service.names;
+    let private = PRIVATE_NAME_SERVER;
+    // Each change to the guest's resolver file prints a line only once it
+    // took, so one that failed fails the test rather than leaving libc on
+    // the gateway, where it would give the same answers.
+    let script = format!(
+        "cat /etc/resolv.conf
+python3 -c '{RESOLVE}' 169.254.0.22 {name} {hidden} example.com
+cp -P /etc/resolv.conf /tmp/resolv.conf.kept && rm -f /etc/resolv.conf && \
+echo nameserver {private} > /etc/resolv.conf && echo \"resolver now $(cat /etc/resolv.conf)\"
+python3 -c '{RESOLVE}' {private} {name} {hidden} example.com
+rm -f /etc/resolv.conf && cp -P /tmp/resolv.conf.kept /etc/resolv.conf && \
+cmp -s /tmp/resolv.conf.kept /etc/resolv.conf && echo resolver back as it was
+python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
+    );
+    let (output, _) = exec(client, id(0), &script).await;
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == "nameserver 169.254.0.22"),
+        "the guest's resolver is not its gateway: {output}"
+    );
+    for changed in [
+        format!("resolver now nameserver {private}"),
+        "resolver back as it was".to_owned(),
+    ] {
+        assert!(
+            output.lines().any(|line| line.trim() == changed),
+            "the guest's resolver file did not change ({changed}): {output}"
+        );
+    }
+    let row = |server: &str, name: &str| {
+        output
+            .lines()
+            .find(|line| line.starts_with(&format!("{server} {name} ")))
+            .unwrap_or_else(|| panic!("no answer for {name} from {server}: {output}"))
+            .to_owned()
     };
-    let lan = target.to_string_lossy().into_owned();
+    let found = if listed { SERVICE } else { "none" };
+    for server in ["169.254.0.22", private] {
+        assert_eq!(
+            row(server, name),
+            format!("{server} {name} udp={found} tcp={found} libc={found}")
+        );
+        assert_eq!(
+            row(server, hidden),
+            format!("{server} {hidden} udp=none tcp=none libc=none")
+        );
+        let public = row(server, "example.com");
+        assert!(
+            !public.contains("=none") && !public.contains("=unanswered"),
+            "a public name: {public}"
+        );
+    }
+    assert!(
+        row("8.8.8.8", name).starts_with(&format!("8.8.8.8 {name} udp=none tcp=none ")),
+        "a public name server answers for itself: {output}"
+    );
+    let public = row("8.8.8.8", "example.com");
+    assert!(
+        !public.contains("=none") && !public.contains("=unanswered"),
+        "a public name server: {public}"
+    );
+}
+
+/// Guests reach the host's local network only where its `--reach` entries
+/// say, on exactly the ports listed, and learn only the names listed: the
+/// sandbox's name server answers a listed name with its address, passes
+/// public names to public name servers, and never asks the host's own, so
+/// a name only the host knows stays unknown. Either way the host, the
+/// metadata service and other sandboxes stay out of reach, and forged
+/// packets get nowhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guests_reach_only_the_listed_ports_and_names_of_the_local_network() {
+    let Some(lab) = lab() else { return };
     let (listener, port) = listen_everywhere();
     std::thread::spawn(move || for _ in listener.incoming() {});
-    let mut targets = vec![lan.clone()];
+    let service = LocalService::start();
+    let lan = [
+        format!("{SERVICE}:{LISTED}"),
+        format!("{SERVICE}:{UNLISTED}"),
+    ];
+    let mut targets = lan.to_vec();
+    // The host's end of the service's link is one of the host's addresses.
     targets.extend(forbidden(port));
+    assert!(targets.contains(&format!("{SERVICE_PEER}:{port}")));
     let script = probe_script(&targets);
-    for trusted in [false, true] {
-        let flags: &[&str] = if trusted {
-            &["--network", "--trusted"]
-        } else {
-            &["--network"]
-        };
-        let host = Host::new(&lab, "lan", flags);
+    let by_name = format!("--reach={}:{LISTED}", service.names[0]);
+    let by_range = format!("--reach=10.250.0.0/30:{UNLISTED}");
+    let cases: [(&str, Option<&str>, Vec<&str>); 3] = [
+        ("none", None, Vec::new()),
+        ("name", Some(by_name.as_str()), vec![lan[0].as_str()]),
+        ("range", Some(by_range.as_str()), vec![lan[1].as_str()]),
+    ];
+    for (case, reach, open) in cases {
+        let mut flags = vec!["--network"];
+        flags.extend(reach);
+        let host = Host::new(&lab, &format!("reach-{case}"), &flags);
         let agent = host.start().await;
         agent.create(id(0), NEVER).await;
         agent.create(id(1), NEVER).await;
@@ -999,14 +1261,176 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
         let (output, _) = exec(&agent.client, id(0), &script).await;
         let lines: Vec<&str> = output.lines().collect();
-        let open: &[&str] = if trusted { &[lan.as_str()] } else { &[] };
-        check_probes(&format!("trusted={trusted}"), &lines, &targets, open);
-        spoofing::check_spoofing(&agent.client, &targets, &lan, trusted).await;
+        check_probes(&format!("reach={case}"), &lines, &targets, &open);
+        check_names(&agent.client, &service, case == "name").await;
+        spoofing::check_spoofing(&agent.client, &targets, &open).await;
         drop(neighbour);
         agent.remove_all().await;
         agent.kill();
-        host.finish(&format!("lan-trusted-{trusted}"));
+        host.finish(&format!("reach-{case}"));
     }
+}
+
+/// What an older version's namespace rules let through, as on a host that
+/// trusted its local network: every guest packet, out of the uplink.
+const OLDER_RULES: &str = "table inet sandbox
+delete table inet sandbox
+table inet sandbox {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname \"uplink\" masquerade
+    }
+}
+";
+
+/// A guest resolver that keeps one UDP socket for its life, as a
+/// long-running one does: it asks the name server at its argument about a
+/// public name every half second, printing its port once, then `answered`
+/// for each answer from that name server, or `unanswered` for each query
+/// not answered within half a second.
+const KEPT_SOCKET: &str = r#"
+import socket, struct, sys, time
+server = sys.argv[1]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", 0))
+s.settimeout(0.5)
+q = struct.pack(">HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+q += b"\x07example\x03com\x00" + struct.pack(">HH", 1, 1)
+print("port", s.getsockname()[1], flush=True)
+while True:
+    s.sendto(q, (server, 53))
+    try:
+        answer, source = s.recvfrom(4096)
+        print("answered" if source[0] == server else "wrong-source", flush=True)
+        time.sleep(0.5)
+    except OSError:
+        print("unanswered", flush=True)
+"#;
+
+/// Runs `nft` with `args` in `namespace`, given `input`, and returns what
+/// it printed.
+fn nft_in(namespace: &str, input: Option<&str>, args: &[&str]) -> String {
+    use std::io::Write as _;
+
+    let mut child = Command::new("ip")
+        .args(["netns", "exec", namespace, "nft"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "nft {args:?} in {namespace}: {}",
+        output.status
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// What the first sandbox's [`KEPT_SOCKET`] resolver has printed, once
+/// `done` holds for the lines after the first `after`; fails after twenty
+/// seconds.
+async fn kept_socket_lines(
+    client: &Client,
+    after: usize,
+    done: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (output, _) = exec(client, id(0), "cat /tmp/kept-socket.log").await;
+        let lines: Vec<String> = output.lines().map(str::to_owned).collect();
+        if lines.get(after..).is_some_and(&done) {
+            return lines;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resolver never got there: {output}"
+        );
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// A guest resolver that keeps one socket, retrying a private name server
+/// an older version of the rules let it ask, is answered by its own name
+/// server once an upgraded agent starts. The kernel keeps sending the
+/// socket's queries wherever the first went for as long as it retries, so
+/// installing the current rules alone changes nothing; the agent, checking
+/// the sandbox's network as it starts, forgets that connection, and the
+/// same socket's next query is redirected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_socket_is_redirected_once_an_upgraded_agent_starts() {
+    let Some(lab) = lab() else { return };
+    let host = Host::new(&lab, "kept-socket", &["--network"]);
+    let agent = host.start().await;
+    agent.create(id(0), NEVER).await;
+    exec(&agent.client, id(0), "true").await;
+    let namespace = format!("ogc-{}", id(0));
+    let current = nft_in(&namespace, None, &["list", "table", "inet", "sandbox"]);
+    nft_in(&namespace, Some(OLDER_RULES), &["-f", "-"]);
+    let start = format!(
+        "python3 -c '{KEPT_SOCKET}' {PRIVATE_NAME_SERVER} \
+         > /tmp/kept-socket.log 2>&1 < /dev/null &"
+    );
+    exec(&agent.client, id(0), &start).await;
+    // The older rules let its queries out, where nothing answers them.
+    let lines = kept_socket_lines(&agent.client, 0, |lines| {
+        lines.iter().filter(|line| *line == "unanswered").count() >= 3
+    })
+    .await;
+    let port = lines[0].clone();
+    assert!(port.starts_with("port "), "{lines:?}");
+
+    // The current rules alone: its queries still go where its first went.
+    let rules = format!("table inet sandbox\ndelete table inet sandbox\n{current}");
+    nft_in(&namespace, Some(&rules), &["-f", "-"]);
+    let installed = kept_socket_lines(&agent.client, 0, |_| true).await.len();
+    sleep(Duration::from_secs(4)).await;
+    let lines = kept_socket_lines(&agent.client, installed, |_| true).await;
+    let since = &lines[installed..];
+    assert!(
+        since.len() >= 4 && since.iter().all(|line| line == "unanswered"),
+        "with the current rules alone: {since:?}"
+    );
+
+    // An upgraded agent: killed and started again, as an upgrade in place
+    // does, it forgets the connection, and the same socket is answered.
+    agent.kill();
+    let agent = host.start().await;
+    let restarted = kept_socket_lines(&agent.client, 0, |_| true).await.len();
+    let lines = kept_socket_lines(&agent.client, restarted, |lines| {
+        lines.iter().any(|line| line == "answered")
+    })
+    .await;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("port "))
+            .count(),
+        1,
+        "one socket: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == "wrong-source"),
+        "{lines:?}"
+    );
+    let log = std::fs::read_to_string(host.root.join("agent.log")).unwrap();
+    assert!(
+        log.lines().any(|line| {
+            line.contains("forgot connections the rules no longer let through")
+                && line.contains(&namespace)
+                && line.contains("forgotten=1")
+        }),
+        "the agent says what it forgot: {log}"
+    );
+    agent.remove_all().await;
+    agent.kill();
+    host.finish("kept-socket");
 }
 
 /// What a sandbox's first command reports: who it is, sixteen random bytes,

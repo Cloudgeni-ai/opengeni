@@ -31,6 +31,13 @@ export type SiteViewProps = {
   loadingLabel?: string | undefined;
   /** Called with the loaded title, for a host header. */
   onTitle?: ((title: string) => void) | undefined;
+  /** Hide the frame toolbar under a host header that draws reload and full screen. */
+  showToolbar?: boolean | undefined;
+  /** Reload the Site whenever this changes. */
+  reloadToken?: number | undefined;
+  /** Host-controlled full screen; omit to let the frame manage it. */
+  fullScreen?: boolean | undefined;
+  onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
   className?: string | undefined;
 };
 
@@ -49,6 +56,10 @@ export function SiteView({
   showTitle = true,
   loadingLabel,
   onTitle,
+  showToolbar,
+  reloadToken,
+  fullScreen,
+  onFullScreenChange,
   className,
 }: SiteViewProps) {
   const t = useOpenGeniText();
@@ -122,6 +133,10 @@ export function SiteView({
       viewer={viewer}
       connectedToolCount={content.requestedTools.length}
       theme={theme}
+      {...(showToolbar !== undefined ? { showToolbar } : {})}
+      {...(reloadToken !== undefined ? { reloadToken } : {})}
+      {...(fullScreen !== undefined ? { fullScreen } : {})}
+      {...(onFullScreenChange ? { onFullScreenChange } : {})}
       fill
       className={className ?? "h-full rounded-none border-0"}
     />

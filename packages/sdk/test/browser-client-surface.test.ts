@@ -64,6 +64,9 @@ const legacyBrowserUnusedMethods = [
   "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
+  // The organization account page reads usage from the account overview, so
+  // this standalone usage read stays available to SDK callers only.
+  "organizationCodexAccountUsage",
   "rejectGoalRevision",
   "revokeUserResourceGrant",
   "rollbackCompanyProfile",
@@ -72,7 +75,6 @@ const legacyBrowserUnusedMethods = [
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
-  "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",

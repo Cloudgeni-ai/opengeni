@@ -1834,6 +1834,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "duplicateWorkspaceArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+    "request": [
+      "DuplicateWorkspaceArtifactRequest"
+    ],
+    "response": [
+      "WorkspaceArtifactMutationResponse"
+    ]
+  },
+  {
     "id": "editQueueItem",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit",
@@ -3183,6 +3194,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
+    ]
+  },
+  {
     "id": "getOrganizationUsageSummary",
     "method": "GET",
     "path": "/v1/billing/usage-summary",
@@ -3734,6 +3754,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceStateResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
     ]
   },
   {
@@ -5146,6 +5175,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "GatewayRealtimeConnectResponse"
+    ]
+  },
+  {
+    "id": "negotiateRealtimeWebsocket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    "request": [
+      "SessionRealtimeWebsocketRequest"
+    ],
+    "response": [
+      "SessionRealtimeWebsocketResponse"
     ]
   },
   {

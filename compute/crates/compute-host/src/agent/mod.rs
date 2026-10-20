@@ -60,6 +60,7 @@ mod warm;
 use config::check_config;
 pub use config::{BusyRule, HostConfig, PagerConfig};
 pub use sample::DiskGauge;
+use sample::ShareCheck;
 
 /// Takes the host's lock at `path` for state root `root`; see
 /// [`HostConfig::host_lock`].
@@ -247,6 +248,7 @@ fn shortage(resource: Resource) -> &'static str {
         Resource::Memory => "bytes of memory reserved",
         Resource::Disk => "bytes of local disk booked",
         Resource::Inodes => "local disk inodes booked",
+        Resource::Cpu => "millicores of processor time reserved",
     }
 }
 
@@ -420,6 +422,13 @@ enum Event<V> {
     Exited {
         id: Id,
         incarnation: u64,
+    },
+    /// The VM of `id`, under removal, is known to have ended; the rest of
+    /// the removal may still be under way, or stop part way.
+    VmEnded {
+        id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
     },
     Destroyed {
         id: Id,
@@ -700,6 +709,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
+    /// The VMs' processor share, read again every few seconds; see
+    /// [`HostConfig::processor_share`].
+    processor_share: Option<ShareCheck>,
     /// When memory pressure frees memory, if it does.
     memory_policy: Option<MemoryPolicy>,
     /// Ready sandboxes, kept for creates to claim (see [`ready`]).
@@ -783,7 +795,7 @@ fn host_images(config: &HostConfig) -> Images {
     Images {
         kernel: config.kernel.clone(),
         boot_args: match &config.network {
-            Some(network) => format!("{} {}", config.boot_args, network.boot_args()),
+            Some(_) => format!("{} {}", config.boot_args, NetworkConfig::boot_args()),
             None => config.boot_args.clone(),
         },
         first_uid: config.first_uid,
@@ -805,7 +817,8 @@ async fn prepare_network(
     let Some(network) = network else {
         return Ok(None);
     };
-    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network))
+    let runtime = tokio::runtime::Handle::current();
+    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network, runtime))
         .await
         .map_err(|error| HostError::Io(error.to_string()))?
         .map_err(|error| HostError::Io(error.to_string()))?;
@@ -947,6 +960,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unseen_activity: 0,
             sample_every: config.sample_every,
             disk_gauge: config.disk_reading,
+            processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
             link: config.agent_link,
@@ -1123,6 +1137,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Size {
             request,
             limit,
+            cpu: u64::from(config.cpu_request()),
             save: limit * self.save_copies + SAVE_EXTRA,
             disk,
             fetch: disk

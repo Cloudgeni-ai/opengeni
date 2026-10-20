@@ -1,3 +1,4 @@
+import { isAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 import {
   agentToolCallOutcome,
   agentToolMetricFamily,
@@ -12,6 +13,7 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  getSandboxRecoveryDiscontinuity,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -532,6 +534,15 @@ export async function runTurnStreamAttempt(
     let historyPreparationOutcome: "completed" | "failed" = "completed";
     let preparedHistoryCount: number | null = null;
     try {
+      // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
+      // existing history stays byte-for-byte intact, including after retries;
+      // the durable receipt restores the warning after compaction as well.
+      const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        "explicit_notice",
+      );
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -539,6 +550,7 @@ export async function runTurnStreamAttempt(
           subjectId: fileAuthoritySubjectId,
         },
         recovering: turn.executionGeneration > 1,
+        ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -826,12 +838,6 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
-    // Native Codex/SuperGrok transports report their literal dispatch through
-    // the shared turn context; generic transports use the wire-dispatch clock.
-    eventing.providerDispatchObserver = () => {
-      streamTiming.onProviderDispatch();
-      startIndependentTitleAdmission();
-    };
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -1146,17 +1152,18 @@ export async function runTurnStreamAttempt(
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
-                onModelTransportDispatched: (clock) => {
-                  startIndependentTitleAdmission();
-                  eventing.preparedTools?.startDeferredPreparation?.();
-                  streamTiming.onProviderDispatch();
-                  eventing.initialModelWireDispatch.record(
-                    { provider: streamProvider, dispatchId },
-                    clock,
-                  );
-                },
               }
             : {}),
+          onModelTransportDispatched: (clock) => {
+            if (isAuxiliaryProviderDispatch()) return;
+            startIndependentTitleAdmission();
+            eventing.preparedTools?.startDeferredPreparation?.();
+            streamTiming.onProviderDispatch();
+            eventing.initialModelWireDispatch.record(
+              { provider: streamProvider, dispatchId },
+              clock,
+            );
+          },
           ...(eventing.toolCancellationFenceRef.current
             ? {
                 turnToolCancellationFence: eventing.toolCancellationFenceRef.current,
@@ -2452,16 +2459,19 @@ export async function runTurnStreamAttempt(
     runtime.generateSessionTitle &&
     !runtimeCancellationSignal.aborted
   ) {
-    const serviceTier = serviceTierForLatencyMode(
-      turnExecutionPolicy.providerId,
-      turnExecutionPolicy.latencyMode,
-    );
     titleCreditPolicyRevision = creditPolicyRevision;
     const titleRoute = sessionTitleRoute({
       resolvedModel,
       modelName: turnExecutionPolicy.upstreamModelId,
       resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
     });
+    // The title inherits the turn's speed only where its model offers it (a
+    // smaller title model may lack the turn's Ultrafast tier).
+    const serviceTier = titleRoute.resolvedModel?.configured.capabilities.latencyModes.some(
+      (mode) => mode.id === turnExecutionPolicy.latencyMode && mode.runnable,
+    )
+      ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
+      : undefined;
     titleUsageModelId = titleRoute.usageModelId;
     if (
       startSessionTitleWorkflow &&

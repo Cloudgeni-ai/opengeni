@@ -382,6 +382,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.core.spare_fits(
             self.fill_memory(template),
             self.fill_disk(template.shape().image),
+            template.shape().cpu_millis(),
         )
     }
 
@@ -405,14 +406,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Books `bytes` for the spare VM `host` with the core: `filling` until
-    /// it is ready, then what it holds; and `disk`, what it may still write.
-    pub(super) fn book_spare(&mut self, host: Id, bytes: u64, disk: DiskSpace, filling: bool) {
+    /// it is ready, then what it holds; `disk`, what it may still write;
+    /// and while filling, `cpu`, the processor time its guest runs on.
+    pub(super) fn book_spare(
+        &mut self,
+        host: Id,
+        bytes: u64,
+        disk: DiskSpace,
+        filling: Option<u64>,
+    ) {
         self.ready.spares.insert(host.0, bytes);
         self.input(Input::Spare {
             sandbox: host.0,
             bytes,
             disk,
-            filling,
+            filling: filling.is_some(),
+            cpu: filling.unwrap_or(0),
         });
     }
 
@@ -428,6 +437,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             bytes: 0,
             disk: DiskSpace::default(),
             filling: false,
+            cpu: 0,
         };
         if ended {
             self.input(gone);
@@ -436,6 +446,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Input::Unmanaged {
                     sandbox: host.0,
                     bytes,
+                    cpu: 0,
                 },
                 gone,
             ]);
@@ -461,6 +472,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     bytes,
                     disk: DiskSpace::default(),
                     filling: false,
+                    cpu: 0,
                 }
             })
             .collect()
@@ -510,8 +522,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return false;
             }
         };
+        // Its guest runs whole while it comes up, at its shape's weight and
+        // booked so; a claim gives it the claimer's request.
         let config = SandboxConfig {
             image: shape.image,
+            cpu_request_millis: Some(u32::from(shape.cpu_weight()) * 10),
             ..SandboxConfig::new(
                 shape.vcpus,
                 shape.memory_mib,
@@ -532,7 +547,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let link = Images::link(&record);
         self.ready.filling.insert(host.0, shape);
         // Booked before it starts, so no wake takes the same room.
-        self.book_spare(host, memory, disk, true);
+        self.book_spare(host, memory, disk, Some(shape.cpu_millis()));
         let fill = Fill {
             job: self.job(record, spec, paths, CancellationToken::new()),
             template: Arc::clone(template),
@@ -589,7 +604,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // from now on.
                     let bytes = self.ready_resident(&idle).max(1);
                     self.ready.idle.push_back(idle);
-                    self.book_spare(host, bytes, DiskSpace::default(), false);
+                    self.book_spare(host, bytes, DiskSpace::default(), None);
                 } else {
                     // Counted as filling until its removal ends it.
                     self.discard(idle);
@@ -741,10 +756,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 bytes: 0,
                 disk: DiskSpace::default(),
                 filling: false,
+                cpu: 0,
             },
             Input::Unmanaged {
                 sandbox: host.0,
                 bytes,
+                cpu: 0,
             },
         ]);
         let template = Arc::clone(&idle.template);
@@ -893,6 +910,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Input::Unmanaged {
                 sandbox: host.0,
                 bytes: 0,
+                cpu: 0,
             },
         ]);
         if died {

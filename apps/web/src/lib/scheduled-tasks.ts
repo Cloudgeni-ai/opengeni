@@ -91,7 +91,7 @@ export type ScheduledTaskFormState = {
   timeZone: string;
   runMode: ScheduledTask["runMode"];
   targetSessionId: string;
-  executionTarget: "managed" | "machine";
+  executionTarget: "workspace_default" | "managed" | "machine";
   sandboxBackend: SandboxBackend | "";
   machineSandboxId: string;
   workingDir: string;
@@ -195,7 +195,10 @@ export function scheduledTaskConnectorSelection(
 export function scheduledTaskConnectorPolicyFromSelection(
   selection: readonly string[],
   workspaceDefaultToolIds: readonly string[],
-): { toolPolicy: NonNullable<ScheduledTaskAgentConfig["toolPolicy"]>; additions: string[] } {
+): {
+  toolPolicy: NonNullable<ScheduledTaskAgentConfig["toolPolicy"]>;
+  additions: string[];
+} {
   const chosen = new Set(withoutCarrier(selection));
   const defaults = withoutCarrier(workspaceDefaultToolIds);
   const defaultSet = new Set(defaults);
@@ -237,7 +240,7 @@ export function newScheduledTaskFormState(
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
     targetSessionId: "",
-    executionTarget: machineDefault ? "machine" : "managed",
+    executionTarget: "workspace_default",
     sandboxBackend: "",
     machineSandboxId: machineDefault ? (defaults.defaultMachineSandboxId ?? "") : "",
     workingDir: "",
@@ -246,7 +249,9 @@ export function newScheduledTaskFormState(
     // A new schedule that starts its own session follows the defaults, like a new chat.
     followsWorkspaceDefaults: true,
     ...(defaults.workspaceDefaultToolIds
-      ? { workspaceDefaultToolIds: withoutCarrier(defaults.workspaceDefaultToolIds) }
+      ? {
+          workspaceDefaultToolIds: withoutCarrier(defaults.workspaceDefaultToolIds),
+        }
       : {}),
     slackBotConnectionId: "",
     slackBotChannelId: "",
@@ -344,9 +349,11 @@ export function formStateFromScheduledTask(
     runMode: task.runMode,
     targetSessionId: task.targetSessionId ?? "",
     executionTarget:
-      task.agentConfig.machineTarget || task.agentConfig.sandboxBackend === "selfhosted"
-        ? "machine"
-        : "managed",
+      task.agentConfig.executionTarget === "workspace_default"
+        ? "workspace_default"
+        : task.agentConfig.machineTarget || task.agentConfig.sandboxBackend === "selfhosted"
+          ? "machine"
+          : "managed",
     sandboxBackend:
       task.agentConfig.sandboxBackend && task.agentConfig.sandboxBackend !== "selfhosted"
         ? task.agentConfig.sandboxBackend
@@ -498,6 +505,7 @@ export function agentConfigFromFormState(
     reasoningEffort: _effort,
     machineTarget: _machine,
     sandboxBackend: _backend,
+    executionTarget: _executionTarget,
     slackBotConnectionId: _bot,
     slackBotChannelId: _channel,
     agent: _agent,
@@ -550,18 +558,22 @@ export function agentConfigFromFormState(
             ...(form.model ? { model: form.model } : {}),
             reasoningEffort: form.reasoningEffort,
           }),
-    ...(form.runMode !== "existing_session" &&
-    form.executionTarget === "machine" &&
-    form.machineSandboxId
-      ? {
-          machineTarget: {
-            targetSandboxId: form.machineSandboxId,
-            ...(form.workingDir.trim() ? { workingDir: form.workingDir.trim() } : {}),
-          },
-        }
-      : form.runMode !== "existing_session" && form.sandboxBackend
-        ? { sandboxBackend: form.sandboxBackend }
-        : {}),
+    ...(form.runMode !== "existing_session" && form.executionTarget === "workspace_default"
+      ? { executionTarget: "workspace_default" as const }
+      : form.runMode !== "existing_session" &&
+          form.executionTarget === "machine" &&
+          form.machineSandboxId
+        ? {
+            machineTarget: {
+              targetSandboxId: form.machineSandboxId,
+              ...(form.workingDir.trim() ? { workingDir: form.workingDir.trim() } : {}),
+            },
+          }
+        : form.runMode !== "existing_session" &&
+            form.executionTarget === "managed" &&
+            form.sandboxBackend
+          ? { sandboxBackend: form.sandboxBackend }
+          : {}),
   };
 }
 

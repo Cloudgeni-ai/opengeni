@@ -524,8 +524,9 @@ so a slower archive costs local disk for longer, not a user's wait;
 ### Noisy neighbours
 
 What the agent sets to keep sandboxes apart: each VM's cgroup gets
-`cpu.weight` 100 per processor requested (`cpu_request_millis`, all its
-vCPUs unless set lower), `memory.low` at its memory request and no swap.
+`cpu.weight` 100 per processor requested (`cpu_request_millis`; when this
+was measured, all its vCPUs unless set lower, and since requests became
+guarantees a tenth of each), `memory.low` at its memory request and no swap.
 It sets no limit on disk or network bandwidth and no processor ceiling
 beyond the VM's vCPU count.
 
@@ -2264,3 +2265,73 @@ The other evidence is also in `runs/r27/`:
 - the certificates: `compute-control.log`;
 - the hosts step: `hosts.log`;
 - the UI screenshots: `ui-*.png`.
+
+## The bare-metal profile on a nested host, and CPU requests (2026-10-20)
+
+Measured on 2026-10-20 at `653fb9ec4` on one GCP n2-standard-8 in
+europe-west4-a: 8 vCPUs (Intel Xeon at 2.80 GHz) and 32 GiB, a VM with
+nested virtualization, host kernel 7.0, Firecracker v1.17.0 under its
+jailer, the lab base image.
+
+### First touch and steady state under each memory profile
+
+One sandbox of 2 vCPUs and 4 GiB with a 512 MiB memory request, created
+afresh by a new agent for each run (`--memory-profile`), the two profiles
+alternating, twice each. Milliseconds, first run / second run:
+
+| Guest workload | Nested (2 MiB huge pages) | Bare metal (4 KiB pages) |
+| --- | --- | --- |
+| `dd` 1 GiB of zeros into `/dev/shm`: memory the guest never touched | 448 / 458 | 5639 / 5548 |
+| read that 1 GiB three times | 453 / 454 | 466 / 454 |
+| start `/bin/true` 2000 times | 2579 / 2576 | 2693 / 2704 |
+| `sort -n` 6 million shuffled numbers | 3999 / 3876 | 4048 / 3958 |
+| `gzip -1` the same file | 837 / 833 | 830 / 830 |
+| Python: allocate 1 GiB, then 3 million random writes into it | 3250 / 3262 | 6548 / 6446 |
+
+Memory a guest already holds runs at the same speed under both profiles,
+and so does work bound by its processors; process starts cost about 5%
+more. The first touch of memory a guest has not held costs about twelve
+times as much with 4 KiB pages: 1 GiB takes 5.6 s rather than 0.45 s. The
+likely cause, not measured separately, is that each new 4 KiB page of a
+nested guest is a fault the outer hypervisor handles too, 512 times as
+many as with huge pages. The Python row is mostly that first touch (the
+allocation zeroes the whole GiB). Hosts on bare metal should not pay it;
+that was not measured here.
+
+So on a nested host the bare-metal profile trades a guest's first touch of
+new memory for booking each sandbox at its request rather than its whole
+size. On a nested GCP host running Opengeni sessions on this profile, an
+idle session sandbox of 4 vCPUs and 8 GiB held about 280 MiB in its guest,
+and the host's free memory fell about 340 MiB at its first wake (8 GiB on
+the nested profile).
+
+On that host, a sandbox of 8 GiB that had just been paused and saved was
+booked at 8 GiB while its VM held 336 MiB (315 MiB of guest memory and
+the VMM's kernel memory): the other 7.7 GiB in its group's
+`memory.current` was clean page cache from writing its image. The agent
+now leaves page cache the host can drop out of what a VM holds (ADR 14),
+and
+`a_guests_disk_writes_are_not_memory_it_holds` checks it.
+
+### CPU requests with every processor busy
+
+`every_awake_sandbox_gets_its_cpu_request_when_every_processor_is_busy` on
+the bare-metal profile with 5 sandboxes: each of 3 vCPUs, requesting 1500
+millicores, which fills the host's 7500-millicore budget (8 processors less
+the reserve of a sixteenth, at least 500 millicores). Every vCPU of every
+sandbox spun, and 8 threads beside the VMs' group spun on the host, so 23
+busy threads shared 8 processors; the host was never idle during the 20 s
+window.
+
+| Sandbox | Processor time, millicores | Of its request |
+| --- | --- | --- |
+| 1 | 1495 | 99.7% |
+| 2 | 1509 | 100.6% |
+| 3 | 1560 | 104.0% |
+| 4 | 1597 | 106.5% |
+| 5 | 1672 | 111.5% |
+
+The VMs together got 7833 millicores, their group's weight (4500) beating
+the busy threads beside it, which with everything else on the host shared
+the remaining 167 or so. A sixth wake, asking for 10 millicores with none
+free, was refused as host full in under 100 ms.

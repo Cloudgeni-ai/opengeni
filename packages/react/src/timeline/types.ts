@@ -591,6 +591,8 @@ export type TurnEndItem = {
   resumedAt?: string;
   /** Keep an existing answer visible when a recorded input wait ends without final output. */
   preserveWaitResponse?: true;
+  /** The turn handed over to a Steer at a safe boundary instead of finishing. */
+  handedOver?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;

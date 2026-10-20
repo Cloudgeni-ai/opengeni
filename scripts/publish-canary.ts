@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync,
+  appendFileSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -135,29 +135,26 @@ type RegistryPackage = {
 };
 type RegistryRequest = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const registry = "https://registry.npmjs.org";
-// A selected version can remain unreadable for several minutes after its write
-// acknowledgement while the rest of the cohort is already visible.
-const CANARY_RECEIPT_TIMEOUT_MS = 600_000;
+// npm acknowledges a publication with 202 Accepted and processes it afterwards.
+// The version stays unreadable until processing finishes: usually 3-10 minutes,
+// sometimes much longer for the largest archives. Confirmation is a separate,
+// re-runnable job, so this window only decides when one confirmation attempt
+// stops waiting; re-running it resumes against the same published versions.
+export const CANARY_VISIBILITY_TIMEOUT_MS = 30 * 60_000;
 const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
 // npm tags a brand-new package `latest: 0.0.0-stage` while its first version
 // waits in the staged-publishing queue for a maintainer's 2FA approval.
 const NPM_STAGED_PLACEHOLDER_VERSION = "0.0.0-stage";
-const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
-// Each receipt costs two GETs. The default budget scales with the cohort so
-// the first pass and the final complete-cohort reserve never consume the whole
-// quota; the floor keeps small cohorts from polling too sparsely.
-const CANARY_RECEIPT_READS_PER_PACKAGE = 16;
-const CANARY_RECEIPT_MIN_READS = 64;
+// Poll each still-invisible version after 5s, 10s, 20s, 40s, then every minute.
+const CANARY_RECEIPT_FIRST_POLL_MS = 5_000;
+const CANARY_RECEIPT_MAX_POLL_MS = 60_000;
 export const CANARY_RECEIPT_MAX_COHORT = 64;
-export const CANARY_RECEIPT_MAX_READS =
-  CANARY_RECEIPT_MAX_COHORT * CANARY_RECEIPT_READS_PER_PACKAGE;
 
-export function defaultCanaryReceiptReads(packageCount: number): number {
-  return Math.min(
-    CANARY_RECEIPT_MAX_READS,
-    Math.max(CANARY_RECEIPT_MIN_READS, packageCount * CANARY_RECEIPT_READS_PER_PACKAGE),
-  );
-}
+/** A registry read that failed for a reason that can clear by itself (transport, 429, 5xx). */
+export class CanaryRegistryUnavailable extends Error {}
+
+/** npm accepted every write, but some versions were not readable within one confirmation window. */
+export class CanaryVisibilityPending extends Error {}
 
 type RegistryReadOptions = {
   signal?: AbortSignal;
@@ -171,7 +168,7 @@ type ReceiptPollOptions = {
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
   pollIntervalMs?: number;
-  maxReads?: number;
+  maxPollIntervalMs?: number;
   custody?: CanaryCustody | undefined;
 };
 
@@ -201,7 +198,8 @@ export function verifyCanarySourceBinding(
     !env.GITHUB_RUN_ATTEMPT ||
     !env.ACTIONS_ID_TOKEN_REQUEST_URL ||
     !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ||
-    !env.NODE_AUTH_TOKEN
+    !env.NODE_AUTH_TOKEN ||
+    !env.GITHUB_OUTPUT
   ) {
     throw new Error("Canary source, workflow, registry auth, and provenance identity must agree");
   }
@@ -237,12 +235,15 @@ async function readRegistryDocument(
       throw new DOMException("Canary read timed out", "TimeoutError");
     // Transport exception text is deliberately excluded from publication logs.
     // eslint-disable-next-line preserve-caught-error
-    throw new Error(`Canary registry read failed for ${name}`);
+    throw new CanaryRegistryUnavailable(`Canary registry read failed for ${name}`);
   }
   const bytes = options.custody
     ? await options.custody.capture(name, response, options.signal)
     : await boundedCanaryBody(response, options.signal);
   if (response.status === 404) return undefined;
+  if (response.status === 429 || response.status >= 500) {
+    throw new CanaryRegistryUnavailable(`Registry metadata for ${name} failed: ${response.status}`);
+  }
   if (!response.ok) throw new Error(`Registry metadata for ${name} failed: ${response.status}`);
   try {
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
@@ -605,6 +606,19 @@ export async function publishPreparedCanaries(
   custody.record("WRITE_PHASE_COMPLETE", { packageCount: packages.length });
 }
 
+const CANARY_VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)-canary\.(0|[1-9]\d*)$/;
+
+/** True when `candidate` is a canary that sorts after `version` (a later publication). */
+export function isLaterCanary(candidate: string, version: string): boolean {
+  const later = CANARY_VERSION_PATTERN.exec(candidate)?.slice(1).map(Number);
+  const current = CANARY_VERSION_PATTERN.exec(version)?.slice(1).map(Number);
+  if (!later || !current) return false;
+  for (let index = 0; index < 4; index++) {
+    if (later[index] !== current[index]) return later[index]! > current[index]!;
+  }
+  return false;
+}
+
 function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): string {
   // npm always points `latest` at a package's first published version, whatever
   // tag the publish asked for. For a package with no stable release yet that is
@@ -619,7 +633,12 @@ function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): strin
   if (!Object.hasOwn(current.versions, pkg.version)) {
     return staged ? "staged_approval_pending" : "version_pending";
   }
-  if (current["dist-tags"].canary !== pkg.version) return "canary_tag_pending";
+  // A re-run confirmation can observe a later canary publication's tag; that
+  // later publication could only start after this one's writes were accepted.
+  const canary = current["dist-tags"].canary;
+  if (canary !== pkg.version && !(canary !== undefined && isLaterCanary(canary, pkg.version))) {
+    return "canary_tag_pending";
+  }
   const dist = current.versions[pkg.version]?.dist;
   if (dist?.integrity && dist.integrity !== pkg.integrity) {
     throw new Error(`Canary archive integrity differs for ${pkg.name}`);
@@ -632,6 +651,14 @@ function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): strin
   return "matched";
 }
 
+/**
+ * Waits until npm has processed every acknowledged write, then qualifies the
+ * complete cohort with one fresh reread. Waiting is time-based: each pending
+ * version is polled with backoff until the window ends. Waiting reads record one
+ * observation each; the final complete-cohort reread retains full response custody.
+ * Transport failures, 429 and 5xx responses count as "not yet"; a moved stable
+ * tag, different archive integrity or invalid identity fail immediately.
+ */
 export async function confirmCanaryCohort(
   packages: readonly CanaryArchive[],
   read: typeof readRegistryPackage = readRegistryPackage,
@@ -639,181 +666,116 @@ export async function confirmCanaryCohort(
 ): Promise<void> {
   const now = options.now ?? performance.now.bind(performance);
   const waitForNextPoll = options.sleep ?? sleep;
-  const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
-  const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
-  const maxReads = options.maxReads ?? defaultCanaryReceiptReads(packages.length);
+  const timeoutMs = options.timeoutMs ?? CANARY_VISIBILITY_TIMEOUT_MS;
+  const firstPollMs = options.pollIntervalMs ?? CANARY_RECEIPT_FIRST_POLL_MS;
+  const maxPollMs = options.maxPollIntervalMs ?? CANARY_RECEIPT_MAX_POLL_MS;
   if (
     packages.length === 0 ||
     packages.length > CANARY_RECEIPT_MAX_COHORT ||
     new Set(packages.map((pkg) => pkg.name)).size !== packages.length ||
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
-    timeoutMs > CANARY_RECEIPT_TIMEOUT_MS ||
-    !Number.isFinite(pollIntervalMs) ||
-    pollIntervalMs < CANARY_RECEIPT_POLL_INTERVAL_MS ||
-    !Number.isInteger(maxReads) ||
-    maxReads <= 0 ||
-    maxReads > CANARY_RECEIPT_MAX_READS
+    !Number.isFinite(firstPollMs) ||
+    firstPollMs <= 0 ||
+    !Number.isFinite(maxPollMs) ||
+    maxPollMs < firstPollMs
   ) {
     throw new Error("Canary receipt cohort, interval or deadline is invalid");
   }
-  const deadline = now() + timeoutMs;
+  const startedAt = now();
+  const deadline = startedAt + timeoutMs;
   const pending = new Map(packages.map((pkg) => [pkg.name, pkg]));
-  let reads = 0;
-  const receiptDurations = new Map<string, number>();
-  const estimatePassMs = (cohort: readonly CanaryArchive[]) => {
-    let duration = 0;
+  const lastObservation = new Map(packages.map((pkg) => [pkg.name, "not_observed"]));
+  let observations = 0;
+  const observe = async (pkg: CanaryArchive, final: boolean): Promise<string> => {
+    const remaining = deadline - now();
+    if (remaining <= 0) return "read_exceeded_deadline";
+    observations++;
+    let observation: string;
+    try {
+      const current = await read(pkg.name, fetch, registry, {
+        revalidate: true,
+        receiptVersion: pkg.version,
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
+        ),
+        custody: final ? options.custody : undefined,
+      });
+      observation = now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
+    } catch (error) {
+      if (canaryErrorCategory(error) === "request_timeout") observation = "request_timeout";
+      else if (error instanceof CanaryRegistryUnavailable) observation = "registry_unavailable";
+      else throw error;
+    }
+    options.custody?.record("READ_OBSERVATION", {
+      package: pkg.name,
+      version: pkg.version,
+      ...(final ? { phase: "final" } : {}),
+      observation,
+    });
+    return observation;
+  };
+  const observeAll = async (cohort: readonly CanaryArchive[], final: boolean) => {
+    const results: { pkg: CanaryArchive; observation: string }[] = [];
     for (let offset = 0; offset < cohort.length; offset += 4) {
-      duration += Math.max(
-        0,
-        ...cohort.slice(offset, offset + 4).map((pkg) => receiptDurations.get(pkg.name) ?? 0),
+      const settled = await Promise.allSettled(
+        cohort
+          .slice(offset, offset + 4)
+          .map(async (pkg) => ({ pkg, observation: await observe(pkg, final) })),
+      );
+      for (const result of settled) {
+        if (result.status === "rejected") throw result.reason;
+        results.push(result.value);
+      }
+    }
+    return results;
+  };
+  let interval = firstPollMs;
+  while (true) {
+    const staged: string[] = [];
+    for (const { pkg, observation } of await observeAll([...pending.values()], false)) {
+      lastObservation.set(pkg.name, observation);
+      if (observation === "matched") pending.delete(pkg.name);
+      if (observation === "staged_approval_pending") staged.push(`${pkg.name}@${pkg.version}`);
+    }
+    // Polling cannot clear a staged first publication; only a maintainer can.
+    if (staged.length) {
+      throw new Error(
+        `npm staged publishing holds the first publication of ${staged.join(", ")}. ` +
+          "A maintainer must approve it with 2FA (npm stage list, then npm stage approve <id>, " +
+          "or the Staged Packages tab on npmjs.com); then re-run the confirmation job.",
       );
     }
-    return duration;
-  };
-  const beforeAdditionalRequest = () => {
-    if (reads >= maxReads) throw new Error("Canary receipt read quota exhausted");
-    reads++;
-  };
-  let lastObservation = "not_observed";
-  while (now() < deadline && reads < maxReads) {
-    const round = [...pending.values()];
-    for (
-      let offset = 0;
-      offset < round.length && now() < deadline && reads < maxReads;
-      offset += 4
-    ) {
-      const batch = round.slice(offset, offset + Math.min(4, maxReads - reads));
-      reads += batch.length;
-      const results = await Promise.allSettled(
-        batch.map(async (pkg) => {
-          let observation: string;
-          const startedAt = now();
-          try {
-            const remaining = deadline - now();
-            if (remaining <= 0) return { pkg, observation: "read_exceeded_deadline" };
-            const current = await read(pkg.name, fetch, registry, {
-              revalidate: true,
-              receiptVersion: pkg.version,
-              beforeAdditionalRequest,
-              signal: AbortSignal.timeout(
-                Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
-              ),
-              custody: options.custody,
-            });
-            observation =
-              now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
-            receiptDurations.set(pkg.name, now() - startedAt);
-          } catch (error) {
-            if (canaryErrorCategory(error) !== "request_timeout") throw error;
-            observation = "request_timeout";
-          }
-          options.custody?.record("READ_OBSERVATION", {
-            package: pkg.name,
-            version: pkg.version,
-            observation,
-          });
-          if (now() >= deadline) observation = "read_exceeded_deadline";
-          return { pkg, observation };
-        }),
-      );
-      let failure: unknown;
-      const staged: string[] = [];
-      for (const result of results) {
-        if (result.status === "rejected") {
-          failure ??= result.reason;
-        } else {
-          lastObservation = result.value.observation;
-          if (lastObservation === "matched") pending.delete(result.value.pkg.name);
-          if (lastObservation === "staged_approval_pending") {
-            staged.push(`${result.value.pkg.name}@${result.value.pkg.version}`);
-          }
-        }
-      }
-      if (failure) throw failure;
-      // Polling cannot clear a staged first publication; only a maintainer can.
-      if (staged.length) {
-        throw new Error(
-          `npm staged publishing holds the first publication of ${staged.join(", ")}. ` +
-            "A maintainer must approve it with 2FA (npm stage list, then npm stage approve <id>, " +
-            "or the Staged Packages tab on npmjs.com); then reconcile this publication run.",
-        );
+    if (pending.size === 0) {
+      // Every version has been seen once. Qualify the whole cohort together;
+      // anything that no longer matches goes back to waiting.
+      for (const { pkg, observation } of await observeAll(packages, true)) {
+        if (observation === "matched") continue;
+        lastObservation.set(pkg.name, observation);
+        pending.set(pkg.name, pkg);
       }
       if (pending.size === 0) {
-        if (packages.length > maxReads - reads || now() >= deadline) {
-          throw new Error("Final canary cohort cannot fit the remaining read bounds");
-        }
-        for (let finalOffset = 0; finalOffset < packages.length; finalOffset += 4) {
-          if (now() >= deadline) throw new Error("Final canary cohort exceeded the deadline");
-          const finalBatch = packages.slice(finalOffset, finalOffset + 4);
-          if (finalBatch.length > maxReads - reads) {
-            throw new Error("Final canary cohort cannot fit the remaining read bounds");
-          }
-          reads += finalBatch.length;
-          const finalResults = await Promise.allSettled(
-            finalBatch.map(async (pkg) => {
-              const remaining = deadline - now();
-              if (remaining <= 0) throw new Error("Final canary cohort exceeded the deadline");
-              const current = await read(pkg.name, fetch, registry, {
-                revalidate: true,
-                receiptVersion: pkg.version,
-                beforeAdditionalRequest,
-                signal: AbortSignal.timeout(
-                  Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
-                ),
-                custody: options.custody,
-              });
-              const observation =
-                now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
-              options.custody?.record("READ_OBSERVATION", {
-                package: pkg.name,
-                version: pkg.version,
-                phase: "final",
-                observation,
-              });
-              if (observation !== "matched" || now() >= deadline) {
-                throw new Error(`Final canary cohort receipt did not match for ${pkg.name}`);
-              }
-            }),
-          );
-          const rejected = finalResults.filter((result) => result.status === "rejected");
-          if (rejected.length) throw rejected[0]!.reason;
-        }
         options.custody?.record("COHORT_READS_MATCHED", {
           packageCount: packages.length,
-          reads,
+          observations,
+          elapsedMs: Math.round(now() - startedAt),
           freshCompleteCohort: true,
         });
-        if (now() < deadline) return;
-        lastObservation = "read_exceeded_deadline";
-        break;
+        return;
       }
     }
     const remaining = deadline - now();
     if (remaining <= 0) break;
-    // Each receipt reads tags and its selected version. Keep a complete fresh
-    // cohort in reserve, and spread the remaining polls across the deadline.
-    const finalReads = packages.length * 2;
-    const remainingPolls = Math.floor((maxReads - reads - finalReads) / (pending.size * 2));
-    if (remainingPolls <= 0) {
-      lastObservation = "read_limit";
-      break;
-    }
-    // Reserve the last pending pass and the complete final pass, using each
-    // batch's slowest completed duration and one scheduling margin.
-    const completionTime = Math.max(
-      CANARY_RECEIPT_REQUEST_TIMEOUT_MS,
-      estimatePassMs([...pending.values()]) + estimatePassMs(packages) + pollIntervalMs,
-    );
-    const wait = Math.min(
-      remaining,
-      Math.max(pollIntervalMs, (remaining - completionTime) / remainingPolls),
-    );
-    if (wait > 0 && reads < maxReads) await waitForNextPoll(wait);
+    await waitForNextPoll(Math.min(interval, remaining));
+    interval = Math.min(maxPollMs, interval * 2);
+    if (now() >= deadline) break;
   }
-  const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;
-  throw new Error(
-    `Canary registry receipt is unavailable for ${[...pending.keys()].join(", ") || "cohort"} after ${reads} reads (${category})`,
+  const unavailable = [...pending.values()]
+    .map((pkg) => `${pkg.name}@${pkg.version} (${lastObservation.get(pkg.name)})`)
+    .join(", ");
+  throw new CanaryVisibilityPending(
+    `Canary registry receipt is unavailable for ${unavailable} after ` +
+      `${Math.round((now() - startedAt) / 1000)}s and ${observations} observations`,
   );
 }
 
@@ -840,39 +802,107 @@ export async function confirmCanaryPublication(
   );
 }
 
-export async function publishAndVerifyCanaryCohort(
-  packages: readonly FrozenCanaryArtifact[],
-  custody: CanaryCustody,
-  token: string,
-  options: ReceiptPollOptions & {
-    read?: typeof readRegistryPackage;
-    publish?: typeof libnpmpublish.publish;
-    writeTimeoutMs?: number;
-    provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>;
-  } = {},
-): Promise<Record<string, string>> {
-  const read = options.read ?? readRegistryPackage;
-  await publishPreparedCanaries(
-    packages,
-    custody,
-    token,
-    read,
-    options.publish,
-    options.writeTimeoutMs,
-    options.provenance,
-  );
-  await confirmCanaryCohort(packages, read, { ...options, custody });
+const SITE_PACKAGES = [
+  "@opengeni/sdk",
+  "@opengeni/react",
+  "@opengeni/codemode",
+  "@opengeni/ogtool",
+] as const;
+
+export function canarySitePins(packages: readonly CanaryArchive[]): Record<string, string> {
   const pins = Object.fromEntries(
     packages
-      .filter((pkg) =>
-        ["@opengeni/sdk", "@opengeni/react", "@opengeni/codemode", "@opengeni/ogtool"].includes(
-          pkg.name,
-        ),
-      )
+      .filter((pkg) => (SITE_PACKAGES as readonly string[]).includes(pkg.name))
       .map((pkg) => [pkg.name, pkg.version]),
   );
-  if (Object.keys(pins).length !== 4) throw new Error("Canary Site package cohort is incomplete");
+  if (Object.keys(pins).length !== SITE_PACKAGES.length) {
+    throw new Error("Canary Site package cohort is incomplete");
+  }
   return pins;
+}
+
+export const CANARY_COHORT_SCHEMA = "opengeni.canary-cohort.v1";
+export type CanaryCohort = {
+  schema: typeof CANARY_COHORT_SCHEMA;
+  source: string;
+  workflowSource: string;
+  runId: string;
+  attempt: string;
+  packages: CanaryArchive[];
+};
+
+/** The acknowledged cohort the publish job hands to the confirmation job. */
+export function canaryCohortHandoff(
+  packages: readonly CanaryArchive[],
+  identity: Omit<CanaryCohort, "schema" | "packages">,
+): string {
+  const cohort: CanaryCohort = {
+    schema: CANARY_COHORT_SCHEMA,
+    ...identity,
+    packages: packages.map((pkg) => ({
+      name: pkg.name,
+      version: pkg.version,
+      ...(pkg.previousLatest === undefined ? {} : { previousLatest: pkg.previousLatest }),
+      integrity: pkg.integrity,
+      archiveBytes: pkg.archiveBytes,
+    })) as CanaryArchive[],
+  };
+  return JSON.stringify(parseCanaryCohort(JSON.stringify(cohort), identity));
+}
+
+export function parseCanaryCohort(
+  text: string,
+  expected: { source: string; workflowSource: string; runId: string },
+): CanaryCohort {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Canary cohort handoff is not JSON");
+  }
+  const isObject = (item: unknown): item is Record<string, unknown> =>
+    item !== null && typeof item === "object" && !Array.isArray(item);
+  const onlyKeys = (item: Record<string, unknown>, keys: string[]) =>
+    Object.keys(item).every((key) => keys.includes(key));
+  if (
+    !isObject(value) ||
+    !onlyKeys(value, ["schema", "source", "workflowSource", "runId", "attempt", "packages"]) ||
+    value.schema !== CANARY_COHORT_SCHEMA ||
+    value.source !== expected.source ||
+    value.workflowSource !== expected.workflowSource ||
+    value.runId !== expected.runId ||
+    typeof value.attempt !== "string" ||
+    !/^[1-9]\d{0,2}$/.test(value.attempt) ||
+    !Array.isArray(value.packages) ||
+    value.packages.length === 0 ||
+    value.packages.length > CANARY_RECEIPT_MAX_COHORT
+  ) {
+    throw new Error("Canary cohort handoff identity differs");
+  }
+  const names = new Set<string>();
+  for (const pkg of value.packages) {
+    if (
+      !isObject(pkg) ||
+      !onlyKeys(pkg, ["name", "version", "previousLatest", "integrity", "archiveBytes"]) ||
+      typeof pkg.name !== "string" ||
+      !/^@opengeni\/[a-z0-9][a-z0-9-]*$/.test(pkg.name) ||
+      names.has(pkg.name) ||
+      typeof pkg.version !== "string" ||
+      !CANARY_VERSION_PATTERN.test(pkg.version) ||
+      (pkg.previousLatest !== undefined &&
+        (typeof pkg.previousLatest !== "string" ||
+          !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.previousLatest))) ||
+      typeof pkg.integrity !== "string" ||
+      !/^sha512-[A-Za-z0-9+/]{86}==$/.test(pkg.integrity) ||
+      !Number.isSafeInteger(pkg.archiveBytes) ||
+      (pkg.archiveBytes as number) <= 0 ||
+      (pkg.archiveBytes as number) > 64 * 1024 * 1024
+    ) {
+      throw new Error("Canary cohort handoff package is invalid");
+    }
+    names.add(pkg.name);
+  }
+  return value as CanaryCohort;
 }
 
 function writeVersion(pkg: WorkspacePackage, version: string): void {
@@ -907,11 +937,9 @@ export async function main(): Promise<void> {
   );
   await admitCanarySource(scriptRoot);
   mkdirSync(join(scriptRoot, ".release"), { recursive: true });
-  const pinsPath = join(scriptRoot, ".release/site-package-versions.json");
   const provenanceDirectory = join(scriptRoot, ".release/canary-provenance");
   if (process.env.SOURCE_SHA !== process.env.GITHUB_SHA)
     mkdirSync(provenanceDirectory, { mode: 0o700 });
-  if (existsSync(pinsPath)) throw new Error("Canary Site pins already exist; no replay is allowed");
   const custody = new CanaryReceiptStore(join(scriptRoot, ".release/canary-receipts"), {
     source: process.env.SOURCE_SHA!,
     workflowSource: process.env.GITHUB_WORKFLOW_SHA!,
@@ -1000,24 +1028,34 @@ export async function main(): Promise<void> {
       });
     }
     const frozen = freezeCanaryCohort(prepared, custody);
-    phase = "publication_and_receipts";
-    const pins = await publishAndVerifyCanaryCohort(frozen, custody, process.env.NODE_AUTH_TOKEN!, {
-      ...(process.env.SOURCE_SHA !== process.env.GITHUB_SHA
-        ? {
-            provenance: (pkg: FrozenCanaryArtifact) =>
-              signCanarySource(pkg.manifest, pkg.packed, provenanceDirectory),
-          }
-        : {}),
-    });
-    phase = "site_pins";
-    writeFileSync(pinsPath, JSON.stringify(pins, null, 2), { flag: "wx", mode: 0o600 });
-    custody.record("SITE_PINS_WRITTEN", {
-      sha256: createHash("sha256").update(readFileSync(pinsPath)).digest("hex"),
-      count: Object.keys(pins).length,
-      metadataOnly: true,
-    });
+    canarySitePins(frozen);
+    phase = "publication";
+    await publishPreparedCanaries(
+      frozen,
+      custody,
+      process.env.NODE_AUTH_TOKEN!,
+      readRegistryPackage,
+      libnpmpublish.publish,
+      undefined,
+      process.env.SOURCE_SHA !== process.env.GITHUB_SHA
+        ? (pkg: FrozenCanaryArtifact) =>
+            signCanarySource(pkg.manifest, pkg.packed, provenanceDirectory)
+        : undefined,
+    );
+    // npm processes accepted writes asynchronously. The separate confirmation
+    // job waits for visibility and can be re-run without publishing again.
+    phase = "cohort_handoff";
+    appendFileSync(
+      process.env.GITHUB_OUTPUT!,
+      `cohort=${canaryCohortHandoff(frozen, {
+        source: process.env.SOURCE_SHA!,
+        workflowSource: process.env.GITHUB_WORKFLOW_SHA!,
+        runId: process.env.GITHUB_RUN_ID!,
+        attempt: process.env.GITHUB_RUN_ATTEMPT!,
+      })}\n`,
+    );
     for (const pkg of packages) {
-      process.stdout.write(`${pkg.name}@${versions.get(pkg.name)} published with provenance\n`);
+      process.stdout.write(`${pkg.name}@${versions.get(pkg.name)} accepted by npm\n`);
     }
   } catch (error) {
     try {

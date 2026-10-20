@@ -55,10 +55,10 @@ pub enum Command {
     /// Install if needed and keep the agent running in the background across
     /// logouts and reboots. This is the normal post-connect command.
     Start(StartArgs),
-    /// Stop the always-on background agent.
+    /// Pause the background agent, including across logins, until start resumes it.
     Stop(ServiceScopeArgs),
     /// Show whether the background agent is installed and running.
-    Status(ServiceScopeArgs),
+    Status(ServiceStatusArgs),
     /// Advanced service management (install/uninstall/start/stop/status).
     Service(ServiceArgs),
     /// Print the operating-system permissions this agent holds for screen
@@ -182,10 +182,10 @@ pub enum ServiceAction {
     Uninstall(ServiceScopeArgs),
     /// Start the installed service.
     Start(ServiceScopeArgs),
-    /// Stop the running service.
+    /// Pause the service, including automatic login startup, until start resumes it.
     Stop(ServiceScopeArgs),
     /// Report the service status.
-    Status(ServiceScopeArgs),
+    Status(ServiceStatusArgs),
 }
 
 /// Arguments for `service install`.
@@ -226,6 +226,16 @@ pub struct ServiceScopeArgs {
     /// Operate on the system-wide service rather than the per-user one (Linux).
     #[arg(long)]
     pub system: bool,
+}
+
+/// Read-only service inspection, including whether a pause survives login.
+#[derive(Debug, Default, clap::Args)]
+pub struct ServiceStatusArgs {
+    #[command(flatten)]
+    pub scope: ServiceScopeArgs,
+    /// Print structured status for desktop hosts without changing the service.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for the `update` subcommand.
@@ -553,6 +563,22 @@ mod tests {
             Some(Command::Service(args)) => assert_eq!(args.action.label(), "status"),
             other => panic!("expected service, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn structured_service_status_is_explicit_and_read_only() {
+        let cli = Cli::parse_from(["opengeni-agent", "service", "status", "--json"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                action: ServiceAction::Status(ServiceStatusArgs { json: true, .. })
+            }))
+        ));
+        let cli = Cli::parse_from(["opengeni-agent", "status"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status(ServiceStatusArgs { json: false, .. }))
+        ));
     }
 
     #[test]

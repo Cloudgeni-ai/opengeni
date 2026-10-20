@@ -85,7 +85,7 @@ export function isAgentWithFullAccess(c: Context): boolean {
 export function requireFullAccessIfAgent(c: Context, what: string): void {
   if (isAgentActingAsPerson(c) && !isAgentWithFullAccess(c)) {
     throw new HTTPException(403, {
-      message: `${what} needs full access, and this agent's access is limited. The person can do it in the Opengeni app.`,
+      message: `${what} needs full access, and this agent's access is limited. The person can do it in the app.`,
     });
   }
 }
@@ -99,7 +99,7 @@ export function organizationSettingsPermission(c: Context): Permission {
 export function requireNotAgent(c: Context, what: string): void {
   if (isAgentActingAsPerson(c)) {
     throw new HTTPException(403, {
-      message: `${what} has to be done by the person in the Opengeni app in a browser.`,
+      message: `${what} has to be done by the person in the app in a browser.`,
     });
   }
 }

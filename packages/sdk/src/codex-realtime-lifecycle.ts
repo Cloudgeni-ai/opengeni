@@ -19,6 +19,27 @@ export type SessionRealtimeLifecycleProjection =
       reason: "user_stop" | "browser_unload" | "lease_expired";
     };
 
+/** Every realtime voice model id the API accepts. */
+export const SESSION_REALTIME_MODELS = [
+  "opengeni-azure/gpt-live-1",
+  "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
+  "opengeni-gateway/openai/gpt-realtime-2.1",
+  "opengeni-gateway/openai/gpt-realtime-mini",
+  "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+  "workspace-gateway/openai/gpt-realtime-2.1",
+  "workspace-gateway/openai/gpt-realtime-mini",
+  "workspace-gateway/xai/grok-voice-think-fast-2.0",
+  "workspace-elevenlabs/eleven_realtime_v1_max",
+  "workspace-elevenlabs/eleven_realtime_v1_mini",
+] as const satisfies readonly SessionRealtimeModel[];
+
+const SESSION_REALTIME_MODEL_SET: ReadonlySet<unknown> = new Set(SESSION_REALTIME_MODELS);
+
+export function isSessionRealtimeModel(value: unknown): value is SessionRealtimeModel {
+  return SESSION_REALTIME_MODEL_SET.has(value);
+}
+
 export function projectSessionRealtimeLifecycle(
   events: ReadonlyArray<Pick<SessionEvent, "sequence" | "type" | "payload">>,
 ): SessionRealtimeLifecycleProjection | null {
@@ -65,16 +86,7 @@ export function projectSessionRealtimeLifecycle(
 }
 
 function realtimeModel(value: unknown): SessionRealtimeModel | null {
-  return value === "gpt-live-1-boulder-alpha" ||
-    value === "supergrok/grok-voice-think-fast-2.0" ||
-    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
-    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
-    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
-    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
-    value === "workspace-gateway/openai/gpt-realtime-mini" ||
-    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
-    ? value
-    : null;
+  return isSessionRealtimeModel(value) ? value : null;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

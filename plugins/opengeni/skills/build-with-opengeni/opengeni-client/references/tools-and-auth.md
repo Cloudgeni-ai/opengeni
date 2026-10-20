@@ -17,6 +17,7 @@ createSessionProxyRoute(og, {
   toolServer: {
     // url defaults to OPENGENI_TOOL_SERVER_URL: public HTTPS, a tunnel when local
     approvals: { ask: ["rename_post"] }, // every write tool; `true` for all tools
+    eager: ["search_posts"], // everyday tools on the first request; the rest stay searchable
   },
 });
 ```
@@ -63,6 +64,11 @@ and refreshes the token on every message, approval, and answer. Tools act as
 the user who started the chat, also in shared chats. The token is an HS256 JWT
 signed with a key derived from `OPENGENI_API_KEY`, with `aud` set to the tool
 URL, `sub` the user, and `tenant` and `workspace_id` claims.
+
+`eager` lists the few tools nearly every chat needs (usually reads such as
+search and get). The agent has them from its first request; every other tool
+stays behind tool search. Keep the list short and stable: each listed schema
+is sent on every request, and changing the list changes the cached prefix.
 
 Authorize every call:
 

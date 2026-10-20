@@ -1208,7 +1208,7 @@ try {
         "};",
         "",
         'if (sessionRealtimeTransportKind("gpt-live-1-boulder-alpha") !== "codex") throw new Error("Codex transport selection drifted");',
-        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "gateway") throw new Error("Gateway transport selection drifted");',
+        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "websocket") throw new Error("Gateway transport selection drifted");',
         "void createSessionRealtimeController;",
         "const markup = renderToStaticMarkup(",
         "  <>",

@@ -1933,12 +1933,23 @@ export interface GpuSample {
 export interface PingRequest {
   /** Echoed back so the caller can correlate / measure RTT. */
   nonce: string;
+  /**
+   * Optional receiver-issued control delivery batch, measured on the agent's
+   * suspend-inclusive monotonic clock. Zero is an ordinary liveness-only ping.
+   */
+  controlReplayWindowMs: string;
 }
 
 export interface PingResponse {
   nonce: string;
   /** The agent's monotonic clock, for skew estimation. */
   agentMonotonicMs: string;
+  /**
+   * Opaque, single-delivery identities for background replenishment. Empty on
+   * older agents or ordinary pings. Each token is used for only one call;
+   * retries retain its exact subject (including timing) and request bytes.
+   */
+  controlReplayTokens: string[];
 }
 
 /**
@@ -2091,6 +2102,15 @@ export interface AgentUpdateProgress {
   errorCode: string;
   retryable: boolean;
   rolledBack: boolean;
+  /** Content-free blockers from this idle proof, not permission to stop work. */
+  blockers: AgentUpdateBlocker[];
+}
+
+export interface AgentUpdateBlocker {
+  kind: string;
+  /** Unused: enrollment-wide diagnostics must never carry private session IDs. */
+  resourceId: string;
+  count: number;
 }
 
 /**
@@ -2191,7 +2211,8 @@ export interface OpStart {
   /**
    * Absolute runner-enforced deadline, unix-epoch ms (0 = none). Runner-side
    * enforcement is authoritative (process-tree kill + Exit{timed_out}); the
-   * server wall-clock is advisory.
+   * server wall-clock is advisory. Legacy one-shot delivery uses this field;
+   * replay v2 uses ExecRequest.timeout_ms from the token's fixed call offset instead.
    */
   deadlineMs: string;
   /** The originating session id, for per-origin fair admission. */
@@ -11574,13 +11595,16 @@ export const GpuSample: MessageFns<GpuSample> = {
 };
 
 function createBasePingRequest(): PingRequest {
-  return { nonce: "0" };
+  return { nonce: "0", controlReplayWindowMs: "0" };
 }
 
 export const PingRequest: MessageFns<PingRequest> = {
   encode(message: PingRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.nonce !== "0") {
       writer.uint32(8).uint64(message.nonce);
+    }
+    if (message.controlReplayWindowMs !== "0") {
+      writer.uint32(16).uint64(message.controlReplayWindowMs);
     }
     return writer;
   },
@@ -11600,6 +11624,14 @@ export const PingRequest: MessageFns<PingRequest> = {
           message.nonce = reader.uint64().toString();
           continue;
         }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.controlReplayWindowMs = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11610,13 +11642,23 @@ export const PingRequest: MessageFns<PingRequest> = {
   },
 
   fromJSON(object: any): PingRequest {
-    return { nonce: isSet(object.nonce) ? globalThis.String(object.nonce) : "0" };
+    return {
+      nonce: isSet(object.nonce) ? globalThis.String(object.nonce) : "0",
+      controlReplayWindowMs: isSet(object.controlReplayWindowMs)
+        ? globalThis.String(object.controlReplayWindowMs)
+        : isSet(object.control_replay_window_ms)
+        ? globalThis.String(object.control_replay_window_ms)
+        : "0",
+    };
   },
 
   toJSON(message: PingRequest): unknown {
     const obj: any = {};
     if (message.nonce !== "0") {
       obj.nonce = message.nonce;
+    }
+    if (message.controlReplayWindowMs !== "0") {
+      obj.controlReplayWindowMs = message.controlReplayWindowMs;
     }
     return obj;
   },
@@ -11627,12 +11669,13 @@ export const PingRequest: MessageFns<PingRequest> = {
   fromPartial<I extends Exact<DeepPartial<PingRequest>, I>>(object: I): PingRequest {
     const message = createBasePingRequest();
     message.nonce = object.nonce ?? "0";
+    message.controlReplayWindowMs = object.controlReplayWindowMs ?? "0";
     return message;
   },
 };
 
 function createBasePingResponse(): PingResponse {
-  return { nonce: "0", agentMonotonicMs: "0" };
+  return { nonce: "0", agentMonotonicMs: "0", controlReplayTokens: [] };
 }
 
 export const PingResponse: MessageFns<PingResponse> = {
@@ -11642,6 +11685,9 @@ export const PingResponse: MessageFns<PingResponse> = {
     }
     if (message.agentMonotonicMs !== "0") {
       writer.uint32(16).uint64(message.agentMonotonicMs);
+    }
+    for (const v of message.controlReplayTokens) {
+      writer.uint32(26).string(v!);
     }
     return writer;
   },
@@ -11669,6 +11715,14 @@ export const PingResponse: MessageFns<PingResponse> = {
           message.agentMonotonicMs = reader.uint64().toString();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.controlReplayTokens.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11686,6 +11740,11 @@ export const PingResponse: MessageFns<PingResponse> = {
         : isSet(object.agent_monotonic_ms)
         ? globalThis.String(object.agent_monotonic_ms)
         : "0",
+      controlReplayTokens: globalThis.Array.isArray(object?.controlReplayTokens)
+        ? object.controlReplayTokens.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.control_replay_tokens)
+        ? object.control_replay_tokens.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -11697,6 +11756,9 @@ export const PingResponse: MessageFns<PingResponse> = {
     if (message.agentMonotonicMs !== "0") {
       obj.agentMonotonicMs = message.agentMonotonicMs;
     }
+    if (message.controlReplayTokens?.length) {
+      obj.controlReplayTokens = message.controlReplayTokens;
+    }
     return obj;
   },
 
@@ -11707,6 +11769,7 @@ export const PingResponse: MessageFns<PingResponse> = {
     const message = createBasePingResponse();
     message.nonce = object.nonce ?? "0";
     message.agentMonotonicMs = object.agentMonotonicMs ?? "0";
+    message.controlReplayTokens = object.controlReplayTokens?.map((e) => e) || [];
     return message;
   },
 };
@@ -13136,6 +13199,7 @@ function createBaseAgentUpdateProgress(): AgentUpdateProgress {
     errorCode: "",
     retryable: false,
     rolledBack: false,
+    blockers: [],
   };
 }
 
@@ -13161,6 +13225,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     }
     if (message.rolledBack !== false) {
       writer.uint32(56).bool(message.rolledBack);
+    }
+    for (const v of message.blockers) {
+      AgentUpdateBlocker.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -13228,6 +13295,14 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
           message.rolledBack = reader.bool();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.blockers.push(AgentUpdateBlocker.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13266,6 +13341,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
         : isSet(object.rolled_back)
         ? globalThis.Boolean(object.rolled_back)
         : false,
+      blockers: globalThis.Array.isArray(object?.blockers)
+        ? object.blockers.map((e: any) => AgentUpdateBlocker.fromJSON(e))
+        : [],
     };
   },
 
@@ -13292,6 +13370,9 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     if (message.rolledBack !== false) {
       obj.rolledBack = message.rolledBack;
     }
+    if (message.blockers?.length) {
+      obj.blockers = message.blockers.map((e) => AgentUpdateBlocker.toJSON(e));
+    }
     return obj;
   },
 
@@ -13307,6 +13388,103 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     message.errorCode = object.errorCode ?? "";
     message.retryable = object.retryable ?? false;
     message.rolledBack = object.rolledBack ?? false;
+    message.blockers = object.blockers?.map((e) => AgentUpdateBlocker.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseAgentUpdateBlocker(): AgentUpdateBlocker {
+  return { kind: "", resourceId: "", count: 0 };
+}
+
+export const AgentUpdateBlocker: MessageFns<AgentUpdateBlocker> = {
+  encode(message: AgentUpdateBlocker, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.kind !== "") {
+      writer.uint32(10).string(message.kind);
+    }
+    if (message.resourceId !== "") {
+      writer.uint32(18).string(message.resourceId);
+    }
+    if (message.count !== 0) {
+      writer.uint32(24).uint32(message.count);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AgentUpdateBlocker {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAgentUpdateBlocker();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.kind = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.resourceId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.count = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AgentUpdateBlocker {
+    return {
+      kind: isSet(object.kind) ? globalThis.String(object.kind) : "",
+      resourceId: isSet(object.resourceId)
+        ? globalThis.String(object.resourceId)
+        : isSet(object.resource_id)
+        ? globalThis.String(object.resource_id)
+        : "",
+      count: isSet(object.count) ? globalThis.Number(object.count) : 0,
+    };
+  },
+
+  toJSON(message: AgentUpdateBlocker): unknown {
+    const obj: any = {};
+    if (message.kind !== "") {
+      obj.kind = message.kind;
+    }
+    if (message.resourceId !== "") {
+      obj.resourceId = message.resourceId;
+    }
+    if (message.count !== 0) {
+      obj.count = Math.round(message.count);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(base?: I): AgentUpdateBlocker {
+    return AgentUpdateBlocker.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(object: I): AgentUpdateBlocker {
+    const message = createBaseAgentUpdateBlocker();
+    message.kind = object.kind ?? "";
+    message.resourceId = object.resourceId ?? "";
+    message.count = object.count ?? 0;
     return message;
   },
 };

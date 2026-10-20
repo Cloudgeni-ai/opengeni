@@ -1,3 +1,4 @@
+export { isConnectedMachineOutcomeUnknownOutput } from "./connected-machine-output";
 export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
   AvailableOpenGeniSlackBots,
@@ -464,9 +465,14 @@ export type {
 export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
+  createRealtimeWebsocketTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
 } from "./gateway-realtime-transport";
-export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
+export {
+  isSessionRealtimeModel,
+  projectSessionRealtimeLifecycle,
+  SESSION_REALTIME_MODELS,
+} from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Provider-neutral Browser/Computer resource client + bounded frame protocol.
 export * from "./interaction";
@@ -509,6 +515,7 @@ export type {
 } from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -848,6 +855,10 @@ export type {
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
   GatewayRealtimeInitialItem,
+  RealtimeWebsocketProtocol,
+  SessionRealtimeWebsocketInitialItem,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
@@ -884,6 +895,8 @@ export type {
   DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  SubscriptionUsagePool,
+  SubscriptionUsagePoolsResponse,
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -1053,6 +1066,7 @@ export type {
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   CreateDocumentBaseRequest,
+  AppShotCapture,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,
@@ -1298,6 +1312,7 @@ export type {
   SessionControlResponse,
   SessionRetryRequest,
   SandboxRecoverySelection,
+  SandboxRecoveryTarget,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   SandboxRecoveryResponse,

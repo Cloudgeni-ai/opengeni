@@ -97,6 +97,16 @@ pub fn stop() -> Result<(), String> {
     Ok(())
 }
 
+/// Resume the installed task without replacing its definition or launch identity.
+pub fn resume() -> Result<(), String> {
+    schtasks(&["/Change", "/TN", TASK, "/ENABLE"])?;
+    let dir = config::config_dir().map_err(|error| error.to_string())?;
+    if !agent_running(&dir) {
+        schtasks(&["/Run", "/TN", TASK])?;
+    }
+    Ok(())
+}
+
 /// Stops the agent and removes the task.
 ///
 /// # Errors
@@ -121,6 +131,21 @@ pub fn uninstall() -> Result<(), String> {
 pub fn state() -> TaskState {
     let running = config::config_dir().is_ok_and(|dir| agent_running(&dir));
     resolve_state(task_status().as_deref(), running)
+}
+
+/// Registration and enabled state must not be inferred from a foreground runner.
+pub fn inspect() -> (bool, bool, bool) {
+    let task = task_status();
+    let running = config::config_dir().is_ok_and(|dir| agent_running(&dir));
+    inspection_state(task.as_deref(), running)
+}
+
+fn inspection_state(task: Option<&str>, running: bool) -> (bool, bool, bool) {
+    (
+        task.is_some(),
+        task.is_some_and(|status| !status.eq_ignore_ascii_case("disabled")),
+        running,
+    )
 }
 
 /// Prints the one-line status the desktop app and scripts read.
@@ -322,6 +347,16 @@ mod tests {
         // holding the lock is not running.
         assert_eq!(resolve_state(Some("Running"), false), TaskState::Stopped);
         assert_eq!(resolve_state(None, false), TaskState::NotInstalled);
+    }
+
+    #[test]
+    fn inspection_keeps_registration_separate_from_a_foreground_runner() {
+        assert_eq!(inspection_state(None, true), (false, false, true));
+        assert_eq!(
+            inspection_state(Some("Disabled"), false),
+            (true, false, false)
+        );
+        assert_eq!(inspection_state(Some("Ready"), true), (true, true, true));
     }
 
     #[test]

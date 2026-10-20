@@ -80,9 +80,19 @@ function agentConnection(serving: () => boolean) {
       subjects.push(subject);
       if (!serving()) throw noResponders();
       const request = ControlRequest.decode(payload);
+      // A replay v2 agent answers a batch ping with single-use delivery tokens.
       const result =
         request.op?.$case === "ping"
-          ? { $case: "ping" as const, ping: { nonce: request.op.ping.nonce } }
+          ? {
+              $case: "ping" as const,
+              ping: {
+                nonce: request.op.ping.nonce,
+                controlReplayTokens:
+                  request.op.ping.controlReplayWindowMs !== "0"
+                    ? Array.from({ length: 64 }, () => crypto.randomUUID())
+                    : [],
+              },
+            }
           : {
               $case: "opStatus" as const,
               opStatus: OpStatus.fromPartial({
@@ -94,7 +104,7 @@ function agentConnection(serving: () => boolean) {
         data: ControlResponse.encode(
           ControlResponse.fromPartial({ requestId: request.requestId, result }),
         ).finish(),
-        headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+        headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "2" : "") },
       };
     },
   };

@@ -46,6 +46,7 @@ export default defineConfig({
     "retained-provider-commands": "src/retained-provider-commands.ts",
     "session-event-slices": "src/session-event-slices.ts",
     "mcp-operations": "src/mcp-operations.ts",
+    "provider-recovery-clock": "src/provider-recovery-clock.ts",
   },
   format: ["esm"],
   target: "es2022",

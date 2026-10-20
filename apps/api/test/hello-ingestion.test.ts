@@ -733,6 +733,48 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     });
   });
 
+  test("update blocker custody clears on progress and rejects stale process replacements", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    const fence = {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId: crypto.randomUUID(),
+    };
+    await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion: "0.1.16" });
+    const blockers = [{ kind: "browser_action", resourceId: crypto.randomUUID(), count: 1 }];
+    await advanceEnrollmentAgentUpdate(db, {
+      ...fence,
+      status: "waiting_for_idle",
+      errorCode: "update_busy_interactions",
+      blockers,
+    });
+    const waiting = (await getEnrollment(db, workspaceId, enrollment.id))!.agentUpdate!;
+    expect(waiting.blockers).toEqual(blockers);
+    expect(
+      (
+        await advanceEnrollmentAgentUpdate(db, {
+          ...fence,
+          connectionInstanceId: crypto.randomUUID(),
+          status: "waiting_for_idle",
+          blockers: [],
+        })
+      ).updated,
+    ).toBe(false);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))!.agentUpdate!.blockers).toEqual(
+      blockers,
+    );
+    await advanceEnrollmentAgentUpdate(db, { ...fence, status: "downloading" });
+    const downloading = (await getEnrollment(db, workspaceId, enrollment.id))!.agentUpdate!;
+    expect(downloading.blockers).toEqual([]);
+    expect(downloading.requestedAt).toBe(waiting.requestedAt);
+  });
+
   test("stale process progress and reordered stages cannot mutate or regress update state", async () => {
     if (!available) return;
     const { accountId, workspaceId, enrollment, connectionInstanceId } =

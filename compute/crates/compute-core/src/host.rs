@@ -16,7 +16,7 @@ mod spare;
 mod squeeze;
 
 pub(crate) use admission::WakeRoom;
-pub use admission::{Capacity, Size};
+pub use admission::{Capacity, CpuCapacity, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub(crate) use squeeze::{Balloon, Squeeze};
 
@@ -41,22 +41,27 @@ pub enum Input {
         last_activity: At,
     },
     /// Stop managing a sandbox and delete it. What its VM occupied stays
-    /// counted against the admission budget, as with [`Input::Unmanaged`],
-    /// until the host agent reports that VM ended.
+    /// counted against the admission budget, and the processor time it
+    /// reserved awake against the processor budget, as with
+    /// [`Input::Unmanaged`], until the host agent reports that VM ended.
     Remove {
         /// The sandbox.
         sandbox: SandboxId,
     },
-    /// A VM this core does not manage holds `bytes` of host memory: the VM
-    /// of a removed sandbox not yet ended, or one the host agent found
-    /// running but could not take back. Counted against the admission
-    /// budget until reported again with 0 once it has ended, as is what a
-    /// removed sandbox or spare VM booked on local disk.
+    /// A VM this core does not manage holds `bytes` of host memory and may
+    /// run with `cpu` millicores reserved: the VM of a removed sandbox not
+    /// yet ended, or one the host agent found running but could not take
+    /// back. Counted against the admission and processor budgets until
+    /// reported again with 0 bytes once it has ended, as is what a removed
+    /// sandbox or spare VM booked on local disk.
     Unmanaged {
         /// The sandbox whose VM it is.
         sandbox: SandboxId,
         /// Bytes it holds; 0 once it has ended.
         bytes: u64,
+        /// Millicores of processor time it may run with; 0 for a VM that
+        /// stays paused.
+        cpu: u64,
     },
     /// Work outside any step, named `key`, may still write `disk` to local
     /// disk, such as a new sandbox's first files: booked like a save until
@@ -159,7 +164,9 @@ pub enum Input {
     /// the admission budget, and ready ones (not `filling`) are the first
     /// memory given back, with [`Action::Discard`]. What one may still
     /// write to local disk is booked like a save's, and what it wrote
-    /// stays booked until a disk reading taken after it ended.
+    /// stays booked until a disk reading taken after it ended. While
+    /// `filling` its guest runs, so it books `cpu` of the processor
+    /// budget as an awake sandbox does; once ready (paused) it books none.
     Spare {
         /// Names the VM.
         sandbox: SandboxId,
@@ -170,6 +177,9 @@ pub enum Input {
         disk: DiskSpace,
         /// Whether it is still coming up.
         filling: bool,
+        /// Millicores of processor time it is guaranteed while filling:
+        /// what its VM's `cpu.weight` gives it.
+        cpu: u64,
     },
     /// No copy of the sandbox's current VM process can be trusted, as with
     /// [`Failure::Unsavable`]: found out other than by a step, such as when
@@ -211,6 +221,18 @@ pub enum Input {
     Disk {
         /// Available bytes and inodes.
         available: DiskSpace,
+    },
+    /// Millicores of processor time the host can guarantee its sandboxes
+    /// now, in place of [`crate::HostPolicy::cpu_budget`]: less while what
+    /// else runs on the host may take more of its processors than it
+    /// keeps back, and more again once that is over. Sandboxes awake stay
+    /// awake; while more is reserved than the budget, no wake is admitted
+    /// until enough sleep, and a refused wake still held wakes by itself
+    /// once it fits. While it is 0 no wake is admitted. Ignored without a
+    /// processor budget.
+    CpuBudget {
+        /// Millicores.
+        millis: u64,
     },
     /// Bytes the sandbox's disk may still grow by, measured: what its
     /// awake VM books for its disk from now on instead of its size's
@@ -404,13 +426,14 @@ pub enum Notice {
     /// once: it needs `needed` of `resource` and only `free` are left even
     /// after ending every idle VM already saved. The wake request is
     /// dropped; a new one tries again, and so does a hold once there is
-    /// room. See [`crate::Admission`] and [`crate::DiskPolicy`].
+    /// room. See [`crate::Admission`], [`crate::HostPolicy::cpu_budget`]
+    /// and [`crate::DiskPolicy`].
     HostFull {
         /// What the host is short of.
         resource: Resource,
-        /// Bytes, or inodes, the wake needs.
+        /// Bytes, inodes or millicores the wake needs.
         needed: u64,
-        /// Bytes, or inodes, free.
+        /// Bytes, inodes or millicores free.
         free: u64,
     },
     /// Whether the sandbox waits, saved, for room after a pause for host
@@ -497,6 +520,9 @@ pub struct Host {
     refused: BTreeSet<SandboxId>,
     /// Bytes held by VMs not managed here; see [`Input::Unmanaged`].
     unmanaged: HashMap<SandboxId, u64>,
+    /// Millicores reserved by VMs not managed here; see
+    /// [`Input::Unmanaged`].
+    unmanaged_cpu: HashMap<SandboxId, u64>,
     /// Room claims (see [`Squeeze::Returning`]) that ended since the last
     /// [`Input::Memory`] reading: their guests may have taken that room
     /// before it, which only a reading taken since shows.
@@ -547,6 +573,7 @@ impl Host {
             settled_relief: 0,
             refused: BTreeSet::new(),
             unmanaged: HashMap::new(),
+            unmanaged_cpu: HashMap::new(),
             unread_claims: 0,
             removed_claims: HashMap::new(),
             spares: spare::Spares::default(),
@@ -652,6 +679,13 @@ impl Host {
         })
     }
 
+    /// Whether sandbox `id` holds its request of the host's memory and
+    /// processor budgets: it is awake, waking, or its wake was let in.
+    #[must_use]
+    pub fn reserves(&self, id: SandboxId) -> bool {
+        self.sandboxes.get(&id).is_some_and(Sandbox::reserves)
+    }
+
     /// Bytes of host memory that ending VM processes could free at once,
     /// without losing anything or keeping anyone waiting: idle, paused
     /// sandboxes whose current state is already saved, and ready spare
@@ -710,18 +744,15 @@ impl Host {
                 bytes,
                 disk,
                 filling,
-            } => self.spare(sandbox, bytes, disk, filling),
-            Input::Unmanaged { sandbox, bytes } => self.unmanaged(sandbox, bytes),
+                cpu,
+            } => self.spare(sandbox, bytes, disk, filling, cpu),
+            Input::Unmanaged {
+                sandbox,
+                bytes,
+                cpu,
+            } => self.unmanaged(sandbox, bytes, cpu),
             Input::Writes { key, disk } => self.writes(key, disk),
-            Input::Touch { sandbox, priority } => {
-                self.ask_awake(sandbox, out);
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.touch(now);
-                    slot.requested = Level::Running;
-                    slot.request_wake(priority, now);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Touch { sandbox, priority } => self.touch(now, sandbox, priority, out),
             Input::Hold {
                 sandbox,
                 hold,
@@ -773,6 +804,7 @@ impl Host {
             }
             Input::Memory { available } => self.memory_read(available),
             Input::Disk { available } => self.disk_read(available),
+            Input::CpuBudget { millis } => self.set_cpu_budget(millis),
             Input::DiskGrowth { sandbox, bytes } => self.disk_growth(sandbox, bytes),
             Input::Hydrating { sandbox, hydrating } => self.hydrating(sandbox, hydrating),
             Input::PausedForMemory { sandbox, bytes } => {
@@ -792,6 +824,17 @@ impl Host {
                 }
             }
             Input::Tick => {}
+        }
+    }
+
+    /// Takes in [`Input::Touch`].
+    fn touch(&mut self, now: At, sandbox: SandboxId, priority: Priority, out: &mut Vec<Action>) {
+        self.ask_awake(sandbox, out);
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            slot.touch(now);
+            slot.requested = Level::Running;
+            slot.request_wake(priority, now);
+            self.mark(sandbox);
         }
     }
 
@@ -1027,6 +1070,10 @@ impl Host {
         let claim = slot.squeeze.claim();
         if held > 0 {
             *self.unmanaged.entry(id).or_default() += held;
+            if slot.reserves() {
+                // Its VM may go on running until it is ended.
+                *self.unmanaged_cpu.entry(id).or_default() += slot.size.cpu;
+            }
             if claim > 0 {
                 *self.removed_claims.entry(id).or_default() += claim;
             }

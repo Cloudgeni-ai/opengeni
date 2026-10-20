@@ -93,6 +93,7 @@ impl Rig {
             bytes,
             disk: DiskSpace::default(),
             filling,
+            cpu: 0,
         })
     }
 
@@ -188,7 +189,7 @@ fn a_spare_still_filling_is_not_ended_for_a_wake() {
 fn a_filling_spare_claims_room_above_the_watermark_until_memory_is_read_again() {
     let mut rig = Rig::new(None, Some(watermarks()));
     assert_eq!(rig.host.spare_room(), Some(0), "nothing before a reading");
-    assert!(!rig.host.spare_fits(1, DiskSpace::default()));
+    assert!(!rig.host.spare_fits(1, DiskSpace::default(), 0));
     rig.send(Input::Memory { available: 8 * GIB });
     assert_eq!(rig.host.spare_room(), Some(3 * GIB));
     rig.spare(2 * GIB, true);
@@ -204,12 +205,14 @@ fn a_filling_spare_claims_room_above_the_watermark_until_memory_is_read_again() 
         bytes: GIB,
         disk: DiskSpace::default(),
         filling: true,
+        cpu: 0,
     });
     rig.send(Input::Spare {
         sandbox: SandboxId(901),
         bytes: 0,
         disk: DiskSpace::default(),
         filling: true,
+        cpu: 0,
     });
     assert_eq!(rig.host.spare_room(), Some(0));
 }
@@ -256,12 +259,14 @@ fn a_spare_that_could_not_be_ended_is_no_relief() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
         Input::Spare {
             sandbox: SPARE,
             bytes: 0,
             disk: DiskSpace::default(),
             filling: false,
+            cpu: 0,
         },
     ]);
     rig.send(Input::Tick);
@@ -299,10 +304,12 @@ fn a_claimed_ready_sandbox_is_counted_once() {
             bytes: 0,
             disk: DiskSpace::default(),
             filling: false,
+            cpu: 0,
         },
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
     ]);
     assert_eq!(occupied(&rig), 2 * GIB);
@@ -317,6 +324,7 @@ fn a_claimed_ready_sandbox_is_counted_once() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 0,
+            cpu: 0,
         },
     ]);
     assert_eq!(occupied(&rig), 2 * GIB);
@@ -334,12 +342,14 @@ fn a_filling_spare_that_could_not_be_ended_keeps_its_claim_until_it_is_gone() {
         Input::Unmanaged {
             sandbox: SPARE,
             bytes: 2 * GIB,
+            cpu: 0,
         },
         Input::Spare {
             sandbox: SPARE,
             bytes: 0,
             disk: DiskSpace::default(),
             filling: true,
+            cpu: 0,
         },
     ]);
     rig.send(Input::Memory { available: 9 * GIB });
@@ -348,6 +358,7 @@ fn a_filling_spare_that_could_not_be_ended_keeps_its_claim_until_it_is_gone() {
     rig.send(Input::Unmanaged {
         sandbox: SPARE,
         bytes: 0,
+        cpu: 0,
     });
     assert_eq!(rig.host.spare_room(), Some(4 * GIB));
 }
@@ -363,25 +374,26 @@ fn what_a_spare_may_write_is_booked_on_disk_until_a_reading_after_it_ends() {
     });
     let snapshot = DiskSpace::save(2 * GIB);
     assert!(
-        !rig.host.spare_fits(GIB, snapshot),
+        !rig.host.spare_fits(GIB, snapshot, 0),
         "nothing that writes before a disk reading"
     );
-    assert!(rig.host.spare_fits(GIB, DiskSpace::default()));
+    assert!(rig.host.spare_fits(GIB, DiskSpace::default(), 0));
     let reading = DiskSpace {
         bytes: 4 * GIB,
         inodes: 1000,
     };
     rig.send(Input::Disk { available: reading });
-    assert!(rig.host.spare_fits(GIB, snapshot));
+    assert!(rig.host.spare_fits(GIB, snapshot, 0));
     rig.send(Input::Spare {
         sandbox: SPARE,
         bytes: GIB,
         disk: snapshot,
         filling: true,
+        cpu: 0,
     });
     let free = |rig: &Rig| rig.host.disk().unwrap().free().bytes;
     assert_eq!(free(&rig), GIB);
-    assert!(!rig.host.spare_fits(GIB, snapshot), "the disk is booked");
+    assert!(!rig.host.spare_fits(GIB, snapshot, 0), "the disk is booked");
     // A sandbox's next save cannot book what the build may write.
     rig.send(Input::Add {
         sandbox: SandboxId(1),

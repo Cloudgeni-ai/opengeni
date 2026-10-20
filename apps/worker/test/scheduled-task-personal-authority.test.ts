@@ -1,5 +1,6 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
@@ -779,6 +780,147 @@ describe("scheduled task personal MCP authority", () => {
       expect(session, runMode).toEqual({ visibility: "user_private", owner: workspace.subjectId });
     }
   });
+
+  test.each(["workspace", "organization"] as const)(
+    "workspace machine defaults freeze %s machines and never grant personal-machine consent",
+    async (machineScope) => {
+      if (!available) return;
+      const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
+      const machineBus = new MemoryEventBus();
+      const install = async (scope: "workspace" | "user" | "organization") => {
+        let originWorkspaceId = workspace.workspaceId;
+        if (scope === "organization") {
+          const [home] = await admin<
+            Array<{ id: string }>
+          >`insert into workspaces (account_id, name) values (${workspace.accountId}, 'Organization machine home') returning id`;
+          originWorkspaceId = home!.id;
+          await admin`insert into workspace_inference_controls(workspace_id, account_id) values (${originWorkspaceId}, ${workspace.accountId})`;
+        }
+        const machine = await admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${originWorkspaceId}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+          const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+          select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+          from finalize_scoped_enrollment(${workspace.accountId}::uuid, ${originWorkspaceId}::uuid, ${scope},
+            ${`pubkey-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64', 'Default machine', ${scope === "organization"})`;
+          return row!;
+        });
+        const connectionInstanceId = crypto.randomUUID();
+        const responder = new MockAgentResponder();
+        machineBus.subscribeRequests(
+          subjectFor(originWorkspaceId, machine.enrollmentId, connectionInstanceId),
+          async (payload, subject) =>
+            ControlResponse.encode(
+              await responder.request(subject, ControlRequest.decode(payload), { timeoutMs: 0 }),
+            ).finish(),
+        );
+        await admin.begin(async (tx) => {
+          await tx`alter table enrollments no force row level security`;
+          await tx`update enrollments set connection_instance_id = ${connectionInstanceId}, connection_generation = 1,
+          connection_lease_expires_at = clock_timestamp() + interval '1 hour', workspace_root = '/home/me/work'
+          where id = ${machine.enrollmentId}`;
+          await tx`alter table enrollments force row level security`;
+        });
+        return machine;
+      };
+      const machine = await install(machineScope);
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId } })} where id = ${workspace.workspaceId}`;
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Uses the workspace machine",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3600 },
+        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Inspect the selected computer",
+          tools: [],
+          resources: [],
+          metadata: {},
+          executionTarget: "workspace_default",
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const dispatch = (producerKey: string, overrides = {}) =>
+        activities(
+          {
+            sandboxBackend: "local",
+            sandboxOwnershipEnabled: true,
+            sandboxSelfhostedEnabled: true,
+            ...overrides,
+          },
+          machineBus,
+        ).dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey,
+        });
+      const first = await dispatch(`default-machine:${crypto.randomUUID()}`);
+      expect(first.action).toBe("start");
+      if (first.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(first)}`);
+      expect(await requireSession(client.db, workspace.workspaceId, first.sessionId)).toMatchObject(
+        {
+          activeSandboxId: machine.sandboxId,
+          sandboxBackend: "selfhosted",
+        },
+      );
+      const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+        workspaceId: workspace.workspaceId,
+        runId: run!.id,
+      });
+      expect(accepted?.resolvedMachineTarget).toEqual({ targetSandboxId: machine.sandboxId });
+      const recoveryRunId = crypto.randomUUID();
+      const recoveryKey = `default-recovery:${crypto.randomUUID()}`;
+      await createScheduledTaskRun(client.db, {
+        runId: recoveryRunId,
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
+        triggerType: "scheduled",
+        producerKey: recoveryKey,
+        acceptedExecutionSnapshot: {
+          ...accepted!,
+          generatedSessionBinding: {
+            ...accepted!.generatedSessionBinding!,
+            createIdempotencyKey: `scheduled-task-run:${recoveryRunId}`,
+          },
+        },
+      });
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "managed" } })} where id = ${workspace.workspaceId}`;
+      const recovered = await dispatch(recoveryKey);
+      expect(recovered.action).toBe("start");
+      if (recovered.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(recovered)}`);
+      expect(
+        await requireSession(client.db, workspace.workspaceId, recovered.sessionId),
+      ).toMatchObject({ activeSandboxId: machine.sandboxId });
+      const next = await dispatch(`default-managed:${crypto.randomUUID()}`);
+      expect(next.action).toBe("start");
+      if (next.action !== "start") throw new Error(`Unexpected: ${JSON.stringify(next)}`);
+      expect(await requireSession(client.db, workspace.workspaceId, next.sessionId)).toMatchObject({
+        activeSandboxId: null,
+        sandboxBackend: "local",
+      });
+      const personal = await install("user");
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: personal.sandboxId } })} where id = ${workspace.workspaceId}`;
+      expect(await dispatch(`default-personal:${crypto.randomUUID()}`)).toMatchObject({
+        action: "blocked",
+        reason: "machine_target_unavailable",
+      });
+      await admin`update workspaces set settings = settings || ${admin.json({ defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId } })} where id = ${workspace.workspaceId}`;
+      expect(
+        await dispatch(`default-disabled:${crypto.randomUUID()}`, {
+          sandboxSelfhostedEnabled: false,
+        }),
+      ).toMatchObject({ action: "blocked", reason: "machine_target_unavailable" });
+    },
+    180_000,
+  );
 
   test("an Only me schedule runs on its owner's own machine; nobody else's schedule can", async () => {
     if (!available) return;
@@ -1770,13 +1912,14 @@ describe("scheduled task personal MCP authority", () => {
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0768_private_visibility_ignores_leftovers.sql'),
         ('0769_private_visibility_never_blocks.sql')`;
+      // 0873 patches the account-binding fence as rewritten by withheld 0501.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0873_mcp_binding_delegation_revocation.sql')`;
       // These learning-scope repairs rewrite routines installed by withheld
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0813_preserve_accepted_learning_scope.sql'),
-        ('0819_explicit_workspace_learning_destination.sql'),
-        ('0824_explicit_learning_destination_symmetry.sql')`;
+      for (const name of knowledgeActorMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // 0832 also extends the producer fence (generated default tool policy).
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0832_schedule_defaults_and_turn_notifications.sql')`;

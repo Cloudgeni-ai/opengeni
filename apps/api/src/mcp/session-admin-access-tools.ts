@@ -57,7 +57,7 @@ export function registerSessionAdminAccessTools(input: {
   };
   const ended = () =>
     failure(
-      "This session no longer has admin access. An owner or admin can give it again from the session's menu in Opengeni.",
+      "This session no longer has admin access. An owner or admin can give it again from the session's menu in the app.",
     );
 
   server.registerTool(
@@ -65,7 +65,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find organization actions",
       description:
-        "This session has admin access: it can do what the person who gave it can manage across the whole organization. Search every Opengeni action (sessions and chats in every workspace, workspaces, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and settings). Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "This session has admin access: it can do what the person who gave it can manage across the whole organization. Search every workspace action (sessions and chats in every workspace, workspaces, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and settings). Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -105,7 +105,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Run an organization action",
       description:
-        "Run one Opengeni action as the owner or admin who gave this session admin access, with exactly what they can manage right now, in any workspace of the organization. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response. Changes are real: confirm the target first.",
+        "Run one workspace action as the owner or admin who gave this session admin access, with exactly what they can manage right now, in any workspace of the organization. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response. Changes are real: confirm the target first.",
       inputSchema: {
         id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
         pathParameters: z4

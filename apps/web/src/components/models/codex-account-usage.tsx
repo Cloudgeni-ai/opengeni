@@ -1,6 +1,8 @@
-import type { CodexAccount, CodexUsage, CodexUsagePayload } from "@opengeni/sdk";
+import type { CodexAccount, CodexUsagePayload } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
+import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
+import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
 import { codexUsageReadings } from "@/components/codex-connection";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { UsageMeterGroup } from "@/components/ui/usage-meter";
@@ -8,12 +10,24 @@ import { UsageMeterGroup } from "@/components/ui/usage-meter";
 export const CODEX_EXTRA_CREDITS_DESCRIPTION =
   "Allow extra credits after included usage runs out. Spread work uses other accounts' included usage first. Usage updates can lag, so a request may still use credits when this is off.";
 
-export function CodexCreditBalance({ credits }: { credits?: CodexUsagePayload["credits"] }) {
+export function CodexCreditBalance({
+  credits,
+  loading = false,
+}: {
+  credits?: CodexUsagePayload["credits"];
+  loading?: boolean;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-4 py-3 text-sm">
       <span className="text-fg-muted">Extra credits</span>
       <span className="text-right text-fg tabular-nums">
-        {credits?.unlimited ? "Unlimited" : formatCreditBalance(credits?.balance)}
+        {loading ? (
+          <ModelSettingsPlaceholder />
+        ) : credits?.unlimited ? (
+          "Unlimited"
+        ) : (
+          formatCreditBalance(credits?.balance)
+        )}
         {credits?.overageLimitReached ? " · spending limit reached" : null}
       </span>
     </div>
@@ -40,37 +54,13 @@ export function OrganizationCodexUsage({
   account: CodexAccount;
   onNeedsReconnect: () => Promise<void>;
 }) {
-  const [live, setLive] = useState<CodexUsage | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const generation = useRef(0);
-  const refresh = useCallback(async () => {
-    const current = ++generation.current;
-    setRefreshing(true);
-    setFailed(false);
-    try {
-      const result = await client.organizationCodexAccountUsage(organizationId, account.id);
-      if (generation.current !== current) return;
-      setLive(result);
-      setFailed(result.status === "error");
-      if (result.usage?.reason === "needs_relogin") await onNeedsReconnect();
-    } catch {
-      if (generation.current !== current) return;
-      setFailed(true);
-      setLive(null);
-    } finally {
-      if (generation.current === current) setRefreshing(false);
-    }
-  }, [client, organizationId, account.id, onNeedsReconnect]);
+  const query = useOrganizationCodexUsage(client, organizationId, account);
+  const { data: live, fetching: refreshing, refresh } = query;
+  const failed = Boolean(query.error) || live?.status === "error";
   useEffect(() => {
-    setLive(null);
-    setFailed(false);
-    if (account.status === "active") void refresh();
-    else setRefreshing(false);
-    return () => {
-      generation.current += 1;
-    };
-  }, [refresh, account.status]);
+    if (live?.usage?.reason === "needs_relogin" && account.status === "active")
+      void onNeedsReconnect();
+  }, [live?.usage?.reason, account.status, onNeedsReconnect]);
   const needsReconnect = account.status !== "active" || live?.usage?.reason === "needs_relogin";
   const usage = live?.status !== "error" ? live?.usage : null;
   const readings = codexUsageReadings(
@@ -89,7 +79,10 @@ export function OrganizationCodexUsage({
           refreshing ? (
             "Checking…"
           ) : checkedAt ? (
-            <RelativeTime date={checkedAt} prefix={usage ? "Checked" : "Last saved"} />
+            <RelativeTime
+              date={checkedAt}
+              prefix={query.source === "provider" ? "Checked" : "Last saved"}
+            />
           ) : (
             "Not checked yet"
           )
@@ -105,7 +98,7 @@ export function OrganizationCodexUsage({
           needsReconnect ? "Sign in to ChatGPT again to check usage." : undefined
         }
       />
-      <CodexCreditBalance credits={usage?.credits} />
+      <CodexCreditBalance credits={usage?.credits} loading={query.loading} />
     </>
   );
 }

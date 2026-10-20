@@ -10,6 +10,7 @@ import {
   quarantineSubscriptionCoreCodexConnection,
   recordSubscriptionCoreCodexModelCooldown,
   recordSubscriptionCoreCodexQuotaObservation,
+  recordSubscriptionCoreCodexTurnUsageReading,
   recordSubscriptionCoreCodexTurnFailure,
   SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,
   touchSubscriptionCoreCodexBinding,
@@ -104,6 +105,27 @@ function leaseRef(
     holderId: lease.holderId,
     generation: lease.generation,
   };
+}
+
+/** Persist each response's original observation while its serving lease is held. */
+export async function recordCoreCodexUsageReading(input: {
+  db: Database;
+  core: CodexSubscriptionCoreTurn;
+  lease: Pick<CodexTurnLease, "holderId" | "generation">;
+  usage: CodexUsageHeaderSnapshot;
+  credentialVersion: number | null;
+}): Promise<void> {
+  const ref = leaseRef(input.core, input.lease);
+  if (!ref) return;
+  await recordSubscriptionCoreCodexTurnUsageReading(
+    input.db,
+    input.core.identity,
+    ref,
+    codexUsageHeadersQuotaObservation(
+      input.usage,
+      input.credentialVersion ?? input.core.placedRefreshGeneration,
+    ),
+  );
 }
 
 /**

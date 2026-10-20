@@ -25,6 +25,8 @@ pub enum Resource {
     Disk,
     /// Local disk inodes for saves.
     Inodes,
+    /// Processor time, in millicores; see [`crate::HostPolicy::cpu_budget`].
+    Cpu,
 }
 
 impl fmt::Display for Resource {
@@ -33,6 +35,7 @@ impl fmt::Display for Resource {
             Self::Memory => "memory",
             Self::Disk => "disk",
             Self::Inodes => "disk inodes",
+            Self::Cpu => "processor time",
         })
     }
 }

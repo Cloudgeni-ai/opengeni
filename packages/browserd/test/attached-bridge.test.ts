@@ -7,6 +7,7 @@ import {
   AttachedBrowserBridgeClient,
   defaultBrowserBridgeAuthorityFile,
 } from "../src/attached-bridge";
+import { ReconnectingAttachedBridge } from "../src/attached-cdp";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const GENERATION = "extension-generation-1";
@@ -96,6 +97,67 @@ describe("AttachedBrowserBridgeClient", () => {
     }
   });
 
+  test("reconnects after a lost socket without replaying the request in flight", async () => {
+    const fixture = await bridgeFixture((socket, messages) => {
+      const request = messages.at(-1);
+      if (request?.type !== "request") return;
+      const payload = request.payload as JsonRecord;
+      if (payload.type === "hold") return;
+      writeFrame(socket, {
+        type: "response",
+        protocolVersion: 1,
+        requestId: request.requestId,
+        deviceId: request.deviceId,
+        connectionGeneration: GENERATION,
+        ok: true,
+        payload: { pong: true },
+      });
+    });
+    const bridge = await ReconnectingAttachedBridge.connect({
+      deviceId: DEVICE_ID,
+      connectionGeneration: GENERATION,
+      authorityFile: fixture.authorityFile,
+    });
+    try {
+      await expect(bridge.request({ type: "ping" })).resolves.toEqual({ pong: true });
+      const held = bridge.request({ type: "hold" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      fixture.dropConnections();
+      await expect(held).rejects.toMatchObject({ code: "transport_failed" });
+      await expect(bridge.request({ type: "ping" })).resolves.toEqual({ pong: true });
+      expect(fixture.messages.filter((message) => message.type === "authenticate")).toHaveLength(2);
+      expect(
+        fixture.messages.filter((message) => (message.payload as JsonRecord)?.type === "hold"),
+      ).toHaveLength(1);
+      bridge.close();
+      await expect(bridge.request({ type: "ping" })).rejects.toMatchObject({
+        code: "transport_failed",
+      });
+
+      // Closing while a reconnect is still under way dispatches nothing.
+      const reopened = await ReconnectingAttachedBridge.connect({
+        deviceId: DEVICE_ID,
+        connectionGeneration: GENERATION,
+        authorityFile: fixture.authorityFile,
+      });
+      fixture.dropConnections();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(reopened.request({ type: "ping" })).rejects.toMatchObject({
+        code: "transport_failed",
+      });
+      const late = reopened.request({ type: "insert" });
+      reopened.close();
+      await expect(late).rejects.toMatchObject({ code: "transport_failed" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        fixture.messages.filter((message) => (message.payload as JsonRecord)?.type === "insert"),
+      ).toHaveLength(0);
+    } finally {
+      bridge.close();
+      await fixture.close();
+    }
+  });
+
   test("accepts screenshot-sized responses above the command envelope", async () => {
     const data = "A".repeat(2 * 1024 * 1024);
     const fixture = await bridgeFixture((socket, messages) => {
@@ -171,6 +233,7 @@ async function bridgeFixture(
   authorityFile: string;
   token: string;
   messages: JsonRecord[];
+  dropConnections: () => void;
   close: () => Promise<void>;
 }> {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-attached-bridge-"));
@@ -208,6 +271,9 @@ async function bridgeFixture(
     authorityFile,
     token,
     messages,
+    dropConnections: () => {
+      for (const socket of sockets) socket.destroy();
+    },
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ControlRequest } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { NatsRequestConnection } from "./control-rpc";
 
 /** Wire-only capability, deliberately absent from model-facing tool contracts. */
@@ -47,6 +47,17 @@ function linkLost(reply: { data: Uint8Array; headers?: { get(name: string): stri
   return reply.data.byteLength === 0 && reply.headers?.get(AGENT_LINK_LOST_HEADER) === "1";
 }
 
+type Token = { id: string; receivedAt: number; usableUntil: number };
+type Pool = {
+  tokens: Token[];
+  legacy: boolean;
+  expiresAt: number;
+  refill?: Promise<{ data: Uint8Array } | undefined>;
+};
+// One-off adapters create new RPC facades, but share the authenticated bus.
+// Cache by that connection and exact process subject, never by enrollment alone.
+const pools = new WeakMap<NatsRequestConnection, Map<string, Pool>>();
+
 function transient(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return (
@@ -87,11 +98,10 @@ export function responderWaitExhausted(error: unknown): boolean {
 
 /** Negotiates against one exact process, never an enrollment or a replacement
  * process. Retries keep the entire subject and payload immutable. The native
- * journal atomically joins duplicates and refuses expired deliveries even after
- * their retained reply has been collected. Legacy mutations remain one-shot. */
+ * journal issues a monotonic lease before execution, then atomically joins
+ * duplicates. Unknown/collected identities are never admitted. Legacy mutations
+ * remain one-shot; sender wall-clock deadlines are no longer negotiated. */
 export class ControlReplyRecovery {
-  private readonly supported = new Map<string, Promise<boolean>>();
-
   constructor(
     private readonly recoveryMs = RECOVERY_MS,
     private readonly retryDelayMs = 250,
@@ -112,43 +122,73 @@ export class ControlReplyRecovery {
     if (!conn.supportsHeaders) {
       return await attempt(conn, subject, payload, timeoutMs, connectionCurrent);
     }
-    const deadline = Date.now() + timeoutMs + this.recoveryMs;
+    const lifetimeMs = Math.ceil(timeoutMs + this.recoveryMs);
+    const deadline = performance.now() + lifetimeMs;
     const readySubject = subject.endsWith(".rpc") ? `${subject.slice(0, -4)}.hello` : undefined;
-    let supported = this.supported.get(subject);
-    if (!supported) {
-      const probe = ControlRequest.encode(
-        ControlRequest.fromPartial({
-          requestId: randomUUID(),
-          op: { $case: "ping", ping: { nonce: "0" } },
-        }),
-      ).finish();
-      supported = this.retry(
+    let subjects = pools.get(conn);
+    if (!subjects) pools.set(conn, (subjects = new Map()));
+    for (const [key, candidate] of subjects) {
+      if (!candidate.refill && candidate.expiresAt <= performance.now()) subjects.delete(key);
+    }
+    let pool = subjects.get(subject);
+    if (!pool) subjects.set(subject, (pool = { tokens: [], legacy: false, expiresAt: deadline }));
+    if (pool.legacy) return await attempt(conn, subject, payload, timeoutMs, connectionCurrent);
+    const take = () => {
+      pool.tokens = pool.tokens.filter(
+        (token) => token.usableUntil >= performance.now() + lifetimeMs,
+      );
+      return pool.tokens.shift();
+    };
+    let token = take();
+    while (!token) {
+      const invalid = await this.refill(
         conn,
         subject,
-        subject,
-        probe,
+        pool,
         timeoutMs,
-        deadline,
+        lifetimeMs,
         readySubject,
         connectionCurrent,
-      ).then((reply) => reply.headers?.get(REPLAY_HEADER) === "1");
-      this.supported.set(subject, supported);
-      void supported.catch(() => {
-        if (this.supported.get(subject) === supported) this.supported.delete(subject);
-      });
+      );
+      if (invalid) {
+        try {
+          const response = ControlResponse.decode(invalid.data);
+          response.requestId = ControlRequest.decode(payload).requestId;
+          return { data: ControlResponse.encode(response).finish() };
+        } catch {
+          return invalid;
+        }
+      }
+      if (pool.legacy) {
+        // Negotiation and the request share one deadline.
+        return await attempt(
+          conn,
+          subject,
+          payload,
+          Math.max(1, Math.min(timeoutMs, deadline - performance.now())),
+          connectionCurrent,
+        );
+      }
+      token = take();
+      if (performance.now() >= deadline)
+        throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
     }
-    if (!(await supported)) {
-      // Negotiation and the request share one absolute deadline.
-      return await attempt(
+    // A warm call does not await replenishment. Concurrent callers share one
+    // refill; only a cold/expired/exhausted pool needs a negotiation round trip.
+    if (pool.tokens.length <= 16) {
+      void this.refill(
         conn,
         subject,
-        payload,
-        Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+        pool,
+        timeoutMs,
+        lifetimeMs,
+        readySubject,
         connectionCurrent,
-      );
+      ).catch(() => {});
     }
-    const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
-    return this.retry(
+    const ageMs = Math.max(0, Math.floor(performance.now() - token.receivedAt));
+    const delivery = `${subject}.replay.${token.id}.${ageMs}.${lifetimeMs}`;
+    const reply = await this.retry(
       conn,
       subject,
       delivery,
@@ -157,6 +197,116 @@ export class ControlReplyRecovery {
       deadline,
       readySubject,
       connectionCurrent,
+    );
+    // A suspended caller may not observe elapsed sleep in performance.now().
+    // Never reissue this call, but discard stale prefetched tokens for the next.
+    try {
+      if (
+        ControlResponse.decode(reply.data).error?.detail.failure_code === "control_delivery_expired"
+      ) {
+        pool.tokens = [];
+      }
+    } catch {
+      /* The normal response decoder owns malformed reply handling. */
+    }
+    return reply;
+  }
+
+  private refill(
+    conn: NatsRequestConnection,
+    subject: string,
+    pool: Pool,
+    timeoutMs: number,
+    lifetimeMs: number,
+    readySubject: string | undefined,
+    connectionCurrent?: () => Promise<boolean>,
+  ): Promise<{ data: Uint8Array } | undefined> {
+    if (pool.refill) return pool.refill;
+    const pending = this.fetchBatch(
+      conn,
+      subject,
+      pool,
+      timeoutMs,
+      lifetimeMs,
+      readySubject,
+      connectionCurrent,
+    );
+    pool.refill = pending;
+    void pending
+      .finally(() => {
+        if (pool.refill === pending) delete pool.refill;
+      })
+      .catch(() => {});
+    return pending;
+  }
+
+  private async fetchBatch(
+    conn: NatsRequestConnection,
+    subject: string,
+    pool: Pool,
+    timeoutMs: number,
+    lifetimeMs: number,
+    readySubject: string | undefined,
+    connectionCurrent?: () => Promise<boolean>,
+  ): Promise<{ data: Uint8Array } | undefined> {
+    const startedAt = performance.now();
+    const windowMs = lifetimeMs * 2;
+    // Retrying this safe request can only allocate unused tokens, never execute
+    // the operation. The local usable bound starts before network transmission.
+    const probe = ControlRequest.encode(
+      ControlRequest.fromPartial({
+        requestId: randomUUID(),
+        op: { $case: "ping", ping: { nonce: "0", controlReplayWindowMs: String(windowMs) } },
+      }),
+    ).finish();
+    const negotiated = await this.retry(
+      conn,
+      subject,
+      subject,
+      probe,
+      timeoutMs,
+      startedAt + lifetimeMs,
+      readySubject,
+      connectionCurrent,
+    );
+    if (negotiated.headers?.get(REPLAY_HEADER) !== "2") {
+      pool.legacy = true;
+      pool.expiresAt = startedAt + windowMs;
+      return;
+    }
+    let response: ControlResponse;
+    try {
+      response = ControlResponse.decode(negotiated.data);
+    } catch {
+      // Let the existing malformed-response boundary classify these bytes as a
+      // protocol error, not a transport outage. The mutation was never sent.
+      return negotiated;
+    }
+    const tokens =
+      response.result?.$case === "ping" ? response.result.ping.controlReplayTokens : [];
+    if (
+      response.error ||
+      !tokens.length ||
+      new Set(tokens).size !== tokens.length ||
+      tokens.some((token) => !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(token))
+    ) {
+      return {
+        data: ControlResponse.encode({
+          requestId: response.requestId,
+          result: undefined,
+          error: response.error ?? {
+            code: ErrorCode.ERROR_CODE_PROTOCOL,
+            message: "The machine did not issue a valid control delivery token.",
+            retryable: false,
+            detail: {},
+          },
+        }).finish(),
+      };
+    }
+    const receivedAt = performance.now();
+    pool.expiresAt = Math.max(pool.expiresAt, startedAt + windowMs);
+    pool.tokens.push(
+      ...tokens.map((id) => ({ id, receivedAt, usableUntil: startedAt + windowMs })),
     );
   }
 
@@ -172,12 +322,16 @@ export class ControlReplyRecovery {
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
     for (;;) {
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) {
+        throw uncertain ?? Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+      }
       try {
         return await attempt(
           conn,
           subject,
           payload,
-          Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+          Math.max(1, Math.min(timeoutMs, remainingMs)),
           connectionCurrent,
           readySubject,
         );
@@ -200,12 +354,13 @@ export class ControlReplyRecovery {
           throw new ControlConnectionReplacedError(uncertain === undefined);
         }
         // The window is spent, so callers do not wait it again.
-        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? windowExhausted(error);
+        if (performance.now() + this.retryDelayMs >= deadline)
+          throw uncertain ?? windowExhausted(error);
         if ((error as { code?: string }).code === "503" && this.onNoResponders) {
           const keepTrying = await this.onNoResponders(target).catch(() => false);
           // A refusal that came only once the hook had spent the window
           // still spent it.
-          const spent = Date.now() + this.retryDelayMs >= deadline;
+          const spent = performance.now() + this.retryDelayMs >= deadline;
           if (!keepTrying) throw uncertain ?? (spent ? windowExhausted(error) : error);
           if (spent) throw uncertain ?? windowExhausted(error);
         }

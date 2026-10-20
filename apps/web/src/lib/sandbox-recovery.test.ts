@@ -8,6 +8,94 @@ import {
 } from "./sandbox-recovery";
 import { isStructuralSandboxFailure } from "./sandbox-failure";
 
+test("workspace retry can settle failed and then explicitly continue fresh without replaying a request", async () => {
+  const target = {
+    sessionId: "session",
+    sandboxGroupId: "group",
+    leaseId: "lease",
+    routeEpoch: 0,
+    authorityEpoch: 1,
+    leaseEpoch: 3,
+    workspaceGeneration: 7,
+    archiveGeneration: 7,
+    revision: "retained",
+    restoreStatus: "unrecoverable",
+    restoreCompletedAt: null,
+  };
+  let current: SandboxRecoveryProjection = {
+    version: 1,
+    status: "eligible",
+    checkpoint: null,
+    operationId: null,
+    reason: null,
+    target,
+    retryAvailable: true,
+    freshWorkspaceAvailable: true,
+  };
+  const writes: SandboxRecoveryRequest[] = [];
+  const controller = createSandboxRecoveryController(
+    {
+      getSandboxRecovery: async () => current,
+      recoverSandbox: async (_workspace, _session, request) => {
+        writes.push(request);
+        current = { ...current, operationId: request.operationId };
+        return { operationId: request.operationId, recovery: current };
+      },
+    },
+    "workspace",
+    "session",
+  );
+  expect(await controller.recoverWorkspace("retry", target)).toBe(true);
+  expect(controller.getSnapshot().request).toBeNull();
+  expect(await controller.recoverWorkspace("continue_fresh", target)).toBe(true);
+  expect(writes).toHaveLength(2);
+  expect(writes[0]).toMatchObject({ action: "retry", target });
+  expect(writes[1]).toMatchObject({ action: "continue_fresh", acceptEmptyWorkspace: true, target });
+  expect(writes[0]!.operationId).not.toBe(writes[1]!.operationId);
+});
+
+test("workspace recovery retains ambiguous requests and never repeats them on polling", async () => {
+  const target = {
+    sessionId: "session",
+    sandboxGroupId: "group",
+    leaseId: "lease",
+    routeEpoch: 0,
+    authorityEpoch: 1,
+    leaseEpoch: 3,
+    workspaceGeneration: 7,
+    archiveGeneration: 7,
+    revision: "retained",
+    restoreStatus: "unrecoverable",
+    restoreCompletedAt: null,
+  };
+  let calls = 0;
+  const controller = createSandboxRecoveryController(
+    {
+      getSandboxRecovery: async () => ({
+        version: 1,
+        status: "eligible",
+        checkpoint: null,
+        operationId: null,
+        reason: null,
+        target,
+        retryAvailable: true,
+        freshWorkspaceAvailable: true,
+      }),
+      recoverSandbox: async () => {
+        calls++;
+        throw new Error("response lost");
+      },
+    },
+    "workspace",
+    "session",
+  );
+  expect(await controller.recoverWorkspace("continue_fresh", target)).toBe(false);
+  await controller.refresh();
+  expect(await controller.recoverWorkspace("continue_fresh", target)).toBe(false);
+  expect(controller.getSnapshot().uncertain).toBe(true);
+  expect(calls).toBe(1);
+});
+
 const selection: SandboxRecoverySelection = {
   version: 1,
   sessionId: "session",
@@ -51,6 +139,7 @@ describe("checkpoint recovery consent", () => {
     expect(await controller.consent(selection)).toBe(true);
     expect(await controller.consent(selection)).toBe(false);
     expect(requests).toHaveLength(1);
+    if (!("selection" in requests[0]!)) throw new Error("Expected historical checkpoint consent");
     expect(requests[0]!.selection).toEqual(selection);
     expect(requests[0]!.selection).not.toBe(selection);
     expect(Object.isFrozen(requests[0])).toBe(true);

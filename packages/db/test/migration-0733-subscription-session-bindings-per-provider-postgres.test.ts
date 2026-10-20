@@ -38,6 +38,7 @@ import {
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
 import {
   MAINTENANCE_PRIVATE_TABLES,
   MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -467,6 +468,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "subscription plan Free anniversary helper is missing",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
+      // Usage-history routines arrive in the withheld 0871/0872.
+      ...ABSENT_USAGE_HISTORY_POSTURE,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
       `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
@@ -501,6 +504,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "runtime role cannot read the subscription plan catalog",
       // Nor the private-file lookup (0854).
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+      // Nor selected-workspace Slack bot access (0864).
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),

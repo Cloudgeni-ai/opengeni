@@ -361,6 +361,12 @@ authority alone for agent links.
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
   ```
 
+  Each host shows its memory and disk, and, when it guarantees processor
+  time, `cpu_millis` (what it guarantees at once now) and
+  `cpu_free_millis` (what a wake can still reserve). A `cpu_millis` below
+  what the host was given means something outside the VMs' group takes
+  more of its processors than it keeps back; the agent logs it.
+
 - **Draining a host.** `POST /v1/hosts/<name>/drain` stops new sandboxes
   going there and hands off every sandbox on it that nothing holds awake;
   each is adopted elsewhere on its next wake (ADR 18). The answer counts
@@ -516,8 +522,13 @@ before users move to compute from Modal:
 - **The network.** Each sandbox has its own namespace and nftables rules:
   internet through NAT, nothing else; no host, no other sandbox, no
   private or shared ranges, no metadata service
-  ([ADR 11](adr/0011-fixed-guest-network.md)). The production units do
-  not pass `--trusted`.
+  ([ADR 11](adr/0011-fixed-guest-network.md)), but for the exact
+  destinations and TCP ports a host lists with `--reach`. Guests resolve
+  names through the host's answer at their gateway, which asks public
+  name servers and never the host's own; a query a guest sends to a name
+  server it may not reach is answered there too. The review should
+  confirm that each listed destination is one sandboxes are meant to
+  reach.
 - **Hosts.** Hosts hold their sandboxes' disks and memory, encrypted at
   rest by the provider, and the host account can read and write every
   archived sandbox in the bucket. A host is as trusted as every sandbox
@@ -575,7 +586,11 @@ before users move to compute from Modal:
      files beyond KVM, the TAP device and the vsock);
   2. the per-sandbox nftables rules on a running host, from inside a
      guest: host addresses, the metadata address, other sandboxes, the
-     VPC, IPv6, and the cloud's public-to-private mapping (`--block`);
+     VPC, IPv6, the cloud's public-to-private mapping (`--block`), each
+     `--reach` destination's other ports, and the sandbox's name server
+     (its gateway's port 53, the one thing in the namespace a guest
+     reaches, and where its queries to unreachable name servers are
+     sent), which parses guests' queries;
   3. the guest-to-host channels, whose input from guests is untrusted:
      the vsock ports the host serves (guest ports it forwards, and the
      agent link of ADR 21) and the pagers' and gateway's replies;
@@ -709,6 +724,14 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   rollout, or after a rollback, never restore a stale copy; beside the
   new schema they can only make a copy count as not whole. A host whose
   guest image predates the `sync` request warns and saves without it.
+  One exception: hosts that report their processor capacity (`cpu_millis`
+  when they register, `cpu_millis` and `cpu_free_millis` in their
+  capacity) need a control
+  service that reads it first. The first releases refuse report fields
+  they do not know, so upgrade the service from before that release
+  first, then the hosts; from that release on, report fields a service
+  does not know are ignored, and the usual order holds again. A service
+  meeting hosts that do not report it places and scales by memory alone.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):
@@ -783,6 +806,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   cloud maps a public address onto the host, the host can also be reached
   through that address: pass it with `--block`, and check from a guest that
   it is refused.
+- **Private destinations sandboxes need.** Where sandboxes must reach
+  something only a private or overlay network serves, such as an
+  Opengeni whose API, object storage and relay are private, list each
+  one with the ports needed: `--reach api.internal:443,9443,9445` in
+  `COMPUTE_HOST_ARGS` (the GCP root's `host_args`), repeated per
+  destination. A name is resolved by the host when its agent starts, so
+  the host's own resolver must know it, and the sandboxes' name server
+  answers it with those addresses; restart the agent if it moves.
+  Nothing else on the network opens, and the agent refuses an entry in a
+  range sandboxes may never reach. `--dns` names the upstream name
+  servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
+  default); keep them public, as sandboxes can look up whatever they
+  know.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with
@@ -792,9 +828,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   Secret Manager and list it in `host_readable_secrets` rather than in the
   prelude, which is instance metadata. Overlay addresses in the shared
   range (100.64.0.0/10) are blocked to sandboxes like any local network,
-  unless the host is trusted; do not accept routes or use an exit node on
-  hosts, and give hosts an overlay identity that may reach only the
-  service's host endpoint and Opengeni's agent gateway.
+  but for what `--reach` lists, and the overlay's name server is never
+  asked for them; do not accept routes or use an exit node on hosts, and
+  give hosts an overlay identity that may reach only the service's host
+  endpoint and Opengeni's endpoints.
+- **Upgrading a host in place.** An agent that starts forgets the
+  connections sandboxes made under an older version that its rules refuse
+  ([ADR 11](adr/0011-fixed-guest-network.md)), such as queries a guest
+  keeps sending one private name server from one socket, which would
+  otherwise keep going there rather than to the guest's own; the log says
+  how many per namespace (`forgot connections the rules no longer let
+  through`). It reads them through the kernel's netlink interface to
+  connection tracking (`nf_conntrack_netlink`, loaded on demand); without
+  it the agent warns and such connections end only once idle.
 
 ## Capacity and cost
 
@@ -811,15 +857,20 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   disk live only in object storage. The final measurements report agent
   memory and open files per archived sandbox; placement must count records,
   not only running VMs.
-- **The agent's processors come out of the sandboxes'.** The agent runs a
+- **The agent's processors come out of the headroom.** The agent runs a
   quarter of the host's processors, from 2 to 8, as async workers, and
   compresses as many chunks at once for object storage; blocking threads,
   which mostly wait on local disk, are 64 more than that. Archiving is the
-  agent's only long processor-bound work, so `--compress-threads` sets how
-  fast idle sandboxes reach object storage against how much processor
-  time their neighbours lose (see the agent threads measurement in
-  [measurements](measurements.md)). Raise it where saved sandboxes wait
-  long for their archive and local disk runs short; `--worker-threads` and
+  agent's only long processor-bound work. Sandboxes' requests are
+  guaranteed first: when every processor is busy, the agent and the rest
+  of the host share `--cpu-headroom-millis` (a sixteenth of the
+  processors, at least 500), and archiving then takes longer; a waking
+  sandbox's pager runs in its own VM's group, on its request. Otherwise
+  `--compress-threads` sets how fast idle sandboxes reach object storage
+  against how much idle processor time their neighbours could have used
+  (see the agent threads measurement in [measurements](measurements.md)).
+  Raise it, or the headroom, where saved sandboxes wait long for their
+  archive and local disk runs short; `--worker-threads` and
   `--blocking-threads` rarely need changing.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage

@@ -37,6 +37,7 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
@@ -167,6 +168,22 @@ function eventAttributeValue(value: unknown): AttributeValue {
   }
 }
 
+const SANDBOX_SETUP_OPERATIONS = new Set([
+  "exec",
+  "execCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "materializeEntry",
+]);
+
+/** Single provider round trips are sub-second when healthy; the tail covers
+ * clone and long setup commands. */
+const SANDBOX_SETUP_OPERATION_BUCKETS = [
+  0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2.5, 5, 10, 30, 120,
+];
+
 export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
@@ -247,6 +264,27 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_workspace_capture_duration_seconds",
         help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
         labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
+    onSandboxSetupOperation: ({ backend, op, purpose, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeOp = SANDBOX_SETUP_OPERATIONS.has(op) ? op : "other";
+      const safePurpose = (SANDBOX_OPERATION_PURPOSES as readonly string[]).includes(purpose)
+        ? purpose
+        : "other";
+      completedOperationSpan(observability, "worker.sandbox_setup.operation", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+        op: safeOp,
+        purpose: safePurpose,
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_setup_operation_duration_seconds",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
+        labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
       });
     },
@@ -2583,6 +2621,8 @@ function completedOperationSpan(
     provider?: string;
     backend?: string;
     tool?: string;
+    op?: string;
+    purpose?: string;
     correlationId?: string | undefined;
   },
 ): void {

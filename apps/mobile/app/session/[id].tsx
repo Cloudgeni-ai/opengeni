@@ -368,6 +368,7 @@ function LiveSession(props: {
               label={pill.name}
               detail={pill.effort}
               fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy

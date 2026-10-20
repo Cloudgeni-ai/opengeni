@@ -103,6 +103,17 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { instrumentSandboxClientSessionOperations } from "./operation-purpose";
+export {
+  currentSandboxOperationPurpose,
+  instrumentSandboxClientSessionOperations,
+  instrumentSandboxSessionOperations,
+  SANDBOX_OPERATION_PURPOSES,
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+  type SandboxOperationPurpose,
+  type SandboxSetupOperationObservation,
+} from "./operation-purpose";
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
@@ -851,15 +862,20 @@ export function createSandboxClientForBackend(
     exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
-  const raw = withProviderExactResumeContract(
-    registration,
-    registration.build({
-      settings,
-      environment,
-      exposedPorts,
-      ...(metrics ? { metrics } : {}),
-    }),
-  );
+  const built = registration.build({
+    settings,
+    environment,
+    exposedPorts,
+    ...(metrics ? { metrics } : {}),
+  });
+  if (metrics?.onSandboxSetupOperation) {
+    instrumentSandboxClientSessionOperations(
+      built,
+      registration.backend,
+      metrics.onSandboxSetupOperation,
+    );
+  }
+  const raw = withProviderExactResumeContract(registration, built);
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)

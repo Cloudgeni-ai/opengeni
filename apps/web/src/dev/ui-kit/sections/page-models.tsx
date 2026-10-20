@@ -10,6 +10,7 @@ import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/s
 import { organization } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection, useKitPane } from "../kit";
 import { DetailView, ModelsPreview } from "../pages/models/models-page";
+import { PooledLimitsPreview } from "../pages/models/pooled-limits";
 import {
   DEFAULT_QUESTIONS,
   ModelsProvider,
@@ -315,8 +316,21 @@ function DetailPagePreviews() {
 }
 
 export default function PageModelsSection() {
+  if (new URLSearchParams(window.location.search).has("pooled-limits")) {
+    return (
+      <div className="mx-auto max-w-4xl p-6">
+        <PooledLimitsPreview />
+      </div>
+    );
+  }
   return (
     <KitSection sectionKey="page-models">
+      <KitBlock
+        title="Pooled limits"
+        description="Real production component with sample account limits. Switch scope, window and history state."
+      >
+        <PooledLimitsPreview />
+      </KitBlock>
       <ModelsProvider>
         <KitBlock
           title="Page"
