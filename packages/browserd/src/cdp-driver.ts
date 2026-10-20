@@ -2045,6 +2045,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
               filePath,
+              // Browser events and replies share this connection in order, so
+              // a reply proves every earlier download event was delivered.
+              ...(state === "completed"
+                ? {
+                    eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
+                  }
+                : {}),
             })
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);

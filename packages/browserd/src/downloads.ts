@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { chmod, copyFile, link, lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   BrowserDownload,
@@ -58,21 +58,39 @@ export type BrowserDownloadProgressEvent = {
   totalBytes: number | null;
   /** Where Chromium saved the completed file, when it reports it. */
   filePath?: string | null;
+  /** Resolves once every browser event Chromium emitted before this call has
+   * reached the store, for example a round trip on the event connection. */
+  eventBarrier?: () => Promise<void>;
 };
 
 export type BrowserDownloadProgressResult = {
   cancelReason: "download_quota_exceeded" | null;
 };
 
-/** A completed download whose bytes are kept but not yet settled, because
- * another download with the same name was still running when it completed
- * and could have replaced its file before it was kept. */
+/** A file's identity on its file system: device and inode. */
+type FileIdentity = string;
+
+/** What the store saw when Chromium finished a download: the identity of
+ * the file then at its name (null when Chromium cancelled it or no file was
+ * there), in the order the store saw it. A conflict means the download's
+ * file was replaced or shared, so its bytes cannot be attributed. */
+type Observation = {
+  sequence: number;
+  filename: string;
+  identity: FileIdentity | null;
+  conflict: boolean;
+};
+
+/** A completed download whose bytes are kept but not yet settled. Chromium
+ * renames a same-name download over the earlier file, so until every
+ * same-name download that could have done that before the bytes were kept
+ * has settled without a conflict, they may be another download's. */
 type HeldCompletion = {
   fileName: string | null;
   sizeBytes: number;
   sha256: string;
-  dev: number;
-  ino: number;
+  /** Those downloads, known once the event barrier has passed. */
+  waitFor: Set<string> | null;
 };
 
 export type BrowserDownloadStoreOptions = {
@@ -114,6 +132,8 @@ export class BrowserDownloadStore {
   private readonly maxExportEntries: number;
   private readonly database: Database;
   private readonly held = new Map<string, HeldCompletion>();
+  private readonly observations = new Map<string, Observation>();
+  private observationSequence = 0;
   private tail: Promise<void> = Promise.resolve();
   private exportTail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -260,16 +280,23 @@ export class BrowserDownloadStore {
         // A cancellation request can race a final Chromium write. Once this
         // resource settled as anything other than completed, no late event may
         // resurrect placement-private bytes or leave an orphan behind.
-        if (row.status !== "completed")
-          await this.removeUnownedCompletion(
-            row,
-            event.filePath ? downloadedFileName(this.filesDirectory, event.filePath) : null,
-          );
+        if (row.status !== "completed") {
+          const fileName = event.filePath
+            ? downloadedFileName(this.filesDirectory, event.filePath)
+            : null;
+          if (event.state !== "inProgress") {
+            await this.observeChromiumFile(row, event.state === "completed" ? fileName : null);
+            await this.resolveHeld();
+          }
+          await this.removeUnownedCompletion(row, fileName);
+        }
         return { cancelReason: null };
       }
       if (receivedBytes < row.received_bytes) {
         throw new Error("download byte progress moved backwards");
       }
+      // A held completion's bytes are already kept; Chromium has nothing more.
+      if (this.held.has(guid)) return { cancelReason: null };
       const projectedBytes = this.otherActiveBytes(guid) + receivedBytes;
       if (
         receivedBytes > this.maxFileBytes ||
@@ -278,21 +305,31 @@ export class BrowserDownloadStore {
       ) {
         // Chromium cannot cancel a download it already completed, so its
         // saved file is removed here; the caller then rejects the download.
-        if (event.state === "completed" && event.filePath) {
-          const fileName = downloadedFileName(this.filesDirectory, event.filePath);
+        if (event.state === "completed") {
+          const fileName = event.filePath
+            ? downloadedFileName(this.filesDirectory, event.filePath)
+            : null;
+          await this.observeChromiumFile(row, fileName);
           if (fileName) await this.removeUnownedCompletion(row, fileName);
         }
         return { cancelReason: "download_quota_exceeded" };
       }
       if (event.state === "canceled") {
+        this.observe(row, null, false);
         await this.removePhysicalFiles(guid);
         this.settle(guid, "cancelled", receivedBytes, totalBytes, null, null);
-        await this.releaseHeld();
+        await this.resolveHeld();
         return { cancelReason: null };
       }
       if (event.state === "completed") {
-        await this.complete(row, receivedBytes, totalBytes, event.filePath ?? null);
-        await this.releaseHeld();
+        await this.complete(
+          row,
+          receivedBytes,
+          totalBytes,
+          event.filePath ?? null,
+          event.eventBarrier ?? null,
+        );
+        await this.resolveHeld();
         return { cancelReason: null };
       }
       if (receivedBytes !== row.received_bytes || totalBytes !== row.total_bytes) {
@@ -313,12 +350,16 @@ export class BrowserDownloadStore {
       const guid = requireGuid(guidInput);
       const failureCode = requireFailureCode(failureCodeInput);
       const row = this.requireRowByGuid(guid);
+      // The caller asked Chromium to cancel first. A completion Chromium
+      // reported before that request was seen already; otherwise the
+      // download ended without saving a file.
+      this.observe(row, null, false);
       this.held.delete(guid);
       await this.removePhysicalFiles(guid);
       if (row.status === "in_progress") {
         this.settle(guid, "failed", row.received_bytes, row.total_bytes, null, failureCode);
       }
-      await this.releaseHeld();
+      await this.resolveHeld();
     });
   }
 
@@ -331,6 +372,7 @@ export class BrowserDownloadStore {
         )
         .all();
       this.held.clear();
+      this.observations.clear();
       for (const row of rows) {
         await this.removePhysicalFiles(row.guid);
         const current = this.requireRowByGuid(row.guid);
@@ -533,10 +575,12 @@ export class BrowserDownloadStore {
     eventReceivedBytes: number,
     eventTotalBytes: number | null,
     reportedPath: string | null,
+    eventBarrier: (() => Promise<void>) | null,
   ): Promise<void> {
     // Chromium names the file; it must be a plain entry of `files/`.
     const fileName =
       reportedPath === null ? null : downloadedFileName(this.filesDirectory, reportedPath);
+    let observation: Observation | null = null;
     try {
       if (reportedPath !== null && fileName === null)
         throw new Error("download was saved outside its folder");
@@ -545,9 +589,8 @@ export class BrowserDownloadStore {
       // Keep these bytes before a later download with the same name can
       // replace the file Chromium saved.
       await exactRegularFile(saved);
-      await keepFile(saved, path);
-      const facts = await exactRegularFile(path);
-      const sizeBytes = facts.size;
+      observation = this.observe(row, await keepFile(saved, path), false);
+      const sizeBytes = (await exactRegularFile(path)).size;
       if (
         sizeBytes > this.maxFileBytes ||
         this.otherActiveBytes(row.guid) + sizeBytes > this.maxSessionBytes
@@ -567,6 +610,7 @@ export class BrowserDownloadStore {
       // any other size is another download's that replaced it before it
       // could be kept, so Chromium's file stays for that download.
       if (sizeBytes !== eventReceivedBytes) {
+        observation.conflict = true;
         await this.removePhysicalFiles(row.guid);
         this.settle(
           row.guid,
@@ -583,58 +627,34 @@ export class BrowserDownloadStore {
       // file cannot be replaced, which would fail a later download with the
       // same name, so the read-only mode is applied elsewhere only.
       if (process.platform !== "win32") await chmod(path, 0o400);
-      const kept = await lstat(path);
-      const completion: HeldCompletion = {
-        fileName,
-        sizeBytes,
-        sha256,
-        dev: kept.dev,
-        ino: kept.ino,
-      };
-      const peers = this.runningPeers(row);
-      // Two downloads holding the same bytes means one of them was replaced
-      // before it was kept, and nothing tells which: neither is trusted.
-      const twinGuid = [...this.held].find(
-        ([, other]) => other.dev === kept.dev && other.ino === kept.ino,
-      )?.[0];
-      const twin = twinGuid === undefined ? null : this.rowByGuid(twinGuid);
-      if (twin) {
-        this.held.delete(twin.guid);
-        await this.removePhysicalFiles(twin.guid);
-        this.settle(
-          twin.guid,
-          "failed",
-          twin.received_bytes,
-          twin.total_bytes,
-          null,
-          "download_integrity_failed",
-        );
-        await this.removePhysicalFiles(row.guid);
-        this.settle(
-          row.guid,
-          "failed",
-          eventReceivedBytes,
-          eventTotalBytes,
-          null,
-          "download_integrity_failed",
-        );
-        return;
-      }
-      if (peers.some((peer) => !this.held.has(peer.guid))) {
-        // A running download with the same name may already have replaced
-        // the file; settle once it has settled and its bytes are known.
-        this.held.set(row.guid, completion);
-        this.database
-          .query<unknown, [number, number, string]>(
-            `UPDATE browser_downloads
-                SET received_bytes = ?, total_bytes = ?, version = version + 1
-              WHERE guid = ? AND status = 'in_progress'`,
+      this.held.set(row.guid, { fileName, sizeBytes, sha256, waitFor: null });
+      this.database
+        .query<unknown, [number, number, string]>(
+          `UPDATE browser_downloads
+              SET received_bytes = ?, total_bytes = ?, version = version + 1
+            WHERE guid = ? AND status = 'in_progress'`,
+        )
+        .run(sizeBytes, sizeBytes, row.guid);
+      // A same-name download that replaced this file before it was kept was
+      // announced before that, since Chromium announces a download before
+      // writing it. Once every event emitted until now has reached the store,
+      // those downloads are known.
+      const guid = row.guid;
+      if (eventBarrier === null) {
+        // Without a barrier, the events already queued are all there is.
+        void this.enqueue(() => this.awaitPeers(guid, true)).catch(() => undefined);
+      } else {
+        void eventBarrier()
+          .then(
+            () => true,
+            () => false,
           )
-          .run(sizeBytes, sizeBytes, row.guid);
-        return;
+          .then((ordered) => this.enqueue(() => this.awaitPeers(guid, ordered)))
+          .catch(() => undefined);
       }
-      this.settle(row.guid, "completed", sizeBytes, sizeBytes, sha256, null, fileName);
     } catch {
+      if (observation) observation.conflict = true;
+      else this.observe(row, null, true);
       await this.discardCompletion(row.guid, fileName);
       this.settle(
         row.guid,
@@ -644,6 +664,145 @@ export class BrowserDownloadStore {
         null,
         "download_integrity_failed",
       );
+    }
+  }
+
+  /** Record what Chromium's finished download left at its name. The first
+   * observation of a download stands; two downloads seeing the same file
+   * conflict, since that file can be only one download's bytes. */
+  private observe(
+    row: Pick<DownloadRow, "guid" | "filename">,
+    identity: FileIdentity | null,
+    conflict: boolean,
+  ): Observation {
+    const existing = this.observations.get(row.guid);
+    if (existing) return existing;
+    const observation: Observation = {
+      sequence: ++this.observationSequence,
+      filename: row.filename,
+      identity,
+      conflict,
+    };
+    if (identity !== null) {
+      for (const [guid, other] of this.observations) {
+        if (guid === row.guid || other.filename !== row.filename || other.identity !== identity)
+          continue;
+        other.conflict = true;
+        observation.conflict = true;
+      }
+    }
+    this.observations.set(row.guid, observation);
+    return observation;
+  }
+
+  /** Observe a finished download the store does not keep: its file's
+   * identity when Chromium saved one, or a conflict when it is gone. */
+  private async observeChromiumFile(
+    row: Pick<DownloadRow, "guid" | "filename">,
+    fileName: string | null,
+  ): Promise<void> {
+    if (this.observations.has(row.guid)) return;
+    if (fileName === null) {
+      this.observe(row, null, false);
+      return;
+    }
+    const facts = await lstat(join(this.filesDirectory, fileName), { bigint: true }).catch(
+      () => null,
+    );
+    if (!facts?.isFile()) this.observe(row, null, true);
+    else this.observe(row, `${facts.dev}:${facts.ino}`, false);
+  }
+
+  /** After the event barrier: wait for the same-name downloads that were
+   * still running when this one finished, or finished after it. One that
+   * finished before it renamed its file before this one's, so it cannot
+   * have replaced this one's bytes. */
+  private async awaitPeers(guid: string, ordered: boolean): Promise<void> {
+    const completion = this.held.get(guid);
+    const own = this.observations.get(guid);
+    if (!completion || !own) return;
+    if (!ordered) own.conflict = true;
+    const waitFor = new Set<string>();
+    for (const { guid: peer } of this.database
+      .query<{ guid: string }, [string, string]>(
+        `SELECT guid FROM browser_downloads
+          WHERE guid <> ? AND filename = ? AND status = 'in_progress'`,
+      )
+      .all(guid, own.filename)) {
+      const observation = this.observations.get(peer);
+      if (!observation || observation.sequence > own.sequence) waitFor.add(peer);
+    }
+    for (const [peer, observation] of this.observations) {
+      if (
+        peer !== guid &&
+        observation.filename === own.filename &&
+        observation.sequence > own.sequence
+      )
+        waitFor.add(peer);
+    }
+    completion.waitFor = waitFor;
+    await this.resolveHeld();
+  }
+
+  /** Settle held completions whose peers have settled. A conflict in a
+   * download or any download it waits for fails it: its file may be another
+   * download's, and nothing tells which. */
+  private async resolveHeld(): Promise<void> {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [guid, completion] of [...this.held]) {
+        const row = this.rowByGuid(guid);
+        const own = this.observations.get(guid);
+        if (!row || row.status !== "in_progress" || !own) {
+          this.held.delete(guid);
+          changed = true;
+          continue;
+        }
+        const peers = [...(completion.waitFor ?? [])];
+        if (own.conflict || peers.some((peer) => this.observations.get(peer)?.conflict)) {
+          own.conflict = true;
+          this.held.delete(guid);
+          await this.removePhysicalFiles(guid);
+          this.settle(
+            guid,
+            "failed",
+            row.received_bytes,
+            row.total_bytes,
+            null,
+            "download_integrity_failed",
+          );
+          changed = true;
+          continue;
+        }
+        if (
+          completion.waitFor === null ||
+          peers.some((peer) => !this.observations.has(peer) || this.held.has(peer))
+        )
+          continue;
+        this.held.delete(guid);
+        this.settle(
+          guid,
+          "completed",
+          completion.sizeBytes,
+          completion.sizeBytes,
+          completion.sha256,
+          null,
+          completion.fileName,
+        );
+        changed = true;
+      }
+    }
+    // Observations matter only while a download with that name may still
+    // be running or held.
+    for (const [guid, observation] of [...this.observations]) {
+      const active = this.database
+        .query<{ guid: string }, [string]>(
+          `SELECT guid FROM browser_downloads
+            WHERE filename = ? AND status = 'in_progress' LIMIT 1`,
+        )
+        .get(observation.filename);
+      if (!active) this.observations.delete(guid);
     }
   }
 
@@ -807,39 +966,6 @@ export class BrowserDownloadStore {
   /** The file as Chromium saved it in its downloads folder. */
   private chromiumPath(row: Pick<DownloadRow, "guid" | "file_name">): string {
     return join(this.filesDirectory, row.file_name ?? requireGuid(row.guid));
-  }
-
-  /** Other unsettled downloads Chromium may save under the same name. */
-  private runningPeers(row: Pick<DownloadRow, "guid" | "filename">): DownloadRow[] {
-    return this.database
-      .query<DownloadRow, [string, string]>(
-        `SELECT * FROM browser_downloads
-          WHERE guid <> ? AND filename = ? AND status = 'in_progress'
-          ORDER BY sequence`,
-      )
-      .all(row.guid, row.filename);
-  }
-
-  /** Settle held completions that no running download can affect any more. */
-  private async releaseHeld(): Promise<void> {
-    for (const [guid, completion] of [...this.held]) {
-      const row = this.rowByGuid(guid);
-      if (!row || row.status !== "in_progress") {
-        this.held.delete(guid);
-        continue;
-      }
-      if (this.runningPeers(row).some((peer) => !this.held.has(peer.guid))) continue;
-      this.held.delete(guid);
-      this.settle(
-        guid,
-        "completed",
-        completion.sizeBytes,
-        completion.sizeBytes,
-        completion.sha256,
-        null,
-        completion.fileName,
-      );
-    }
   }
 
   /** Remove what a download that is no longer wanted left behind. Chromium's
@@ -1006,18 +1132,44 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Keep `source`'s current bytes at `target`: a hard link shares them without
- * copying and survives the source name being replaced; a file system without
- * hard links gets an exclusive copy. */
-async function keepFile(source: string, target: string): Promise<void> {
+/** Keep `source`'s current bytes at `target` and return the identity of the
+ * file they were kept from: a hard link shares them without copying and
+ * survives the source name being replaced; a file system without hard links
+ * gets an exclusive copy read from one open handle, so the identity is that
+ * of the bytes copied even if the name is replaced meanwhile. */
+async function keepFile(source: string, target: string): Promise<FileIdentity> {
   await rm(target, { force: true });
   try {
     await link(source, target);
+    const facts = await lstat(target, { bigint: true });
+    if (!facts.isFile()) throw new Error("download is not a regular file");
+    return `${facts.dev}:${facts.ino}`;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EXDEV" && code !== "EOPNOTSUPP")
       throw error;
-    await copyFile(source, target, fsConstants.COPYFILE_EXCL);
+  }
+  const input = await open(source, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const facts = await input.stat({ bigint: true });
+    if (!facts.isFile()) throw new Error("download is not a regular file");
+    const output = await open(target, "wx", 0o600);
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      for (;;) {
+        const { bytesRead } = await input.read(buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+        let written = 0;
+        while (written < bytesRead) {
+          written += (await output.write(buffer, written, bytesRead - written)).bytesWritten;
+        }
+      }
+    } finally {
+      await output.close();
+    }
+    return `${facts.dev}:${facts.ino}`;
+  } finally {
+    await input.close();
   }
 }
 
