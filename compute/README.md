@@ -181,16 +181,20 @@ a processor, all of `vcpus` unless set lower), and may use idle processors
 up to `vcpus` above it, best effort. The requests of awake and waking
 sandboxes, and of VMs the agent does not manage that may run, stay within
 the host's processor capacity (`--cpu-capacity-millis`; by default the
-processors the agent may use less `--cpu-headroom-millis`, a sixteenth of
-them and at least 500). A sleeping sandbox books none. Nothing frees
+processors the VMs may run on less `--cpu-headroom-millis`, a sixteenth of
+them and at least 500), as do template builds and ready sandboxes while
+they come up. A sleeping sandbox books none. Nothing frees
 processor time instantly, so a wake that does not fit gets `host_full`
 naming processor time at once; one that is held wakes by itself once
 another sandbox sleeps. Each VM's `cpu.weight` is one per 10 millicores
 requested, and the VMs' parent group gets a weight that outweighs every
-group beside it at start by the capacity against the headroom, so when
-every processor is busy each awake sandbox still gets at least its
-request. A capacity above the processors overcommits them: requests then
-hold only in proportion. The status shows `cpu` (total, reserved, free),
+busy group beside it by the capacity against the headroom, so when every
+processor is busy each awake sandbox still gets at least its request.
+The default capacity is never more than that group then gets, worked out
+from the whole cgroup hierarchy and read again every five seconds as
+groups beside it come and go. A capacity given above the processors
+overcommits them: requests then hold only in proportion. The status
+shows `cpu` (total, reserved, free),
 and a host in a fleet reports its capacity, which placement and scaling
 count beside memory.
 

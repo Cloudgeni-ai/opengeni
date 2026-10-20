@@ -198,7 +198,8 @@ struct Serve {
     /// Spare memory to keep, in thousandths of the group's.
     #[arg(long, default_value_t = 200)]
     scale_spare_per_mille: u32,
-    /// And room for at least this many of the largest sandboxes.
+    /// And rooms for this many of the largest sandboxes, each with its
+    /// memory and processor time on one host.
     #[arg(long, default_value_t = 2)]
     scale_spare_largest: u32,
     /// The largest sandbox's guaranteed memory, in MiB.

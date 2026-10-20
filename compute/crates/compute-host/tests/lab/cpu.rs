@@ -196,11 +196,10 @@ async fn every_awake_sandbox_gets_its_cpu_request_when_every_processor_is_busy()
     assert_eq!((cpu.reserved, cpu.free), (0, cpu.total));
     let processors = std::thread::available_parallelism().unwrap().get();
     let parent_weight = std::fs::read_to_string(Path::new(CGROUP).join("cpu.weight")).unwrap();
+    // Whatever covers the capacity against the groups beside it, which
+    // the share measured below shows; any weight, on a host with nothing
+    // else busy.
     let parent_weight = parent_weight.trim().to_owned();
-    assert!(
-        parent_weight.parse::<u64>().unwrap() > 100,
-        "the VMs' group outweighs the groups beside it: {parent_weight}"
-    );
 
     let count = count();
     let awake = fill(&agent, count, cpu.total).await;

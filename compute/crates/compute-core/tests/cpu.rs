@@ -6,11 +6,14 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, Admission, At, CpuCapacity, Durability, HoldId, Host, HostPolicy, Input, Level, Notice,
-    OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
+    Action, Admission, At, CpuCapacity, DiskSpace, Durability, HoldId, Host, HostPolicy, Input,
+    Level, Notice, OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, SleepRules,
+    State, Step,
 };
 
 const GIB: u64 = 1 << 30;
+/// A spare VM, such as a template build or a ready sandbox.
+const SPARE: SandboxId = SandboxId(900);
 
 fn saved() -> State {
     State::new(Level::Saved, Durability::Local, true)
@@ -66,6 +69,21 @@ impl Rig {
             sandbox: SandboxId(id),
             priority: Priority::Interactive,
         })
+    }
+
+    /// Books the spare VM: `filling` with `cpu` millicores, or ready.
+    fn spare(&mut self, filling: bool, cpu: u64) -> Vec<Action> {
+        self.send(Input::Spare {
+            sandbox: SPARE,
+            bytes: GIB,
+            disk: DiskSpace::default(),
+            filling,
+            cpu,
+        })
+    }
+
+    fn spare_fits(&self, cpu: u64) -> bool {
+        self.host.spare_fits(GIB, DiskSpace::default(), cpu)
     }
 
     fn hold(&mut self, id: u128) -> Vec<Action> {
@@ -390,4 +408,106 @@ fn a_wake_refused_for_memory_gives_its_processor_time_back() {
         "{actions:?}"
     );
     assert_eq!(rig.cpu().reserved, 600);
+}
+
+#[test]
+fn a_spare_vm_coming_up_books_its_processor_time_until_it_is_ready() {
+    let mut rig = Rig::new(1000);
+    assert!(rig.spare_fits(1000));
+    assert!(!rig.spare_fits(1010), "more than the budget");
+    // Its guest runs while it comes up.
+    rig.spare(true, 600);
+    assert_eq!(rig.cpu().reserved, 600);
+    assert!(!rig.spare_fits(600), "only 400 left");
+    rig.add(1, saved(), size(600));
+    let actions = rig.touch(1);
+    assert_eq!(host_full(&actions, 1), Some((Resource::Cpu, 600, 400)));
+    // Ready, so paused: it books none.
+    rig.spare(false, 0);
+    assert_eq!(rig.cpu().reserved, 0);
+    let actions = rig.touch(1);
+    assert!(matches!(started(&actions)[..], [(1, Step::Restore, _)]));
+}
+
+#[test]
+fn a_spare_vm_that_ends_while_coming_up_gives_its_processor_time_back() {
+    let mut rig = Rig::new(1000);
+    rig.spare(true, 600);
+    rig.send(Input::Spare {
+        sandbox: SPARE,
+        bytes: 0,
+        disk: DiskSpace::default(),
+        filling: false,
+        cpu: 0,
+    });
+    assert_eq!(rig.cpu().reserved, 0);
+}
+
+#[test]
+fn no_spare_vm_starts_while_a_wake_waits_for_processor_time() {
+    let mut rig = Rig::new(1000);
+    rig.add(1, saved(), size(600));
+    rig.add(2, saved(), size(600));
+    rig.hold_awake(1);
+    rig.hold(2);
+    assert!(rig.host.waits_for_room(SandboxId(2)));
+    assert!(!rig.spare_fits(10), "the 400 left are the waiting wake's");
+    rig.release(2);
+    assert!(rig.spare_fits(400));
+}
+
+#[test]
+fn a_spare_vm_that_could_not_be_ended_while_coming_up_keeps_its_processor_time() {
+    let mut rig = Rig::new(1000);
+    rig.spare(true, 600);
+    // Its guest may still run, whatever the agent last saw of it.
+    rig.send(Input::Unmanaged {
+        sandbox: SPARE,
+        bytes: GIB,
+        cpu: 0,
+    });
+    assert_eq!(rig.cpu().reserved, 600);
+    rig.add(1, saved(), size(600));
+    let actions = rig.touch(1);
+    assert_eq!(host_full(&actions, 1), Some((Resource::Cpu, 600, 400)));
+    // Gone: nothing booked.
+    rig.send(Input::Unmanaged {
+        sandbox: SPARE,
+        bytes: 0,
+        cpu: 0,
+    });
+    assert_eq!(rig.cpu().reserved, 0);
+}
+
+#[test]
+fn a_smaller_budget_admits_no_wake_until_it_fits_and_a_larger_one_lets_held_wakes_in() {
+    let mut rig = Rig::new(1000);
+    rig.add(1, saved(), size(600));
+    rig.add(2, saved(), size(300));
+    rig.hold_awake(1);
+    // What else runs on the host now takes more than it kept back.
+    rig.send(Input::CpuBudget { millis: 500 });
+    assert_eq!(
+        rig.cpu(),
+        CpuCapacity {
+            budget: 500,
+            reserved: 600
+        }
+    );
+    assert_eq!(rig.level(1), Level::Running, "an awake sandbox stays awake");
+    let actions = rig.hold(2);
+    assert!(host_full(&actions, 2).is_some_and(|(resource, ..)| resource == Resource::Cpu));
+    assert!(rig.host.waits_for_room(SandboxId(2)));
+    // Over: the held wake goes in by itself.
+    let actions = rig.send(Input::CpuBudget { millis: 1000 });
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Restore, _)]),
+        "{actions:?}"
+    );
+    // Nothing to change without a budget, nor to none.
+    rig.send(Input::CpuBudget { millis: 0 });
+    assert_eq!(rig.cpu().budget, 1000);
+    let mut unbudgeted = Rig::with(HostPolicy::default());
+    unbudgeted.send(Input::CpuBudget { millis: 500 });
+    assert_eq!(unbudgeted.host.cpu_capacity(), None);
 }

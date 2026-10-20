@@ -407,6 +407,7 @@ fn booking(key: SandboxId, spare: bool, disk: DiskSpace) -> Input {
             bytes: MIB,
             disk,
             filling: disk != DiskSpace::default(),
+            cpu: 0,
         }
     } else {
         Input::Writes { key, disk }

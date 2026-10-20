@@ -275,8 +275,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Keeps the ordinals of builds an earlier agent left running taken,
-    /// and their memory and what they may write counted as unmanaged until a build of the same
-    /// name proves them gone or the next start of the agent ends them.
+    /// and their memory, processor time and what they may write counted
+    /// as unmanaged until a build of the same name proves them gone or the
+    /// next start of the agent ends them.
     /// Such a VM may have stopped part way through coming up, so what it
     /// may still take stays claimed above the high watermark meanwhile,
     /// as for a build of this agent that could not be ended.
@@ -306,11 +307,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     bytes: build.bytes,
                     disk,
                     filling: true,
+                    cpu: build.cpu,
                 },
                 Input::Unmanaged {
                     sandbox: name.0,
                     bytes: build.bytes,
-                    cpu: 0,
+                    cpu: build.cpu,
                 },
             ]);
             self.build_left(build.name, Some(name));
@@ -349,13 +351,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.save_copies,
             SAVE_EXTRA,
         );
-        if !disk
-            .as_ref()
-            .is_ok_and(|disk| self.core.spare_fits(shape.bytes(), *disk))
-        {
+        if !disk.as_ref().is_ok_and(|disk| {
+            self.core
+                .spare_fits(shape.bytes(), *disk, shape.cpu_millis())
+        }) {
             if let Some(warm) = &mut self.warm {
                 let problem = match &disk {
-                    Ok(_) => "the host has no memory or disk to spare for a template build".into(),
+                    Ok(_) => {
+                        "the host has no memory, disk or processor time to spare for a template \
+                         build"
+                            .into()
+                    }
                     Err(error) => format!("reading the base image or kernel: {error}"),
                 };
                 warm.pool.built(shape, Err(problem), Instant::now());
@@ -399,7 +405,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let name = self.spare_name();
         self.ready.building.insert(shape, name);
-        self.book_spare(name, shape.bytes(), disk, true);
+        self.book_spare(name, shape.bytes(), disk, Some(shape.cpu_millis()));
         let engine = Arc::clone(&self.engine);
         let events = self.events_tx.clone();
         tokio::spawn(async move {

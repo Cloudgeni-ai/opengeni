@@ -2,15 +2,85 @@
 //! traffic.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
 use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
 
+use crate::cpu_share::ProcessorShare;
 use crate::step::Reading;
 use crate::store::Store;
 
 use super::{BusyRule, HostAgent};
+
+/// How often the VMs' processor share is read again: groups beside them
+/// that start holding processes take their share from then on.
+const SHARE_EVERY: Duration = Duration::from_secs(5);
+
+/// The VMs' processor share and the processor time the host last told
+/// its core it guarantees with it (see [`crate::cpu_share`]).
+#[derive(Debug)]
+pub(super) struct ShareCheck {
+    share: ProcessorShare,
+    capacity: Option<u64>,
+    next: Instant,
+    failing: bool,
+}
+
+impl ShareCheck {
+    /// Checks `share`, if any, from a while from now on: the agent read it
+    /// as it started and guarantees `capacity` with it.
+    pub(super) fn of(share: Option<ProcessorShare>, capacity: Option<u64>) -> Option<Self> {
+        Some(Self {
+            share: share?,
+            capacity,
+            next: Instant::now() + SHARE_EVERY,
+            failing: false,
+        })
+    }
+
+    /// When due, reads the share again, sets the VMs' group's weight and
+    /// returns the processor time to guarantee if it changed. Blocks.
+    fn check(&mut self, now: Instant) -> Option<u64> {
+        if now < self.next {
+            return None;
+        }
+        self.next = now + SHARE_EVERY;
+        let share = match self.share.apply() {
+            Ok(share) => share,
+            Err(error) => {
+                // What it set last stays in place.
+                if !self.failing {
+                    tracing::warn!(%error, "reading the VMs' processor share");
+                }
+                self.failing = true;
+                return None;
+            }
+        };
+        self.failing = false;
+        if self.capacity == Some(share.capacity) {
+            return None;
+        }
+        if share.capacity < self.share.budget() {
+            tracing::warn!(
+                capacity_millis = share.capacity,
+                budget_millis = self.share.budget(),
+                weight = share.weight,
+                "groups beside the VMs now take more of the processors than the host keeps \
+                 back; guaranteeing what the VMs get"
+            );
+        } else {
+            tracing::info!(
+                capacity_millis = share.capacity,
+                weight = share.weight,
+                "the VMs get their whole processor budget again"
+            );
+        }
+        self.capacity = Some(share.capacity);
+        Some(share.capacity)
+    }
+}
 
 /// Readings of the local disk handed to the agent one at a time, in place
 /// of its own of the state root's filesystem (see
@@ -90,6 +160,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         if let Some(available) = disk {
             batch.push(Input::Disk { available });
+        }
+        if let Some(millis) = self
+            .processor_share
+            .as_mut()
+            .and_then(|share| share.check(Instant::now()))
+        {
+            batch.push(Input::CpuBudget { millis });
         }
         let resident: Vec<(Level, u64)> = batch
             .iter()

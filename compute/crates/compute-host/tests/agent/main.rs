@@ -922,6 +922,7 @@ impl Lab {
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
             agent_link: None,
+            processor_share: None,
         }
     }
 

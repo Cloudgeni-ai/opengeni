@@ -164,7 +164,9 @@ pub enum Input {
     /// the admission budget, and ready ones (not `filling`) are the first
     /// memory given back, with [`Action::Discard`]. What one may still
     /// write to local disk is booked like a save's, and what it wrote
-    /// stays booked until a disk reading taken after it ended.
+    /// stays booked until a disk reading taken after it ended. While
+    /// `filling` its guest runs, so it books `cpu` of the processor
+    /// budget as an awake sandbox does; once ready (paused) it books none.
     Spare {
         /// Names the VM.
         sandbox: SandboxId,
@@ -175,6 +177,9 @@ pub enum Input {
         disk: DiskSpace,
         /// Whether it is still coming up.
         filling: bool,
+        /// Millicores of processor time it is guaranteed while filling:
+        /// what its VM's `cpu.weight` gives it.
+        cpu: u64,
     },
     /// No copy of the sandbox's current VM process can be trusted, as with
     /// [`Failure::Unsavable`]: found out other than by a step, such as when
@@ -216,6 +221,17 @@ pub enum Input {
     Disk {
         /// Available bytes and inodes.
         available: DiskSpace,
+    },
+    /// Millicores of processor time the host can guarantee its sandboxes
+    /// now, in place of [`crate::HostPolicy::cpu_budget`]: less while what
+    /// else runs on the host may take more of its processors than it
+    /// keeps back, and more again once that is over. Sandboxes awake stay
+    /// awake; while more is reserved than the budget, no wake is admitted
+    /// until enough sleep, and a refused wake still held wakes by itself
+    /// once it fits. Ignored without a processor budget, and when 0.
+    CpuBudget {
+        /// Millicores.
+        millis: u64,
     },
     /// Bytes the sandbox's disk may still grow by, measured: what its
     /// awake VM books for its disk from now on instead of its size's
@@ -720,7 +736,8 @@ impl Host {
                 bytes,
                 disk,
                 filling,
-            } => self.spare(sandbox, bytes, disk, filling),
+                cpu,
+            } => self.spare(sandbox, bytes, disk, filling, cpu),
             Input::Unmanaged {
                 sandbox,
                 bytes,
@@ -779,6 +796,7 @@ impl Host {
             }
             Input::Memory { available } => self.memory_read(available),
             Input::Disk { available } => self.disk_read(available),
+            Input::CpuBudget { millis } => self.set_cpu_budget(millis),
             Input::DiskGrowth { sandbox, bytes } => self.disk_growth(sandbox, bytes),
             Input::Hydrating { sandbox, hydrating } => self.hydrating(sandbox, hydrating),
             Input::PausedForMemory { sandbox, bytes } => {

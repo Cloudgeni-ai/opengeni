@@ -60,6 +60,7 @@ mod warm;
 use config::check_config;
 pub use config::{BusyRule, HostConfig, PagerConfig};
 pub use sample::DiskGauge;
+use sample::ShareCheck;
 
 /// Takes the host's lock at `path` for state root `root`; see
 /// [`HostConfig::host_lock`].
@@ -701,6 +702,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
+    /// The VMs' processor share, read again every few seconds; see
+    /// [`HostConfig::processor_share`].
+    processor_share: Option<ShareCheck>,
     /// When memory pressure frees memory, if it does.
     memory_policy: Option<MemoryPolicy>,
     /// Ready sandboxes, kept for creates to claim (see [`ready`]).
@@ -949,6 +953,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unseen_activity: 0,
             sample_every: config.sample_every,
             disk_gauge: config.disk_reading,
+            processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
             link: config.agent_link,

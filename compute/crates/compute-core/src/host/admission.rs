@@ -267,8 +267,15 @@ impl Host {
             .sum();
         Some(CpuCapacity {
             budget,
-            reserved: awake + self.unmanaged_cpu.values().sum::<u64>(),
+            reserved: awake + self.unmanaged_cpu.values().sum::<u64>() + self.spares.filling_cpu(),
         })
+    }
+
+    /// Takes in [`crate::Input::CpuBudget`].
+    pub(super) fn set_cpu_budget(&mut self, millis: u64) {
+        if self.policy.cpu_budget.is_some() && millis > 0 {
+            self.policy.cpu_budget = Some(millis);
+        }
     }
 
     /// Whether `id`'s wake was refused for want of memory and it waits,

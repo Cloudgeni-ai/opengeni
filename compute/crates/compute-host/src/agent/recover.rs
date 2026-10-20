@@ -13,7 +13,7 @@ use futures::StreamExt;
 use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::observe::{Alarm, alarm_event};
-use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
+use crate::protocol::{Id, MAX_MEMORY_MIB, MAX_VCPUS, SandboxConfig};
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
@@ -31,6 +31,29 @@ type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
 fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
     if let Ok(Some((_, _, Some(memory)))) = found {
         memory.serve_detached();
+    }
+}
+
+/// The size of a sandbox whose record cannot be read whole, from the
+/// parts of it that can (`loose`): its memory, processors and CPU request
+/// where they still tell, and otherwise the most any sandbox may have,
+/// since its VM may still run with it.
+fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
+    let config = loose.and_then(|record| record.get("config"));
+    let field = |name: &str| config.and_then(|config| config.get(name)?.as_u64());
+    let memory_mib = field("memory_mib").map_or(MAX_MEMORY_MIB, |mib| {
+        u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
+    });
+    let vcpus = field("vcpus").map_or(MAX_VCPUS, |vcpus| {
+        u8::try_from(vcpus).map_or(MAX_VCPUS, |vcpus| vcpus.clamp(1, MAX_VCPUS))
+    });
+    // Within what its processors allow; all of them when it does not tell.
+    let cpu_request_millis = field("cpu_request_millis")
+        .and_then(|millis| u32::try_from(millis).ok())
+        .map(|millis| millis.clamp(10, u32::from(vcpus) * 1000));
+    SandboxConfig {
+        cpu_request_millis,
+        ..SandboxConfig::new(vcpus, memory_mib, crate::protocol::SleepConfig::default())
     }
 }
 
@@ -158,7 +181,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // Its VM may still run as the user its ordinal names,
                     // behind the host link its ordinal names: no other
                     // sandbox may get that ordinal, and it may hold as much
-                    // memory as its record still tells, or any sandbox can.
+                    // memory and be guaranteed as much processor time as
+                    // its record still tells, or any sandbox can.
                     let loose = self.loose_record(stray.id).await;
                     let ordinal = self.unreadable_ordinal(stray.id, loose.as_ref()).await;
                     match ordinal {
@@ -173,14 +197,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
                     self.block(stray.id, problem.to_string());
-                    let mib = loose
-                        .as_ref()
-                        .and_then(|record| record.get("config")?.get("memory_mib")?.as_u64())
-                        .map_or(MAX_MEMORY_MIB, |mib| {
-                            u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
-                        });
-                    let config =
-                        SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
+                    let config = loose_config(loose.as_ref());
                     // Only a sandbox whose disk is in the store has no VM
                     // that may hold its local disk open.
                     let remote = loose
@@ -805,5 +822,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let event = alarm_event(what.clone()).with("compute.sandbox.id", id.to_string());
             self.observer.alarm(alarm, event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record that cannot be read whole counts its VM at what its parts
+    /// still tell, and otherwise at the most any sandbox may have.
+    #[test]
+    fn an_unreadable_record_counts_what_it_still_tells_or_the_most() {
+        let told = serde_json::json!({
+            "config": {"vcpus": 4, "memory_mib": 2048, "cpu_request_millis": 250},
+            "disk": "not what a record holds",
+        });
+        let config = loose_config(Some(&told));
+        assert_eq!((config.vcpus, config.memory_mib), (4, 2048));
+        assert_eq!(config.cpu_request(), 250);
+        // Its processors, but no request: all of them, as before requests.
+        let processors = serde_json::json!({"config": {"vcpus": 4}});
+        let config = loose_config(Some(&processors));
+        assert_eq!(config.cpu_request(), 4000);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        // Nothing: the most.
+        let config = loose_config(None);
+        assert_eq!(config.vcpus, MAX_VCPUS);
+        assert_eq!(config.memory_mib, MAX_MEMORY_MIB);
+        assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
+        // Out of range: within it.
+        let wild = serde_json::json!({"config": {"vcpus": 900, "cpu_request_millis": 99_999_999}});
+        let config = loose_config(Some(&wild));
+        assert_eq!(config.vcpus, MAX_VCPUS);
+        assert_eq!(config.cpu_request(), u32::from(MAX_VCPUS) * 1000);
+        assert_eq!(
+            loose_config(Some(&serde_json::json!({"config": {"vcpus": 0}}))).vcpus,
+            1
+        );
     }
 }

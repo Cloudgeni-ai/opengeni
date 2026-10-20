@@ -12,6 +12,13 @@
 //! way, to the same share: the group grows for whichever runs short first
 //! and shrinks only with plenty of both. What a new host brings of it is
 //! what the live hosts report, since they are all of one kind.
+//!
+//! A sandbox lands whole on one host, its memory and processor time both,
+//! so spare scattered in slivers across hosts holds none of the largest.
+//! Beside the shares, the group keeps rooms for the largest sandboxes:
+//! how many of it each live host can still take, counted host by host
+//! and summed. Rooms run short, and the group grows, even while the sums
+//! of spare look plenty.
 
 /// What a group should keep spare and how far it may grow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +26,8 @@ pub struct ScalePolicy {
     /// Spare memory and processor time to keep, in thousandths of the
     /// group's.
     pub spare_per_mille: u32,
-    /// And at least room for this many of the largest sandboxes.
+    /// And rooms for this many of the largest sandboxes, each on one host
+    /// (see [`ScalePolicy::rooms`]).
     pub spare_largest: u32,
     /// The largest sandbox's guaranteed memory in MiB.
     pub largest_mib: u64,
@@ -60,6 +68,14 @@ pub struct GroupView {
     /// Live hosts that do not say what processor time they guarantee:
     /// while one does, processor time does not decide the group's size.
     pub cpu_unreported: u32,
+    /// Rooms on the live hosts for the largest sandbox by memory alone:
+    /// [`ScalePolicy::rooms`] of each host's free memory, summed.
+    pub memory_rooms: u64,
+    /// Rooms on the live hosts for the largest sandbox by memory and
+    /// processor time both, on the same host: [`ScalePolicy::rooms`] of
+    /// each host's free memory and processor time, summed. A host that
+    /// does not say what processor time it guarantees counts by memory.
+    pub rooms: u64,
 }
 
 /// What to do with a group.
@@ -79,7 +95,9 @@ pub enum ScaleDecision {
 }
 
 impl ScalePolicy {
-    /// The spare memory in MiB `view` should keep.
+    /// The spare memory in MiB `view` should keep: its share of the
+    /// group's, and at least what the rooms for the largest sandboxes
+    /// take.
     #[must_use]
     pub fn target_mib(&self, view: &GroupView) -> u64 {
         let share = view.memory_mib * u64::from(self.spare_per_mille) / 1_000;
@@ -87,7 +105,7 @@ impl ScalePolicy {
     }
 
     /// The spare processor time in millicores `view` should keep, when
-    /// processor time decides the group's size.
+    /// processor time decides the group's size: likewise.
     #[must_use]
     pub fn target_cpu_millis(&self, view: &GroupView) -> Option<u64> {
         if view.cpu_unreported > 0 || view.host_cpu_millis == 0 {
@@ -95,6 +113,18 @@ impl ScalePolicy {
         }
         let share = view.cpu_millis * u64::from(self.spare_per_mille) / 1_000;
         Some(share.max(u64::from(self.spare_largest) * self.largest_cpu_millis))
+    }
+
+    /// How many of the largest sandbox a host with `free_mib` of memory,
+    /// and `free_cpu_millis` of processor time when it guarantees any, can
+    /// still take at once.
+    #[must_use]
+    pub fn rooms(&self, free_mib: u64, free_cpu_millis: Option<u64>) -> u64 {
+        let memory = free_mib.checked_div(self.largest_mib).unwrap_or(u64::MAX);
+        let cpu = free_cpu_millis
+            .and_then(|free| free.checked_div(self.largest_cpu_millis))
+            .unwrap_or(u64::MAX);
+        memory.min(cpu)
     }
 
     /// What to do with the group `view` describes.
@@ -105,7 +135,7 @@ impl ScalePolicy {
         let size = view.hosts + view.booting;
         let mut wanted = size.max(self.min_hosts);
         let mut short_of = |free: u64, target: u64, per_host: u64| {
-            let spare = free + u64::from(view.booting) * per_host;
+            let spare = free.saturating_add(u64::from(view.booting).saturating_mul(per_host));
             if spare < target && per_host > 0 {
                 let short = (target - spare).div_ceil(per_host);
                 wanted = wanted.max(size.saturating_add(u32::try_from(short).unwrap_or(u32::MAX)));
@@ -115,6 +145,17 @@ impl ScalePolicy {
         if let Some(cpu_target) = cpu_target {
             short_of(view.free_cpu_millis, cpu_target, view.host_cpu_millis);
         }
+        // What a new host brings of rooms, and those the live hosts have,
+        // by processor time too while it decides.
+        let (rooms, host_rooms) = match cpu_target {
+            Some(_) => (
+                view.rooms,
+                self.rooms(self.host_memory_mib, Some(view.host_cpu_millis)),
+            ),
+            None => (view.memory_rooms, self.rooms(self.host_memory_mib, None)),
+        };
+        let rooms_target = u64::from(self.spare_largest);
+        short_of(rooms, rooms_target, host_rooms);
         let wanted = wanted.min(self.max_hosts);
         if wanted > size {
             return ScaleDecision::Grow { to: wanted };
@@ -123,7 +164,10 @@ impl ScalePolicy {
         let plenty = view.free_memory_mib >= target + 2 * self.host_memory_mib
             && cpu_target.is_none_or(|cpu_target| {
                 view.free_cpu_millis >= cpu_target + 2 * view.host_cpu_millis
-            });
+            })
+            // A host too small for the largest sandbox has no rooms to lose.
+            && (host_rooms == 0
+                || rooms >= rooms_target.saturating_add(host_rooms.saturating_mul(2)));
         if settled && plenty && view.hosts > self.min_hosts {
             return ScaleDecision::Shrink;
         }
@@ -146,13 +190,17 @@ mod tests {
     };
 
     fn view(hosts: u32, free_gib: u64) -> GroupView {
+        let free_memory_mib = free_gib * 1024;
+        let rooms = POLICY.rooms(free_memory_mib, None);
         GroupView {
             hosts,
             booting: 0,
             draining: 0,
             stalled: 0,
             memory_mib: u64::from(hosts) * 100 * 1024,
-            free_memory_mib: free_gib * 1024,
+            free_memory_mib,
+            memory_rooms: rooms,
+            rooms,
             ..GroupView::default()
         }
     }
@@ -163,7 +211,51 @@ mod tests {
         view.cpu_millis = u64::from(view.hosts) * 30_000;
         view.free_cpu_millis = free * 1000;
         view.host_cpu_millis = 30_000;
+        view.rooms = POLICY.rooms(view.free_memory_mib, Some(view.free_cpu_millis));
         view
+    }
+
+    #[test]
+    fn it_grows_when_no_host_has_room_for_the_largest_sandbox_though_the_sums_do() {
+        // Sandboxes of up to 8 processors; four hosts of 30 with 7 free
+        // each: 28 in all, above the 24 to keep and two of the largest,
+        // but no host has room for one.
+        let policy = ScalePolicy {
+            largest_cpu_millis: 8000,
+            spare_largest: 2,
+            ..POLICY
+        };
+        let mut view = with_cpu(view(4, 250), 28);
+        view.rooms = 4 * policy.rooms(62 * 1024, Some(7000));
+        assert_eq!(view.rooms, 0);
+        // Two rooms short, at three a new host: one more.
+        assert_eq!(policy.decide(&view), ScaleDecision::Grow { to: 5 });
+        // With 8 free on one of them, it has room for one of the two.
+        view.free_cpu_millis = 29_000;
+        view.rooms = 1;
+        assert_eq!(policy.decide(&view), ScaleDecision::Grow { to: 5 });
+        view.rooms = 2;
+        assert_eq!(policy.decide(&view), ScaleDecision::Hold);
+        // By memory alone while a host does not report processor time.
+        view.rooms = 0;
+        view.cpu_unreported = 1;
+        assert_eq!(policy.decide(&view), ScaleDecision::Hold);
+        view.memory_rooms = 1;
+        assert_eq!(policy.decide(&view), ScaleDecision::Grow { to: 5 });
+    }
+
+    #[test]
+    fn a_host_too_small_for_the_largest_sandbox_lets_rooms_decide_nothing() {
+        let policy = ScalePolicy {
+            largest_mib: 200 * 1024,
+            ..POLICY
+        };
+        let mut view = view(10, 1000);
+        view.memory_rooms = 0;
+        view.rooms = 0;
+        // Its share and the largest's memory decide: 1000 GiB is the
+        // 800 to keep and two hosts' more.
+        assert_eq!(policy.decide(&view), ScaleDecision::Shrink);
     }
 
     #[test]

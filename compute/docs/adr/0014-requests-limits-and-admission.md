@@ -50,9 +50,15 @@ pick a VM.
   `vcpus`, best effort. The requests of awake and waking sandboxes, and of
   VMs the agent does not manage that may run (a removed sandbox's until
   its VM has ended, one found running at its request), stay within the
-  host's processor capacity: its processors less a headroom for the agent
-  and the rest of the host (a sixteenth, at least half a processor), or
-  what the operator sets. A sleeping sandbox books none: paused, its vCPUs
+  host's processor capacity: the processors its VMs' group may run on
+  less a headroom for the agent and the rest of the host (a sixteenth, at
+  least half a processor), or what the operator sets. Template builds and
+  ready sandboxes book every processor of their shape while they come up,
+  since their guests run then at the weight of a whole guest, and none
+  once ready (paused); no new one starts while that would not fit or a
+  held wake waits for processor time. A VM whose record cannot be read
+  books what the parts still readable say, otherwise the most a sandbox
+  may have. A sleeping sandbox books none: paused, its vCPUs
   do not run. Nothing frees processor time instantly, so a wake that does
   not fit is refused at once with `host_full` naming processor time,
   before memory is looked at, and ends no idle VM; a held one wakes by
@@ -62,20 +68,37 @@ pick a VM.
   as with memory.
 - The kernel enforces it with weights, not limits. A VM's `cpu.weight` is
   one per 10 millicores requested, the request rounded up to that, so the
-  weights of awake VMs add up to at most the capacity. The VMs' parent
-  group, at the top of the hierarchy, gets the weight that gives it the
-  capacity against every group beside it at start busy at once: the sum
-  of their weights times the capacity over the headroom, at most 10000.
-  Contended time goes to busy groups by weight, so when every processor is
-  busy each awake VM still gets at least its request, VMM threads and its
-  pager included, which run in its group. The agent's own work beyond the
-  headroom (archiving, mostly) waits for idle processors. A capacity above
-  the processors overcommits them on purpose: requests then hold only in
-  proportion, and the agent warns that its share cannot cover them. Hosts
+  weights of awake VMs add up to at most the capacity; an agent taking
+  over VMs an earlier one left sets each one's weight anew from its
+  request. The VMs' parent group gets the weight that gives it the
+  capacity against every group beside it that holds processes, all busy
+  at once: the sum of their weights times the capacity over what is left,
+  at most 10000. What it then gets is worked out from the whole hierarchy
+  (the processors its `cpuset.cpus.effective` lists, its share at every
+  level above it against the busy groups beside each, whose weights the
+  agent leaves alone, and any `cpu.max` on the way), and the host
+  guarantees no more than that: when no weight covers the capacity, as
+  under a nested group or beside a heavy one, the capacity is lowered to
+  what the group gets, and the agent warns. Groups beside it come and go,
+  so the agent reads the hierarchy again every five seconds, sets the
+  weight anew and, when what the group gets changes, the capacity with
+  it: sandboxes awake stay awake, and while more is booked than the
+  capacity no wake is admitted until enough sleep, as on an overdrawn
+  capacity. Contended time goes to busy groups by weight, so when every
+  processor is busy each awake VM still gets at least its request, VMM
+  threads and its pager included, which run in its group. The agent's own
+  work beyond the headroom (archiving, mostly) waits for idle processors.
+  A capacity the operator gives outright is kept as given, even above
+  what the group gets: above the processors it overcommits them on
+  purpose, requests then hold only in proportion, and the agent warns.
+  Hosts
   report their capacity and what is free; placement skips a host without
   room for a sandbox's request, and a host group grows for whichever of
-  memory and processor time runs short first and shrinks only with plenty
-  of both. Not `cpu.max`: a ceiling would waste idle processors and slow a
+  memory and processor time runs short first, or when its hosts have too
+  few rooms for the largest sandbox (its memory and processor time on one
+  host, counted host by host, since spare scattered in slivers holds
+  none), and shrinks only with plenty of all of them. Not `cpu.max`: a
+  ceiling would waste idle processors and slow a
   burst that harms nobody, and the request is a floor, as in Kubernetes
   and Modal.
 - A running VM is never compressed or swapped: `memory.swap.max` and

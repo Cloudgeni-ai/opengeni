@@ -406,6 +406,7 @@ impl Boots {
         members: &[Member],
         hosts: &HashMap<String, GroupHost>,
         within: Duration,
+        policy: &ScalePolicy,
     ) -> GroupView {
         let now = Instant::now();
         let mut before = std::mem::take(&mut self.0);
@@ -421,7 +422,7 @@ impl Boots {
                 if boot.is_some_and(|boot| boot.stalled) {
                     tracing::info!(name = %member.name, "a stalled host registered");
                 }
-                bring(&mut seen, host);
+                bring(&mut seen, host, policy);
                 continue;
             }
             let mut boot = boot.unwrap_or(Boot {
@@ -463,7 +464,7 @@ impl Boots {
             if unlisted == 0 {
                 break;
             }
-            bring(&mut seen, host);
+            bring(&mut seen, host, policy);
             unlisted -= 1;
         }
         seen.booting += unlisted;
@@ -471,20 +472,30 @@ impl Boots {
     }
 }
 
-/// Adds what `host` brings to `seen`.
-fn bring(seen: &mut GroupView, host: &GroupHost) {
+/// Adds what `host` brings to `seen`, its rooms for the largest sandbox
+/// by `policy` among it.
+fn bring(seen: &mut GroupView, host: &GroupHost, policy: &ScalePolicy) {
     if host.draining {
         seen.draining += 1;
     } else {
         seen.hosts += 1;
         seen.memory_mib += host.memory_mib;
         seen.free_memory_mib += host.free_memory_mib;
+        seen.memory_rooms = seen
+            .memory_rooms
+            .saturating_add(policy.rooms(host.free_memory_mib, None));
         if let (Some(cpu), Some(free)) = (host.cpu_millis, host.free_cpu_millis) {
             seen.cpu_millis += cpu;
             seen.free_cpu_millis += free;
             seen.host_cpu_millis = seen.host_cpu_millis.max(cpu);
+            seen.rooms = seen
+                .rooms
+                .saturating_add(policy.rooms(host.free_memory_mib, Some(free)));
         } else {
             seen.cpu_unreported += 1;
+            seen.rooms = seen
+                .rooms
+                .saturating_add(policy.rooms(host.free_memory_mib, None));
         }
     }
 }
@@ -508,7 +519,13 @@ async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Res
     let members = scaling.group.members().await?;
     let hosts = view.group(|name| name.starts_with(&prefix));
     start_stopped(scaling, &hosts, &members).await;
-    let seen = boots.count(described.target_size, &members, &hosts, scaling.boot_within);
+    let seen = boots.count(
+        described.target_size,
+        &members,
+        &hosts,
+        scaling.boot_within,
+        &scaling.policy,
+    );
     match scaling.policy.decide(&seen) {
         ScaleDecision::Grow { to } => {
             let to = grown_size(described.target_size, &seen, to, scaling.policy.max_hosts);
@@ -638,6 +655,17 @@ mod tests {
 
     const GIB: u64 = 1024;
 
+    /// Rooms for sandboxes of up to 4 GiB and 2 processors, two kept.
+    const POLICY: ScalePolicy = ScalePolicy {
+        spare_per_mille: 200,
+        spare_largest: 2,
+        largest_mib: 4 * GIB,
+        largest_cpu_millis: 2000,
+        host_memory_mib: 64 * GIB,
+        min_hosts: 1,
+        max_hosts: 10,
+    };
+
     fn member(name: &str) -> Member {
         Member {
             name: name.to_owned(),
@@ -672,11 +700,13 @@ mod tests {
     #[tokio::test]
     async fn a_registered_host_the_listing_does_not_name_takes_one_place() {
         // One place asked for, nothing listed yet, and its host registered.
-        let seen = Boots::default().count(1, &[], &hosts(&[("hosts-a", live(1))]), BOOTING);
+        let seen =
+            Boots::default().count(1, &[], &hosts(&[("hosts-a", live(1))]), BOOTING, &POLICY);
         assert_eq!((seen.hosts, seen.booting), (1, 0), "{seen:?}");
         assert_eq!(grown_size(1, &seen, 2, 10), 2);
         // Two places asked for: the other is booting.
-        let seen = Boots::default().count(2, &[], &hosts(&[("hosts-a", live(1))]), BOOTING);
+        let seen =
+            Boots::default().count(2, &[], &hosts(&[("hosts-a", live(1))]), BOOTING, &POLICY);
         assert_eq!((seen.hosts, seen.booting), (1, 1), "{seen:?}");
     }
 
@@ -686,7 +716,7 @@ mod tests {
         // listing gone) but is still registered.
         let members = [member("hosts-a")];
         let registered = hosts(&[("hosts-a", live(1)), ("hosts-b", live(64))]);
-        let seen = Boots::default().count(1, &members, &registered, BOOTING);
+        let seen = Boots::default().count(1, &members, &registered, BOOTING, &POLICY);
         assert_eq!(
             (seen.hosts, seen.booting, seen.free_memory_mib),
             (1, 0, GIB),
@@ -699,7 +729,7 @@ mod tests {
             ("hosts-b", live(64)),
             ("hosts-c", live(2)),
         ]);
-        let seen = Boots::default().count(2, &members, &registered, BOOTING);
+        let seen = Boots::default().count(2, &members, &registered, BOOTING, &POLICY);
         assert_eq!(
             (seen.hosts, seen.booting, seen.free_memory_mib),
             (2, 0, 3 * GIB),
@@ -713,7 +743,7 @@ mod tests {
         draining.draining = true;
         let members = [member("hosts-a"), member("hosts-b"), member("hosts-c")];
         let registered = hosts(&[("hosts-a", live(1)), ("hosts-b", draining)]);
-        let seen = Boots::default().count(3, &members, &registered, STALLED);
+        let seen = Boots::default().count(3, &members, &registered, STALLED, &POLICY);
         assert_eq!(
             (seen.hosts, seen.draining, seen.stalled, seen.booting),
             (1, 1, 1, 0),
@@ -724,21 +754,13 @@ mod tests {
         assert_eq!(grown_size(3, &seen, 2, 10), 4);
         assert_eq!(grown_size(3, &seen, 2, 3), 3, "never past the maximum");
         // Within the allowance the third member is coming.
-        let seen = Boots::default().count(3, &members, &registered, BOOTING);
+        let seen = Boots::default().count(3, &members, &registered, BOOTING, &POLICY);
         assert_eq!((seen.booting, seen.stalled), (1, 0), "{seen:?}");
     }
 
     #[tokio::test]
     async fn a_stalled_member_holds_off_a_shrink() {
-        let policy = ScalePolicy {
-            spare_per_mille: 200,
-            spare_largest: 2,
-            largest_mib: 4 * GIB,
-            largest_cpu_millis: 2000,
-            host_memory_mib: 64 * GIB,
-            min_hosts: 1,
-            max_hosts: 10,
-        };
+        let policy = POLICY;
         let members = [
             member("hosts-a"),
             member("hosts-b"),
@@ -751,12 +773,12 @@ mod tests {
             ("hosts-c", live(64)),
         ]);
         let mut boots = Boots::default();
-        let booting = boots.count(4, &members, &registered, BOOTING);
+        let booting = boots.count(4, &members, &registered, BOOTING, &POLICY);
         assert_eq!(policy.decide(&booting), ScaleDecision::Hold);
-        let stalled = boots.count(4, &members, &registered, STALLED);
+        let stalled = boots.count(4, &members, &registered, STALLED, &POLICY);
         assert_eq!(stalled.stalled, 1, "{stalled:?}");
         assert_eq!(policy.decide(&stalled), ScaleDecision::Hold);
-        let settled = boots.count(3, &members[..3], &registered, STALLED);
+        let settled = boots.count(3, &members[..3], &registered, STALLED, &POLICY);
         assert_eq!(policy.decide(&settled), ScaleDecision::Shrink, "control");
     }
 
@@ -766,11 +788,41 @@ mod tests {
         leaving.leaving = true;
         let members = [leaving, member("hosts-b")];
         let registered = hosts(&[("hosts-a", live(64)), ("hosts-b", live(1))]);
-        let seen = Boots::default().count(1, &members, &registered, BOOTING);
+        let seen = Boots::default().count(1, &members, &registered, BOOTING, &POLICY);
         assert_eq!(
             (seen.hosts, seen.booting, seen.free_memory_mib),
             (1, 0, GIB),
             "{seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn spare_in_slivers_across_hosts_holds_no_room_and_grows_the_group() {
+        let sliver = GroupHost {
+            cpu_millis: Some(7500),
+            free_cpu_millis: Some(1500),
+            ..live(64)
+        };
+        let members = [
+            member("hosts-a"),
+            member("hosts-b"),
+            member("hosts-c"),
+            member("hosts-d"),
+        ];
+        let registered = hosts(&[
+            ("hosts-a", sliver),
+            ("hosts-b", sliver),
+            ("hosts-c", sliver),
+            ("hosts-d", sliver),
+        ]);
+        let seen = Boots::default().count(4, &members, &registered, BOOTING, &POLICY);
+        assert_eq!(
+            (seen.free_cpu_millis, seen.rooms, seen.memory_rooms),
+            (6000, 0, 64),
+            "{seen:?}"
+        );
+        // 6000 free is all the share asks, but no host can take a sandbox
+        // of 2 processors: one more host, which brings three rooms.
+        assert_eq!(POLICY.decide(&seen), ScaleDecision::Grow { to: 5 });
     }
 }

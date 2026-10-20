@@ -79,7 +79,7 @@ use crate::layout::{
     templates_dir, write_atomic,
 };
 use crate::net::Isolated;
-use crate::protocol::{ImageId, MAX_MEMORY_MIB, TemplateState, TemplateStatus};
+use crate::protocol::{ImageId, MAX_MEMORY_MIB, MAX_VCPUS, TemplateState, TemplateStatus};
 use crate::rootfs::Cache;
 use crate::step::{DiskWatch, take_written};
 
@@ -92,6 +92,10 @@ const ORDINAL: &str = "ordinal";
 /// The file in a template VM's directory giving its guest memory in MiB,
 /// so a later agent counts a VM it could not end at its size.
 const MEMORY: &str = "memory_mib";
+/// The file in a template VM's directory giving its processors, so a
+/// later agent counts a VM it could not end at the processor time its
+/// shape is guaranteed.
+const VCPUS: &str = "vcpus";
 /// The disk in a template's directory.
 const DISK: &str = "disk.ext4";
 /// The suffix of a template being put together.
@@ -753,7 +757,7 @@ fn template_vm(
         // A template's VM is a whole guest of its shape: it requests all
         // of it.
         memory_request_mib: shape.memory_mib,
-        cpu_weight: u16::from(shape.vcpus) * 100,
+        cpu_weight: shape.cpu_weight(),
         boot_args: sources.boot_args.clone(),
         network: sources.networked.then(|| Isolated::new(name).vm_network()),
     }
@@ -856,6 +860,7 @@ async fn attempt<E: Engine>(
                 // so it needs no flush to disk.
                 fs::write(paths.dir.join(ORDINAL), ordinal.to_string())?;
                 fs::write(paths.dir.join(MEMORY), memory_mib.to_string())?;
+                fs::write(paths.dir.join(VCPUS), shape.vcpus.to_string())?;
                 copy_sparse(&sources.image(shape), &paths.disk)?;
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
@@ -1085,6 +1090,9 @@ pub(crate) struct Held {
     /// Host memory it may hold: its guest's, when its files still say,
     /// otherwise the most any guest may have.
     pub bytes: u64,
+    /// Millicores of processor time it is guaranteed: its shape's, when
+    /// its files still say, otherwise the most any guest may have.
+    pub cpu: u64,
     /// The length of the disk its guest may still write to; see
     /// [`crate::disk_growth::retained_disk_len`].
     pub disk_bytes: u64,
@@ -1114,11 +1122,17 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
         // Only its name and paths matter for ending it.
         let shape = Shape::new(1, 128);
         let dir = jails.join(&name);
-        let (ordinal, memory_mib) = {
+        let (ordinal, memory_mib, vcpus) = {
             let dir = dir.clone();
-            blocking(move || Ok((build_ordinal(&dir, first_uid), build_memory_mib(&dir))))
-                .await
-                .unwrap_or((None, None))
+            blocking(move || {
+                Ok((
+                    build_ordinal(&dir, first_uid),
+                    build_memory_mib(&dir),
+                    build_vcpus(&dir),
+                ))
+            })
+            .await
+            .unwrap_or((None, None, None))
         };
         let uid = ordinal.map_or(first_uid, |ordinal| first_uid.saturating_add(ordinal));
         let (paths, spec) = template_vm(root, &name, shape, uid, sources);
@@ -1134,6 +1148,7 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
                 name,
                 ordinal,
                 bytes: u64::from(memory_mib) << 20,
+                cpu: Shape::new(vcpus.unwrap_or(MAX_VCPUS), memory_mib).cpu_millis(),
                 disk_bytes,
             });
             continue;
@@ -1176,6 +1191,15 @@ fn build_memory_mib(dir: &Path) -> Option<u32> {
         .parse()
         .ok()
         .filter(|mib| (1..=MAX_MEMORY_MIB).contains(mib))
+}
+
+/// The processors of the build VM in `dir`, from its file. Blocks.
+fn build_vcpus(dir: &Path) -> Option<u8> {
+    let text = fs::read_to_string(dir.join(VCPUS)).ok()?;
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|vcpus| (1..=MAX_VCPUS).contains(vcpus))
 }
 
 /// The templates under `root` that still fit today's `sources`; the rest

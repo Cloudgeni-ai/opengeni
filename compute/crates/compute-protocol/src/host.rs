@@ -211,6 +211,9 @@ impl SleepConfig {
 /// The most guest memory a sandbox may have, in MiB.
 pub const MAX_MEMORY_MIB: u32 = 65_536;
 
+/// The most virtual processors a sandbox may have.
+pub const MAX_VCPUS: u8 = 32;
+
 /// A sandbox image built from an OCI image (ADR 19): the BLAKE3 digest of
 /// its ext4 file, written as 64 lowercase hex digits. The same file always
 /// has the same id, on every host, and a host checks a fetched image
@@ -382,8 +385,8 @@ impl SandboxConfig {
 
     /// Checks everything that can be wrong before any work is done.
     pub fn validate(&self) -> Result<SleepPolicy, String> {
-        if self.vcpus == 0 || self.vcpus > 32 {
-            return Err("vcpus must be between 1 and 32".into());
+        if self.vcpus == 0 || self.vcpus > MAX_VCPUS {
+            return Err(format!("vcpus must be between 1 and {MAX_VCPUS}"));
         }
         if !(128..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
             return Err(format!(
