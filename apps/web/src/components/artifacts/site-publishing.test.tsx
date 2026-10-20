@@ -266,6 +266,17 @@ test("unavailable, forbidden and Only me Sites show one notice instead of the fo
   await act(async () => button(privateNone.host, "Share with workspace")!.click());
   expect(shared).toBe(1);
   await privateNone.unmount();
+
+  // A Personal workspace has nobody to share with: publishing shares it.
+  const personal = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    site: { id: "site", title: "Team CRM", visibility: "private" },
+    personalWorkspace: true,
+  });
+  expect(personal.host.textContent).not.toContain("Share this Site with the workspace first");
+  expect(personal.host.querySelector("input")).not.toBeNull();
+  await personal.unmount();
 });
 
 test("take down asks for a reason, and a taken-down Site offers Restore", async () => {

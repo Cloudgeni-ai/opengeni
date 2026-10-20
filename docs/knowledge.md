@@ -340,6 +340,15 @@ the snapshot or earlier model context. Newly accepted turns use the shared chat'
 current destination. A genuinely incompatible retained scope fails at startup
 with an explanation to send a new message; Retry cannot reopen that same turn.
 
+A personal workspace makes Personal the default destination only for work with a
+verified initiating person. Work with no such person, such as a published Site's
+guest chat or other service-started work, uses the Workspace destination with no
+person, as it does in a shared workspace. Because a personal workspace's
+Workspace layer is not shown in its settings, that work saves no Knowledge,
+Skills or instructions there: all three learning modes are frozen as Off. A
+private chat, or a chat that chose user memory, still requires its verified
+owner.
+
 An agent saves to the destination it explicitly chooses, beyond its chat's
 default. From a chat that learns for its person, saving a workspace instruction,
 changing an existing workspace Skill or Knowledge entry by its id, or creating a
