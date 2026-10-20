@@ -27,6 +27,7 @@ import {
   resolveConnectedMachineWorkspaceRoot,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { managedSessionGroupBackend, managedSessionGroupOs } from "@opengeni/core";
 import { mergeResourceRefs } from "../common";
 import {
@@ -977,6 +978,7 @@ export async function bindLazySandboxProvisioner(
     toolResultSpill,
     connectionScope,
     codemodeAuthority,
+    objectStorage,
   } = deps;
   const {
     releaseLateSandbox,
@@ -1103,6 +1105,14 @@ export async function bindLazySandboxProvisioner(
           const lazyCodemodeToken = sandboxCodemodeToken
             ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
             : undefined;
+          // A fresh URL: a lazy box can be provisioned long after agent build.
+          const lazyCodemodeClientDownload = lazyCodemodeToken
+            ? await managedCodemodeClientDownload({
+                settings: runSettings,
+                objectStorage,
+                activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+              })
+            : undefined;
           await attachRunCredentialRenewal(
             provisioned.established.session as RunCredentialCommandSession,
             initialRunCredentialMaterial,
@@ -1135,6 +1145,9 @@ export async function bindLazySandboxProvisioner(
                   ...(lazyCodemodeToken
                     ? {
                         codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                        ...(lazyCodemodeClientDownload
+                          ? { codemodeClientDownloadOverride: lazyCodemodeClientDownload }
+                          : {}),
                       }
                     : {}),
                   ...(eventing.toolCancellationFenceRef.current
