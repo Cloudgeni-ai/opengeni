@@ -16,7 +16,7 @@ import {
   nodeWebSocketFactory,
   type ModelWebSocketLike,
 } from "../packages/network/src/responses-websocket";
-import { promptCacheCohortKey } from "../apps/worker/src/activities/agent-turn/codex";
+import { codexCacheAffinityKey } from "../apps/worker/src/activities/agent-turn/codex";
 
 const authFile = process.env.CODEX_AUTH_FILE;
 if (!authFile) throw new Error("Set CODEX_AUTH_FILE to a local Codex OAuth credential file.");
@@ -60,7 +60,7 @@ const tools = [
     },
   },
 ];
-const shared = promptCacheCohortKey(run);
+const shared = codexCacheAffinityKey(run, "synthetic-person", "unused-session");
 console.log(
   JSON.stringify({
     type: "config",
