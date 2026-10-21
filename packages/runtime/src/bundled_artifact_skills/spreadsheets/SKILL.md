@@ -84,6 +84,9 @@ unavailable or does not list that format, the file itself is the deliverable:
   dimension to its default. Never hide a gap by changing mutable truth
   back to a local XLSX.
 - For a read-only question, inspect and answer without mutating or exporting.
+- Compute every total, average or other figure you report with code or a
+  formula, never by adding numbers up yourself. Without `openpyxl`, read an
+  .xlsx with `pip install openpyxl` or Python's `zipfile` and sum in Python.
 
 ## Completion gate
 
