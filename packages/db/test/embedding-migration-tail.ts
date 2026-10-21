@@ -366,4 +366,7 @@ export const embeddingMigrationTail = [
   // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
   "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites the subscription and vault routines and 0777's policies; replay
+  // after all of them.
+  "0897_workspace_owner_administers_subscriptions.sql",
 ];
