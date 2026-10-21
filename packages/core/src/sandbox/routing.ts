@@ -395,9 +395,10 @@ export function wrapChannelABoxWithRouting(
     workspaceId: string;
     sessionId: string;
     resourceSubjectId: string;
-    /** Whose access reaches Connected Machines (see ChannelAMachineAuthority).
-     * Resolved lazily, once, only when a request routes to a machine. Omitted,
-     * the request uses `resourceSubjectId`'s own access. */
+    /** Whose access reaches Connected Machines (see ChannelAMachineAuthority),
+     * and who a workspace write on the cloud home is admitted for. Resolved
+     * lazily, once, only when a request routes to a machine or writes to the
+     * home. Omitted, the request uses `resourceSubjectId`'s own access. */
     machineAuthority?: () => Promise<ChannelAMachineAuthority>;
     homeLease?: {
       sandboxGroupId: string;
@@ -439,6 +440,13 @@ export function wrapChannelABoxWithRouting(
         });
     return machineAuthority;
   };
+  // Who a workspace write on the cloud home is admitted for. The private-chat
+  // owner check runs against it, so an agent's write is the person's who
+  // started its turn, resolved the same way as its machine access; the
+  // agent's own signing identity owns no chat. A turn no person started keeps
+  // the request's own subject, which a private chat still refuses.
+  const mutationInitiatorSubjectId = async (): Promise<string> =>
+    (await resolveMachineAuthority()).subjectId ?? ids.resourceSubjectId;
   const beforeMutation = homeLease
     ? async ({
         op,
@@ -469,7 +477,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           requestId: ids.directRequest.requestId,
           holderId: ids.directRequest.holderId,
-          initiatorSubjectId: ids.resourceSubjectId,
+          initiatorSubjectId: await mutationInitiatorSubjectId(),
           sandboxGroupId: homeLease.sandboxGroupId,
           expectedEpoch: backend.leaseEpoch,
           expectedInstanceId: backend.providerInstanceId,
@@ -547,7 +555,7 @@ export function wrapChannelABoxWithRouting(
               kind: "direct",
               requestId: ids.directRequest.requestId,
               holderId: ids.directRequest.holderId,
-              initiatorSubjectId: ids.resourceSubjectId,
+              initiatorSubjectId: await mutationInitiatorSubjectId(),
               sandboxGroupId: homeLease.sandboxGroupId,
               expectedEpoch: backend.leaseEpoch,
               expectedInstanceId: backend.providerInstanceId,
@@ -568,7 +576,7 @@ export function wrapChannelABoxWithRouting(
             sessionId: ids.sessionId,
             requestId: ids.directRequest.requestId,
             holderId: ids.directRequest.holderId,
-            initiatorSubjectId: ids.resourceSubjectId,
+            initiatorSubjectId: await mutationInitiatorSubjectId(),
             sandboxGroupId: homeLease.sandboxGroupId,
             expectedEpoch: backend.leaseEpoch,
             expectedInstanceId: backend.providerInstanceId,
