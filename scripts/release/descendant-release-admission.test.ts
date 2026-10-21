@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -337,13 +338,74 @@ type CiFixture = {
   checks: Job[];
   statuses: Job[];
   artifacts: Job[];
+  receipts: Map<number, Map<string, Buffer>>;
 };
+
+// Stored ZIP fixtures follow reconcile-canary-publication.test.ts's byte format.
+// They exercise the real unzip/digest boundary without a registry or zip CLI.
+function receiptZip(members: Map<string, Buffer>) {
+  const local: Buffer[] = [],
+    central: Buffer[] = [];
+  let position = 0;
+  for (const [name, body] of members) {
+    let crc = 0xffffffff;
+    for (const byte of body) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const path = Buffer.from(name),
+      h = Buffer.alloc(30),
+      c = Buffer.alloc(46);
+    h.writeUInt32LE(0x04034b50);
+    h.writeUInt16LE(20, 4);
+    h.writeUInt32LE(crc, 14);
+    h.writeUInt32LE(body.length, 18);
+    h.writeUInt32LE(body.length, 22);
+    h.writeUInt16LE(path.length, 26);
+    c.writeUInt32LE(0x02014b50);
+    c.writeUInt16LE(20, 4);
+    c.writeUInt16LE(20, 6);
+    c.writeUInt32LE(crc, 16);
+    c.writeUInt32LE(body.length, 20);
+    c.writeUInt32LE(body.length, 24);
+    c.writeUInt16LE(path.length, 28);
+    c.writeUInt32LE(position, 42);
+    local.push(h, path, body);
+    central.push(c, path);
+    position += h.length + path.length + body.length;
+  }
+  const entries = Buffer.concat(central),
+    end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50);
+  end.writeUInt16LE(members.size, 8);
+  end.writeUInt16LE(members.size, 10);
+  end.writeUInt32LE(entries.length, 12);
+  end.writeUInt32LE(position, 16);
+  return Buffer.concat([...local, entries, end]);
+}
+const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+
+function changeReceipt(fixture: CiFixture, artifactPrefix: string, mutate: (body: any) => void) {
+  const artifact = fixture.artifacts.find((item) => item.name.startsWith(artifactPrefix))!;
+  const files = fixture.receipts.get(artifact.id)!;
+  const file =
+    artifactPrefix === "full-green-main-" ? "full-green-main.json" : "canary-images.json";
+  const body = JSON.parse(files.get(file)!.toString());
+  mutate(body);
+  const bytes = Buffer.from(JSON.stringify(body) + "\n");
+  files.set(file, bytes);
+  if (file === "canary-images.json")
+    files.set("canary-images.sha256", Buffer.from(`${hash(bytes)}  canary-images.json\n`));
+  artifact.digest = `sha256:${hash(receiptZip(files))}`;
+}
 
 function attemptUrl(runId: number, attempt: number) {
   return `${serverRepo}/actions/runs/${runId}/attempts/${attempt}`;
 }
 
 function ciFor(sha: string, runId: number): CiFixture {
+  const receipts = new Map<number, Map<string, Buffer>>();
   const jobs = ciJobNames.map((name, index) => {
     const id = runId * 10 + index;
     return {
@@ -359,6 +421,7 @@ function ciFor(sha: string, runId: number): CiFixture {
     run: {
       id: runId,
       run_attempt: ciRunAttempt,
+      run_started_at: "2026-10-21T10:00:00Z",
       status: "completed",
       conclusion: "success",
       event: "push",
@@ -400,16 +463,66 @@ function ciFor(sha: string, runId: number): CiFixture {
         creator: versionBot,
       },
     ],
+    receipts,
     artifacts: [
       `${contract.descendant.fullGreenArtifactPrefix}${sha}`,
       `${contract.descendant.canaryImageArtifactPrefix}${sha}`,
-    ].map((name, index) => ({
-      id: runId * 10 + 100 + index,
-      name,
-      expired: false,
-      digest: `sha256:${String(index + 1).repeat(64)}`,
-      workflow_run: { id: runId, head_sha: sha, head_branch: contract.defaultBranch },
-    })),
+    ].map((name, index) => {
+      const id = runId * 10 + 100 + index;
+      const file = index === 0 ? "full-green-main.json" : "canary-images.json";
+      const receipt =
+        index === 0
+          ? {
+              schemaVersion: 1,
+              sha,
+              runId: String(runId),
+              runAttempt: String(ciRunAttempt),
+              url: attemptUrl(runId, ciRunAttempt),
+              mode: "full",
+            }
+          : {
+              schemaVersion: 1,
+              source: { repository, ref: "refs/heads/main", sha },
+              producer: {
+                workflow: contract.ciWorkflowPath,
+                runId: String(runId),
+                runAttempt: String(ciRunAttempt),
+              },
+              chartVersion: "1.0.0",
+              imageTag: `canary-sha-${sha}`,
+              images: Object.fromEntries(
+                [
+                  "api",
+                  "worker",
+                  "web",
+                  "sandbox",
+                  "relay",
+                  "artifact-materializer",
+                  "artifact-outbox-dispatcher",
+                  "desktop",
+                ].map((role) => [
+                  role,
+                  {
+                    repository: `ghcr.io/cloudgeni-ai/opengeni-${role}`,
+                    digest: `sha256:${"1".repeat(64)}`,
+                  },
+                ]),
+              ),
+            };
+      const bytes = Buffer.from(JSON.stringify(receipt) + "\n");
+      const files = new Map([[file, bytes]]);
+      if (index === 1)
+        files.set("canary-images.sha256", Buffer.from(`${hash(bytes)}  canary-images.json\n`));
+      receipts.set(id, files);
+      return {
+        id,
+        name,
+        expired: false,
+        created_at: "2026-10-21T10:50:00Z",
+        digest: `sha256:${hash(receiptZip(files))}`,
+        workflow_run: { id: runId, head_sha: sha, head_branch: contract.defaultBranch },
+      };
+    }),
   };
 }
 
@@ -595,6 +708,22 @@ function apiFixture(s: Scenario, options: FixtureOptions = {}) {
         return response({ message: "missing" }, 404);
       }
       return response({ total_count: fixture.jobs.length, jobs: page > 1 ? [] : fixture.jobs });
+    }
+    match = path.match(new RegExp(`^${prefix}/actions/runs/([0-9]+)/attempts/([0-9]+)$`));
+    if (match) {
+      const fixture = runsById.get(Number(match[1]));
+      return fixture && Number(match[2]) === fixture.run.run_attempt
+        ? response(fixture.run)
+        : response({ message: "missing attempt" }, 404);
+    }
+    match = path.match(new RegExp(`^${prefix}/actions/artifacts/([0-9]+)/zip$`));
+    if (match) {
+      const id = Number(match[1]);
+      for (const fixture of ci.values()) {
+        const files = fixture.receipts.get(id);
+        if (files) return new Response(receiptZip(files));
+      }
+      return response({ message: "missing archive" }, 404);
     }
     match = path.match(new RegExp(`^${prefix}/actions/runs/([0-9]+)/artifacts$`));
     if (match) {
@@ -1173,6 +1302,97 @@ describe("tested-descendant release admission", () => {
       await expect(admit(s, {}, { ci: (ci) => mutate(ci.get(s.candidate)!) })).rejects.toThrow(
         message,
       );
+    }
+  });
+
+  test("downloads and validates current-attempt receipt bodies and exact image identities", async () => {
+    const s = scenario("good");
+    const cases: Array<[(fixture: CiFixture) => void, string]> = [
+      [
+        (fixture) => {
+          fixture.artifacts[0]!.created_at = "2026-10-21T09:59:00Z";
+        },
+        "predates the selected CI attempt",
+      ],
+      [
+        (fixture) => {
+          fixture.artifacts[0]!.digest = `sha256:${"0".repeat(64)}`;
+        },
+        "archive digest differs",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "full-green-main-", (body) => {
+            body.runAttempt = "1";
+          }),
+        "full-green receipt names another run attempt",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "full-green-main-", (body) => {
+            body.sha = s.provenance;
+          }),
+        "full-green receipt names another source",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "full-green-main-", (body) => {
+            body.mode = "focused";
+          }),
+        "full-green receipt names another source or mode",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.producer.runAttempt = "1";
+          }),
+        "canary receipt names another run attempt",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.source.sha = s.provenance;
+          }),
+        "canary receipt names another source",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.images = {};
+          }),
+        "canary api image",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.images.api.repository = "ghcr.io/foreign/image";
+          }),
+        "canary api image identity is invalid",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.images.desktop.digest = "latest";
+          }),
+        "canary desktop image identity is invalid",
+      ],
+      [
+        (fixture) =>
+          changeReceipt(fixture, "canary-images-", (body) => {
+            body.imageTag = `canary-sha-${s.provenance}`;
+          }),
+        "canary image tag names another source",
+      ],
+    ];
+    for (const [mutate, message] of cases) {
+      await expect(admit(s, {}, { ci: (ci) => mutate(ci.get(s.candidate)!) })).rejects.toThrow(
+        message,
+      );
+    }
+    const { requests, result } = await admit(s);
+    for (const artifact of result.fullGreen.artifacts) {
+      expect(requests).toContain(`GET ${prefix}/actions/artifacts/${artifact.id}/zip`);
+      expect(artifact.receiptSha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });
 

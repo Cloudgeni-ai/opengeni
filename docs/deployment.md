@@ -2038,7 +2038,7 @@ requires, fail-closed:
 
 - `source_sha` retained by `main` at the initial and terminal reads, with
   `provenance_sha` on its first-parent chain; the controller is either the
-  Version PR's reviewed base, `source_sha` itself, or a later `main` commit;
+  Version PR's reviewed base or a later `main` commit, never `source_sha` itself;
 - every intervening first-parent commit is a two-parent merge whose single
   associated PR merged into `main` with `merge_commit_sha` equal to that merge
   and head equal to its second parent; a competing `changeset-release/main` PR,
@@ -2054,7 +2054,12 @@ requires, fail-closed:
   `source_sha`; the newest `Full CI` commit status was created by the GitHub
   Actions bot and targets that run's current attempt; and that run attempt owns
   exactly one unexpired, digest-bearing `full-green-main-<source_sha>` and
-  `canary-images-<source_sha>` artifact. Batch-ready or queue-ready signals are
+  `canary-images-<source_sha>` artifact created after that attempt started.
+  Admission downloads each exact artifact ID, verifies its archive digest and
+  parses the canonical receipts. Source, workflow, run, attempt, full mode and
+  all eight workload image repositories/digests must match; a previous attempt's
+  receipt is not accepted even when its run ID or artifact name matches.
+  Batch-ready or queue-ready signals are
   not full green, and nothing is borrowed from the Version merge's own CI.
 
 The walk is bounded to 100 intervening merges and 2,000 compared commits. Any

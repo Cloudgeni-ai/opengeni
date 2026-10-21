@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   directTreeManifest,
   verifyHistoricalSourceAdmission,
@@ -189,6 +191,37 @@ function githubClient(fetchImpl, token) {
     return { status: response.status, value: await response.json() };
   };
   return {
+    artifactBytes: async (id) => {
+      const path = repositoryPath(
+        `/actions/artifacts/${assertPositiveInteger(id, "artifact ID")}/zip`,
+      );
+      let response = await fetchImpl(`${RELEASE_AUTOMATION_CONTRACT.apiUrl}${path}`, {
+        redirect: "manual",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "opengeni-release-pr-automation",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+      if (response.status === 302) {
+        const location = new URL(
+          assertString(response.headers.get("location"), "artifact download location"),
+        );
+        invariant(location.protocol === "https:", "artifact download must use HTTPS");
+        // The signed storage URL must never receive the GitHub credential.
+        response = await fetchImpl(location.href, { redirect: "error" });
+      }
+      invariant(response.ok === true && response.body, "artifact download failed");
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.byteLength;
+        invariant(size <= 2 * 1024 * 1024, "release receipt archive exceeds 2 MiB");
+        chunks.push(Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    },
     get: async (path) => (await request("GET", path)).value,
     getOptional: async (path) => {
       const result = await request("GET", path, undefined, [404]);
@@ -2687,8 +2720,113 @@ async function verifyFullGreenStatus(api, sha, runId, runAttempt) {
   });
 }
 
-async function verifyFullGreenArtifacts(api, sha, runId) {
+function readReceiptArchive(bytes, digest, receiptFile) {
+  invariant(
+    `sha256:${createHash("sha256").update(bytes).digest("hex")}` === digest,
+    "downloaded receipt archive digest differs from GitHub metadata",
+  );
+  const directory = mkdtempSync(join(tmpdir(), "opengeni-release-receipt-"));
+  try {
+    const archive = join(directory, "receipt.zip");
+    writeFileSync(archive, bytes);
+    const list = spawnSync("unzip", ["-Z1", archive], {
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 128 * 1024,
+    });
+    invariant(list.status === 0, "cannot inspect release receipt ZIP");
+    const names = list.stdout.trim().split("\n");
+    const allowed =
+      receiptFile === "canary-images.json" ? [receiptFile, "canary-images.sha256"] : [receiptFile];
+    invariant(
+      names.length === allowed.length &&
+        new Set(names).size === names.length &&
+        names.every((name) => allowed.includes(name)),
+      "release receipt ZIP has unexpected or duplicate members",
+    );
+    const read = (name) => {
+      const result = spawnSync("unzip", ["-p", archive, name], {
+        timeout: 10000,
+        maxBuffer: 128 * 1024,
+      });
+      invariant(result.status === 0, "cannot read release receipt ZIP member");
+      return result.stdout;
+    };
+    const body = read(receiptFile);
+    const receiptSha256 = createHash("sha256").update(body).digest("hex");
+    if (receiptFile === "canary-images.json") {
+      invariant(
+        read("canary-images.sha256").toString("utf8").trim() ===
+          `${receiptSha256}  canary-images.json`,
+        "canary image receipt checksum differs",
+      );
+    }
+    return { receipt: record(JSON.parse(body.toString("utf8")), receiptFile), receiptSha256 };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function verifyReceiptBody(receipt, file, sha, runId, runAttempt) {
+  invariant(receipt.schemaVersion === 1, `${file} schema changed`);
+  if (file === "full-green-main.json") {
+    invariant(
+      receipt.sha === sha && receipt.mode === "full",
+      "full-green receipt names another source or mode",
+    );
+    invariant(
+      assertPositiveInteger(receipt.runId, "full-green receipt run ID") === runId &&
+        assertPositiveInteger(receipt.runAttempt, "full-green receipt attempt") === runAttempt &&
+        receipt.url === fullGreenAttemptUrl(runId, runAttempt),
+      "full-green receipt names another run attempt",
+    );
+    return;
+  }
+  invariant(
+    receipt.source?.sha === sha &&
+      receipt.source?.repository === RELEASE_AUTOMATION_CONTRACT.repository &&
+      receipt.source?.ref === "refs/heads/main",
+    "canary receipt names another source",
+  );
+  invariant(
+    receipt.producer?.workflow === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath &&
+      assertPositiveInteger(receipt.producer?.runId, "canary receipt run ID") === runId &&
+      assertPositiveInteger(receipt.producer?.runAttempt, "canary receipt attempt") === runAttempt,
+    "canary receipt names another run attempt",
+  );
+  invariant(receipt.imageTag === `canary-sha-${sha}`, "canary image tag names another source");
+  assertString(receipt.chartVersion, "canary receipt chart version");
+  for (const role of [
+    "api",
+    "worker",
+    "web",
+    "sandbox",
+    "relay",
+    "artifact-materializer",
+    "artifact-outbox-dispatcher",
+    "desktop",
+  ]) {
+    const image = record(receipt.images?.[role], `canary ${role} image`);
+    invariant(
+      image.repository === `ghcr.io/cloudgeni-ai/opengeni-${role}` &&
+        /^sha256:[0-9a-f]{64}$/.test(image.digest ?? ""),
+      `canary ${role} image identity is invalid`,
+    );
+  }
+}
+
+async function verifyFullGreenArtifacts(api, sha, runId, runAttempt) {
   const limits = RELEASE_AUTOMATION_CONTRACT.descendant;
+  const attempt = await api.get(repositoryPath(`/actions/runs/${runId}/attempts/${runAttempt}`));
+  invariant(
+    attempt.id === runId &&
+      attempt.run_attempt === runAttempt &&
+      attempt.head_sha === sha &&
+      attempt.status === "completed" &&
+      attempt.conclusion === "success",
+    "receipt attempt identity changed",
+  );
+  const startedAt = assertTimestamp(attempt.run_started_at, "receipt attempt start");
   const artifacts = [];
   let totalCount;
   for (let page = 1; page <= maximumPages; page += 1) {
@@ -2705,28 +2843,43 @@ async function verifyFullGreenArtifacts(api, sha, runId) {
     if (artifacts.length >= totalCount || value.artifacts.length < recordsPerPage) break;
   }
   invariant(artifacts.length === totalCount, "full-green workflow artifact listing is incomplete");
-  return [
-    `${limits.fullGreenArtifactPrefix}${sha}`,
-    `${limits.canaryImageArtifactPrefix}${sha}`,
-  ].map((name) => {
-    const selected = artifacts.filter((artifact) => artifact?.name === name);
-    invariant(selected.length === 1, `${name} is not exactly one artifact of run ${runId}`);
-    const artifact = selected[0];
-    invariant(artifact.expired === false, `${name} has expired`);
-    invariant(
-      artifact.workflow_run?.id === runId &&
-        artifact.workflow_run?.head_sha === sha &&
-        artifact.workflow_run?.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
-      `${name} is bound to another workflow run or commit`,
-    );
-    const digest = assertString(artifact.digest, `${name} digest`);
-    invariant(/^sha256:[0-9a-f]{64}$/.test(digest), `${name} digest is invalid`);
-    return Object.freeze({
-      name,
-      id: assertPositiveInteger(artifact.id, `${name} artifact ID`),
-      digest,
-    });
-  });
+  return Promise.all(
+    [`${limits.fullGreenArtifactPrefix}${sha}`, `${limits.canaryImageArtifactPrefix}${sha}`].map(
+      async (name) => {
+        const selected = artifacts.filter((artifact) => artifact?.name === name);
+        invariant(selected.length === 1, `${name} is not exactly one artifact of run ${runId}`);
+        const artifact = selected[0];
+        invariant(artifact.expired === false, `${name} has expired`);
+        invariant(
+          artifact.workflow_run?.id === runId &&
+            artifact.workflow_run?.head_sha === sha &&
+            artifact.workflow_run?.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+          `${name} is bound to another workflow run or commit`,
+        );
+        const digest = assertString(artifact.digest, `${name} digest`);
+        invariant(/^sha256:[0-9a-f]{64}$/.test(digest), `${name} digest is invalid`);
+        invariant(
+          assertTimestamp(artifact.created_at, `${name} creation`) >= startedAt,
+          `${name} predates the selected CI attempt`,
+        );
+        const file = name.startsWith(limits.fullGreenArtifactPrefix)
+          ? "full-green-main.json"
+          : "canary-images.json";
+        const { receipt, receiptSha256 } = readReceiptArchive(
+          await api.artifactBytes(artifact.id),
+          digest,
+          file,
+        );
+        verifyReceiptBody(receipt, file, sha, runId, runAttempt);
+        return Object.freeze({
+          name,
+          id: assertPositiveInteger(artifact.id, `${name} artifact ID`),
+          digest,
+          receiptSha256,
+        });
+      },
+    ),
+  );
 }
 
 async function verifyTestedDescendantRelease({ options, env, logger, context, api }) {
@@ -2871,7 +3024,12 @@ async function verifyTestedDescendantRelease({ options, env, logger, context, ap
     workflowRunId,
     workflowRunAttempt,
   );
-  const fullGreenArtifacts = await verifyFullGreenArtifacts(api, context.sourceSha, workflowRunId);
+  const fullGreenArtifacts = await verifyFullGreenArtifacts(
+    api,
+    context.sourceSha,
+    workflowRunId,
+    workflowRunAttempt,
+  );
 
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
   const terminalMainSha = await assertReleaseMainRef(
