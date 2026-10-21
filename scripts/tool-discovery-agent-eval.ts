@@ -1,0 +1,468 @@
+#!/usr/bin/env bun
+/**
+ * Paired live discovery trajectories, stopping at the first requested domain call.
+ * Never executes a domain tool. This is not production traffic or task-success proof.
+ * --catalog --queries --out --model --decision-model; provider credentials in env.
+ */
+import OpenAI from "openai";
+import { createHash } from "node:crypto";
+import type { Tool } from "@openai/agents";
+import type { ResolvedModelProvider } from "@opengeni/config";
+import type { ReasoningEffort } from "@opengeni/contracts";
+import { encode } from "gpt-tokenizer/encoding/o200k_base";
+import { LazyToolRuntime } from "../packages/runtime/src/lazy-tool-transport";
+import {
+  createToolSelector,
+  TOOL_SELECTION_PROTOCOL,
+  type ToolSelector,
+} from "../packages/runtime/src/tool-discovery-decision";
+import {
+  configuredEvalDecisionModel,
+  warmDecisionModel,
+} from "./tool-discovery-eval/decision-backend";
+import { createChatComparisonSelector } from "./tool-discovery-eval/chat-comparison";
+import { legacySearchTools } from "./tool-discovery-eval/legacy-ranking";
+
+function option(name: string) {
+  const i = process.argv.indexOf(`--${name}`);
+  return i < 0 ? undefined : process.argv[i + 1];
+}
+const catalog = option("catalog"),
+  queries = option("queries"),
+  out = option("out"),
+  model = option("model"),
+  decisionModel = option("decision-model");
+const apiKey = process.env.DECISION_MODEL_API_KEY,
+  baseURL = process.env.DECISION_MODEL_BASE_URL;
+if (!catalog || !queries || !out || !model || !decisionModel || !apiKey || !baseURL)
+  throw new Error("Missing eval paths, model IDs or provider environment");
+const decisionBackend = option("decision-backend") ?? "openrouter";
+const warmup = process.argv.includes("--warmup");
+if (!["openai-compatible", "jev", "openai", "openrouter"].includes(decisionBackend))
+  throw new Error("Unsupported decision backend");
+if (decisionBackend !== "openai-compatible" && option("decision-reasoning"))
+  throw new Error("Typed judgments do not use a reasoning flag");
+const typed =
+  decisionBackend !== "openai-compatible" && decisionModel !== "none"
+    ? configuredEvalDecisionModel(decisionBackend, decisionModel)
+    : undefined;
+if (warmup && decisionModel !== "none" && !typed)
+  throw new Error("Warmup is supported for current typed or no-model comparisons only");
+const raw = await Bun.file(catalog).json();
+const entries = Array.isArray(raw) ? raw : raw.tools;
+const tools = entries.map(
+  (t: { name: string; description: string; parameters?: unknown; inputSchema?: unknown }) =>
+    ({
+      type: "function",
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters ?? t.inputSchema,
+      strict: false,
+    }) as Tool,
+);
+const mapping = new Map<string, string>(
+  entries.flatMap((t: { name: string; identity?: { serverId?: string } }) =>
+    t.identity?.serverId ? [[t.name, t.identity.serverId]] : [],
+  ),
+);
+const makeRuntime = (decision?: ToolSelector) => {
+  const r = new LazyToolRuntime(
+    "generic_dispatch",
+    new Set(mapping.values()),
+    undefined,
+    new Set(mapping.values()),
+    new Set(),
+    () => mapping,
+    false,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    decision,
+  );
+  r.refresh(tools);
+  return r;
+};
+const baseline = makeRuntime();
+const pool = baseline.inspectSearchableTools().map((t) => ({ ...t, type: "function" }) as Tool);
+const cases = (
+  (await Bun.file(queries).json()) as Array<{ id: string; query: string; expected: string[] }>
+).filter((_, i) => i % 3 === 0);
+let decisionReceipts: Array<{
+  provider?: string;
+  costUsd?: number | null;
+  model?: string;
+  costSource?: string;
+}> = [];
+const client = new OpenAI({
+  apiKey,
+  baseURL,
+  fetch: async (url, init) => {
+    const response = await fetch(url, init);
+    if (response.ok) {
+      const result = (await response.clone().json()) as {
+        provider?: string;
+        model?: string;
+        usage?: { cost?: number };
+      };
+      decisionReceipts.push({
+        ...(result.provider ? { provider: result.provider } : {}),
+        ...(result.model ? { model: result.model } : {}),
+        ...(typeof result.usage?.cost === "number" ? { costUsd: result.usage.cost } : {}),
+      });
+    }
+    return response;
+  },
+});
+const effort = option("decision-reasoning") ?? "none";
+if (!["none", "minimal", "low", "medium", "high", "xhigh"].includes(effort))
+  throw new Error("Unsupported decision reasoning effort");
+const provider = {
+  id: "eval",
+  api: "chat",
+  kind: "api-key",
+  baseUrl: baseURL,
+} as ResolvedModelProvider;
+const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const metadata = {
+  version: 6,
+  warmup,
+  catalogSha256: hash(raw),
+  queriesSha256: hash(cases),
+  model,
+  decisionModel,
+  decisionBackend,
+  agentBaseUrl: baseURL,
+  decisionEndpoint: typed?.metadata ?? { baseURL },
+  decisionReasoning: typed ? null : effort,
+  decisionProtocol: typed ? TOOL_SELECTION_PROTOCOL : null,
+  implementation: option("implementation") ?? "working-tree",
+};
+const prior = (await Bun.file(out).exists()) ? await Bun.file(out).json() : undefined;
+if (prior && JSON.stringify(prior.metadata) !== JSON.stringify(metadata))
+  throw new Error("Output belongs to a different experiment");
+const rows = prior?.rows ?? [];
+const warmups = prior?.warmups ?? [];
+const baselinePath = option("reuse-baseline");
+if (!prior && baselinePath) {
+  const source = await Bun.file(baselinePath).json();
+  if (source.model !== model) throw new Error("Baseline used a different agent model");
+  if (source.metadata?.catalogSha256 !== metadata.catalogSha256)
+    throw new Error("Baseline used a different catalog");
+  if (warmup && source.metadata?.warmup !== true)
+    throw new Error("A warmed comparison requires a warmed baseline");
+  for (const c of cases) {
+    const row = source.rows.find(
+      (r: { id: string; arm: string; query: string }) =>
+        r.id === c.id && r.arm === "before" && r.query === c.query,
+    );
+    if (!row) throw new Error(`Baseline lacks case ${c.id}`);
+    rows.push({
+      ...row,
+      expected: c.expected,
+      correct: c.expected.includes(row.firstTool),
+      decisionModelCostUsd: row.decisionCalls === 0 ? 0 : row.decisionModelCostUsd,
+    });
+  }
+}
+const pending = cases.some((c) =>
+  ["before", "after"].some(
+    (arm) => !rows.some((row: { id: string; arm: string }) => row.id === c.id && row.arm === arm),
+  ),
+);
+if (warmup && pending) {
+  const started = performance.now();
+  const response = await fetch(`${baseURL.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      reasoning: { effort: "none" },
+      messages: [{ role: "user", content: "Reply OK." }],
+    }),
+  });
+  if (!response.ok) throw new Error(`Agent warmup HTTP ${response.status}`);
+  const result = (await response.json()) as {
+    model?: string;
+    provider?: string;
+    usage?: { cost?: number; prompt_tokens?: number; completion_tokens?: number };
+  };
+  warmups.push({
+    kind: "main-agent",
+    ms: performance.now() - started,
+    usage: {
+      model: result.model ?? model,
+      provider: result.provider ?? null,
+      inputTokens: result.usage?.prompt_tokens ?? null,
+      outputTokens: result.usage?.completion_tokens ?? null,
+      costUsd: result.usage?.cost ?? null,
+    },
+  });
+  if (typed) warmups.push(await warmDecisionModel(typed.model));
+  await Bun.write(out, JSON.stringify({ metadata, model, decisionModel, warmups, rows }, null, 2));
+}
+for (const c of cases)
+  for (const arm of ["before", "after"] as const) {
+    if (rows.some((r: { id: string; arm: string }) => r.id === c.id && r.arm === arm)) continue;
+    let decisionCalls = 0,
+      decisionFailures = 0,
+      decisionHttpChunks = 0,
+      decisionInputTokens = 0,
+      decisionOutputTokens = 0;
+    let decisionInputKnown = true,
+      decisionOutputKnown = true;
+    decisionReceipts = [];
+    const select = typed
+      ? createToolSelector(typed.model, {
+          onUsage: (usage) => {
+            decisionInputKnown &&= usage.inputTokens !== null;
+            decisionOutputKnown &&= usage.outputTokens !== null;
+            decisionInputTokens += usage.inputTokens ?? 0;
+            decisionOutputTokens += usage.outputTokens ?? 0;
+            decisionHttpChunks += usage.requests;
+            decisionReceipts.push(usage);
+          },
+        })
+      : createChatComparisonSelector(
+          { client, provider, modelId: decisionModel },
+          {
+            reasoningEffort: effort as ReasoningEffort,
+            onUsage: async (usage) => {
+              decisionInputTokens += usage.usage.inputTokens ?? 0;
+              decisionOutputTokens += usage.usage.outputTokens ?? 0;
+            },
+          },
+        );
+    const choose: typeof select = async (input) => {
+      decisionCalls++;
+      try {
+        return await select(input);
+      } catch (error) {
+        decisionFailures++;
+        throw error;
+      }
+    };
+    const runtime = makeRuntime(decisionModel === "none" ? undefined : choose);
+    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list")!;
+    const wireTools = runtime.controlTools
+      .filter(
+        (
+          t,
+        ): t is Tool & {
+          type: "function";
+          name: string;
+          description: string;
+          parameters: Record<string, unknown>;
+        } => t.type === "function",
+      )
+      .map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description:
+            t.name === "tool_search" && arm === "before"
+              ? "Search currently authorized tools by capability. Returns matching complete input schemas. Pass exact names with an empty query to load known tools."
+              : t.description,
+          parameters: t.parameters,
+          strict: false,
+        },
+      }));
+    const messages: Array<Record<string, unknown>> = [
+      {
+        role: "system",
+        content:
+          "You are evaluating tool discovery. Find the tool that directly performs the requested capability. All domain tools are deferred. Use tool_search or tool_list; do not guess tools that have not been disclosed. Once you have the best tool's COMPLETE input schema, call tool_invoke with its exact name and arguments:{}; the evaluator intercepts it and never executes it. Do not ask for task arguments or execute anything else. If no tool fits, say so. A compact candidate is not a complete schema.",
+      },
+      { role: "user", content: c.query },
+    ];
+    let discoveryCalls = 0,
+      resultTokens = 0,
+      mainModelCostUsd: number | null = 0,
+      firstTool: string | null = null,
+      outcome = "no_tool";
+    const trace: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    const started = performance.now();
+    while (true) {
+      const response = await fetch(`${baseURL.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, reasoning: { effort: "none" }, messages, tools: wireTools }),
+      });
+      if (!response.ok) throw new Error(`Agent model HTTP ${response.status}`);
+      const result = (await response.json()) as {
+        choices: Array<{
+          message: {
+            role: string;
+            content: string | null;
+            tool_calls?: Array<{
+              id: string;
+              type: string;
+              function: { name: string; arguments: string };
+            }>;
+          };
+        }>;
+        usage?: { cost?: number };
+      };
+      mainModelCostUsd =
+        mainModelCostUsd !== null && typeof result.usage?.cost === "number"
+          ? mainModelCostUsd + result.usage.cost
+          : null;
+      const message = result.choices[0]!.message;
+      messages.push(message);
+      if (!message.tool_calls?.length) break;
+      let stop = false;
+      for (const call of message.tool_calls) {
+        const args = JSON.parse(call.function.arguments);
+        trace.push({ name: call.function.name, arguments: args });
+        if (
+          call.function.name === "tool_invoke" ||
+          !["tool_search", "tool_list"].includes(call.function.name)
+        ) {
+          firstTool = call.function.name === "tool_invoke" ? args.name : call.function.name;
+          outcome = "first_call";
+          stop = true;
+          break;
+        }
+        const identity = JSON.stringify([call.function.name, args]);
+        if (seen.has(identity)) {
+          outcome = "repeated_discovery";
+          stop = true;
+          break;
+        }
+        seen.add(identity);
+        discoveryCalls++;
+        let output: string,
+          definitions: Record<string, unknown>[] = [];
+        if (call.function.name === "tool_search") {
+          if (arm === "before") output = JSON.stringify({ tools: legacySearchTools(pool, args) });
+          else {
+            const prepared = await runtime.prepareSearch(args);
+            output = prepared.output;
+            definitions = prepared.tools ?? [];
+          }
+        } else {
+          if (list.type !== "function") throw new Error("Missing tool_list");
+          output = String(await list.invoke({} as never, JSON.stringify(args)));
+        }
+        resultTokens += encode(output).length;
+        messages.push({ role: "tool", tool_call_id: call.id, content: output });
+        if (definitions.length) {
+          const text = `These tools are now available. Call through tool_invoke with the exact name. Definitions:\n${JSON.stringify({ tools: definitions })}`;
+          resultTokens += encode(text).length;
+          messages.push({
+            role: "user",
+            content: `Machine-origin tool declaration, not a new human request. ${text}`,
+          });
+        }
+      }
+      if (stop) break;
+    }
+    const row = {
+      id: c.id,
+      arm,
+      query: c.query,
+      expected: c.expected,
+      firstTool,
+      correct: firstTool !== null && c.expected.includes(firstTool),
+      outcome,
+      discoveryCalls,
+      resultTokens,
+      decisionCalls,
+      decisionFailures,
+      decisionHttpChunks: typed ? decisionHttpChunks : null,
+      decisionInputTokens:
+        decisionInputKnown && decisionReceipts.length === decisionCalls
+          ? decisionInputTokens
+          : null,
+      decisionOutputTokens:
+        decisionOutputKnown && decisionReceipts.length === decisionCalls
+          ? decisionOutputTokens
+          : null,
+      mainModelCostUsd,
+      decisionModelCostUsd:
+        decisionReceipts.length === decisionCalls &&
+        decisionReceipts.every((r) => typeof r.costUsd === "number")
+          ? decisionReceipts.reduce((sum, r) => sum + r.costUsd!, 0)
+          : null,
+      decisionCostSources: [
+        ...new Set(decisionReceipts.map((receipt) => receipt.costSource ?? "provider-reported")),
+      ],
+      decisionProviders: [...new Set(decisionReceipts.map((r) => r.provider).filter(Boolean))],
+      decisionModels: [...new Set(decisionReceipts.map((r) => r.model).filter(Boolean))],
+      ms: performance.now() - started,
+      trace,
+    };
+    rows.push(row);
+    await Bun.write(
+      out,
+      JSON.stringify(
+        {
+          metadata,
+          model,
+          decisionModel,
+          warmups,
+          scope:
+            "Live simulated discovery only; stops before domain execution; every third frozen case",
+          rows,
+        },
+        null,
+        2,
+      ),
+    );
+    console.log(
+      JSON.stringify({
+        id: c.id,
+        arm,
+        correct: row.correct,
+        discoveryCalls,
+        resultTokens,
+        ms: row.ms,
+      }),
+    );
+  }
+console.log(
+  JSON.stringify(
+    Object.fromEntries(
+      ["before", "after"].map((arm) => {
+        const selected = rows.filter((r: { arm: string }) => r.arm === arm);
+        const mean = (key: string) =>
+          selected.reduce((s: number, r: Record<string, unknown>) => s + Number(r[key]), 0) /
+          selected.length;
+        const latencies = selected
+          .map((r: { ms: number }) => r.ms)
+          .sort((a: number, b: number) => a - b);
+        return [
+          arm,
+          {
+            queries: selected.length,
+            correct: mean("correct"),
+            discoveryCalls: mean("discoveryCalls"),
+            meanResultTokens: mean("resultTokens"),
+            meanMs: mean("ms"),
+            p95Ms: latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)] ?? null,
+            meanMainModelCostUsd: selected.every(
+              (r: Record<string, unknown>) => typeof r.mainModelCostUsd === "number",
+            )
+              ? mean("mainModelCostUsd")
+              : null,
+            decisionCostSources: [
+              ...new Set(
+                selected.flatMap(
+                  (row: { decisionCostSources?: string[] }) => row.decisionCostSources ?? [],
+                ),
+              ),
+            ],
+            meanDecisionModelCostUsd: selected.every(
+              (r: Record<string, unknown>) => typeof r.decisionModelCostUsd === "number",
+            )
+              ? mean("decisionModelCostUsd")
+              : null,
+          },
+        ];
+      }),
+    ),
+    null,
+    2,
+  ),
+);

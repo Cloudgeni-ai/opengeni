@@ -575,6 +575,13 @@ describe("Codex progressive tool disclosure", () => {
 });
 
 describe("provider-neutral progressive tool disclosure", () => {
+  test("decision inference is opt-in through an explicit configured model ID", () => {
+    expect(withEnv({}, () => getSettings()).decisionModelId).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_DECISION_MODEL_ID: "provider/decision" }, () => getSettings())
+        .decisionModelId,
+    ).toBe("provider/decision");
+  });
   test("is enabled by default and has an independent emergency opt-out", () => {
     expect(withEnv({}, () => getSettings()).lazyToolSearchEnabled).toBe(true);
     const settings = withEnv(

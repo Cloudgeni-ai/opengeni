@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { codeSearchDeploymentPolicy, getSettings, usableJevApiKey } from "../src";
+import {
+  codeSearchDeploymentPolicy,
+  decisionModelConfiguration,
+  getSettings,
+  usableJevApiKey,
+} from "../src";
 
 describe("Jev and code_search settings", () => {
   test("default to off with the native Jev endpoint", () => {
@@ -50,6 +55,53 @@ describe("Jev and code_search settings", () => {
 
   test("rejects an unknown mode", () => {
     expect(() => withEnv({ OPENGENI_CODE_SEARCH_MODE: "sometimes" }, getSettings)).toThrow();
+  });
+
+  test.each(["jev", "openai", "openrouter"])(
+    "shared %s configuration serves both consumers",
+    (provider) => {
+      const settings = withEnv(
+        {
+          OPENGENI_CODE_SEARCH_MODE: "opt_in",
+          OPENGENI_DECISION_MODEL_PROVIDER: provider,
+          OPENGENI_DECISION_MODEL_ID: "configured-model",
+          OPENGENI_DECISION_MODEL_API_KEY: "configured-test-key",
+          OPENGENI_DECISION_MODEL_BASE_URL: "https://decisions.test/v1",
+        },
+        getSettings,
+      );
+      expect(decisionModelConfiguration(settings)).toEqual({
+        provider,
+        model: "configured-model",
+        apiKey: "configured-test-key",
+        baseUrl: "https://decisions.test/v1",
+      });
+      expect(codeSearchDeploymentPolicy(settings)).toEqual({
+        available: true,
+        workspaceDefault: "off",
+      });
+    },
+  );
+
+  test("partial shared configuration never borrows the legacy credential", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_CODE_SEARCH_MODE: "default_on",
+        OPENGENI_JEV_API_KEY: "legacy-test-key",
+        OPENGENI_DECISION_MODEL_PROVIDER: "openrouter",
+        OPENGENI_DECISION_MODEL_ID: "configured-model",
+      },
+      getSettings,
+    );
+    expect(decisionModelConfiguration(settings, true)).toBeUndefined();
+    expect(codeSearchDeploymentPolicy(settings).available).toBe(false);
+  });
+
+  test("legacy compatibility enables only code search, not new paid consumers", () => {
+    const settings = withEnv({ OPENGENI_JEV_API_KEY: "legacy-test-key" }, getSettings);
+    expect(decisionModelConfiguration(settings)).toBeUndefined();
+    expect(decisionModelConfiguration(settings, true)?.provider).toBe("jev");
+    expect(codeSearchDeploymentPolicy(settings).available).toBe(false);
   });
 });
 

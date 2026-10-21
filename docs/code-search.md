@@ -7,9 +7,11 @@ relevant source passages, verbatim with paths and line numbers, plus an evidence
 rating for those passages. That replaces a chain of separate searches and file reads, each of
 which would otherwise cost a model request.
 
-Ranking uses Jev, TypeSafe's fast judge model. Jev answers many yes/no
-questions in parallel in about 0.4 s per request at $0.042 per million input
-tokens. It never writes text, so the agent still writes the answer.
+Ranking uses the shared [decision-model category](decision-models.md), not a
+conversational model. Its original validated backend is Jev, TypeSafe's fast judge;
+OpenAI and OpenRouter typed Decisions can use the same interface. The pipeline and
+historical Jev measurements below are retained, not extrapolated to other backends.
+The judge returns probabilities, so the agent still writes the answer.
 
 ## Measured effect
 
@@ -106,9 +108,9 @@ only read-only commands through `SandboxChannelAService`:
   files.
 
 None of these writes to the workspace (only to the box's temporary directory),
-so none takes workspace mutation admission. The Jev key stays on the server,
-in the API and worker processes, and never reaches a sandbox or Connected Machine. The worker uses it to call
-Jev; the API reads it only to report whether the deployment offers the tool.
+so none takes workspace mutation admission. The decision-model credential stays
+on the API/worker servers and never reaches a sandbox or Connected Machine. The
+worker calls the provider; the API checks configuration only to report availability.
 The tool works on every sandbox backend and Connected Machine that has `rg` and
 `bash`; both stock sandbox images include them. Windows Connected Machines do
 not get the tool, because its search commands are POSIX shell scripts.
@@ -149,14 +151,17 @@ credentials into its answer.
 
 | Level | Setting | Effect |
 | --- | --- | --- |
-| Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
+| Deployment | `OPENGENI_DECISION_MODEL_PROVIDER/ID/API_KEY` | Explicit shared typed backend. Legacy `OPENGENI_JEV_API_KEY` still works for code search when no shared setting is present; it never enables paid tool discovery by itself. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
 | Workspace | `settings.codeSearchEnabled` | Settings → General → New session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
-| Worker process | Circuit breaker | Three consecutive Jev outages make `code_search` calls on that worker fail at once for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. The breaker never hides the tool. |
+| Worker process | Circuit breaker | The existing policy applies to the configured decision provider: three consecutive outages refuse calls for 5 minutes, or 30 minutes after auth/billing failure (401/402/403). After cooldown one trial runs at a time; others wait until it ends or has run for 10 minutes. A search needing no judgment neither closes nor reopens it. The breaker never hides the tool. No values changed in the shared-category migration. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and
 `OPENGENI_JEV_REQUEST_TIMEOUT_MS` default to the native TypeSafe API,
 `jev-latest` and 10 s.
+These settings govern the existing direct Jev client only; see
+[decision-model configuration](decision-models.md#deployment-configuration) for
+the typed OpenAI/OpenRouter endpoints and their live-verification boundaries.
 
 ### The decision is frozen per session
 
@@ -173,12 +178,12 @@ miss for the whole conversation. To keep a session's prompt stable:
   turning the mode on, adding the key, switching a workspace to On, or moving
   from `experiment` to `default_on` affect new sessions only.
 - Three deliberate switch-offs still reach running sessions on their next
-  turn, because they stop repository content going to Jev: mode `off`,
+  turn, because they stop repository content going to the decision provider: mode `off`,
   removing the key, and a workspace Off. Undoing one gives the tool back to
   sessions that were created with it. Each change costs every affected running
   session one prompt-cache miss. Change the mode or key in one rollout; while
   old and new workers overlap, sessions can alternate between them.
-- Transient Jev health never changes the tool list. The breaker is per worker
+- Transient provider health never changes the tool list. The breaker is per worker
   process, and sessions move between workers, so it only refuses calls.
 
 A session without compute (`backend: none`) never gets the tool, and neither
@@ -206,11 +211,11 @@ A typical path: run `experiment` in staging, check the result, then set
 
 The tool reports problems to the agent instead of degrading silently:
 
-- **Jev is down, rate-limited, out of credit or rejects a request.** The tool
+- **The judge is down, rate-limited, out of credit, refuses or rejects a request.** The tool
   returns an error telling the agent to search with `exec_command` instead.
   Repeated outages trip the breaker, and calls on that worker then fail at once
   with the same advice.
-- **Only the final status check fails.** The tool still returns the Jev-scored
+- **Only the final status check fails.** The tool still returns the previously scored
   pack with `evidence rating unknown (check failed)`. An outage there counts toward the breaker.
 - **ripgrep is missing** (possible on a Connected Machine). The tool returns an
   error saying so.
@@ -219,18 +224,21 @@ The tool reports problems to the agent instead of degrading silently:
 
 ## Cost
 
-Jev runs on the deployment's TypeSafe key, so the tool works whatever the
-workspace uses for its chat model: Opengeni credits, its own subscription or
-its own API keys. It costs about $0.006 per call. Every completed call records
-two usage events against its workspace, session, turn and attempt:
-`code_search.jev_input_tokens` (tokens) and `code_search.jev_cost`
-(`usd_micros`). Nothing is debited from credits.
+The judge runs on the explicitly configured deployment account, independently
+of the workspace's chat model. The historical Jev experiment cost about $0.006
+per call; other providers and workloads must be measured separately.
+Received usage records `code_search.decision_input_tokens` and
+`code_search.decision_cost` (or `decision_estimated_cost`) against workspace,
+session, turn and attempt, even if a later stage fails. Missing costs stay unknown;
+direct Jev uses the existing client's estimate, OpenRouter uses reported cost.
+Nothing is debited from customer credits. Old `code_search.jev_*` telemetry names
+are replaced; external dashboards must update their queries.
 
 ## Observability
 
 - `opengeni_code_search_calls_total{outcome}`
 - `opengeni_code_search_duration_seconds{outcome}`
-- `opengeni_code_search_jev_requests_total`
-- `opengeni_code_search_jev_cost_micro_usd_total`
+- `opengeni_code_search_decision_requests_total`
+- `opengeni_code_search_decision_cost_micro_usd_total`
 
 Tool calls and results also appear in the session timeline like any other tool.

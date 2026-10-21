@@ -155,6 +155,10 @@ empty literal-prefix listings may suggest authorized names but never restore
 disabled tools or grant execution outside the current catalog.
 
 - Public clients talk only to the API.
+- Typed decision models are separate from conversational models. Tool discovery
+  and code-search judgments share `@opengeni/decisions`; provider adapters must not
+  silently fall back to chat completions or borrow a customer's credential. See
+  `docs/decision-models.md` for configuration and verified provider boundaries.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
   authority hierarchy: `managed_accounts.id` remains the physical organization
   id, organization membership is distinct from ordinary workspace membership,
@@ -313,6 +317,8 @@ disabled tools or grant execution outside the current catalog.
   hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
+
+- **Discovery is compact and history is append-only.** `tool_search` uses field-aware selection; an optional configured decision model handles ambiguous queries, while strong matches and exact `names` bypass inference. Native Responses routes retain hosted client search and native function loading; generic routes load the strongest match with compact alternatives through ordinary search/list/invoke. Compact candidates are not loaded schemas. Freeze selection on the originating call and retain its native output or append its generic declaration after the result; never reread today's catalog to reconstruct old discovery. `tool_list({view: "groups"})` is the directory; never prepend a changing directory to an earlier prompt. See `scripts/tool-discovery-eval/README.md` for the eval and provider limitations.
 
 Session creation reserves an idle shell, not queued work. Initial admission
 commits the first turn, status and wake atomically. Never reconstruct accepted

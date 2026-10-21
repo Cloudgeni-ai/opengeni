@@ -1,15 +1,22 @@
 /**
- * judge.ts - the only place where scores come from: Jev answers one probability per judged item.
+ * judge.ts - the only place where scores come from: a typed model returns a probability per item.
  *
- * All Jev wording lives in PROMPTS below (one place to review). Design rules followed:
- *  - one state + many narrow Nouls per request (fan-out); one Noul per candidate (multi-select)
+ * All judge wording lives in PROMPTS below (one place to review). Design rules followed:
+ *  - one state + many narrow predicates per request; one predicate per candidate
  *  - criteria text is explicit (in the state for 60-file triage batches, per question for passages)
  *  - the literal question text is inlined in every question (no `collections[i]`-style indirection)
  *  - state holds only the candidates being judged (filtered by code first)
- *  - no counting, math or dates asked of Jev; code combines answers
- * A Jev failure is not replaced by lexical scores: it propagates and the whole search fails.
+ *  - no counting, math or dates asked of the model; code combines answers
+ * A model failure or refusal is not replaced by lexical scores.
  */
-import { noul, type JevAnswer, type JevClient, type JevNoulQuestion } from "../client";
+import {
+  predicate,
+  DecisionUnavailableError,
+  type DecisionAnswer,
+  type DecisionModel,
+  type DecisionPredicateQuestion,
+  type DecisionUsage,
+} from "@opengeni/decisions";
 import type { CodeSearchConfig } from "./config";
 
 export interface JudgeContext {
@@ -22,7 +29,7 @@ export interface FileItem {
   path: string;
   /** path + best hit lines, as shown to the judge */
   descriptor: string;
-  /** Normalized lexical score; used only if Jev returns no usable number for this item. */
+  /** Normalized lexical score retained for candidate ordering. */
   lex: number;
 }
 
@@ -58,15 +65,15 @@ export interface StatusScore {
 
 export interface StageStats {
   requests: number;
-  inputTokens: number;
-  costUsd: number;
+  inputTokens: number | null;
+  costUsd: number | null;
   ms: number;
 }
 
 export type JudgeEvent = (stage: string, data: Record<string, unknown>) => void;
 
 // ---------------------------------------------------------------------------
-// Prompts (all Jev wording; identical to scout-0.3.1)
+// Prompts (judge wording retained from scout-0.3.1)
 // ---------------------------------------------------------------------------
 
 export const PROMPTS = {
@@ -164,15 +171,15 @@ export function buildFileRequest(items: FileItem[], ctx: JudgeContext, cfg: Code
     ...(perQ ? {} : { criteria: PROMPTS.fileCriteria }),
     files: Object.fromEntries(items.map((f) => [f.id, f.descriptor])),
   };
-  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
+  const questions: Record<string, DecisionPredicateQuestion> = Object.fromEntries(
     items.map((f) => [
       f.id,
       perQ
-        ? noul(PROMPTS.fileQuestionPerQ(f.id, f.path, q), {
+        ? predicate(PROMPTS.fileQuestionPerQ(f.id, f.path, q), {
             true: PROMPTS.fileCriteria.yes,
             false: PROMPTS.fileCriteria.no,
           })
-        : noul(PROMPTS.fileQuestion(f.id, f.path, q)),
+        : predicate(PROMPTS.fileQuestion(f.id, f.path, q)),
     ]),
   );
   return { state, questions };
@@ -200,14 +207,14 @@ export function buildPassageRequest(
       ]),
     ),
   };
-  const questions: Record<string, JevNoulQuestion> = {};
+  const questions: Record<string, DecisionPredicateQuestion> = {};
   for (const p of items) {
-    questions[`rel::${p.id}`] = noul(
+    questions[`rel::${p.id}`] = predicate(
       PROMPTS.passageQuestion(p.id, p.path, p.start, p.end, q),
       PROMPTS.passageCriteria,
     );
     ctx.subQuestions.forEach((sub, j) => {
-      questions[`cov::${p.id}::${j}`] = noul(
+      questions[`cov::${p.id}::${j}`] = predicate(
         PROMPTS.coverageQuestion(p.id, p.path, p.start, p.end, sub),
         PROMPTS.coverageCriteria,
       );
@@ -227,8 +234,8 @@ export function buildLeadRequest(items: LeadItem[], ctx: JudgeContext, cfg: Code
       items.map((l) => [l.id, `${l.name}  (seen at ${l.seenAt})  ${l.context}`]),
     ),
   };
-  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
-    items.map((l) => [l.id, noul(PROMPTS.leadQuestion(l.id, l.name, q))]),
+  const questions: Record<string, DecisionPredicateQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, predicate(PROMPTS.leadQuestion(l.id, l.name, q))]),
   );
   return { state, questions };
 }
@@ -242,8 +249,8 @@ export function buildSymbolRequest(items: LeadItem[], ctx: JudgeContext, cfg: Co
     criteria: PROMPTS.symbolCriteria,
     symbols: Object.fromEntries(items.map((l) => [l.id, `${l.name}  (${l.context})`])),
   };
-  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
-    items.map((l) => [l.id, noul(PROMPTS.symbolQuestion(l.id, l.name, q))]),
+  const questions: Record<string, DecisionPredicateQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, predicate(PROMPTS.symbolQuestion(l.id, l.name, q))]),
   );
   return { state, questions };
 }
@@ -259,8 +266,8 @@ export function buildChangeRequest(items: LeadItem[], ctx: JudgeContext, cfg: Co
       items.map((l) => [l.id, `${l.name}  (${l.seenAt})\n${l.context}`]),
     ),
   };
-  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
-    items.map((l) => [l.id, noul(PROMPTS.changeQuestion(l.id, l.name, q))]),
+  const questions: Record<string, DecisionPredicateQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, predicate(PROMPTS.changeQuestion(l.id, l.name, q))]),
   );
   return { state, questions };
 }
@@ -268,11 +275,11 @@ export function buildChangeRequest(items: LeadItem[], ctx: JudgeContext, cfg: Co
 export function buildStatusRequest(evidence: string, ctx: JudgeContext, cfg: CodeSearchConfig) {
   const q = inlineQ(ctx.question, cfg.jev.inlineQuestionMaxChars);
   const state = { task: PROMPTS.statusTask, question: ctx.question, ...withSubs(ctx), evidence };
-  const questions: Record<string, JevNoulQuestion> = {
-    overall: noul(PROMPTS.statusQuestion(q), PROMPTS.statusCriteria),
+  const questions: Record<string, DecisionPredicateQuestion> = {
+    overall: predicate(PROMPTS.statusQuestion(q), PROMPTS.statusCriteria),
   };
   ctx.subQuestions.forEach((sub, j) => {
-    questions[`sub::${j}`] = noul(PROMPTS.statusSubQuestion(sub), PROMPTS.statusCriteria);
+    questions[`sub::${j}`] = predicate(PROMPTS.statusSubQuestion(sub), PROMPTS.statusCriteria);
   });
   return { state, questions };
 }
@@ -314,27 +321,30 @@ function chunk<T>(xs: T[], n: number): T[][] {
   return out;
 }
 
-const noulOf = (a: JevAnswer | undefined): number =>
-  a && a.type === "noul" && Number.isFinite(a.probability) ? a.probability : Number.NaN;
+const probabilityOf = (a: DecisionAnswer | undefined): number =>
+  a && a.type === "predicate" && Number.isFinite(a.probability) ? a.probability : Number.NaN;
 
 function orLex(p: number, lex: number): number {
   return Number.isFinite(p) ? p : lex;
 }
 
 // ---------------------------------------------------------------------------
-// Jev judge
+// Provider-neutral judge
 // ---------------------------------------------------------------------------
 
-export class JevJudge {
+export class CodeSearchJudge {
   private readonly stageStats: Record<string, StageStats> = {};
-  private jevModel: string | null = null;
+  private decisionModelName: string | null = null;
+  private decisionProvider: string | null = null;
+  private readonly usageCostSources = new Set<"provider-reported" | "estimate" | "unknown">();
 
   constructor(
     private readonly o: {
-      client: JevClient;
+      client: DecisionModel;
       config: CodeSearchConfig;
       signal: AbortSignal;
       onEvent?: JudgeEvent | undefined;
+      onUsage?: ((usage: DecisionUsage) => void | Promise<void>) | undefined;
     },
   ) {}
 
@@ -343,7 +353,13 @@ export class JevJudge {
   }
 
   model(): string | null {
-    return this.jevModel;
+    return this.decisionModelName;
+  }
+  provider(): string | null {
+    return this.decisionProvider;
+  }
+  costSources() {
+    return [...this.usageCostSources];
   }
 
   private stat(stage: string): StageStats {
@@ -354,25 +370,43 @@ export class JevJudge {
   private async ask(
     stage: string,
     state: unknown,
-    questions: Record<string, JevNoulQuestion>,
-  ): Promise<Record<string, JevAnswer>> {
+    questions: Record<string, DecisionPredicateQuestion>,
+  ): Promise<Record<string, DecisionAnswer>> {
     const t0 = performance.now();
-    const r = await this.o.client.ask(state, questions, {
+    const r = await this.o.client.decide(state, questions, {
       tag: stage,
       signal: this.o.signal,
+      onUsage: (usage) => {
+        const st = this.stat(stage);
+        st.requests += usage.requests;
+        st.inputTokens =
+          st.inputTokens === null || usage.inputTokens === null
+            ? null
+            : st.inputTokens + usage.inputTokens;
+        st.costUsd =
+          st.costUsd === null || usage.costUsd === null ? null : st.costUsd + usage.costUsd;
+        this.decisionModelName = usage.model || this.decisionModelName;
+        this.decisionProvider = usage.provider || this.decisionProvider;
+        this.usageCostSources.add(usage.costSource);
+        return this.o.onUsage?.(usage);
+      },
     });
-    const st = this.stat(stage);
-    st.requests += r.requests;
-    st.inputTokens += r.usage.inputTokens;
-    st.costUsd += r.costUsd;
-    this.jevModel = r.model || this.jevModel;
-    this.o.onEvent?.("jev", {
-      jevStage: stage,
+    for (const name of Object.keys(questions)) {
+      const answer = r.answers[name];
+      if (
+        answer?.type !== "predicate" ||
+        !Number.isFinite(answer.probability) ||
+        answer.probability < 0 ||
+        answer.probability > 1
+      )
+        throw new DecisionUnavailableError(
+          "Code-search decision model returned an invalid judgment or refusal",
+        );
+    }
+    this.o.onEvent?.("decision", {
+      decisionStage: stage,
       ms: Math.round(performance.now() - t0),
-      requests: r.requests,
-      model: r.model,
-      inputTokens: r.usage.inputTokens,
-      costUsd: r.costUsd,
+      ...r.usage,
       state,
       questions,
       answers: r.answers,
@@ -384,8 +418,8 @@ export class JevJudge {
   private async stage<I, R>(
     stage: string,
     batches: I[][],
-    build: (b: I[]) => { state: unknown; questions: Record<string, JevNoulQuestion> },
-    read: (b: I[], answers: Record<string, JevAnswer>) => Array<[string, R]>,
+    build: (b: I[]) => { state: unknown; questions: Record<string, DecisionPredicateQuestion> },
+    read: (b: I[], answers: Record<string, DecisionAnswer>) => Array<[string, R]>,
   ): Promise<Map<string, R>> {
     const t0 = performance.now();
     try {
@@ -407,7 +441,7 @@ export class JevJudge {
       "wave1",
       chunkEven(items, this.o.config.wave1.filesPerRequest),
       (b) => buildFileRequest(b, ctx, this.o.config),
-      (b, a) => b.map((f) => [f.id, orLex(noulOf(a[f.id]), f.lex)]),
+      (b, a) => b.map((f) => [f.id, orLex(probabilityOf(a[f.id]), f.lex)]),
     );
   }
 
@@ -426,9 +460,9 @@ export class JevJudge {
         b.map((p) => [
           p.id,
           {
-            rel: orLex(noulOf(a[`rel::${p.id}`]), p.lex),
+            rel: orLex(probabilityOf(a[`rel::${p.id}`]), p.lex),
             cov: ctx.subQuestions.map((_, j) =>
-              orLex(noulOf(a[`cov::${p.id}::${j}`]), p.lexCov[j] ?? 0),
+              orLex(probabilityOf(a[`cov::${p.id}::${j}`]), p.lexCov[j] ?? 0),
             ),
           },
         ]),
@@ -441,7 +475,7 @@ export class JevJudge {
       "leads",
       chunk(items, 250),
       (b) => buildLeadRequest(b, ctx, this.o.config),
-      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), l.lex)]),
+      (b, a) => b.map((l) => [l.id, orLex(probabilityOf(a[l.id]), l.lex)]),
     );
   }
 
@@ -451,7 +485,7 @@ export class JevJudge {
       "symbols",
       chunkEven(items, 120),
       (b) => buildSymbolRequest(b, ctx, this.o.config),
-      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), l.lex)]),
+      (b, a) => b.map((l) => [l.id, orLex(probabilityOf(a[l.id]), l.lex)]),
     );
   }
 
@@ -461,7 +495,7 @@ export class JevJudge {
       "change",
       chunkEven(items, 80),
       (b) => buildChangeRequest(b, ctx, this.o.config),
-      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), 0)]),
+      (b, a) => b.map((l) => [l.id, orLex(probabilityOf(a[l.id]), 0)]),
     );
   }
 
@@ -473,8 +507,8 @@ export class JevJudge {
     try {
       const a = await this.ask("status", req.state, req.questions);
       return {
-        overall: noulOf(a.overall),
-        subs: ctx.subQuestions.map((_, j) => noulOf(a[`sub::${j}`])),
+        overall: probabilityOf(a.overall),
+        subs: ctx.subQuestions.map((_, j) => probabilityOf(a[`sub::${j}`])),
       };
     } finally {
       this.stat("status").ms += Math.round(performance.now() - t0);

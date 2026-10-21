@@ -64,6 +64,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/core": "workspace:*",
     "@opengeni/db": "workspace:*",
+    "@opengeni/decisions": "workspace:*",
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
