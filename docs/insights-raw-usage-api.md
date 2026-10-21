@@ -93,17 +93,28 @@ Its `truncated` result means more scan work remains, even when this page found
 no missing facts. Callers must continue until it is false. Counts describe only
 the missing keys resolved by that page, not an estimate of the remaining scan.
 
-The discovery phase reads ledger `(occurred_at, id)` pages and queues missing
-`(turn_id, source_key)` keys. The repair phase reads each queued turn's usage
-history once in timestamp/id order, including historical payload keys without a
-backfilled `usage_source_key`. It fetches full payloads only for matching keys.
-Unrepairable keys are drained in bounded pages; they cannot starve later rows.
+The first discovery phase reads ledger `(occurred_at, id)` pages and queues missing
+`(turn_id, source_key)` keys. After bootstrap, ledger and usage-event INSERT
+triggers capture new arrivals in the same transaction as the source write;
+idempotent ledger replays that fill missing attribution enqueue the key too.
+Completed windows are **not** re-scanned. This catches late/backdated commits
+without treating transaction-start or event timestamps as commit order.
+The repair phase claims at most one input page of keys, drops keys whose soft
+fact write already succeeded, and reads the missing turn's usage history in
+timestamp/id pages, including historical payload keys without a backfilled
+`usage_source_key`. It fetches full payloads only for matching keys.
+An arrival reopens its queued key by clearing its batch id; a consumer deletes
+only its own batch. Thus an event arriving behind an active history cursor is
+retried from the beginning, not silently consumed by that older scan.
+Unrepairable keys are drained in bounded pages; a later event requeues them.
+They cannot starve later rows or cost another scan on every maintenance tick.
 The two workspace-scoped FORCE-RLS tables retain the cursor and candidates.
 Queue changes, fact inserts and cursor advancement share one transaction. An
 aborted page rolls back; another process resumes the last committed page. A slow
-sweep completes its captured window before advancing to a new window, bridging
-the elapsed interval instead of skipping it. Recent overlapping windows still
-recheck late events. The existing historical backfill remains separate.
+sweep completes its captured window before advancing the queue's eligibility
+cutoff. Queue arrivals older than the caller's lookback remain eligible. The
+existing historical backfill remains separate; widening a completed bootstrap's
+window does not launch a new historical sweep.
 
 Repair preserves first-event selection, durable billing annotations and existing
 facts. It never charges or rewrites the usage/credit ledger. Concurrent sweepers
@@ -124,13 +135,14 @@ No deployment-wide timeout or resource setting is changed. Externally injected
 drivers lacking this cancellation capability fail explicitly for this activity;
 hosts can use `createDb` for the maintenance connection.
 
-Migrations 0890–0893 are rolling: new FORCE-RLS state plus concurrently built
-indexes. Run them before new worker code. Old workers ignore the new state and
+Migrations 0890–0894 are rolling: new FORCE-RLS state, invoker arrival triggers,
+and concurrently built indexes. Run them before new worker code. Old workers ignore the new state and
 may duplicate repair attempts during a rollout; the existing unique fact key
 keeps insertion idempotent. They retain their old query until drained. The event
 index covers only `agent.model.usage`, not every streamed session event. The
-ledger paging/source indexes add write and storage cost; measure their size and
-the full sweep, not just its first page, when evaluating this change.
+ledger paging/source indexes and queue upserts add write and storage cost;
+measure ingestion, the first full sweep and incremental runs, not just the first
+page, when evaluating this change.
 
 ## Hourly rollup lifecycle
 

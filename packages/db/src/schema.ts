@@ -13021,9 +13021,15 @@ export const modelCallFactReconciliationCandidates = pgTable(
     sessionId: uuid("session_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     sourceKey: text("source_key").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    batchId: uuid("batch_id"),
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.turnId, table.sourceKey] }),
+    ready: index("model_fact_reconciliation_ready_idx")
+      .on(table.workspaceId, table.occurredAt, table.turnId, table.sourceKey)
+      .where(sql`${table.batchId} is null`),
+    batch: index("model_fact_reconciliation_batch_idx").on(table.workspaceId, table.batchId),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],

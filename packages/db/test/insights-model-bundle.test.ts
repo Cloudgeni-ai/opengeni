@@ -394,6 +394,253 @@ function sessionRelationLoops(value: unknown, loops: number[] = []): number[] {
 }
 
 describe("Workspace Insights model bundle", () => {
+  test("incremental queue ingestion and native-adapter maintenance budget", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const turnId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (id,account_id,workspace_id,session_id,trigger_event_id,
+      temporal_workflow_id,status,position,prompt,model,reasoning_effort,latency_mode,sandbox_backend,resources,tools,metadata)
+      values (${turnId},${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${crypto.randomUUID()},
+        ${`session-${seeded.sharedSessionId}`},'completed',100,'ingestion fixture','fixture','medium','standard','none','[]','[]','{}')`;
+    const samples = { without: [] as number[], with: [] as number[] };
+    const rollback = new Error("rollback ingestion benchmark");
+    const ingest = async (tx: postgres.TransactionSql) => {
+      await tx`insert into usage_events (account_id,workspace_id,event_type,quantity,unit,
+        source_resource_type,source_resource_id,session_id,turn_id,occurred_at,idempotency_key)
+        select ${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros',
+          'model_response',${turnId}||':ingest-'||n,${seeded.sharedSessionId},${turnId},'2026-08-15',${turnId}||':ingest-'||n
+        from generate_series(1,1000) g(n)`;
+      await tx`insert into session_events (account_id,workspace_id,session_id,turn_id,turn_association,
+        sequence,type,payload,occurred_at)
+        select ${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${turnId},'current',
+          (select coalesce(max(sequence),0) from session_events where session_id=${seeded.sharedSessionId})+n,
+          'agent.model.usage',jsonb_build_object('sourceKey','ingest-'||n,'provider','openai',
+            'providerApi','responses','model','fixture'),'2026-08-15'
+        from generate_series(1,1000) g(n)`;
+    };
+    for (let trial = 0; trial < 3; trial++)
+      for (const enabled of [false, true]) {
+        try {
+          await shared.admin.begin(async (tx) => {
+            if (!enabled) {
+              await tx`alter table usage_events disable trigger model_fact_reconciliation_ledger_arrival`;
+              await tx`alter table session_events disable trigger model_fact_reconciliation_event_arrival`;
+            }
+            const start = performance.now();
+            await ingest(tx);
+            samples[enabled ? "with" : "without"].push(performance.now() - start);
+            throw rollback;
+          });
+        } catch (error) {
+          if (error !== rollback) throw error;
+        }
+      }
+    const window = {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-15"),
+      until: new Date("2026-08-16"),
+      limit: 500,
+      signal: new AbortController().signal,
+      deadlineAtMs: Date.now() + 180000,
+    };
+    expect(await reconcileModelCallFacts(client.db, window)).toMatchObject({ truncated: false });
+    await shared.admin.begin(ingest);
+    await shared.admin`insert into model_call_facts (account_id,workspace_id,session_id,turn_id,source_key,
+      provider,provider_api,model,billing_path,priced_cost_micros,occurred_at)
+      select ${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${turnId},'ingest-'||n,
+        'openai','responses','fixture','opengeni_credits',1,'2026-08-15' from generate_series(1,1000) g(n)`;
+    const start = performance.now();
+    let pages = 0;
+    for (;;) {
+      const result = await reconcileModelCallFacts(client.db, window);
+      pages++;
+      expect(result.missing).toBe(0);
+      if (!result.truncated) break;
+      if (pages > 2) throw new Error("Native incremental queue did not drain");
+    }
+    expect(pages).toBe(2);
+    if (process.env.INSIGHTS_EXPLAIN === "1")
+      console.log("native incremental and ingestion", {
+        newRows: 1000,
+        pages,
+        wallMs: performance.now() - start,
+        ingestionSamplesMs: samples,
+      });
+  }, 180_000);
+
+  test("an arrival behind a claimed history cursor is reopened, not lost", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const turnId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (id,account_id,workspace_id,session_id,trigger_event_id,
+      temporal_workflow_id,status,position,prompt,model,reasoning_effort,latency_mode,sandbox_backend,resources,tools,metadata)
+      values (${turnId},${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${crypto.randomUUID()},
+        ${`session-${seeded.sharedSessionId}`},'completed',100,'arrival fixture','fixture','medium','standard','none','[]','[]','{}')`;
+    const append = async (
+      key: string,
+      at: string,
+      writer: postgres.Sql | postgres.TransactionSql = shared!.admin,
+    ) => {
+      await writer`insert into session_events
+        (account_id,workspace_id,session_id,turn_id,turn_association,sequence,type,payload,occurred_at)
+        values (${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${turnId},'current',
+          (select coalesce(max(sequence),0)+1 from session_events where session_id=${seeded.sharedSessionId}),
+          'agent.model.usage',${shared!.admin.json({ sourceKey: key, provider: "openai", providerApi: "responses", model: "fixture" })},${at})`;
+    };
+    for (let n = 1; n <= 3; n++) await append(`unrelated-${n}`, `2026-08-15T00:00:0${n}Z`);
+    await shared.admin`insert into usage_events
+      (account_id,workspace_id,event_type,quantity,unit,source_resource_type,source_resource_id,session_id,turn_id,occurred_at,idempotency_key)
+      values (${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros','model_response',
+        ${turnId + ":delayed"},${seeded.sharedSessionId},${turnId},'2026-08-15',${turnId + ":delayed"})`;
+    const window = {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-15"),
+      until: new Date("2026-08-16"),
+      limit: 2,
+    };
+    expect(await reconcileModelCallFacts(client.db, window)).toMatchObject({
+      repaired: 0,
+      truncated: true,
+    });
+    const [claimed] =
+      await shared.admin`select batch_id from model_call_fact_reconciliation_candidates where workspace_id=${seeded.workspaceId}`;
+    expect(claimed!.batch_id).not.toBeNull();
+    await append("delayed", "2026-08-15T00:00:00Z");
+    const [reopened] =
+      await shared.admin`select batch_id from model_call_fact_reconciliation_candidates where workspace_id=${seeded.workspaceId}`;
+    expect(reopened!.batch_id).toBeNull();
+    let total = 0;
+    for (let n = 0; n < 10; n++) {
+      const result = await reconcileModelCallFacts(client.db, window);
+      total += result.repaired;
+      if (!result.truncated) break;
+      if (n === 9) throw new Error("Reopened arrival did not finish");
+    }
+    expect(total).toBe(1);
+    expect(await reconcileModelCallFacts(client.db, window)).toEqual({
+      missing: 0,
+      repaired: 0,
+      unrepaired: 0,
+      truncated: false,
+    });
+
+    // A source transaction starts before a completed checkpoint and commits
+    // afterwards. Neither recorded_at nor occurred_at is a safe watermark.
+    let release!: () => void, inserted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    const writer = shared.admin.begin(async (tx) => {
+      await tx`insert into usage_events
+        (account_id,workspace_id,event_type,quantity,unit,source_resource_type,source_resource_id,session_id,turn_id,occurred_at,idempotency_key)
+        values (${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros','model_response',
+          ${turnId + ":late-commit"},${seeded.sharedSessionId},${turnId},'2026-08-01',${turnId + ":late-commit"})`;
+      inserted();
+      await gate;
+    });
+    try {
+      await ready;
+      expect(await reconcileModelCallFacts(client.db, window)).toMatchObject({
+        missing: 0,
+        truncated: false,
+      });
+    } finally {
+      release();
+      await writer;
+    }
+    await append("late-commit", "2026-08-01T00:00:00Z");
+    let late = 0;
+    for (let n = 0; n < 10; n++) {
+      const result = await reconcileModelCallFacts(client.db, window);
+      late += result.repaired;
+      if (!result.truncated) break;
+      if (n === 9) throw new Error("Late commit did not finish");
+    }
+    expect(late).toBe(1);
+
+    await shared.admin`insert into usage_events
+      (account_id,workspace_id,event_type,quantity,unit,source_resource_type,source_resource_id,session_id,turn_id,occurred_at,idempotency_key)
+      values (${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros','model_response',
+        ${turnId + ":concurrent"},${seeded.sharedSessionId},${turnId},'2026-08-01',${turnId + ":concurrent"}),
+        (${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros','model_response',
+        ${turnId + ":concurrent-wait"},${seeded.sharedSessionId},${turnId},'2026-08-01',${turnId + ":concurrent-wait"})`;
+    await append("concurrent", "2026-08-01T00:00:01Z");
+    let unlock!: () => void, repairing!: () => void;
+    const held = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      repairing = resolve;
+    });
+    const repair = reconcileModelCallFactPage(client.db, { ...window, limit: 100 }, async () => {
+      repairing();
+      await held;
+      return false;
+    });
+    await Promise.race([
+      entered,
+      repair.then(() => {
+        throw new Error("Expected a claimed repair");
+      }),
+    ]);
+    let writerPid = 0;
+    const arrival = shared.admin.begin(async (tx) => {
+      const [backend] = await tx`select pg_backend_pid() as pid`;
+      writerPid = backend!.pid;
+      await append("concurrent-wait", "2026-08-01T00:00:02Z", tx);
+    });
+    // Observe immediately; finally below still joins and propagates failures.
+    void arrival.catch(() => undefined);
+    // Observe the actual conflict, rather than guessing that a launched query
+    // reached the queue. These are two connections to this isolated fixture.
+    let waiting = false;
+    try {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (writerPid) {
+          const [activity] =
+            await shared.admin`select wait_event_type from pg_stat_activity where pid=${writerPid}`;
+          if (activity?.wait_event_type === "Lock") {
+            waiting = true;
+            break;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      unlock();
+      await Promise.all([repair, arrival]);
+    }
+    const [pending] =
+      await shared.admin`select batch_id from model_call_fact_reconciliation_candidates
+      where workspace_id=${seeded.workspaceId} and source_key='concurrent-wait'`;
+    expect(pending).toBeDefined();
+    expect(pending!.batch_id).toBeNull();
+    expect(await reconcileModelCallFacts(client.db, { ...window, limit: 100 })).toMatchObject({
+      repaired: 1,
+      truncated: false,
+    });
+    await shared.admin`insert into usage_events
+      (account_id,workspace_id,event_type,quantity,unit,source_resource_type,source_resource_id,occurred_at,idempotency_key)
+      values (${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros','model_response',
+        ${turnId + ":attribution"},'2026-08-01',${turnId + ":attribution"})`;
+    await append("attribution", "2026-08-01T00:00:03Z");
+    expect(await reconcileModelCallFacts(client.db, window)).toMatchObject({
+      missing: 0,
+      truncated: false,
+    });
+    // recordUsageEvent's idempotent replay fills nullable attribution this way.
+    await shared.admin`update usage_events set session_id=${seeded.sharedSessionId},turn_id=${turnId}
+      where workspace_id=${seeded.workspaceId} and idempotency_key=${turnId + ":attribution"}`;
+    expect(await reconcileModelCallFacts(client.db, { ...window, limit: 100 })).toMatchObject({
+      repaired: 1,
+      truncated: false,
+    });
+  });
+
   test("one-row ledger and event pages preserve PostgreSQL microseconds and frozen windows", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
@@ -587,6 +834,10 @@ describe("Workspace Insights model bundle", () => {
       await app.end();
     }
     const repairStatements: CapturedStatement[] = [];
+    // Simulate an initial upgrade over history with pre-existing gaps. Later
+    // normal runs must use the arrival queue, not discover deletions made by
+    // this fixture behind the already-completed historical checkpoint.
+    await shared.admin`delete from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`;
     const repairClient = instrumentedDb(repairStatements);
     const repairStart = performance.now();
     let pages = 0,
@@ -640,6 +891,7 @@ describe("Workspace Insights model bundle", () => {
     if (process.env.INSIGHTS_EXPLAIN === "1") {
       await shared.admin`delete from model_call_facts where turn_id=${turnId} and source_key in
         (select 'scale-' || n from generate_series(${size - gaps + 1}::integer,${size}::integer) g(n))`;
+      await shared.admin`delete from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`;
       const start = performance.now();
       const times: number[] = [];
       let total = 0;
@@ -694,6 +946,59 @@ describe("Workspace Insights model bundle", () => {
         wallMs: performance.now() - completeStart,
       });
     }
+    // A second run sees only newly committed arrivals, even if their logical
+    // timestamps are behind the completed checkpoint. Use live triggers here.
+    const newRows = 1000;
+    const ingestStart = performance.now();
+    await shared.admin`insert into usage_events (account_id,workspace_id,event_type,quantity,unit,
+      source_resource_type,source_resource_id,session_id,turn_id,idempotency_key,occurred_at)
+      select ${seeded.accountId},${seeded.workspaceId},'model.cost',1,'usd_micros',
+        'model_response',${turnId}||':incremental-'||n,${seeded.sharedSessionId},${turnId},
+        'incremental-'||n,'2026-08-15'::timestamptz from generate_series(1,${newRows}) g(n)`;
+    const ingestMs = performance.now() - ingestStart;
+    await shared.admin`insert into model_call_facts (account_id,workspace_id,session_id,turn_id,source_key,
+      provider,provider_api,model,billing_path,priced_cost_micros,occurred_at)
+      select ${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${turnId},
+        'incremental-'||n,'openai','responses','fixture','opengeni_credits',1,'2026-08-15'::timestamptz
+      from generate_series(1,${newRows}) g(n)`;
+    const incrementalStatements: CapturedStatement[] = [];
+    const incrementalClient = instrumentedDb(incrementalStatements);
+    const incrementalStart = performance.now();
+    let incrementalPages = 0;
+    try {
+      for (;;) {
+        const result = await reconcileModelCallFacts(incrementalClient.db, {
+          workspaceId: seeded.workspaceId,
+          since: new Date("2026-08-15"),
+          until: new Date("2026-08-16"),
+          limit: pageSize,
+        });
+        expect(result.repaired).toBe(0);
+        incrementalPages++;
+        if (!result.truncated) break;
+        if (incrementalPages > 3) throw new Error("Incremental scan revisited history");
+      }
+    } finally {
+      await incrementalClient.close();
+    }
+    expect(incrementalPages).toBe(2);
+    expect(incrementalStatements.some((s) => s.query.includes("-- model-fact-ledger-page"))).toBe(
+      false,
+    );
+    expect(
+      incrementalStatements.some((s) =>
+        s.query.includes("payload->>'sourceKey' as source_key,turn_association"),
+      ),
+    ).toBe(false);
+    if (process.env.INSIGHTS_EXPLAIN === "1")
+      console.log("incremental after 1000 arrivals", {
+        historicalRows: size,
+        newRows,
+        pages: incrementalPages,
+        wallMs: performance.now() - incrementalStart,
+        ingestMs,
+        statements: incrementalStatements.length,
+      });
   }, 180_000);
 
   test("reads each window once through the scoped projection and aggregates in grouping sets", async () => {
@@ -1170,10 +1475,13 @@ describe("Workspace Insights model bundle", () => {
     if (!shared || !client) return;
     const seeded = await fixture();
     const occurredAt = new Date("2026-08-15T10:00:00.000Z");
+    // Source keys are turn-scoped: a mixed-turn queue batch must never consume
+    // another turn's key merely because their provider keys happen to match.
+    const sharedSourceKey = `reconcile-${crypto.randomUUID()}`;
     const calls = ["with-event", "without-event", "already-faceted"].map((label, index) => ({
       label,
       turnId: crypto.randomUUID(),
-      sourceKey: `reconcile-${label}-${crypto.randomUUID()}`,
+      sourceKey: sharedSourceKey,
       costMicros: [1200, 800, 500][index]!,
       // The unrepairable call is oldest. Durable page progress must reach the
       // repairable call behind it without ranking the entire window first.
@@ -1361,9 +1669,25 @@ describe("Workspace Insights model bundle", () => {
 
     const again = await finishSweep();
     expect(again).toEqual({
-      missing: 1,
+      missing: 0,
       repaired: 0,
-      unrepaired: 1,
+      unrepaired: 0,
+      truncated: false,
+    });
+    expect(await ledgerState()).toEqual(unchanged);
+
+    // No repeated polling of the missing event. Its eventual commit reopens
+    // the exact key, even with an old timestamp and a completed checkpoint.
+    const delayed = calls[1]!;
+    await shared.admin`insert into session_events
+      (account_id,workspace_id,session_id,turn_id,turn_association,sequence,type,payload,occurred_at)
+      values (${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${delayed.turnId},
+        'current',(select max(sequence)+1 from session_events where session_id=${seeded.sharedSessionId}),
+        'agent.model.usage',${shared.admin.json({ sourceKey: delayed.sourceKey, provider: "openai", providerApi: "responses", model: "fixture" })},${occurredAt})`;
+    expect(await finishSweep()).toEqual({
+      missing: 1,
+      repaired: 1,
+      unrepaired: 0,
       truncated: false,
     });
     expect(await ledgerState()).toEqual(unchanged);
@@ -1388,9 +1712,9 @@ describe("Workspace Insights model bundle", () => {
           'agent.model.usage', '{"sourceKey":""}'::jsonb, ${occurredAt})`;
     }
     expect(await finishSweep()).toEqual({
-      missing: 2,
+      missing: 1,
       repaired: 0,
-      unrepaired: 2,
+      unrepaired: 1,
       truncated: false,
     });
   });

@@ -18,6 +18,8 @@ CREATE TABLE model_call_fact_reconciliation_candidates (
   session_id uuid NOT NULL,
   turn_id uuid NOT NULL,
   source_key text NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  batch_id uuid,
   PRIMARY KEY (workspace_id, turn_id, source_key),
   FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
@@ -32,3 +34,9 @@ DO $$ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON model_call_fact_reconciliation_candidates TO opengeni_app;
   END IF;
 END $$;
+
+CREATE INDEX model_fact_reconciliation_ready_idx
+  ON model_call_fact_reconciliation_candidates(workspace_id, occurred_at, turn_id, source_key)
+  WHERE batch_id IS NULL;
+CREATE INDEX model_fact_reconciliation_batch_idx
+  ON model_call_fact_reconciliation_candidates(workspace_id, batch_id);

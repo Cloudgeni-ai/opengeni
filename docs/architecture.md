@@ -1734,8 +1734,9 @@ tokens per second is derived, not stored:
 positive.
 
 The control worker repairs missing call facts through the durable,
-input-paged ledger/event sweep in `packages/db/src/model-call-fact-reconciliation.ts`;
-each page commits its progress with its facts, and its database work is joined to
+input-paged bootstrap and commit-coupled arrival queue in
+`packages/db/src/model-call-fact-reconciliation.ts`; completed windows are not
+rescanned. Each page commits its progress with its facts, and its database work is joined to
 the activity's existing run deadline and cancellation. See the
 [reconciliation lifecycle](insights-raw-usage-api.md#missing-model-fact-reconciliation).
 Insights retains private/deleted/unmatched amounts. Details require actor

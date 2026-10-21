@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, rlsContextForWorkspace, withRlsContext, type Database } from "./database";
 import type { ModelCallFactReconciliation } from "./insights";
@@ -11,12 +11,14 @@ const Checkpoint = z.object({
   complete: z.boolean(),
   phase: z.enum(["ledger", "events"]),
   after: Position.nullable(),
+  batchId: z.string().uuid().nullable(),
   turn: z
     .object({
       sessionId: z.string().uuid(),
       turnId: z.string().uuid(),
       after: Position.nullable(),
       exhausted: z.boolean(),
+      batchId: z.string().uuid(),
     })
     .nullable(),
 });
@@ -33,8 +35,9 @@ type UsageEvent = {
 };
 
 /** Advance bounded input pages, not an unbounded scan with bounded output.
- * Discovery queues missing keys before repair so every missing turn's history
- * is read once per sweep, including legacy events with no usage_source_key.
+ * A first historical sweep discovers old gaps. Commit-coupled triggers queue
+ * subsequent ledger/event arrivals, including backdated commits. A bounded
+ * claimed batch scans a turn's history, including legacy unkeyed events.
  * Progress, queue changes and repairs commit together. Failed or interrupted
  * pages replay safely; permanent gaps cannot starve later ledger rows.
  */
@@ -70,8 +73,9 @@ export async function reconcileModelCallFactPage(
       .for("update");
     if (!row) throw new Error("Model fact reconciliation scope disappeared");
     const prior = row.checkpoint === null ? null : Checkpoint.parse(row.checkpoint);
-    // A slow sweep may finish after its original lookback has elapsed. Resume
-    // from its end, not just now-minus-lookback, so no interval is skipped.
+    // Only bootstrap reads the historical ledger. Triggers capture every new
+    // commit; using occurred_at/recorded_at as a high-water mark would miss
+    // transactions that commit late with an older timestamp.
     const checkpoint: ModelFactCheckpoint =
       prior === null || prior.complete
         ? {
@@ -81,8 +85,9 @@ export async function reconcileModelCallFactPage(
                 : input.since.toISOString(),
             until: input.until.toISOString(),
             complete: false,
-            phase: "ledger",
+            phase: prior === null ? "ledger" : "events",
             after: null,
+            batchId: null,
             turn: null,
           }
         : prior;
@@ -109,12 +114,12 @@ export async function reconcileModelCallFactPage(
         ), page as materialized (
           select * from input_page order by occurred_at,id limit ${limit}
         ), candidate as materialized (
-          select session_id,turn_id,substr(source_resource_id,38) as source_key
+          select session_id,turn_id,substr(source_resource_id,38) as source_key,occurred_at
           from page where session_id is not null and turn_id is not null
             and source_resource_type='model_response'
             and left(source_resource_id,37)=turn_id::text||':'
         ), queued as (
-          insert into ${queue} (account_id,workspace_id,session_id,turn_id,source_key)
+          insert into ${queue} (account_id,workspace_id,session_id,turn_id,source_key,occurred_at)
           select ${context.accountId}::uuid,${input.workspaceId}::uuid,candidate.*
           from candidate
           where not exists (select 1 from ${schema.modelCallFacts} fact
@@ -138,14 +143,40 @@ export async function reconcileModelCallFactPage(
     }
 
     if (checkpoint.phase === "events") {
+      if (!checkpoint.batchId) {
+        // Claim a bounded input page before checking facts. Ordinary writes
+        // usually filled the soft fact already, so no event reads are needed.
+        const batchId = crypto.randomUUID();
+        checkpoint.batchId = batchId;
+        await scoped.execute(sql`
+          with ready as materialized (
+            select turn_id,source_key from ${queue}
+            where workspace_id=${input.workspaceId}::uuid and batch_id is null
+              and occurred_at<${checkpoint.until}::timestamptz
+            order by occurred_at,turn_id,source_key limit ${limit}
+            for update
+          ) update ${queue} q set batch_id=${batchId}::uuid from ready r
+            where q.workspace_id=${input.workspaceId}::uuid
+              and q.turn_id=r.turn_id and q.source_key=r.source_key
+          `);
+        // Separate statements see the claim and preserve producer/consumer
+        // serialization. A producer that waits here reopens the key on commit.
+        await scoped.execute(sql`delete from ${queue} q
+          where workspace_id=${input.workspaceId}::uuid and batch_id=${batchId}::uuid
+            and exists(select 1 from ${schema.modelCallFacts} f
+              where f.workspace_id=q.workspace_id and f.turn_id=q.turn_id
+                and f.source_key=q.source_key offset 0)`);
+      }
       if (!checkpoint.turn) {
+        const batchId = checkpoint.batchId!;
         const [first] = await scoped
           .select({ sessionId: queue.sessionId, turnId: queue.turnId })
           .from(queue)
-          .where(workspace)
-          .orderBy(queue.turnId, queue.sourceKey)
+          .where(and(workspace, eq(queue.batchId, batchId)))
           .limit(1);
-        if (first) checkpoint.turn = { ...first, after: null, exhausted: false };
+        if (first) {
+          checkpoint.turn = { ...first, batchId, after: null, exhausted: false };
+        } else checkpoint.batchId = null;
       }
       const turn = checkpoint.turn;
       if (turn && !turn.exhausted) {
@@ -164,6 +195,8 @@ export async function reconcileModelCallFactPage(
           from ${schema.sessionEvents}
           where workspace_id=${input.workspaceId}::uuid and session_id=${turn.sessionId}::uuid
             and turn_id=${turn.turnId}::uuid and type='agent.model.usage'
+            and exists (select 1 from ${queue} q where q.workspace_id=${input.workspaceId}::uuid
+              and q.batch_id=${turn.batchId}::uuid and q.turn_id=${turn.turnId}::uuid)
             ${turn.after ? sql`and (occurred_at,id)>(${turn.after.at}::timestamptz,${turn.after.id}::uuid)` : sql``}
           order by occurred_at,id limit ${limit + 1}`,
         );
@@ -181,7 +214,14 @@ export async function reconcileModelCallFactPage(
           ? await scoped
               .select({ sourceKey: queue.sourceKey })
               .from(queue)
-              .where(and(workspace, eq(queue.turnId, turn.turnId), inArray(queue.sourceKey, keys)))
+              .where(
+                and(
+                  workspace,
+                  eq(queue.batchId, turn.batchId),
+                  eq(queue.turnId, turn.turnId),
+                  inArray(queue.sourceKey, keys),
+                ),
+              )
           : [];
         let noCandidatesRemain = false;
         if (candidates.length) {
@@ -213,6 +253,7 @@ export async function reconcileModelCallFactPage(
           await scoped.delete(queue).where(
             and(
               workspace,
+              eq(queue.batchId, turn.batchId),
               eq(queue.turnId, turn.turnId),
               inArray(
                 queue.sourceKey,
@@ -223,7 +264,7 @@ export async function reconcileModelCallFactPage(
           const [remaining] = await scoped
             .select({ sourceKey: queue.sourceKey })
             .from(queue)
-            .where(and(workspace, eq(queue.turnId, turn.turnId)))
+            .where(and(workspace, eq(queue.batchId, turn.batchId), eq(queue.turnId, turn.turnId)))
             .limit(1);
           noCandidatesRemain = !remaining;
         }
@@ -237,7 +278,7 @@ export async function reconcileModelCallFactPage(
         const unresolved = await scoped
           .select({ sourceKey: queue.sourceKey })
           .from(queue)
-          .where(and(workspace, eq(queue.turnId, turn.turnId)))
+          .where(and(workspace, eq(queue.batchId, turn.batchId), eq(queue.turnId, turn.turnId)))
           .orderBy(queue.sourceKey)
           .limit(limit + 1);
         const page = unresolved.slice(0, limit);
@@ -246,6 +287,7 @@ export async function reconcileModelCallFactPage(
           await scoped.delete(queue).where(
             and(
               workspace,
+              eq(queue.batchId, turn.batchId),
               eq(queue.turnId, turn.turnId),
               inArray(
                 queue.sourceKey,
@@ -257,12 +299,29 @@ export async function reconcileModelCallFactPage(
         if (unresolved.length <= limit) checkpoint.turn = null;
       }
       if (!checkpoint.turn) {
+        if (checkpoint.batchId) {
+          const [next] = await scoped
+            .select({ sessionId: queue.sessionId, turnId: queue.turnId })
+            .from(queue)
+            .where(and(workspace, eq(queue.batchId, checkpoint.batchId)))
+            .limit(1);
+          if (next)
+            checkpoint.turn = {
+              ...next,
+              batchId: checkpoint.batchId,
+              after: null,
+              exhausted: false,
+            };
+          else checkpoint.batchId = null;
+        }
         const [remaining] = await scoped
           .select({ turnId: queue.turnId })
           .from(queue)
-          .where(workspace)
+          .where(
+            and(workspace, isNull(queue.batchId), lt(queue.occurredAt, new Date(checkpoint.until))),
+          )
           .limit(1);
-        checkpoint.complete = !remaining;
+        checkpoint.complete = !checkpoint.turn && !remaining;
       }
     }
     input.signal?.throwIfAborted();

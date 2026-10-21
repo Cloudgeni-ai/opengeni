@@ -44,6 +44,7 @@ describe("release schema contract", () => {
       "0891_model_fact_ledger_pages.sql",
       "0892_model_fact_event_pages.sql",
       "0893_model_fact_ledger_source.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
     ]) {
       expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
         path,
@@ -2339,6 +2340,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0894_model_fact_reconciliation_arrivals.sql",
       "0893_model_fact_ledger_source.sql",
       "0892_model_fact_event_pages.sql",
       "0891_model_fact_ledger_pages.sql",
