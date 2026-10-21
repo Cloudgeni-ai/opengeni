@@ -2067,6 +2067,14 @@ later change to a reviewed Version path fails closed; choose an earlier green
 tip. The admission job reports `release_source_sha`, `version_provenance_sha`
 and `release_admission_mode`; the candidate receipt schema is unchanged.
 
+Recover a failed full-main run intended for release with **Re-run all jobs**, not
+"Re-run failed jobs": the canary image and full-green receipts must come from the
+same selected attempt. A green provider run with stale image receipts is still
+ineligible. `latest-green-main.ts` discovers full-CI-green SHAs, not complete
+Version-release eligibility; a tip with pending changesets or altered reviewed
+Version content is rejected by admission. Prefer the isolated Version merge's own
+fully green run or a qualifying descendant, never relax those checks.
+
 Do not recreate admission from a live review list, a review comment, a commit
 message, or a local record. The ordinary operator still records identity fields
 (`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on

@@ -807,7 +807,11 @@ Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
 the controller owns the single unchanged-input flaky retry. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
 Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
-the plan and task receipts are deliberately bound to one run attempt. Changes to
+the plan and task receipts are deliberately bound to one run attempt.
+Full main CI also requires **Re-run all jobs** when recovering a release candidate:
+the Full CI and canary image receipts must belong to the same selected attempt.
+A partial rerun can turn the provider run green while leaving the SHA ineligible
+for release. Changes to
 the batcher or its CI control files require an isolated batch and explicit
 independent review of those control-plane changes.
 
