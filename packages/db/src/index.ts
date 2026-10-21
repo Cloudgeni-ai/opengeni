@@ -36805,6 +36805,15 @@ export type ListSessionEventsOptions = {
    */
   retainPresentedToolCalls?: boolean;
   /**
+   * Full-mode step reads: return each `agent.toolCall.output` payload larger
+   * than SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES as a bounded preview
+   * (long strings keep their head and tail around an explicit omission
+   * marker) carrying an `outputPreview` fact. Readers load one row's exact
+   * payload with an ordinary full read when they need it. No effect in other
+   * payload modes.
+   */
+  toolOutputPreview?: boolean;
+  /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
    * not compete with current truth. Durable session sequence is authoritative
@@ -36877,6 +36886,16 @@ export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
  */
 export const SESSION_EVENT_FULL_READ_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const SESSION_EVENT_FULL_READ_PREVIEW_CHARS = 32 * 1024;
+/** A previewed step read returns tool-output payloads up to this size exactly. */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES = 4 * 1024;
+/** Hard ceiling of one previewed tool-output payload (structured or text). */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES = 16 * 1024;
+/** Strings longer than this keep only their head and tail in a preview. */
+const TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS = 2048;
+const TOOL_OUTPUT_PREVIEW_HEAD_CHARS = 1024;
+const TOOL_OUTPUT_PREVIEW_TAIL_CHARS = 512;
+/** Nesting below `output` whose strings are shortened in place (output.content[i].text is 3). */
+const TOOL_OUTPUT_PREVIEW_DEPTH = 4;
 const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
@@ -36963,6 +36982,8 @@ export async function listSessionEventPage(
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
   const direction = options.direction ?? (hasBefore ? "before" : "after");
   const payloadMode = options.payloadMode ?? "full";
+  const toolOutputPreview = payloadMode === "full" && options.toolOutputPreview === true;
+  const transferBytesSql = sessionEventTransferBytes(toolOutputPreview);
   const typeFilters = resolveSessionEventTypeFilters({
     includeTypes: options.includeTypes,
     excludeTypes: options.excludeTypes,
@@ -37087,7 +37108,7 @@ export async function listSessionEventPage(
             ),
             bounded as (
               select ordered.id, ordered.row_number,
-                octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                ${transferBytesSql} + 1
                   as cumulative_transfer_bytes
               from ordered
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37095,7 +37116,7 @@ export async function listSessionEventPage(
               union all
               select ordered.id, ordered.row_number,
                 bounded.cumulative_transfer_bytes
-                  + octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                  + ${transferBytesSql} + 1
               from bounded
               join ordered on ordered.row_number = bounded.row_number + 1
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37108,7 +37129,7 @@ export async function listSessionEventPage(
           ) as session_event_page_selected`;
           const selectedRows = await scopedDb
             .select({
-              ...sessionEventProjectionSelect("full"),
+              ...sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
               sourceRowCount: sql<number>`session_event_page_selected.source_row_count`,
             })
             .from(schema.sessionEvents)
@@ -37127,7 +37148,7 @@ export async function listSessionEventPage(
           // public event, so this conservatively bounds ordinary page transfer.
           // One oversized event is selected alone and remains exact.
           const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect())
+            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
             .from(schema.sessionEvents)
             .where(and(...filters))
             .orderBy(ordering)
@@ -37166,7 +37187,9 @@ export async function listSessionEventPage(
 
           if (exactIds.length > 0) {
             rows = await scopedDb
-              .select(sessionEventProjectionSelect("full"))
+              .select(
+                sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
+              )
               .from(schema.sessionEvents)
               .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
               .orderBy(ordering)
@@ -37194,6 +37217,7 @@ export async function listSessionEventPage(
         }
         const event = mapProjectedEvent(row);
         if (row.payloadReadBounded === true) fullPayloadsExact = false;
+        if (toolOutputPreview && isToolOutputPreviewEvent(event)) fullPayloadsExact = false;
         const eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
@@ -37234,17 +37258,154 @@ export async function listSessionEventPage(
   });
 }
 
-function sessionEventProjectionMetadataSelect() {
+function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
   return {
     id: schema.sessionEvents.id,
     sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`,
+    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
   } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
+}
+
+/**
+ * Conservative transfer size used to plan a page before payloads are read. A
+ * tool output a previewed read will bound counts at most the preview ceiling.
+ */
+function sessionEventTransferBytes(toolOutputPreview: boolean): SQL {
+  const exact = sql`octet_length(row_to_json(${schema.sessionEvents})::text)::bigint`;
+  if (!toolOutputPreview) return exact;
+  return sql`case when ${toolOutputPreviewCandidate(schema.sessionEvents)}
+    then least(${exact}, ${sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES + 2048))})
+    else ${exact} end`;
+}
+
+/**
+ * A tool output a previewed read may bound: larger than the exact threshold,
+ * an object with an `output`, and not stored with the lossless string codec
+ * (shortening an encoded string would corrupt it).
+ */
+function toolOutputPreviewCandidate(
+  source: Pick<SessionEventProjectionSource, "type" | "payload" | "payloadCodecVersion">,
+): SQL {
+  return sql`(
+    ${source.type} = 'agent.toolCall.output'
+    and ${source.payloadCodecVersion} is null
+    and jsonb_typeof(${source.payload}) = 'object'
+    and (${source.payload} -> 'output') is not null
+    and octet_length((${source.payload})::text) > ${sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES))}
+  )`;
+}
+
+/** Head and tail of a long string around an explicit omission marker. */
+function toolOutputPreviewText(text: SQL): SQL {
+  const max = sql.raw(String(TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS));
+  const head = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS));
+  const tail = sql.raw(String(TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  const kept = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS + TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  return sql`case when char_length(${text}) <= ${max} then ${text}
+    else left(${text}, ${head}) || chr(10) || '…[' || (char_length(${text}) - ${kept})::text
+      || ' characters omitted from this preview]…' || chr(10) || right(${text}, ${tail})
+    end`;
+}
+
+/**
+ * Shorten the long strings of one JSON value, keeping its shape. Inline media
+ * (data URLs, `data`/`image_url` fields) is kept whole: a shortened image is
+ * not an image, so such a row falls back to the text preview below.
+ */
+function toolOutputPreviewValue(value: SQL, key: SQL | null, depth: number): SQL {
+  const text = sql`(${value} #>> '{}')`;
+  const media = key ? sql` or ${key} in ('data', 'image_url', 'blob')` : sql``;
+  const string = sql`case when left(${text}, 5) = 'data:'${media} then ${value}
+    else to_jsonb(${toolOutputPreviewText(text)}) end`;
+  if (depth >= TOOL_OUTPUT_PREVIEW_DEPTH) {
+    return sql`case when jsonb_typeof(${value}) = 'string' then ${string} else ${value} end`;
+  }
+  const k = sql.raw(`tool_output_k${depth}`);
+  const x = sql.raw(`tool_output_x${depth}`);
+  const o = sql.raw(`tool_output_o${depth}`);
+  return sql`case jsonb_typeof(${value})
+    when 'string' then ${string}
+    when 'object' then coalesce((
+      select jsonb_object_agg(${k}, ${toolOutputPreviewValue(x, k, depth + 1)})
+      from jsonb_each(${value}) as ${sql.raw(`tool_output_e${depth}`)}(${k}, ${x})
+    ), '{}'::jsonb)
+    when 'array' then coalesce((
+      select jsonb_agg(${toolOutputPreviewValue(x, null, depth + 1)} order by ${o})
+      from jsonb_array_elements(${value}) with ordinality as ${sql.raw(`tool_output_a${depth}`)}(${x}, ${o})
+    ), '[]'::jsonb)
+    else ${value}
+  end`;
+}
+
+/**
+ * The bounded preview of one tool-output payload. Every field but `output`
+ * is kept and the output keeps its shape with long strings shortened
+ * (`shape: "structured"`). When that still exceeds the preview ceiling the
+ * output becomes the head and tail of its text (`shape: "text"`). A payload
+ * within the ceiling with nothing to shorten is returned exact, without a
+ * preview fact.
+ */
+function toolOutputPreviewPayload(payload: SQLWrapper): SQL {
+  const max = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES));
+  const source = sql.raw("tool_output_source.payload");
+  const outputText = sql`coalesce(
+    case when jsonb_typeof(${source} -> 'output') = 'string' then ${source} ->> 'output' end,
+    ${source} #>> '{output,content,0,text}',
+    (${source} -> 'output')::text
+  )`;
+  const flatText = toolOutputPreviewText(outputText);
+  const fact = (shape: "structured" | "text", previewBytes: SQL) => sql`jsonb_build_object(
+    'truncated', true,
+    'reason', 'tool_output_preview',
+    'shape', ${sql.raw(`'${shape}'`)},
+    'originalBytes', tool_output_preview.original_bytes,
+    'previewBytes', ${previewBytes}
+  )`;
+  return sql`(select case
+      when octet_length(tool_output_preview.payload::text) <= ${max}
+        then case when tool_output_preview.payload = ${source} then ${source}
+          else tool_output_preview.payload || jsonb_build_object('outputPreview', ${fact(
+            "structured",
+            sql`octet_length(tool_output_preview.payload::text)`,
+          )}) end
+      else jsonb_strip_nulls(jsonb_build_object(
+        'id', left(${source} ->> 'id', 256),
+        'name', left(${source} ->> 'name', 256),
+        'status', left(${source} ->> 'status', 128),
+        'error', case
+          when jsonb_typeof(${source} -> 'error') = 'boolean' then ${source} -> 'error'
+          when ${source} #> '{output,isError}' = 'true'::jsonb then 'true'::jsonb
+        end,
+        'failed', case when jsonb_typeof(${source} -> 'failed') = 'boolean'
+          then ${source} -> 'failed' end,
+        'truncation', case when octet_length((${source} -> 'truncation')::text) <= 4096
+          then ${source} -> 'truncation' end,
+        'output', to_jsonb(${flatText}),
+        'outputPreview', ${fact("text", sql`octet_length(${flatText})`)}
+      ))
+    end
+    from (select ${payload} as payload) as tool_output_source,
+      lateral (select
+        (${source} - 'output') || jsonb_build_object(
+          'output', ${toolOutputPreviewValue(sql`(${source} -> 'output')`, null, 0)}
+        ) as payload,
+        octet_length((${source})::text) as original_bytes
+      ) as tool_output_preview)`;
+}
+
+function isToolOutputPreviewEvent(event: SessionEvent): boolean {
+  return (
+    event.type === "agent.toolCall.output" &&
+    typeof event.payload === "object" &&
+    event.payload !== null &&
+    Object.prototype.hasOwnProperty.call(event.payload, "outputPreview")
+  );
 }
 
 function sessionEventProjectionSelect(
   payloadMode: SessionEventPayloadMode = "full",
   source: SessionEventProjectionSource = schema.sessionEvents,
+  options: { toolOutputPreview?: boolean | undefined } = {},
 ) {
   const typeInvalid = sql`(
     octet_length(${source.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
@@ -37371,6 +37532,11 @@ function sessionEventProjectionSelect(
         ))
       )
     ))
+    ${
+      options.toolOutputPreview
+        ? sql`when ${toolOutputPreviewCandidate(source)} then ${toolOutputPreviewPayload(source.payload)}`
+        : sql``
+    }
     else ${source.payload}
   end`;
   const selectedPayload =
@@ -37494,7 +37660,12 @@ export async function listSessionEvents(
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
     const rows = await scopedDb
-      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .select(
+        sessionEventProjectionSelect(options.payloadMode ?? "full", schema.sessionEvents, {
+          toolOutputPreview:
+            (options.payloadMode ?? "full") === "full" && options.toolOutputPreview,
+        }),
+      )
       .from(schema.sessionEvents)
       .where(and(...filters))
       .orderBy(

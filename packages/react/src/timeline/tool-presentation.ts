@@ -8,6 +8,7 @@ import {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
+  retainedToolResultImages,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -1611,6 +1612,34 @@ export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
     return "machine";
   }
   return "generic";
+}
+
+/** Presentations whose collapsed row reads correctly from an output preview. */
+const PREVIEW_READABLE_KINDS: ReadonlySet<PresentedToolKind> = new Set([
+  "exec",
+  "write_stdin",
+  "apply_patch",
+  "generic",
+]);
+
+/**
+ * Whether the shared presentation of `item` reads correctly while its output
+ * is a bounded preview (`item.outputPreview`): long strings keep their head and
+ * tail, so an exit code, a tail peek, a patch summary or an error snippet stay
+ * right, and the body is shown only after the exact output is read. Every
+ * other tool needs its exact output first. True for an exact output.
+ */
+export function presentsToolOutputPreview(item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  if (item.outputPreview.shape !== "structured") return false;
+  const shown = invokedToolCall(item);
+  const kind = presentedToolKind(shown);
+  if (!PREVIEW_READABLE_KINDS.has(kind)) return false;
+  if (kind !== "generic") return true;
+  // A generic row draws retained images from its result, and parses a JSON
+  // result string whole: a cut one would not parse.
+  if (typeof shown.output === "string" && /^\s*[[{]/u.test(shown.output)) return false;
+  return retainedToolResultImages(shown.output).images.length === 0;
 }
 
 export function toolRowPresentation(

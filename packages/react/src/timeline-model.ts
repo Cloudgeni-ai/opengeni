@@ -63,6 +63,7 @@ export {
   pathDirname,
   plainToolRow,
   presentedToolKind,
+  presentsToolOutputPreview,
   runOnPresentation,
   toolRowPresentation,
   truncatePreview,

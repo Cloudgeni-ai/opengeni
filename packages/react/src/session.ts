@@ -146,6 +146,7 @@ export type {
   TimelineItem,
   TurnOutcome,
   ToolCallItem,
+  ToolOutputPreview,
   TurnEndItem,
   TurnStepsItem,
   TurnStepsState,

@@ -478,6 +478,7 @@ export type {
   TurnStepsItem,
   TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerItem,
 } from "./timeline";

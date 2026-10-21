@@ -21,6 +21,7 @@ import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isToolOutputPreviewEvent, useToolOutputReads } from "./tool-output-reads";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -466,6 +467,9 @@ export function useSessionEvents(
         limit: SESSION_TURN_STEP_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
+        // Large tool outputs arrive as bounded previews; a row reads its
+        // exact output when the reader needs it (see useToolOutputReads).
+        toolOutputs: "preview",
       }).then(
         (page) => {
           if (!isCurrent()) return;
@@ -1561,8 +1565,26 @@ export function useSessionEvents(
   const visibleStepStores = liveSteps ? stepStores : EMPTY_STEP_STORES;
   const visiblePresentedOutputs = liveSteps ? presentedOutputs : EMPTY_PRESENTED_OUTPUTS;
   const visibleTurnless = liveSteps ? turnlessSteps : EMPTY_TURNLESS_STEPS;
-  // The conversation plus loaded steps, presented results and the live
-  // turnless tail, by sequence.
+  const readToolOutput = useCallback(
+    async (sequence: number) =>
+      sessionId
+        ? (
+            await readEventPage(client, workspaceId, sessionId, {
+              includeTypes: ["agent.toolCall.output"],
+              after: Math.max(0, sequence - 1),
+              before: sequence + 1,
+              direction: "after",
+              limit: 1,
+              payloadMode: "full",
+            })
+          ).events
+        : [],
+    [client, workspaceId, sessionId],
+  );
+  const toolOutputs = useToolOutputReads(readToolOutput, stepStores);
+  const visibleToolOutputs = liveSteps ? toolOutputs.exact : EMPTY_PRESENTED_OUTPUTS;
+  // The conversation plus loaded steps, presented results, exact tool outputs
+  // and the live turnless tail, by sequence.
   const loadedEvents = useMemo(
     () =>
       mergeLoadedEvents(
@@ -1570,8 +1592,15 @@ export function useSessionEvents(
         visibleStepStores,
         visiblePresentedOutputs,
         visibleTurnless.events,
+        visibleToolOutputs,
       ),
-    [visibleEvents, visibleStepStores, visiblePresentedOutputs, visibleTurnless],
+    [
+      visibleEvents,
+      visibleStepStores,
+      visiblePresentedOutputs,
+      visibleTurnless,
+      visibleToolOutputs,
+    ],
   );
   // Turns whose steps are not all loaded get an expandable, loadable marker.
   const turnSteps = useMemo(() => {
@@ -1609,6 +1638,7 @@ export function useSessionEvents(
     const timelineOptions = {
       partialStart: visibleHasOlder || visibleTruncated || after > 0,
       ...(turnSteps ? { turnSteps } : {}),
+      ...(liveSteps ? { toolOutputs: toolOutputs.reader } : {}),
     };
     if (witness.length === 0) return buildTimeline(t, loadedEvents, timelineOptions);
     const ids = new Set(loadedEvents.map((event) => event.id));
@@ -1627,6 +1657,8 @@ export function useSessionEvents(
     client,
     streamKey,
     turnSteps,
+    liveSteps,
+    toolOutputs.reader,
     t,
   ]);
 
@@ -1637,7 +1669,8 @@ export function useSessionEvents(
     const resolved = new Set<string>(presentedOutputs.keys());
     const collect = (events: readonly SessionEvent[]) => {
       for (const event of events) {
-        if (event.type !== "agent.toolCall.output") continue;
+        // A previewed result is not presented: its exact read still runs.
+        if (event.type !== "agent.toolCall.output" || isToolOutputPreviewEvent(event)) continue;
         const id = (event.payload as Record<string, unknown> | null)?.id;
         if (typeof id === "string") resolved.add(id);
       }
@@ -2541,8 +2574,16 @@ function mergeLoadedEvents(
   stores: TurnStepStores,
   presented: ReadonlyMap<string, SessionEvent>,
   turnless: readonly SessionEvent[],
+  exactOutputs: ReadonlyMap<string, SessionEvent> = EMPTY_PRESENTED_OUTPUTS,
 ): SessionEvent[] {
-  if (stores.size === 0 && presented.size === 0 && turnless.length === 0) return conversation;
+  if (
+    stores.size === 0 &&
+    presented.size === 0 &&
+    turnless.length === 0 &&
+    exactOutputs.size === 0
+  ) {
+    return conversation;
+  }
   const turns = windowTurns(conversation);
   const ids = new Set(conversation.map((event) => event.id));
   const extra: SessionEvent[] = [];
@@ -2551,8 +2592,10 @@ function mergeLoadedEvents(
     ids.add(event.id);
     extra.push(event);
   };
-  for (const [turnId, store] of stores) if (turns.has(turnId)) store.events.forEach(add);
+  // Exact outputs first: they replace the previews a step page delivered.
   presented.forEach(add);
+  exactOutputs.forEach(add);
+  for (const [turnId, store] of stores) if (turns.has(turnId)) store.events.forEach(add);
   for (const event of turnless) {
     if (ids.has(event.id)) continue;
     ids.add(event.id);

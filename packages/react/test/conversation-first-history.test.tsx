@@ -297,6 +297,8 @@ describe("conversation-first session history", () => {
           limit: SESSION_TURN_STEP_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
+          // Large tool outputs arrive as bounded previews.
+          toolOutputs: "preview",
         },
       ]);
       let steps = stepEvents(hook.result.current.events);

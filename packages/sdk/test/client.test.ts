@@ -1595,6 +1595,20 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("listEventPage asks for tool-output previews only when requested", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      includeTypes: ["agent.toolCall.output"],
+      payloadMode: "full",
+      toolOutputs: "preview",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=full&includeTypes=agent.toolCall.output&toolOutputs=preview`,
+    );
+  });
+
   test("listEventPage sends exclusive latest lookups and rejects runtime filter conflicts", async () => {
     const event = makeEvent(42, "turn.completed", { result: "authoritative" });
     const { client, requests } = makeClient(() => jsonResponse([event]));

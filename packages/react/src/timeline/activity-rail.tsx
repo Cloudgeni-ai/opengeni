@@ -12,6 +12,7 @@ import {
   BrainCircuitIcon,
   MessageSquareTextIcon,
   SendIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   Component,
@@ -19,6 +20,7 @@ import {
   lazy,
   Suspense,
   useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -28,14 +30,20 @@ import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
-import { defaultToolRegistry } from "./tool-renderers";
+import { defaultToolRegistry, rendersToolOutputPreview } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
+import {
+  BodyNote,
+  PayloadBlock,
+  ActivityDisclosure,
+  ToolCallTruncationProvider,
+  ToolOutputPreviewProvider,
+} from "./shared";
 import { invokedToolCall } from "./invoked-tool";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
+import type { ActivityItem, AgentMessageItem, MemoryItem, ToolCallItem, WorkerItem } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
@@ -317,17 +325,26 @@ export function renderActivity(
       // A deferred tool run through tool_invoke reads as the tool it ran.
       const shown = invokedToolCall(item);
       const Renderer = toolRegistry.resolve(shown);
+      const outputPreview = item.outputPreview ?? null;
+      // A row that cannot read its preview waits for its exact output; one
+      // whose read failed falls back to the generic row, which says so.
+      const exactFirst = outputPreview !== null && !rendersToolOutputPreview(Renderer, shown);
+      const Shown =
+        exactFirst && outputPreview.state === "error" ? toolRegistry.fallback : Renderer;
       return (
-        <ToolRowBoundary
-          name={toolDisplayName(msg, shown.name)}
-          resetKeys={[item.status, Renderer]}
-        >
+        <ToolRowBoundary name={toolDisplayName(msg, shown.name)} resetKeys={[item.status, Shown]}>
           <ToolCallTruncationProvider value={item.truncation ?? null}>
-            <Renderer
-              item={shown}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-            />
+            <ToolOutputPreviewProvider value={outputPreview}>
+              {exactFirst && outputPreview.load && outputPreview.state !== "error" ? (
+                <ToolOutputExactRow item={shown} preview={outputPreview} />
+              ) : (
+                <Shown
+                  item={shown}
+                  loadRetainedScreenshot={loadRetainedScreenshot}
+                  loadRetainedArtifact={loadRetainedArtifact}
+                />
+              )}
+            </ToolOutputPreviewProvider>
           </ToolCallTruncationProvider>
         </ToolRowBoundary>
       );
@@ -363,6 +380,35 @@ export function renderActivity(
     default:
       return assertNever(item);
   }
+}
+
+/**
+ * A tool row whose renderer needs its exact output: it reads it on mount and
+ * stands in as a quiet loading row until the output lands.
+ */
+function ToolOutputExactRow({
+  item,
+  preview,
+}: {
+  item: ToolCallItem;
+  preview: NonNullable<ToolCallItem["outputPreview"]>;
+}) {
+  const msg = useOpenGeniText();
+  const pending = preview.state === "preview";
+  const load = preview.load;
+  useEffect(() => {
+    if (pending) load?.();
+  }, [pending, load]);
+  return (
+    <div data-og-tool-output-loading="" aria-busy="true">
+      <ActivityDisclosure
+        icon={<WrenchIcon className="size-3.5" />}
+        title={toolDisplayName(msg, item.name)}
+        preview={msg("timeline.toolRenderers.loadingOutput")}
+        expandable={false}
+      />
+    </div>
+  );
 }
 
 /**
