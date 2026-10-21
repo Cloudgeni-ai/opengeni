@@ -1,6 +1,6 @@
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, provisionRoles, rotateMcpOAuthRefreshToken, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";

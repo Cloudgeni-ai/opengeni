@@ -24,7 +24,7 @@
  * test replaces module bindings (`mock.module`) for the whole process.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Sql } from "postgres";
 import type { Settings } from "@opengeni/config";
 import {

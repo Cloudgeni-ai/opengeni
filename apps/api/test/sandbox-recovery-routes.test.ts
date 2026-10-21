@@ -1,7 +1,8 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { SandboxRecoveryRequest } from "@opengeni/contracts";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 // Exercise the actual HTTP adapter with a deterministic revocation immediately

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb } from "../src/database";
 import { listKnowledgeEntries, type KnowledgeContext } from "../src/knowledge-entries";
 import { seedListingFixture, type ListingFixture } from "./fixtures/knowledge-collection-listing";

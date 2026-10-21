@@ -27,7 +27,7 @@ const englishText = createOpenGeniText();
    the right words given the dispatch logic lives in JSX.
    -------------------------------------------------------------------------- */
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser

@@ -7,9 +7,9 @@ import {
   RoutingMutationOutputRejectedError,
   RoutingSandboxSession,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { TurnHistorySink } from "../src/activities/agent-turn/history-sink";
-import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { sandboxRouteTransitionCode } from "../src/activities/agent-turn/errors";
 

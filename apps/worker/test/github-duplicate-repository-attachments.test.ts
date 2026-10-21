@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { GitCredentialsRequest, ResourceRef } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithSigningSettings } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createGitHubRepositoryLookupCache,
   resolveTurnGitHubRepositoryBindings,

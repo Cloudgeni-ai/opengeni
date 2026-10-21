@@ -6,7 +6,7 @@ import {
   type ModelCallOutput,
   type ModelCallService,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const SECRET = "chat-completions-route-secret";

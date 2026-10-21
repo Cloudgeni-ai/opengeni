@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { AccessGrant, CreateScheduledTaskRequest } from "@opengeni/contracts";
 import { createValidatedScheduledTask } from "@opengeni/core";
 

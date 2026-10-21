@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Agent, Runner, tool as functionTool, type AgentOutputItem } from "@openai/agents";
-import { assistantMessage, ScriptedModel, testSettings } from "@opengeni/testing";
+import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";

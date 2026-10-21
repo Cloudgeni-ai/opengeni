@@ -9,7 +9,9 @@ import {
   enqueueSessionWorkflowWake,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { startTestServices, testSettings, waitFor, type TestServices } from "@opengeni/testing";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import {
   KNOWLEDGE_INDEXING_PERIOD_MS,
   KNOWLEDGE_INDEXING_SCHEDULE_ID,

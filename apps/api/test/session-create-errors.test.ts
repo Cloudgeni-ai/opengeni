@@ -7,7 +7,8 @@ import {
   SessionTenancyNotActivatedError,
   SessionCreateConnectionSelectionUnavailableError,
 } from "@opengeni/db";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { registerSessionRoutes, sessionCreateErrorResponse } from "../src/routes/sessions";

@@ -8,7 +8,7 @@ import {
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb } from "../src";
 import { migrate } from "../src/migrate";

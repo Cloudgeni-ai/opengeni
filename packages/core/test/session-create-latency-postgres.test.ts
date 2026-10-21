@@ -2,12 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configuredModels } from "@opengeni/config";
 import type { AccessGrant, LatencyMode } from "@opengeni/contracts";
 import { bootstrapWorkspace, claimSessionWorkForAttempt, createDb, getSession } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "../src";
 import {
   acceptSessionUserMessage,

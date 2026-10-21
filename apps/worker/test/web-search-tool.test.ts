@@ -5,7 +5,7 @@ import {
   type WebSearchBilling,
   type WebSearchCallCost,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   WebProviderHealth,
   turnWebSearchPlan,

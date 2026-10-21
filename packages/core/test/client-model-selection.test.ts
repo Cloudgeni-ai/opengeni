@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { isWorkspaceModelAdmissible, resolveWorkspaceModelSelection } from "../src/model-catalog";
 import { admissibleWorkspaceModel } from "../src/default-session-model";
 

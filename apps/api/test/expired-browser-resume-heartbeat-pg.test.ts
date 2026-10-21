@@ -19,7 +19,7 @@ import {
   prepareBrowserSessionSuspend,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { withInteractionHolderHeartbeat } from "../src/interaction-holder-heartbeat";
 
 let shared: SharedTestDatabase | null = null;

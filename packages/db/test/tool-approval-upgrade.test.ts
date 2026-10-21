@@ -4,7 +4,7 @@ import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   bootstrapWorkspace,

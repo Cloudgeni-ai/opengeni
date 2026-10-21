@@ -3,7 +3,7 @@ import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as admission from "../src/activities/agent-run-admission";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";

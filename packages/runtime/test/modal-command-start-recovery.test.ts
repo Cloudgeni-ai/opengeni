@@ -10,7 +10,7 @@ import {
 import { createRequire } from "node:module";
 import { status as Status } from "@grpc/grpc-js";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildAgentCapabilities, type TurnToolCancellationFence } from "../src/index";
 import {
   ProviderCommandStartOutcomeUnknownError,

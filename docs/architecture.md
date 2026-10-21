@@ -1901,7 +1901,7 @@ behind a generic 500, so its session lookups run through
 | `packages/desktop` | `@opengeni/desktop` | Electron kit for desktop apps: accounts, server windows, notifications, deep links, updates, and Connected Machine setup |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
-| `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
+| `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers; import the package's leaf exports so pure tests do not initialize unrelated services or schema graphs |
 
 ### 6.3 Examples
 

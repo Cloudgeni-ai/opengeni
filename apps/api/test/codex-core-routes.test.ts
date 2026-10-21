@@ -7,7 +7,7 @@ import {
   stampDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { codexAccountJson } from "../src/routes/codex";
 

@@ -11,7 +11,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   sessionEffectiveToolProjectionInput,
   sessionWithEffectiveToolPolicy,

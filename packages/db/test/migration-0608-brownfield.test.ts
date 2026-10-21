@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { executeMigrationFile } from "../src/migrate";
 import { createDb } from "../src/database";
 import { withLegacySessionActivityRlsContext as withRestoredSessionActivityRlsContext } from "./fixtures/legacy-session-activity";

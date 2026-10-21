@@ -13,12 +13,9 @@ import {
   type ScheduledTaskAdmissionRefusalReason,
 } from "@opengeni/db";
 import type { ScheduledTask } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { reconcileExhaustedScheduledTasks } from "../src/scheduled-task-lifecycle";
 import { scheduledTaskBlockerNoticeKey } from "../src/scheduled-task-blockers";
 

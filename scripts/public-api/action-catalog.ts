@@ -7,7 +7,7 @@
  * fails when a registered route is neither in the catalog nor exempt.
  */
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";

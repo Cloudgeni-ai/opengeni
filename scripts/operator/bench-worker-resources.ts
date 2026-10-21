@@ -3,12 +3,10 @@ import { createConnection, createServer } from "node:net";
 import type postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession, type Database } from "@opengeni/db";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  ScriptedModel,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { submitTestHumanPrompt } from "../../test/integration/helpers/session-control";
 import { postgresWireBudget } from "./postgres-wire-budget";

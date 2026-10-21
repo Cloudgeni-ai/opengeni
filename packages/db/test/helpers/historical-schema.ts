@@ -1,5 +1,5 @@
 import { readdir } from "node:fs/promises";
-import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate, type MigrationRuntimeOptions } from "../../src/migrate";
 import { provisionRoles } from "../../src/provision-roles";

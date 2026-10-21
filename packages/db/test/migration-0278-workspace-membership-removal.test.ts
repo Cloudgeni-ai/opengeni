@@ -2,7 +2,7 @@
 // teardown. Source contract plus the live definer posture; the behavioral
 // protocol is exercised in workspace-membership-removal.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(

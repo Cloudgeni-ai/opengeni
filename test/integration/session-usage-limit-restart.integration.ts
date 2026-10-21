@@ -4,16 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, Connection } from "@temporalio/client";
 import postgres from "postgres";
+import { acquireRestrictedRuntimeTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort, startTestServices } from "@opengeni/testing/compose";
 import {
-  acquireRestrictedRuntimeTestDatabase,
-  freePort,
   startE2eWorkerTopology,
   startProcess,
-  startTestServices,
   waitFor,
   type StartedE2eWorkerTopology,
   type StartedProcess,
-} from "@opengeni/testing";
+} from "@opengeni/testing/process";
 
 // Task usage limits across a real crash and repeated wakes: a real API process,
 // real control and turn worker processes, PostgreSQL in the restricted runtime

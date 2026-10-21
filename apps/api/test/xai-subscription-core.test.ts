@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { SUPERGROK_REALTIME_MODEL_ID } from "@opengeni/config";
 
 const settings = testSettings({ supergrokSubscriptionEnabled: true });

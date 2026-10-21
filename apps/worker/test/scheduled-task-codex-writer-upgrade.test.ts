@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   ensureManagedAccessForUser,

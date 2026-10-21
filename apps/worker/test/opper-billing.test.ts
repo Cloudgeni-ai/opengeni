@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { withWorkspaceOpperCredential } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";

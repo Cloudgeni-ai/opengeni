@@ -8,11 +8,8 @@
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import type { SubscriptionCoreClaudeCredential } from "../../../packages/db/src/subscription-core-claude-adapter";
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { installNetworkDenialGuard } from "../../../packages/db/test/fixtures/subscription-core-fake-api-key";

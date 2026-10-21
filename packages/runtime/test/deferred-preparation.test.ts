@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { MCPServer, ModelRequest } from "@openai/agents";
-import { ScriptedModel, testSettings, functionCall } from "@opengeni/testing";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { allAgentCapabilities } from "@opengeni/contracts";
 import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "../src/index";
 import { LazyToolRuntime } from "../src/lazy-tool-transport";

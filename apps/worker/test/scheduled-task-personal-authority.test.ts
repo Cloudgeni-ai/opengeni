@@ -60,10 +60,10 @@ import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legac
 import {
   acquireSharedTestDatabase,
   acquireBlankTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";

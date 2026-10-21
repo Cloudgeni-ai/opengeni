@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildAgentCapabilities } from "../src/index";
 
 // The ChatGPT/Codex backend rejects the SDK's HOSTED `apply_patch` tool type

@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentLinkNats, AgentLinkNatsMessage } from "@opengeni/events";
 import { AGENT_LINK_LOST_HEADER, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiWebSocketConnection, ApiWebSocketLike } from "../src/api-websocket";
 import { startComputeAgentGateway } from "../src/sandbox/compute-gateway-boot";
 import {

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { SESSION_EVENT_RAW_DELTA_TYPES, resolveSessionEventTypeFilters } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { eq } from "drizzle-orm";
 import type postgres from "postgres";
 import {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type Settings } from "@opengeni/config";
 import { CapabilityCatalogItem, CapabilityInstallation } from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import {
   apiIntegrationsMatchingDelegations,

@@ -43,12 +43,9 @@ import {
 } from "@opengeni/db/session-background-commands";
 import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
 import { AGENT_UNANSWERED_HEADER, NatsControlRpc, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
 import { releaseStoredConnectedCommandOutput } from "../../packages/core/src/sandbox/output-release";
 import {
   ComputeAgentIncompatibleError,

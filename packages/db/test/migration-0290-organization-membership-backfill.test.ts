@@ -5,7 +5,7 @@
 // through the exact existing lifecycle seam - and records everything it cannot
 // prove deterministically as unresolved rather than guessing it.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";

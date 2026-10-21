@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import type { StoredVaultProviderCredentials } from "@opengeni/core";
 import { DestinationPolicyError } from "@opengeni/network";
 import { createProviderCallBudget, providerOperations, VaultProviderError } from "@opengeni/vaults";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { FakeKsm, loginData } from "../../../packages/vaults-keeper/test/fake-ksm";
 import { VALID_TOKEN, makeFakeCli } from "../../../packages/vaults-protonpass/test/fixture";
 import {

@@ -13,7 +13,7 @@ import {
   mintUserJwt,
   nkeys,
 } from "@opengeni/events";
-import { freePort } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
 import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 
 const agentBinary = process.env.OPENGENI_ROTATION_PROBE_BINARY;

@@ -5,7 +5,7 @@ import {
   type KnowledgeSourceSyncAction,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createValidatedScheduledTask } from "../src/domain/scheduled-tasks";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";

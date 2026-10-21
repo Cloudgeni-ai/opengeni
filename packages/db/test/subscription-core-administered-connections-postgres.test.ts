@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } 
 import type { Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengeni/subscriptions";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";

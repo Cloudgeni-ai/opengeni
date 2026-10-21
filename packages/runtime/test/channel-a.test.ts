@@ -16,7 +16,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createHash } from "node:crypto";
 import {
   chmodSync,

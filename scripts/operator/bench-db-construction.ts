@@ -3,7 +3,7 @@ import { PgDatabase, PgDialect } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "../../packages/db/src/schema";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 // Local restricted-role fixture only. "full" reproduces the old relational
 // schema registration; "lean" uses the explicit-table configuration of createDb.

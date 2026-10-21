@@ -1,6 +1,6 @@
 import { legacyWorkspaceCodexSubscriptionActive as workspaceCodexSubscriptionActive } from "./fixtures/legacy-codex";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";

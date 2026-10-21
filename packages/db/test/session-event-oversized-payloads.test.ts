@@ -3,7 +3,7 @@ import {
   TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   sessionEventPayloadTruncation,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   appendSessionEvents,
   bootstrapWorkspace,

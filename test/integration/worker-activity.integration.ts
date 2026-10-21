@@ -113,15 +113,11 @@ import {
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { reconcilePendingParentSystemUpdates } from "../../apps/worker/src/activities/parent-wake";
-import {
-  ScriptedModel,
-  functionCall,
-  latestStatus,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  type TestServices,
-} from "@opengeni/testing";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { latestStatus } from "@opengeni/testing/assertions";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
 
 async function setSessionStatus(
   db: Database,

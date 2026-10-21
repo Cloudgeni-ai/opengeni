@@ -1,4 +1,4 @@
-import { startTestServices } from "@opengeni/testing";
+import { startTestServices } from "@opengeni/testing/compose";
 
 // WAL is cluster-wide. Always own a fresh disposable PostgreSQL instance rather
 // than sampling an operator-provided URL, which may have unrelated writers.

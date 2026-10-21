@@ -15,7 +15,7 @@ import {
   SandboxChannelAService,
   type ChannelASession,
 } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   codeSearchToolDefinitions,
   codeSearchWorkspaceFromChannel,

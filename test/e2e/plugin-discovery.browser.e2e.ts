@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 test("plugin rows and detail pages preserve keyboard focus, scrolling, and installation states", async () => {
   const port = await freePort();

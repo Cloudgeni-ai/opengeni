@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ArtifactCatalogListQuery } from "@opengeni/contracts";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   createSession,

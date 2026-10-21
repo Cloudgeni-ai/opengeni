@@ -1,5 +1,5 @@
 import { beforeAll, afterAll, test, expect } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   bootstrapWorkspace,

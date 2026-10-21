@@ -11,7 +11,18 @@
     "./subscription-reference-worlds": "./src/subscription-reference-worlds.ts",
     "./fake-login": "./src/fake-login/index.ts",
     "./rls-scope-fake": "./src/rls-scope-fake.ts",
-    "./session-usage-limits": "./src/session-usage-limits.ts"
+    "./session-usage-limits": "./src/session-usage-limits.ts",
+    "./scripted-model": "./src/scripted-model.ts",
+    "./compose": "./src/compose.ts",
+    "./object-storage-fixture": "./src/object-storage-fixture.ts",
+    "./shared-pg": "./src/shared-pg.ts",
+    "./process": "./src/process.ts",
+    "./sse": "./src/sse.ts",
+    "./assertions": "./src/assertions.ts",
+    "./settings": "./src/settings.ts",
+    "./fakes": "./src/fakes.ts",
+    "./mcp": "./src/mcp.ts",
+    "./screenshot": "./src/screenshot.ts"
   },
   "scripts": {
     "typecheck": "tsrs --noEmit"

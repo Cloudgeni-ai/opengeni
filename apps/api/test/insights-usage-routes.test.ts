@@ -7,7 +7,7 @@ import type {
 import * as core from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import {

@@ -7,7 +7,7 @@ import {
   UNLIMITED_SITE_FLOOD_BRAKES,
   type SiteHostMapRecord,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";

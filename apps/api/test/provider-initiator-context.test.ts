@@ -24,12 +24,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { verifyCredentialProviderRequest } from "@opengeni/sdk";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { bindRunCredentialResolver } from "../../worker/src/activities/run-credentials";
 import { registerSessionRoutes } from "../src/routes/sessions";

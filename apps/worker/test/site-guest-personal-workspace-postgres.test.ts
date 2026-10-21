@@ -1,12 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  assistantMessage,
-  MemoryEventBus,
-  ScriptedModel,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applyCreditLedgerEntry,
   claimSessionWorkForAttempt,

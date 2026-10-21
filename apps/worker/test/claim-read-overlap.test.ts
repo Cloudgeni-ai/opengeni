@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
 import * as core from "@opengeni/core";
 import * as dbPorts from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { measureTurnStartupPhase } from "../src/observability-metrics";
 import { claimTurnAttempt, type ClaimTurnDeps } from "../src/activities/agent-turn/claim";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";

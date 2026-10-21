@@ -186,6 +186,11 @@ export function buildTimeline(
   options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  // Calls remain in insertion order while message bubbles can move. Keep the
+  // two existing lookup rules separate: creation merges only tool rows, while
+  // an output correlates to the latest tool or worker with that exact id.
+  const toolCallsById = new Map<string, ToolCallItem>();
+  const callsById = new Map<string, ToolCallItem | WorkerItem>();
   const allowanceNotices = new Set<string>();
   // One "not saved" notice per turn for the same refused change, however
   // often the agent retried it.
@@ -895,7 +900,7 @@ export function buildTimeline(
         ) {
           const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
           const title = spawn ? workerTitle(args) : null;
-          items.push({
+          const item: WorkerItem = {
             kind: "worker",
             id: event.id,
             turnId,
@@ -907,7 +912,9 @@ export function buildTimeline(
             failure: null,
             status: "running",
             occurredAt: event.occurredAt,
-          });
+          };
+          items.push(item);
+          if (callId) callsById.set(callId, item);
           break;
         }
         if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
@@ -918,11 +925,7 @@ export function buildTimeline(
         // `RunToolCallItem` share the same item id. Merge so mid-stream cards
         // do not duplicate when the step finally materializes.
         if (callId) {
-          const existing = [...items]
-            .reverse()
-            .find(
-              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
-            );
+          const existing = toolCallsById.get(callId);
           if (existing) {
             if (display) existing.display = display;
             if (args != null) {
@@ -935,7 +938,7 @@ export function buildTimeline(
             break;
           }
         }
-        items.push({
+        const item: ToolCallItem = {
           kind: "tool-call",
           id: event.id,
           turnId,
@@ -950,13 +953,18 @@ export function buildTimeline(
           raw: payload.raw,
           status: providerNativeToolStatus(payload.raw),
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(item);
+        if (callId) {
+          toolCallsById.set(callId, item);
+          callsById.set(callId, item);
+        }
         break;
       }
 
       case "agent.toolCall.output": {
         const callId = typeof payload.id === "string" ? payload.id : null;
-        const target = findOpenCall(items, callId);
+        const target = findOpenCall(items, callId, callsById);
         if (!target) {
           break;
         }
@@ -3903,23 +3911,21 @@ function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncatio
 function findOpenCall(
   items: TimelineItem[],
   callId: string | null,
+  callsById: ReadonlyMap<string, ToolCallItem | WorkerItem>,
 ): ToolCallItem | WorkerItem | undefined {
-  const reversed = [...items].reverse();
-  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
-    item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
-    const byId = reversed.find((item) => isCall(item) && item.callId === callId);
-    if (byId) {
-      return byId as ToolCallItem | WorkerItem;
-    }
     // An explicit provider correlation id is authoritative. Falling back to
     // an unrelated running call corrupts its status/output when compact pages
     // or interleaved providers deliver an unmatched historical result.
-    return undefined;
+    return callsById.get(callId);
   }
-  return reversed.find(
-    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
-  );
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {

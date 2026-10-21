@@ -9,7 +9,7 @@ import {
   toolSearchTool,
   type Tool,
 } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
 import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {

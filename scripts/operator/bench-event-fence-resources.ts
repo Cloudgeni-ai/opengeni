@@ -1,7 +1,7 @@
 import { createConnection, createServer } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import type postgres from "postgres";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   appendSessionEvents,
   appendSessionEventsForTurnAttempt,

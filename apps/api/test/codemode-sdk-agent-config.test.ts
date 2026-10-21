@@ -5,7 +5,7 @@ import {
   type AgentConfigRequest,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import {
   assertConfiguredCodemodeSessionProxyPath,

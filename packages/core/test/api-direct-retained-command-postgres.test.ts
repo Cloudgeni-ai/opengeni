@@ -6,11 +6,8 @@ import {
   createSession,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { synchronousNativeOutputFixture } from "../../runtime/test/synchronous-output-fixture";
 import { wrapChannelABoxWithRouting } from "../src/sandbox/routing";

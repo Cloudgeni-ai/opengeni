@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, mock, test } from "bun:test";
 import { resolveStreamTokenSecret } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { verifyStreamToken } from "@opengeni/runtime/sandbox";
 import { mintSelfhostedStream, resolveActiveDesktopTransport } from "../src/sandbox/viewer";
 

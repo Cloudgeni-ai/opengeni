@@ -8,7 +8,7 @@ import {
   type AttemptToolIdentity,
   type AttemptToolResult,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { PrefixedMcpServer, prefixedMcpToolName, prepareAgentTools } from "../src";
 import { projectKnowledgeToolResultForModel } from "../src/knowledge-model-projection";
 import { unwrapSdkMcpResultProjection } from "../src/mcp-result-custom-data";

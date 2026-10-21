@@ -1,7 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { prepareDraftModel } from "../src/application/draft-model-preparation";
 
 const settings = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));

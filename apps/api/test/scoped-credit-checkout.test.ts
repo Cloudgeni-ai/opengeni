@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import Stripe from "stripe";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerBillingRoutes } from "../src/routes/billing";
 
 const accountId = "00000000-0000-4000-8000-000000000001";

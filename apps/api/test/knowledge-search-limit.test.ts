@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 test("the retired search path never invokes the old document retrieval lane", async () => {

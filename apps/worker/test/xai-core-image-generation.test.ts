@@ -7,7 +7,7 @@
  */
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { XAI_IMAGE_MODEL } from "@opengeni/xai-subscription";
 
 const originalFetch = globalThis.fetch;

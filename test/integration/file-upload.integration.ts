@@ -23,12 +23,11 @@ import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
-  MemoryEventBus,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+} from "@opengeni/testing/object-storage-fixture";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { createFileUploadReaperActivities } from "../../apps/worker/src/activities/file-upload-reaper";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";

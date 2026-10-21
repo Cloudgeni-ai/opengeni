@@ -129,7 +129,7 @@ test("missing subscription account identity fails before any network call", asyn
 
 test("run-scoped native routing preserves prompt lineage but never shares it across runners", async () => {
   const { MultiProviderModelProvider } = await import("../src/model-provider-routing");
-  const { testSettings } = await import("@opengeni/testing");
+  const { testSettings } = await import("@opengeni/testing/settings");
   const settings = testSettings({
     modelProvidersJson: JSON.stringify([
       {

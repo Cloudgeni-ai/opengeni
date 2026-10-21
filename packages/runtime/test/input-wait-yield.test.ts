@@ -6,8 +6,8 @@ import {
   functionCall,
   shellCall,
   ScriptedModel,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CompactionNeededError,

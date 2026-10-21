@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { TranscriptionServiceError } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createTranscriptionService,
   orderedProviders,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";

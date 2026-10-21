@@ -3,7 +3,7 @@ declare global {
     var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
 }
 /** Register DOM globals for this test file; unregisters after the file. */
-export declare function registerDom(): void;
+export declare function registerDom(options?: { clock?: "real" | "virtual" }): void;
 export type RenderedHook<T, P> = {
     /** Latest hook return value. */
     result: {

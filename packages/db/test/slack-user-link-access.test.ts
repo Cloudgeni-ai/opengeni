@@ -8,7 +8,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   type SlackUserLinkAccessRequest,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {

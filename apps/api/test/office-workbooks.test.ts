@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { OpStreamConnection } from "@opengeni/events";
-import { MemoryEventBus } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { chooseWorkbook, excelAddinInstallUrl } from "../src/mcp/excel-tools";
 import {
   clampTimeout,

@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   claimSessionWorkForAttempt,
   createSession,

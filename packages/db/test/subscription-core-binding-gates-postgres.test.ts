@@ -6,7 +6,7 @@
 // reach. Variant bindings of the registered Codex provider stand in for
 // future providers, as the restricted application role.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   designateSubscriptionCoreCodexApps,

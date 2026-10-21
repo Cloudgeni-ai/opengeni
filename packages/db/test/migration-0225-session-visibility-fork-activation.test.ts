@@ -7,7 +7,7 @@ import {
   personalGitHubRepositoryResources,
   validateGitHubRepositorySelection,
 } from "@opengeni/core";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql as drizzleSql } from "drizzle-orm";
 import postgres from "postgres";
 import {

@@ -6,7 +6,7 @@ import {
   createEnrollment,
   reconcileAttachedBrowserInventory,
 } from "@opengeni/db";
-import { startTestServices } from "@opengeni/testing";
+import { startTestServices } from "@opengeni/testing/compose";
 import { postgresWireBudget } from "./postgres-wire-budget";
 
 // WAL is cluster-wide: this benchmark owns its entire disposable PostgreSQL

@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
 import * as runAdmission from "../src/billing/agent-run-admission";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   assertGoalResumeAllowed,

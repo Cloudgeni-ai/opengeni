@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
 import * as opengeniDb from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createCompactionModelUsageEventState,
   createModelResponseEventState,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { EnrollmentRecord } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { MockAgentResponder, SelfhostedSession } from "@opengeni/runtime/sandbox";
 import { applyDiff } from "@openai/agents";
 import { setSelfhostedApplyDiff } from "../../../packages/runtime/src/sandbox/selfhosted/session";
