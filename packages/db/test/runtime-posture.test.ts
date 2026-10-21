@@ -3106,6 +3106,7 @@ describe("runtime database posture evaluator", () => {
           publicExecute: false,
           securityDefiner: !execute,
           triggerCallable: false,
+          hasDependents: false,
         });
         expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       }
@@ -3117,6 +3118,8 @@ describe("runtime database posture evaluator", () => {
       { execute: false, publicExecute: true, securityDefiner: true },
       { execute: false, securityDefiner: true, triggerCallable: true },
       { execute: false, securityDefiner: true, triggerCallable: undefined },
+      { execute: false, securityDefiner: true, hasDependents: true },
+      { execute: false, securityDefiner: true, hasDependents: undefined },
     ]) {
       test(`rejects unknown unsafe routine in ${inventory}: ${JSON.stringify(unsafe)}`, () => {
         const posture = safePosture();
@@ -3126,6 +3129,7 @@ describe("runtime database posture evaluator", () => {
           execute: true,
           publicExecute: false,
           triggerCallable: false,
+          hasDependents: false,
           configuration: ["search_path=pg_catalog"],
           ...unsafe,
         });

@@ -2756,13 +2756,20 @@ function unknownRoutineViolations(
   // alone does not make a definer inert: triggers do not check EXECUTE when
   // firing. Reject trigger/event-trigger return types and pg_trigger bindings,
   // including absent metadata, even if both runtime and PUBLIC ACLs are revoked.
+  // Aggregates and other catalog dependents can invoke their support functions
+  // without checking those functions' EXECUTE grants. An unknown definer is
+  // eligible only when no catalog object depends on it. Do not enumerate each
+  // indirect invocation mechanism or infer its caller ACL.
   // A callable unknown definer is NOT proven
   // safe by FORCE RLS, a trusted owner or a fixed search_path: its body could
   // disable owner RLS or expose a capability. Require a prior explicit binary
   // contract for it. Treat missing PUBLIC metadata as unknown, not revoked.
   if (
     routine.securityDefiner &&
-    (routine.execute || routine.publicExecute !== false || routine.triggerCallable !== false)
+    (routine.execute ||
+      routine.publicExecute !== false ||
+      routine.triggerCallable !== false ||
+      routine.hasDependents !== false)
   ) {
     violations.push(`unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`);
   }
@@ -2834,6 +2841,7 @@ export type RuntimeRoutinePosture = {
   publicExecute?: boolean;
   securityDefiner: boolean;
   triggerCallable?: boolean | undefined;
+  hasDependents?: boolean | undefined;
   configuration?: string[] | null;
 };
 
@@ -3321,6 +3329,7 @@ export async function inspectRuntimeDatabasePosture(
         public_execute: boolean;
         security_definer: boolean;
         trigger_callable: boolean;
+        has_dependents: boolean;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -3336,6 +3345,7 @@ export async function inspectRuntimeDatabasePosture(
             p.prosecdef as security_definer,
             (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
               or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
+            exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -3351,6 +3361,7 @@ export async function inspectRuntimeDatabasePosture(
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
           triggerCallable: row.trigger_callable,
+          hasDependents: row.has_dependents,
           configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
@@ -3362,6 +3373,7 @@ export async function inspectRuntimeDatabasePosture(
         public_execute: boolean;
         security_definer: boolean;
         trigger_callable: boolean;
+        has_dependents: boolean;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -3377,6 +3389,7 @@ export async function inspectRuntimeDatabasePosture(
             p.prosecdef as security_definer,
             (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
               or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
+            exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -3391,6 +3404,7 @@ export async function inspectRuntimeDatabasePosture(
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
         triggerCallable: row.trigger_callable,
+        hasDependents: row.has_dependents,
         configuration: row.configuration,
       }));
 
