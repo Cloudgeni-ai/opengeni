@@ -131,6 +131,9 @@ const withheldMigrations = [
   "0873_mcp_binding_delegation_revocation.sql",
   // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
   "0884_subscription_core_personal_quarantine_expiry.sql",
+  // The schedule list trigger reads the audience column of 0720, withheld
+  // with the allowance tail below; replay after it.
+  "0888_session_list_invalidation.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
