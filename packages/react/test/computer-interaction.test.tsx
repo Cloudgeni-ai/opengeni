@@ -3684,6 +3684,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["same paint", "pending decode", "new paint"] as const)(
     "dispatches an immediate first click and one continuation against each actual %s",
     async (paint) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas(true);
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -3751,6 +3753,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["drag", "key", "right click", "wheel"] as const)(
     "does not resend an immediate click before a following %s",
     async (next) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(undefined, undefined, {
         pointerClickContinuation: true,
@@ -3818,6 +3822,8 @@ describe("ComputerViewer input reliability", () => {
   ] as const)(
     "clears first-click continuation before a later gesture after %s",
     async (boundary) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -3939,6 +3945,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["transport rejection", "failed receipt", "unknown receipt"] as const)(
     "a late first %s cannot cancel a key queued after the second click completes",
     async (result) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const pending: Array<{
         resolve: (value: ComputerActionReceipt) => void;
@@ -4050,6 +4058,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["prepared", "dispatched"] as const)(
     "a current %s receipt does not report completed input or advance queued keys",
     async (state) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(async (request) => ({
         ...receipt(observation(), request.operationId),
@@ -4111,6 +4121,8 @@ describe("ComputerViewer input reliability", () => {
   ])(
     "starts a new click when canvas $change maps the same client point elsewhere",
     async ({ rect, x, y }) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(undefined, undefined, {
         pointerClickContinuation: true,
@@ -4193,6 +4205,8 @@ describe("ComputerViewer input reliability", () => {
     },
   ])("honors mouse and keyboard availability independently (%p)", async (testCase) => {
     const { expectedHint, ...capabilities } = testCase;
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4712,6 +4726,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["discovery", "clipboard"] as const)(
     "keeps controls unavailable after a %s service failure while capture continues",
     async (source) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(
         async (request) => receipt(observation(), request.operationId),
@@ -4805,6 +4821,8 @@ describe("ComputerViewer input reliability", () => {
   test.each([500, 503])(
     "keeps live input available after a %s app inspection failure",
     async (status) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture();
       fixture.client.observeComputerTarget = async () => {
@@ -4873,6 +4891,8 @@ describe("ComputerViewer input reliability", () => {
       new OpenGeniApiError(0, "Transport unavailable", { outcomeUnknown: true }),
     ],
   ] as const)("does not label a %s as a control outage or replay it", async (_name, error) => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     let fail = true;
     const fixture = await renderComputerInputFixture(async (request) => {
