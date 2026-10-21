@@ -65,6 +65,11 @@ export default defineConfig({
     "src/terminal.ts",
     "src/editor.ts",
     "src/desktop.ts",
+    // `./ui/*` is a subpath pattern export: every primitive is its own entry.
+    "src/ui/*.tsx",
+    "!src/ui/*.test.tsx",
+    "!src/ui/*.browser.test.tsx",
+    "!src/ui/*.dom-fixture.tsx",
   ],
   format: ["esm"],
   target: "es2022",
