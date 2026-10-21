@@ -154,7 +154,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/hooks/turnless-output-gaps.ts"))).toBe(true);
     // Exact reads of tool outputs a turn's step page delivered as previews.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
-    expect(reactSources.length).toBe(44);
+    // The live stream's head read joins the conversation's fresh detail read.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
+    expect(reactSources.length).toBe(45);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
