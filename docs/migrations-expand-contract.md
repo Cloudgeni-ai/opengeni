@@ -70,7 +70,7 @@ For a maintenance deployment, run pre while live, then run maintenance while
 parked. For a rolling deployment, run **maintenance**, not just pre, before
 rolling the fleet, as the legacy workflow did; `requiresDrain` retains its
 existing meaning and is not recomputed from the phase name. Post always follows
-the rollout. TODO(OPE-834): relax the inert prefix only after forward-compatible
+the rollout. TODO: relax the inert prefix only after forward-compatible
 readiness is already running in production, not when first deploying that fix.
 
 Only rolling migrations accepted by the concurrent-index or batched-backfill

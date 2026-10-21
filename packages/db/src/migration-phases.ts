@@ -6,7 +6,7 @@ export type MigrationPhases = Record<MigrationPhase, string[]>;
 
 /** A conservative posture classification, not a general rolling-safety proof.
  * Unknown/dynamic statements stay in the maintenance span rather than guessing.
- * TODO(OPE-834): relax only after forward-compatible readiness is deployed as
+ * TODO: relax only after forward-compatible readiness is deployed as
  * the OLD production binary; shipping it in the same release is not sufficient.
  */
 export function ordinaryMigrationIsPostureInert(sqlText: string): boolean {
