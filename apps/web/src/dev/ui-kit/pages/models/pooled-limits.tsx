@@ -1,6 +1,9 @@
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { SubscriptionUsagePoolView } from "@/components/models/subscription-usage-pool";
-import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
+import {
+  AccountGroupHeading,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { ProviderTile } from "@/components/models/provider-mark";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { Section, SectionStack } from "@/components/ui/section";
@@ -127,13 +130,7 @@ export function PooledLimitsPreview() {
           title={scope === "organization" ? "Organization · Models" : "Design workspace · Models"}
         >
           <RowList label="Model providers" flush>
-            {/* Keys and unpooled accounts come first, as on the page. */}
-            <ListRow
-              leading={<ProviderTile provider="vercel" size="lg" />}
-              title="Vercel AI Gateway"
-              meta={["Belongs to Design", "API key"]}
-              onOpen={() => undefined}
-            />
+            <AccountGroupHeading>Subscriptions</AccountGroupHeading>
             <li className="col-span-full list-none">
               <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
             </li>
@@ -154,6 +151,13 @@ export function PooledLimitsPreview() {
                 />
               ),
             )}
+            <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+            <ListRow
+              leading={<ProviderTile provider="vercel" size="lg" />}
+              title="Vercel AI Gateway"
+              meta={["Belongs to Design", "API key"]}
+              onOpen={() => undefined}
+            />
           </RowList>
         </Section>
       </SectionStack>

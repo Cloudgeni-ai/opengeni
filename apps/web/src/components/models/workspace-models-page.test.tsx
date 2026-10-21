@@ -1611,7 +1611,7 @@ describe("Opengeni credits", () => {
     }));
   });
 
-  test("leads the Accounts list and counts as a payer, opening Billing for billing admins", async () => {
+  test("heads the pay-as-you-go group and counts as a payer, opening Billing for billing admins", async () => {
     noAccounts();
     creditsDeployment(["billing:manage"]);
     (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
@@ -1631,6 +1631,27 @@ describe("Opengeni credits", () => {
     expect(lastNavigation?.search.fromLabel).toBe("Design preview · Models");
     expect(lastNavigation?.search.from).toBe("/workspaces/workspace-a/settings?section=models");
     await cleanup(view);
+  });
+
+  test("subscriptions come first and credits open the pay-as-you-go group below them", async () => {
+    creditsDeployment([]);
+    const view = await render(false, "organization-a");
+    try {
+      await flush();
+      const headings = [...view.container.querySelectorAll("h3")].map((h) => h.textContent);
+      expect(headings).toContain("Subscriptions");
+      expect(headings).toContain("Pay as you go");
+      const text = view.container.textContent ?? "";
+      const subscriptions = text.indexOf("Subscriptions");
+      const codexRow = text.indexOf("Team plan");
+      const payAsYouGo = text.lastIndexOf("Pay as you go", text.indexOf("Opengeni credits"));
+      expect(subscriptions).toBeGreaterThanOrEqual(0);
+      expect(codexRow).toBeGreaterThan(subscriptions);
+      expect(payAsYouGo).toBeGreaterThan(codexRow);
+      expect(text.indexOf("Opengeni credits")).toBeGreaterThan(payAsYouGo);
+    } finally {
+      await cleanup(view);
+    }
   });
 
   test("is a plain row without the balance for people who can't read billing", async () => {

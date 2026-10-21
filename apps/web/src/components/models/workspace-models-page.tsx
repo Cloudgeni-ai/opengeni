@@ -1,5 +1,6 @@
 import { t } from "@/lib/console-text";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { AccountGroupHeading } from "./subscription-account-ui";
 import { ModelsRefreshControl } from "./models-refresh-control";
 import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
@@ -1172,6 +1173,8 @@ export function WorkspaceModelsPageBody({
       listedOrgGateways.length,
       readyOrgKeys.length,
     ];
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1227,14 +1230,46 @@ export function WorkspaceModelsPageBody({
             }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
+                {subscriptionsListed > 0 ? (
+                  <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+                ) : null}
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
+                />
+                <CodexAccountRows
+                  codex={codex}
+                  places={codexPlaces}
+                  organization={codexPool}
+                  onKeptForPeople={reportKeptForPeople}
+                />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
+                {claudeEnabled ? (
+                  <ClaudeAccountRows
+                    claude={claude}
+                    places={claudePlaces}
+                    organization={claudePool}
+                  />
+                ) : null}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {payAsYouGoListed > 0 ? (
+                  <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+                ) : null}
                 <OpenGeniCreditsRow
                   credits={credits}
                   workspaceId={anchorWorkspaceId}
                   workspaceName={workspaceName}
                   scope={labels.everyone}
                 />
-                {/* Keys and unpooled accounts first: each pooled provider below
-                    starts with its own card and runs to the end of the list. */}
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -1264,34 +1299,6 @@ export function WorkspaceModelsPageBody({
                     onOpen={() => nav.openAccount(accountKey("gateway", id))}
                   />
                 ))}
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
-                <ConnectedSubscriptionUsagePool
-                  client={client}
-                  scope="workspace"
-                  id={workspaceId}
-                  provider="codex"
-                />
-                <CodexAccountRows
-                  codex={codex}
-                  places={codexPlaces}
-                  organization={codexPool}
-                  onKeptForPeople={reportKeptForPeople}
-                />
-                {claudeEnabled ? (
-                  <ConnectedSubscriptionUsagePool
-                    client={client}
-                    scope="workspace"
-                    id={workspaceId}
-                    provider="claude"
-                  />
-                ) : null}
-                {claudeEnabled ? (
-                  <ClaudeAccountRows
-                    claude={claude}
-                    places={claudePlaces}
-                    organization={claudePool}
-                  />
-                ) : null}
               </RowList>
             }
             providerSections={
