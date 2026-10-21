@@ -7,22 +7,23 @@ import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/inter/wght-italic.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
 import "@opengeni/react/compiled.css";
-import { SessionApp, type SessionAppSurfaces } from "@opengeni/react/session-app";
+import {
+  SessionApp,
+  type MessageContextItem,
+  type SessionAppSurfaces,
+} from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
 import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
-import {
-  lazy,
-  StrictMode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { lazy, StrictMode, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { runOfficeCode } from "./executor";
 import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
+import {
+  readSelection,
+  selectionContextItem,
+  type SelectionRequestContext,
+  type SelectionSnapshot,
+} from "./selection-context";
 import {
   describeWorkbook,
   WorkbookLink,
@@ -166,6 +167,61 @@ function useOfficeTheme(): "light" | "dark" | undefined {
   return theme;
 }
 
+/** The workbook's current selection, re-read shortly after it or the sheet changes. */
+function useWorkbookSelection(active: boolean): SelectionSnapshot | null {
+  const [selection, setSelection] = useState<SelectionSnapshot | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    let reading = false;
+    let again = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async () => {
+      if (reading) {
+        again = true;
+        return;
+      }
+      reading = true;
+      try {
+        const next = await Excel.run((context) =>
+          readSelection(context as unknown as SelectionRequestContext),
+        );
+        if (live) setSelection(next);
+      } catch {
+        // Keep the last selection; the next change reads again.
+      } finally {
+        reading = false;
+        if (again && live) {
+          again = false;
+          schedule();
+        }
+      }
+    };
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => void read(), 150);
+    };
+    void read();
+    const event = Office.EventType.DocumentSelectionChanged ?? "documentSelectionChanged";
+    const document = Office.context.document;
+    try {
+      document?.addHandlerAsync?.(event, schedule);
+    } catch {
+      // Hosts without the event keep the selection read when the pane connected.
+    }
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      try {
+        document?.removeHandlerAsync?.(event, { handler: schedule });
+      } catch {
+        // Nothing registered.
+      }
+    };
+  }, [active]);
+  return selection;
+}
+
 function WorkbookStatus(props: {
   link: WorkbookLinkState;
   busy: boolean;
@@ -273,17 +329,23 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   }, [token, onSignedOut]);
 
   const connectionId = link.status === "connected" ? link.connectionId : null;
+  const selection = useWorkbookSelection(connectionId !== null);
   // Per-message context (never instructions), so the agent knows where it is
-  // without changing what earlier requests sent.
-  const messageContext = useCallback(
+  // and what is selected without changing what earlier requests sent. The
+  // selection shows as a pill the person can leave out.
+  const messageContext = useMemo<MessageContextItem[] | undefined>(
     () =>
       workbook && connectionId
-        ? `The person is writing from the Opengeni add-in in their open Excel workbook "${workbook.name}" (${workbook.app}, workbook id ${connectionId}). Use excel_run to read or change it.`
+        ? [
+            {
+              id: "excel-workbook",
+              text: `The person is writing from the Opengeni add-in in their open Excel workbook "${workbook.name}" (${workbook.app}, workbook id ${connectionId}). Use excel_run to read or change it.`,
+            },
+            ...(selection ? [selectionContextItem(selection, workbook.name)] : []),
+          ]
         : undefined,
-    [workbook, connectionId],
+    [workbook, connectionId, selection],
   );
-  const messageContextRef = useRef(messageContext);
-  messageContextRef.current = messageContext;
   const headers = useCallback(() => ({ Authorization: `Bearer ${token}` }), [token]);
   const signOut = useCallback(() => {
     void client.signOutNativeApp().catch(() => undefined);
@@ -318,7 +380,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       preset="companion"
       theme={theme}
       surfaces={surfaces}
-      messageContext={() => messageContextRef.current()}
+      messageContext={messageContext}
       onUnauthorized={onSignedOut}
       openUrl={(url) => {
         // The task pane cannot navigate away; open the browser instead.

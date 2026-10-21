@@ -8,6 +8,7 @@ export {
   type SessionAppProps,
   type SessionAppSurfaces,
 } from "./app/embed/session-app";
+export type { MessageContextInput, MessageContextItem } from "./app/lib/message-context";
 export {
   SESSION_UI_PRESETS,
   type SessionUiFeatures,
