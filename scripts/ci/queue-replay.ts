@@ -244,7 +244,7 @@ export function replay(input: ReplayInput) {
       if (index < 0) continue;
       const e = stack[index]!;
       charge(e.sample!);
-      e.end = undefined;
+      delete e.end;
       if (!e.red) {
         e.passed = true;
         log("green", [e]);
@@ -266,7 +266,7 @@ export function replay(input: ReplayInput) {
       log("invalidate", successors);
       for (const s of successors) {
         if (s.end !== undefined) charge(s.sample!, now - s.start!);
-        s.end = undefined;
+        delete s.end;
         s.passed = false;
       }
       if (e.reds <= 1) {
