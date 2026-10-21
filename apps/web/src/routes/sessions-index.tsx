@@ -8,6 +8,7 @@ import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-lau
 import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { useSessionListHintRefresh } from "@/lib/use-session-list-hint-refresh";
 import {
   addsConnectorOutsideDefaults,
   changedConnectorExclusions,
@@ -35,6 +36,7 @@ import {
   ModelMark,
   useChannels,
   useWorkspaceSessions,
+  useOpenGeni,
   type ComposerState,
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults, stableJson } from "@opengeni/contracts";
@@ -1989,13 +1991,17 @@ function reportDraftSaveFailure(draft: {
 // the rail's session list + the workspace model catalog so labels/marks match
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
-  const { sessions, pinned } = useWorkspaceSessions({
+  const { workspaceSessionListEvent } = useOpenGeni();
+  const hintsAvailable =
+    workspaceSessionListEvent?.workspaceId === workspaceId && workspaceSessionListEvent.available;
+  const { sessions, pinned, refresh, error } = useWorkspaceSessions({
     limit: 12,
     // Top-level conversations: sub-agents open from their parent and would
     // otherwise fill this short page in a workspace that runs many of them.
     parentSessionId: null,
-    pollIntervalMs: 30_000,
+    pollIntervalMs: hintsAvailable ? undefined : 30_000,
   });
+  useSessionListHintRefresh(refresh, error);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   // Pins are server-authoritative and sit above running and recency rows.
   const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);

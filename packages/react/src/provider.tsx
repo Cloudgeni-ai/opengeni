@@ -6,6 +6,7 @@ import {
   type StreamConnectionState,
   type WorkspaceControlEvent,
   type WorkspaceInteractionRevisionEvent,
+  type WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
@@ -104,6 +105,8 @@ export function OpenGeniProvider({
   >("idle");
   const [workspaceInteractionEvent, setWorkspaceInteractionEvent] =
     useState<WorkspaceInteractionRevisionEvent | null>(null);
+  const [workspaceSessionListEvent, setWorkspaceSessionListEvent] =
+    useState<WorkspaceSessionListEvent | null>(null);
   const [workspaceInteractionConnectionState, setWorkspaceInteractionConnectionState] = useState<
     StreamConnectionState | "idle" | "error"
   >("idle");
@@ -194,6 +197,7 @@ export function OpenGeniProvider({
     const openLiveStream = client.streamWorkspaceLiveEvents!;
     setWorkspaceControlEvent(null);
     setWorkspaceInteractionEvent(null);
+    setWorkspaceSessionListEvent(null);
     if (!pageLive) {
       setWorkspaceControlConnectionState("idle");
       setWorkspaceInteractionConnectionState("idle");
@@ -203,6 +207,7 @@ export function OpenGeniProvider({
     const setConnectionState = (state: StreamConnectionState) => {
       setWorkspaceControlConnectionState(state);
       setWorkspaceInteractionConnectionState(state);
+      if (state !== "live") setWorkspaceSessionListEvent(null);
     };
     setConnectionState("connecting");
     void (async () => {
@@ -232,7 +237,7 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             callbackRef.current?.(event);
-          } else {
+          } else if (event.type === "workspace.interaction.changed") {
             workspaceInteractionSequencesRef.current.set(
               workspaceId,
               Math.max(
@@ -244,6 +249,8 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             interactionCallbackRef.current?.(event);
+          } else if (event.workspaceId === workspaceId) {
+            setWorkspaceSessionListEvent(event);
           }
         }
       } catch (error) {
@@ -254,6 +261,7 @@ export function OpenGeniProvider({
         if (!controller.signal.aborted) {
           setWorkspaceControlConnectionState("error");
           setWorkspaceInteractionConnectionState("error");
+          setWorkspaceSessionListEvent(null);
         }
       }
     })();
@@ -376,6 +384,7 @@ export function OpenGeniProvider({
       workspaceControlConnectionState,
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
+      workspaceSessionListEvent,
       registerSessionReconciler,
       reconcileSession,
     }),
@@ -386,6 +395,7 @@ export function OpenGeniProvider({
       workspaceControlConnectionState,
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
+      workspaceSessionListEvent,
       registerSessionReconciler,
       reconcileSession,
     ],

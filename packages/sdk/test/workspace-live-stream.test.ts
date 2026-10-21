@@ -39,7 +39,7 @@ function streamOf(...events: WorkspaceLiveEvent[]): ReadableStream<Uint8Array> {
       for (const event of events) {
         controller.enqueue(
           new TextEncoder().encode(
-            `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            `${"sequence" in event ? `id: ${event.sequence}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
           ),
         );
       }
@@ -49,6 +49,34 @@ function streamOf(...events: WorkspaceLiveEvent[]): ReadableStream<Uint8Array> {
 }
 
 describe("streamWorkspaceLiveEvents", () => {
+  test("transient list hints never advance either replay cursor", async () => {
+    const opens: number[][] = [];
+    const hints: WorkspaceLiveEvent[] = [];
+    const ready: WorkspaceLiveEvent = {
+      type: "workspace.sessions.changed",
+      workspaceId: WORKSPACE_ID,
+      available: true,
+      sessionIds: null,
+    };
+    for await (const event of streamWorkspaceLiveEvents(
+      {
+        openStream: async (controlAfter, interactionAfter) => {
+          opens.push([controlAfter, interactionAfter]);
+          return opens.length === 1 ? streamOf(ready, control(5), interaction(7)) : streamOf(ready);
+        },
+      },
+      { controlAfter: 3, interactionAfter: 4, reconnectDelayMs: 0 },
+    )) {
+      hints.push(event);
+      if (hints.length === 4) break;
+    }
+    expect(opens).toEqual([
+      [3, 4],
+      [5, 7],
+    ]);
+    expect(hints[0]).toEqual(ready);
+    expect(hints[3]).toEqual(ready);
+  });
   test("the client uses one route with both resume cursors", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({
@@ -71,7 +99,7 @@ describe("streamWorkspaceLiveEvents", () => {
       interactionAfter: 27,
       reconnect: false,
     })) {
-      values.push(`${event.type}:${event.sequence}`);
+      values.push(`${event.type}:${"sequence" in event ? event.sequence : "hint"}`);
     }
     expect(values).toEqual(["workspace.control.changed:12", "workspace.interaction.changed:31"]);
     expect(requests).toHaveLength(1);
@@ -96,7 +124,7 @@ describe("streamWorkspaceLiveEvents", () => {
       },
       { controlAfter: 3, interactionAfter: 4, reconnectDelayMs: 0 },
     )) {
-      values.push(`${event.type}:${event.sequence}`);
+      values.push(`${event.type}:${"sequence" in event ? event.sequence : "hint"}`);
       if (values.length === 4) break;
     }
     expect(opens.slice(0, 2)).toEqual([

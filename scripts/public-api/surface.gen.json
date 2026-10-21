@@ -32651,6 +32651,7 @@
       "WorkspaceRevisionDegradedPayload": "type",
       "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
+      "WorkspaceSessionListEvent": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
       "WorkspaceStateAttemptGovernance": "type",

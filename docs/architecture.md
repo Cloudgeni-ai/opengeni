@@ -163,6 +163,17 @@ Session list totals materialize narrow, caller-RLS-authorized child metadata onc
 before recursive traversal. Roots retain their list/scope filters; exact-target
 grants do not expand to children. Tree depth does not multiply base session scans.
 
+The workspace live SSE also carries transient session-list invalidation hints.
+PostgreSQL commit triggers notify only on list-relevant changes; one lazy dedicated
+listener per API process batches dirty IDs at the existing 15-second cadence and
+filters them through current list authority before delivery. These hints have no
+replay cursor and are never history: reconnect/focus reconciles the authoritative
+lists. Web and desktop share the dirty-scope renderer, so unchanged roots, pins,
+expanded branches and project windows no longer poll. Missing listener support,
+transaction-only database handles, finite HTTP/1 batches and external host ACLs
+retain polling. The source is `packages/db/src/session-list-notifications.ts`; the
+authorized batch is `apps/api/src/http/session-list-hints.ts`.
+
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
 EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
