@@ -264,10 +264,23 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
-    // The pinned pre-0864 binary is checked only at the 0864 boundary above.
-    // It predates forward-compatible posture (#5263), so tables later
-    // migrations add are unknown to it; readiness of the actual previous
-    // release against the complete schema is the pinned-readiness job's check.
+    // This pre-0864 binary predates forward-compatible posture (#5263): 0890's
+    // two new tables make it unready. Keep the exact incompatibilities as a
+    // negative control so additional known-object or grant regressions fail.
+    // This is not rolling-readiness evidence: pre-compatibility fleets need a
+    // compatibility-first or maintenance rollout. The pinned-readiness job's
+    // bootstrap baseline is not the deployed previous release; only a verified
+    // production pin can provide that separate full-chain readiness proof.
+    expect(
+      previous.evaluateRuntimeDatabasePosture(
+        await previous.inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual([
+      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+      "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+    ]);
   } finally {
     await client?.close();
     await staging.end();
