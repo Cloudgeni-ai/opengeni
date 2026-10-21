@@ -7,7 +7,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
-import { acquireBlankTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   createSession,

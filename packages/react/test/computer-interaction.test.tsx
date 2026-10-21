@@ -26,7 +26,7 @@ import { useComputerSessions } from "../src/hooks/use-computer-sessions";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const COMPUTER_SESSION_ID = "44444444-4444-4444-8444-444444444444";
 const PEER_COMPUTER_SESSION_ID = "55555555-5555-4555-8555-555555555555";
@@ -2058,6 +2058,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("keeps grants out of URLs, authenticates frames, and clears on target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     const client = fakeClient({
       attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
@@ -2095,6 +2097,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("accepts restarted frame sequences after attachment renewal", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     let attaches = 0;
     const client = fakeClient({
@@ -2178,6 +2182,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("uses the distinct Computer relay stream kind", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     let socket: FakeComputerSocket | null = null;
     const client = fakeClient({
       attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
@@ -2229,6 +2235,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     let release!: (value: ArrayBuffer) => void;
     const delayed = new (class extends Blob {
@@ -2612,6 +2620,8 @@ describe("ComputerViewer", () => {
   });
 
   test("switches whole screens with the display target's existing frame and coordinate fence", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const screens = [
       { ...target("screen-1", "screen"), title: "Main display", focused: true },
@@ -3102,6 +3112,8 @@ describe("ComputerViewer", () => {
 
   for (const recovery of ["Reconnect", "Refresh desktops"]) {
     test(`recovers an ended desktop producer through ${recovery} after a visible frame`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const current = computerSession();
       const currentTarget = target();
@@ -3406,6 +3418,8 @@ describe("ComputerViewer", () => {
     "no-keyboard",
   ] as const) {
     test(`isolated CUA viewer input preserves seat authority: ${scenario}`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const currentSession = computerSession();
       currentSession.adapter = "opengeni.cua.linux.v1";
@@ -3505,6 +3519,8 @@ describe("ComputerViewer", () => {
   });
 
   test("routes advertised background window clicks and typing without focusing the desktop", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(undefined, undefined, {
       currentTarget: { ...target(), title: "Background window", focused: false },
@@ -3865,6 +3881,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("sends the real second click while the first receipt waits and fences later keys behind both", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const finishes: Array<(value: ComputerActionReceipt) => void> = [];
     const fixture = await renderComputerInputFixture(
@@ -3985,6 +4003,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("an older failure preserves the latest failed click and only notifies that latest failure", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const pending: Array<(value: ComputerActionReceipt) => void> = [];
     const fixture = await renderComputerInputFixture(
@@ -4061,6 +4081,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("starts a new click after painted dimensions change without substituting frame metadata", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(undefined, undefined, {
       pointerClickContinuation: true,
@@ -4229,6 +4251,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("fits captured windows to the dock while preserving pixels and input coordinates", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const resizeMock = mockComputerViewportResize();
     const fixture = await renderComputerInputFixture();
@@ -4386,6 +4410,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("dismisses the desktop menu without swallowing a canvas click or subsequent typing", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4431,6 +4457,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("uses the painted frame for pointer input and discards decoding after a target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas(true);
     const fixture = await renderComputerInputFixture();
     try {
@@ -4594,6 +4622,8 @@ describe("ComputerViewer input reliability", () => {
   }
 
   test("keeps control unavailable across live frames and reconnects the same desktop", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     let controlUnavailable = true;
     const fixture = await renderComputerInputFixture(
@@ -4724,6 +4754,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("keeps background semantic actions usable when app inspection fails", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const backgroundTarget = { ...target(), focused: false };
     const fixture = await renderComputerInputFixture(async (request) =>
@@ -4880,6 +4912,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("hides a frame after the selected target generation changes", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(async (request) =>
       receipt(observation({ ...target(), targetGeneration: "generation-2" }), request.operationId),
@@ -4940,6 +4974,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("preserves scroll deltas across frames and sends scroll before a key", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4975,6 +5011,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("dispatches a continuous wheel gesture within 45 ms", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {

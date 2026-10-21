@@ -22,14 +22,11 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createApp } from "../../apps/api/src/app";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

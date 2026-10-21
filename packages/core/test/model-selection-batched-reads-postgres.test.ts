@@ -24,11 +24,8 @@ import {
   type DbClient,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadWorkspaceModelSelectionInput } from "../src/default-session-model";
 import { resolveWorkspaceCatalogSettings } from "../src/model-catalog";
 

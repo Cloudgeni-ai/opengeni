@@ -12,7 +12,7 @@ import {
   resolveRigProviderImageForRun,
 } from "@opengeni/core";
 import { rigSetupScriptCommand } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,

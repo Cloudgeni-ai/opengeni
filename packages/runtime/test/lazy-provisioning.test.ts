@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { dir, Manifest } from "@openai/agents/sandbox";

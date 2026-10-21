@@ -3,7 +3,7 @@
 // a workspace context; definitions follow their Site and are removed with the
 // workspace. Also covers the store in src/site-sql.ts.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   appendSiteSqlMigration,

@@ -4,7 +4,7 @@ import { projectHostedSearchEvidence } from "../src/hosted-search-evidence";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
 import { anthropicCompactionRequest } from "../src/anthropic-compaction";
 import { configuredProviders } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { compactionHistoryFixture as longHistory } from "../../../scripts/operator/compaction-history";
 import {
   CompactionProviderResponseError,

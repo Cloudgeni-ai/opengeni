@@ -5,7 +5,7 @@ import {
   type SessionAuthorizationPort,
 } from "@opengeni/core";
 import { type ArtifactCatalogCandidate } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { getTableName, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { Hono } from "hono";

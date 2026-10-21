@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrationDeploymentMode, planMigrations } from "../src/migrate";
 

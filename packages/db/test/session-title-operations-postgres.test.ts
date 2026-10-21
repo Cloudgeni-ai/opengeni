@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
 import { failoverFixture } from "./helpers/subscription-core-failover-fixture";
 import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";

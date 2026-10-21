@@ -25,8 +25,8 @@ import { createObservability } from "@opengeni/observability";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
   type HistoricalModalSandboxLifecycleProbeFn,

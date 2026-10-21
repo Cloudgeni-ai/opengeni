@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,

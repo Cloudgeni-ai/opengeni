@@ -6,7 +6,7 @@ import {
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   resolveWorkspaceModelSelection,
   workspaceCustomModelReference,

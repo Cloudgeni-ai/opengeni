@@ -21,16 +21,12 @@ import { createWorkerServiceLifecycle } from "../../apps/worker/src/worker-servi
 import { createWorkerWorkflowSignaler } from "../../apps/worker/src/index";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createTurnToolCancellationController } from "../../packages/runtime/src/sandbox/turn-tool-cancellation";
-import {
-  functionCall,
-  latestStatus,
-  ScriptedModel,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { latestStatus } from "@opengeni/testing/assertions";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";

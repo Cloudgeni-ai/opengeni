@@ -55,7 +55,7 @@ import {
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { guardedMcpFetch } from "@opengeni/runtime/mcp-network";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,

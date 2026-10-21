@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
 import {
   ANTHROPIC_COMPACTION_TEXT_ONLY_INSTRUCTION,

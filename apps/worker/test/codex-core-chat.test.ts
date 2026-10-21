@@ -67,7 +67,7 @@ import {
   ensureRunAllowed,
   turnExecutionPolicyBillingIdentity,
 } from "../src/activities/agent-turn/admission";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applyQuotaObservation,
   quotaCapacity,

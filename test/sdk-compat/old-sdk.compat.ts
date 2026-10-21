@@ -31,12 +31,9 @@ import { createHash } from "node:crypto";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import { createDb, createOrganizationApiKey, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../apps/api/src/app";
 import { organizationApiKeyPermissionsForAccess } from "../../apps/api/src/routes/api-keys";
 

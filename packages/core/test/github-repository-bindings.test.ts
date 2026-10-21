@@ -6,7 +6,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   applyGitHubRepositoryBindings,
   listGitHubRepositoryBindingCandidates,

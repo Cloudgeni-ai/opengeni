@@ -16,7 +16,7 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import { hasPermission } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withFirstPartyTools } from "../../../apps/worker/src/activities/goals";
 import { prepareAgentTools, type PrepareToolsOptions, type PreparedAgentTools } from "../src/index";
 

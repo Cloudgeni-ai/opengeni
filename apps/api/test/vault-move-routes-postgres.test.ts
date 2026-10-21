@@ -16,11 +16,8 @@ import type { ExternalVaultProviderFactories } from "@opengeni/core";
 import { createDb, type DbClient } from "@opengeni/db";
 import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const delegationSecret = randomBytes(32).toString("hex");

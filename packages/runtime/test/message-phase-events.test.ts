@@ -10,7 +10,7 @@ import {
 import { RunItemStreamEvent, RunMessageOutputItem } from "@openai/agents-core";
 import { isStreamedAssistantMessageCompletion } from "@opengeni/contracts";
 import { ChatTurnFold } from "@opengeni/sdk/chat";
-import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing";
+import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import OpenAI from "openai";
 import { z } from "zod";
 import {

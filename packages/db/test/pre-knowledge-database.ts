@@ -1,4 +1,4 @@
-import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";

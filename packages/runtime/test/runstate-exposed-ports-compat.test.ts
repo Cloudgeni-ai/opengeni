@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { RunContext, RunState } from "@openai/agents-core";
 import { Manifest } from "@openai/agents-core/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   deserializeSandboxSessionStateEnvelope,

@@ -14,9 +14,9 @@ import {
 } from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 
 let shared: RestrictedRuntimeTestDatabase;

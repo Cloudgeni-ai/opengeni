@@ -6,7 +6,7 @@ import type {
   ResolvedWorkspaceInstructionPolicySnapshot,
   ResolvedWorkspaceInstructionPolicySnapshotEntry,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   WorkspaceGovernancePromptLimitError,
   buildOpenGeniAgent,

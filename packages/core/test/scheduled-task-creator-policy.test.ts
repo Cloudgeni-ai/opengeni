@@ -9,7 +9,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import type { SessionCommandActor } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrantAuthorization, type AccessGrantAuthorization } from "../src/access";

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import { allAgentCapabilities, type ResolvedAgentConfig } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../src";
 import { buildAnthropicRequest } from "../src/anthropic-messages";
 import { applyClaudeCodeIdentity } from "../src/claude-code-identity";

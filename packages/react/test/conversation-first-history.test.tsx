@@ -33,7 +33,7 @@ import {
 import { MessageTimeline } from "../src/components/message-timeline";
 import { createOpenGeniText } from "../src/messages/runtime";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const t = createOpenGeniText();
 const STEP_TYPES = new Set<string>(SESSION_EVENT_STEP_TYPES);
@@ -573,6 +573,8 @@ describe("conversation-first session history", () => {
   });
 
   test("returning from a hidden tab keeps an open working turn's steps and replays the gap", async () => {
+    // This test owns the real → virtual → real transition around visibility.
+    jest.useRealTimers();
     let visibility: DocumentVisibilityState = "visible";
     const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
     Object.defineProperty(document, "visibilityState", {
@@ -640,6 +642,7 @@ describe("conversation-first session history", () => {
   });
 
   test("an open working turn keeps its steps on screen while a long-gap return re-reads them", async () => {
+    jest.useRealTimers();
     let visibility: DocumentVisibilityState = "visible";
     const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
     Object.defineProperty(document, "visibilityState", {
@@ -1115,6 +1118,7 @@ describe("conversation-first session history", () => {
   test(
     "terminal output written while the tab was hidden is read again on return",
     async () => {
+      jest.useRealTimers();
       let visibility: DocumentVisibilityState = "visible";
       const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
       Object.defineProperty(document, "visibilityState", {

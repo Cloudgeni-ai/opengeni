@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   subscriptionCoreCodexAppsRequestAuth,
   SubscriptionCoreCodexAppsUnavailableError,

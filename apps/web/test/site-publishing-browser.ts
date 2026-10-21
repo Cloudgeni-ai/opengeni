@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 const port = Number(process.env.OPENGENI_SITE_PUBLISHING_PORT ?? (await freePort()));
 const baseUrl = `http://127.0.0.1:${port}`;

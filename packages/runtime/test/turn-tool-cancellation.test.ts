@@ -22,7 +22,7 @@ import {
   RoutingSandboxSession,
 } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
 import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";

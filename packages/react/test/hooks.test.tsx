@@ -4,7 +4,7 @@
    DOM globals are registered exactly once for the bun test process slice that
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act as reactAct } from "react";
 import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
@@ -44,7 +44,7 @@ import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 function makeEvent(
   sequence: number,
@@ -5558,6 +5558,8 @@ describe("useComposer durable draft and control binding", () => {
 
 describe("session hook concurrent target ownership", () => {
   test("a suspended target transition leaves the committed session fully interactive", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const turn = fakeTurn({
@@ -5663,6 +5665,8 @@ describe("session hook concurrent target ownership", () => {
   });
 
   test("a suspended target render cannot retarget a committed draft callback", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const draftA: ComposerDraft = {
@@ -6163,7 +6167,7 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
     // The shared read is released one task after its last reader leaves.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush(0);
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

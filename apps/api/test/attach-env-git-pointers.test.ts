@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import type { Session } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { sessionAttachEnvironment } from "../src/sandbox/viewer";
 
 const settings = testSettings({

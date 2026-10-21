@@ -4,7 +4,7 @@ import {
   metadataWithTurnExecutionPolicyV1,
   ServiceTurnInitiatorContext,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   clipAgentProvenanceHops,
   contextForCausalTurn,

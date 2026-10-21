@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 
 describe("managed sandbox logical image identity", () => {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Agent, Runner, tool } from "@openai/agents";
-import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import {
   ModelRequestCaptureModel,
   withModelCallLifecycle,

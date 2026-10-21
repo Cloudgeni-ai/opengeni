@@ -5,11 +5,8 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { createOrganizationApiKey } from "@opengeni/db";
 import { requireAccessContext } from "../src/access";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   rawRows,

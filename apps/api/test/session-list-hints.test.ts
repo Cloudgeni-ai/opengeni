@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { waitFor } from "@opengeni/testing";
+import { waitFor } from "@opengeni/testing/process";
 import type { SessionListChangeSource, SessionListNotification } from "@opengeni/db";
 import { subscribeSessionListHints, type SessionListHint } from "../src/http/session-list-hints";
 

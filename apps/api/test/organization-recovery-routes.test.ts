@@ -6,7 +6,7 @@ import {
   OrganizationRecoveryRevisionConflictError,
   OrganizationRecoveryUnavailableError,
 } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   organizationRecoveryHttpError,

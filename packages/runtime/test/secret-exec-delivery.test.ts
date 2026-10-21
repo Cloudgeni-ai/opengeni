@@ -14,7 +14,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxClientForBackend } from "../src/index";
 import {
   cancellableShellCommand,

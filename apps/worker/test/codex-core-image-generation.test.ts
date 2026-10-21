@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import { executeCoreCodexImageGeneration } from "../src/activities/codex-image-generation";
 import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";

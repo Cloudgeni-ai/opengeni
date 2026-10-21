@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   ComputerUnavailableError,
   SandboxComputer,

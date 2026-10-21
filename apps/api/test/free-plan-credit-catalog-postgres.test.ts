@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,

@@ -15,7 +15,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxProviderContinuityUnavailableError,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ModalCreateIntent } from "../src/sandbox/providers/modal-create-boundary";
 
 const hydrateCalls: Uint8Array[] = [];

@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database } from "@opengeni/db";
 import { ensureRunAllowed, recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";

@@ -191,9 +191,9 @@ import {
 import {
   ScriptedModel,
   functionCall as scriptedFunctionCall,
-  startTestMcpServer,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,

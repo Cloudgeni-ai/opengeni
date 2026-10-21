@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./defaults": {
+      "types": "./src/defaults.ts",
+      "default": "./src/defaults.ts"
     }
   },
   "publishConfig": {

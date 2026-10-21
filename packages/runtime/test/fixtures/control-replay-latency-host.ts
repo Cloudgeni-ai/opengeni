@@ -7,7 +7,7 @@
 // broker and native unit-test executable. This never changes host networking.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { freePort } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
 
 const output = join(import.meta.dir, "../../../../target");
 await mkdir(output, { recursive: true });

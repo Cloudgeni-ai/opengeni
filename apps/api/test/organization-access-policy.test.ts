@@ -14,7 +14,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   registerApiKeyRoutes,
   organizationApiKeyPermissionsForAccess,

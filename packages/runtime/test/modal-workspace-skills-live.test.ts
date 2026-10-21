@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 import type { SandboxSessionLike, SandboxSessionState } from "@openai/agents/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createSandboxClient } from "../src/sandbox";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";

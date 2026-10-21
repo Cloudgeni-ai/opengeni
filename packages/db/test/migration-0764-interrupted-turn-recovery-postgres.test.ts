@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,

@@ -25,11 +25,8 @@ import {
 } from "@opengeni/db";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
 import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import {
   createExternalVaultReceiver,

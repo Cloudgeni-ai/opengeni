@@ -861,6 +861,51 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("duplicate creation merges only tool rows while output targets the latest matching call", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.toolCall.created", { id: "shared", name: "lookup", arguments: { page: 1 } }),
+      event("agent.toolCall.created", { id: "shared", name: "session_create", arguments: {} }),
+      event("agent.toolCall.created", { id: "shared", name: "lookup", arguments: { page: 2 } }),
+      event("agent.toolCall.output", {
+        id: "shared",
+        output: { sessionId: "11111111-1111-4111-8111-111111111111" },
+      }),
+    ]);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      kind: "tool-call",
+      callId: "shared",
+      arguments: { page: 2 },
+      status: "running",
+    });
+    expect(items[1]).toMatchObject({
+      kind: "worker",
+      callId: "shared",
+      status: "complete",
+      workerSessionId: "11111111-1111-4111-8111-111111111111",
+    });
+  });
+
+  test("uncorrelated outputs retain reverse-running order after settled and unmatched receipts", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.toolCall.created", { id: "first", name: "lookup" }),
+      event("agent.toolCall.created", { id: "second", name: "lookup" }),
+      event("agent.toolCall.output", { id: "second", output: "second result" }),
+      event("agent.toolCall.output", { id: "missing", output: "ignored" }),
+      event("agent.toolCall.output", { output: "first result" }),
+      event("agent.toolCall.output", { id: "second", output: "updated second result" }),
+    ]);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ callId: "first", status: "complete", output: "first result" });
+    expect(items[1]).toMatchObject({
+      callId: "second",
+      status: "complete",
+      output: "updated second result",
+    });
+  });
+
   test("keeps accumulated text when completed text does not extend it", () => {
     reset();
     const items = buildTimeline(englishText, [

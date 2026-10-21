@@ -19,7 +19,7 @@ import {
   type VaultProvider,
 } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createVaultService, isVaultError } from "../src/domain/vaults";
 import { syncLinkedProviderVault } from "../src/domain/vaults/provider-sync";
 

@@ -21,7 +21,7 @@ import {
   upsertVaultItem,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createVaultInteractionSecretsPort } from "../src/interaction-secrets-vault";
 
 setDefaultTimeout(180_000);

@@ -42,12 +42,9 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { ToolGatewayApprovalRequiredError } from "@opengeni/tool-gateway";
-import {
-  acquireSharedTestDatabase,
-  startTestMcpServer,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../../../packages/db/src/lossless-json";
 import { createApp } from "../src/app";
 import { prepareWorkspaceToolGateway } from "../src/workspace-tool-gateway";

@@ -5,7 +5,7 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import type { SessionWorkflowClient } from "@opengeni/core";
 import { bootstrapWorkspace, createDb, type Database, type DbClient } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
-import { freePort, startTestServices, type TestServices } from "@opengeni/testing";
+import { freePort, startTestServices, type TestServices } from "@opengeni/testing/compose";
 
 import { createApp } from "../../apps/api/src/app";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";

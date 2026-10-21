@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
 import { rawRows, withWorkspaceSubjectRls } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";

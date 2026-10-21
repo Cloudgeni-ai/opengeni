@@ -1,6 +1,6 @@
 import { buildOpenGeniAgent, modelToolResultFits } from "@opengeni/runtime";
 import { SKILL_USE_META_KEY, skillUseFromToolOutput } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
 import {

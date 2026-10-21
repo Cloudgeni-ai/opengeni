@@ -11,7 +11,7 @@ import {
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 
 import {
   acceptOrganizationInvitation,

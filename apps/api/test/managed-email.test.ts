@@ -10,7 +10,7 @@ import {
   renderOrganizationUserSetupEmail,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../src/auth/organization-user-setup";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 const message = {
   kind: "organization_user_setup" as const,

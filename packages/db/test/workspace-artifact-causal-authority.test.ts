@@ -17,7 +17,7 @@ import {
   setWorkspaceArtifactStatus,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 const externalAdminUrl = process.env.OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_ADMIN_URL?.trim();
 const externalAppUrl = process.env.OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_APP_URL?.trim();

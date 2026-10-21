@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { prepareAgentTools, prefixedMcpToolName } from "../src/index";
 
 test("session tool policy intersects connection tools for discovery and direct execution", async () => {

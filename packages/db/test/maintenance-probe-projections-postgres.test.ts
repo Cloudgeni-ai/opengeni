@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { createDb } from "../src/database";
 import {
   MAINTENANCE_PROBE_SOURCES,

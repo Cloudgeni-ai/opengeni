@@ -26,7 +26,8 @@ import {
   getWorkspaceInsights,
   type GetWorkspaceInsightsInput,
 } from "../packages/core/src/domain/insights";
-import { acquireSharedTestDatabase, testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   DEFAULT_CALLS,
   FIXTURE_VERSION,

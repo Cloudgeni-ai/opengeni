@@ -20,8 +20,8 @@ import { existsSync } from "node:fs";
 import { afterEach, describe, expect, test } from "bun:test";
 import { run } from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
-import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing";
-import { testSettings } from "@opengeni/testing";
+import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildManifest,
   buildOpenGeniAgent,

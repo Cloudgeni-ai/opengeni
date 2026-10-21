@@ -11,11 +11,8 @@ import {
   ensureExternalIdentity,
 } from "@opengeni/db";
 import { OpenGeniClient } from "@opengeni/sdk";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { requestBodyValidationHttpError } from "../src/http/request-body";
 import { registerUsageAllowanceRoutes } from "../src/routes/usage-allowances";
 

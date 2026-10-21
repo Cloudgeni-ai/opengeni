@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 let browser: Browser, web: StartedProcess, baseUrl: string;
 const evidence = new URL("../../.agent/evidence/codex-account/", import.meta.url).pathname;

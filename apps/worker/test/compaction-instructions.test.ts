@@ -9,7 +9,7 @@ import {
   inspectPersistentAgentInstructions,
   type ResolvedAgentConfig,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { standaloneCompactionInstructions } from "../src/activities/agent-turn/compaction-prep";
 
 const settings = testSettings({ sandboxBackend: "docker" });

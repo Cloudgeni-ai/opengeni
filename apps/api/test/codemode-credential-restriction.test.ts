@@ -8,7 +8,7 @@ import {
 } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { codemodeSessionRequest } from "../src/codemode";
 

@@ -4,7 +4,7 @@ import { ModelCallError } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import * as runtimeModelCall from "@opengeni/runtime/model-call";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as rls from "../src/access-grant-rls";
 import { PendingUsageSettlements } from "../src/model-calls/pending-usage-settlements";
 import { createModelCallService } from "../src/model-calls/service";

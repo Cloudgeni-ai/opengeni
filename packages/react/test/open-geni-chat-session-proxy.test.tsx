@@ -2,7 +2,7 @@
 // `createSessionProxyHandler`, a real server `OpenGeniClient`, and a recording
 // fake upstream. Every browser request goes through the proxy's allowlist, so a
 // stock control that the default proxy cannot serve shows up here as a 404.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import {
   OpenGeniClient,
   createSessionProxyHandler,
@@ -11,7 +11,7 @@ import {
 import { OpenGeniChat, type OpenGeniChatProps } from "../src/components/open-geni-chat";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 3_000;
@@ -687,6 +687,8 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
   });
 
   test("live voice appears when the proxy or the conversation opts in", async () => {
+    // Response delivery and the lazy React boundary must settle on real time.
+    jest.useRealTimers();
     const voiceButton = (container: HTMLElement) =>
       container.querySelector(
         "[data-og-conversation-composer] [data-testid='realtime-primary-action']",

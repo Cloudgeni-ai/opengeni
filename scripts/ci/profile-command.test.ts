@@ -1,10 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   LiveResourceLog,
+  cgroupSnapshot,
   parseGnuTime,
   parseResourceCounters,
   parseResourceInteger,
@@ -57,6 +66,32 @@ function resourceRecords(text: string): ResourceRecord[] {
 }
 
 describe("bounded live resource diagnostics", () => {
+  test("summary accounting reads the selected nested cgroup, never host counters", () => {
+    const root = mkdtempSync(join(tmpdir(), "profile-accounting-"));
+    const nested = join(root, "job");
+    mkdirSync(nested);
+    try {
+      writeFileSync(join(root, "cpu.stat"), "usage_usec 999999\n");
+      writeFileSync(join(root, "memory.current"), "999999\n");
+      writeFileSync(join(nested, "cpu.stat"), "usage_usec 123\n");
+      writeFileSync(join(nested, "memory.current"), "456\n");
+      writeFileSync(join(nested, "io.stat"), "8:0 rbytes=12 wbytes=34\n8:1 rbytes=5 wbytes=6\n");
+      expect(cgroupSnapshot(nested)).toEqual({
+        memoryBytes: 456,
+        cpuNanoseconds: 123000,
+        readBytes: 17,
+        writeBytes: 40,
+      });
+      expect(cgroupSnapshot(join(nested, "missing"))).toEqual({
+        memoryBytes: null,
+        cpuNanoseconds: null,
+        readBytes: null,
+        writeBytes: null,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   test("strict counters exclude unknown keys and reject ambiguous or oversized values", () => {
     expect(
       parseResourceCounters(

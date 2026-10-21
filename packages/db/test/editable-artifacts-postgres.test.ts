@@ -7,7 +7,7 @@ import {
   hashEditableArtifactMutationIntentBytes,
 } from "@opengeni/contracts/editable-artifacts";
 import { encodePresentationArtifactCommandBatch } from "@opengeni/contracts/presentation-artifact-commands";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 
 import {

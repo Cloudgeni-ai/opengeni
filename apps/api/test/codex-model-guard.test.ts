@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { assertConfiguredModel } from "@opengeni/core";
 
 describe("assertConfiguredModel — codex subscription models", () => {

@@ -81,14 +81,13 @@ import {
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
-  MemoryEventBus,
-  parseSseBlock,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+} from "@opengeni/testing/object-storage-fixture";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { parseSseBlock } from "@opengeni/testing/sse";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";

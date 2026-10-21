@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import type { FirstPartyMcpToolName, ToolRef } from "@opengeni/contracts";
 import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "../src/index";
 import { lazyToolRuntimeForAgent } from "../src/lazy-tool-transport";

@@ -16,12 +16,9 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { OpenGeniClient } from "@opengeni/sdk";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceIdResolver } from "../../../packages/sdk/src/tenant-workspaces";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";

@@ -9,9 +9,9 @@ import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/d
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireOwnerMigratedTestDatabase,
-  testSettings,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
 import { Hono } from "hono";
 import postgres from "postgres";

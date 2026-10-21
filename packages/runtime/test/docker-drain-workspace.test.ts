@@ -64,7 +64,7 @@ const {
 } = await import("../src/sandbox/providers/docker-workspace-drain");
 const { captureWorkspaceArchiveForStorage, disposeWorkspaceArchive } =
   await import("../src/sandbox/workspace-archive");
-const { testSettings } = await import("@opengeni/testing");
+const { testSettings } = await import("@opengeni/testing/settings");
 const { terminateProviderBox, verifyDockerDrainCaptureFence } =
   await import("../../../apps/worker/src/activities/sandbox-lease");
 

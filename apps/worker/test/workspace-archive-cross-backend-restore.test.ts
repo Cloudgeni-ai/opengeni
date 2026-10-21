@@ -15,7 +15,7 @@ import {
   terminateManagedSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import { downloadWorkspaceArchiveSpool, type ObjectStorage } from "@opengeni/storage";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { putVersion1TarArchiveOrInline } from "../src/sandbox-archive-storage";
 
 // The validator the remote providers run before extracting a workspace tar.

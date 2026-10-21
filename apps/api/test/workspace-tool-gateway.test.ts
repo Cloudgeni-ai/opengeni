@@ -11,7 +11,7 @@ import {
   WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";

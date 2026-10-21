@@ -1,12 +1,9 @@
 import { createScheduledTaskActivities } from "../../../apps/worker/src/activities/scheduled-tasks";
 import type { ActivityServices } from "../../../apps/worker/src/activities/types";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createScheduledTask,
   createConnection,

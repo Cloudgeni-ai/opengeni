@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { AccessGrant } from "@opengeni/contracts";
 import { frozenInitiatorForCommandActor } from "@opengeni/db";
 import { serviceInitiatorFromHeaders } from "../src/access/service-initiator";

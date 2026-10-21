@@ -1,7 +1,7 @@
 import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(

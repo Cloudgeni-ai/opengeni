@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import { fakeApiKeyProvider } from "./fixtures/subscription-core-fake-api-key";
 import {

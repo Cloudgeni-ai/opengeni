@@ -3,7 +3,7 @@ import { ControlRequest, ControlResponse, ErrorCode, OpState } from "@opengeni/a
 import * as db from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { MockAgentResponder } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { fileContentDigest } from "../../runtime/src/sandbox/selfhosted/file-transfer";
 import { runOnSandbox } from "../src/sandbox/fleet";
 

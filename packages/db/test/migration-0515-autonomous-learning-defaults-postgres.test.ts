@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb, createSession, withSessionRlsActorContext } from "../src";
 import { getAgentLearningSettings, saveAgentLearningSettings } from "../src/knowledge-entries";
 import { migrate } from "../src/migrate";

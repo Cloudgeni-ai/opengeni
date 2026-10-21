@@ -269,6 +269,10 @@
     "./session-list-entries": {
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
+    },
+    "./workspace-control-event": {
+      "types": "./src/workspace-control-event.ts",
+      "default": "./src/workspace-control-event.ts"
     }
   },
   "publishConfig": {

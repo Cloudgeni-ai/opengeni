@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { fetchCodexModels } from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import type * as dbApi from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadWorkspaceCodexCatalogReadiness } from "../src/codex-model-availability";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 

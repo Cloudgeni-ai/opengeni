@@ -7,7 +7,7 @@
 // one for any of the three families, so the counter is removed rather than
 // renamed; `byScope` already reports every distinction the schema can make.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, inventoryOrganizationTenancy, type Database, type DbClient } from "../src";

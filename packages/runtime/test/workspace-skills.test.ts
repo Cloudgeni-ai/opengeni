@@ -10,7 +10,7 @@ import {
 } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import { ErrorCode } from "@opengeni/agent-proto";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
 import {

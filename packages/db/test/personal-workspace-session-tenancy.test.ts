@@ -1,6 +1,6 @@
 import { skillCatalogContextItem, readSkillCatalogContext } from "@opengeni/contracts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import type postgres from "postgres";
 import {

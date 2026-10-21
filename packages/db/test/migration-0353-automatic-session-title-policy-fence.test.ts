@@ -9,7 +9,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate, parseConcurrentIndexMigration } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";

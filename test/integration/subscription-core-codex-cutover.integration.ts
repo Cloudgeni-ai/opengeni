@@ -18,7 +18,7 @@ import { Worker } from "@temporalio/worker";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   claimSessionWorkForAttempt,
   createDb,

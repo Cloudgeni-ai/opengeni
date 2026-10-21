@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { createSignedState } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   INTEGRATIONS_FALLBACK_PATH,
   oauthStateFailureReturn,

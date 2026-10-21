@@ -4,7 +4,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type BlankTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, provisionRoles } from "../src";
 import {

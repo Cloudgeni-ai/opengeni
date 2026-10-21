@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import type { SaveComposerDraftRequest, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { Markdown } from "../src/components/markdown";
@@ -10,7 +10,7 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
 import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 test("an embedded existing chat loads history and live events and prepares an editable revision-fenced draft without sending", async () => {
   const base = fakeClient({});
@@ -776,6 +776,9 @@ test("the complete conversation forwards only picker appearance without replacin
 });
 
 test("live voice is opt-in and needs an available voice model", async () => {
+  // Loading the actual voice boundary settles through React's native scheduler,
+  // not the logical clock used by the conversation's polling tests.
+  jest.useRealTimers();
   const base = fakeClient({});
   const voiceModel = {
     id: "opengeni-azure/gpt-live-1",

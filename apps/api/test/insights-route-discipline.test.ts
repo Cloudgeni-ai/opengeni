@@ -4,7 +4,7 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

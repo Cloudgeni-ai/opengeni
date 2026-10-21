@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireEnvironmentEncryption, variableSetsRemovedError } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   legacyVariableSetFields,
   rejectLegacyVariableSetFields,

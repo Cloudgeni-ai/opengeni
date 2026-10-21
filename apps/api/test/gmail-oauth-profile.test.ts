@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime";
 import { gmailOAuthClientConfigured } from "../src/integrations/oauth-client";
 import {

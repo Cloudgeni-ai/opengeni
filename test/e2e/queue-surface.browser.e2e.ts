@@ -3,7 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import {
   OMITTED_QUEUE_SOURCE_MARKER,
   QUEUE_VISIBILITY_PROBE_KINDS,

@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Settings } from "@opengeni/config";
 
 // The get.<domain> install-serving routes. These only read

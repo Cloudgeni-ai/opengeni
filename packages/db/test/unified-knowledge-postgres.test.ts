@@ -12,7 +12,7 @@ import { parseDocumentBytes, type DocumentServices } from "@opengeni/documents";
 import type { ObjectStorage } from "@opengeni/storage";
 import { knowledgeContractPdf } from "./fixtures/knowledge-pdf";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   appendSessionHistoryItems,

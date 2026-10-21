@@ -19,6 +19,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./durable-fanout": {
+      "types": "./src/durable-fanout.ts",
+      "default": "./src/durable-fanout.ts"
     }
   },
   "publishConfig": {
