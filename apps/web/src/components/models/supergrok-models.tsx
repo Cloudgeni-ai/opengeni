@@ -20,6 +20,7 @@ import {
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
+import { managesSubscriptionAccount } from "./use-subscription-account-pool";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { FieldStack } from "@opengeni/react/ui/field";
 import { ListRow } from "@opengeni/react/ui/list-row";
@@ -93,7 +94,8 @@ export function superGrokListedCount(
 }
 /** Who a SuperGrok account is for, in the one tag its row and page carry. */
 function scopeOf(grok: SuperGrokSubscriptions, account: SuperGrokAccount, places: SuperGrokPlaces) {
-  if (grok.inherited || grok.organizationId) return places.scope.organization;
+  if (grok.inherited || grok.organizationId || account.scope === "organization")
+    return places.scope.organization;
   return account.scope === "user" ? places.scope.user : places.scope.workspace;
 }
 
@@ -281,7 +283,7 @@ export function SuperGrokAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={Boolean(grok.organizationId)}
-      canManage={grok.canManageAccounts}
+      canManage={account ? managesSubscriptionAccount(grok, account) : grok.canManageAccounts}
       name={account ? superGrokAccountName(account) : "this account"}
       onClose={onClose}
     />

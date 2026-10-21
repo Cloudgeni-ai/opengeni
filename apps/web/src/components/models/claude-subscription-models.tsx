@@ -15,7 +15,10 @@ import {
   type OrganizationSubscriptionRows,
 } from "./subscription-account-rows";
 import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
-import { subscriptionAccountName } from "./use-subscription-account-pool";
+import {
+  managesSubscriptionAccount,
+  subscriptionAccountName,
+} from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
@@ -124,7 +127,7 @@ export function ClaudeRow({
         scopeLabel ??
           (claude.organizationId
             ? organizationReachLabel(places.scope, access.data)
-            : claude.inherited
+            : claude.inherited || account.scope === "organization"
               ? places.scope.organization
               : account.scope === "user"
                 ? places.scope.user
@@ -138,7 +141,7 @@ export function ClaudeRow({
             scope={claude.organizationId ? "organization" : "workspace"}
             scopeId={claude.organizationId ?? claude.workspaceId!}
             account={account}
-            canManage={claude.canManageAccounts}
+            canManage={managesSubscriptionAccount(claude, account)}
           />
         ),
       }}
@@ -206,7 +209,7 @@ function AccountUsage({
     connected: true,
     credentialId: account.id,
     credentialVersion: account.version,
-    canManage: claude.canManageAccounts,
+    canManage: managesSubscriptionAccount(claude, account),
     onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
@@ -241,7 +244,7 @@ export function ClaudeAccountPage({
           claude={claude}
           account={account}
           onReconnect={
-            claude.canManageAccounts && !claude.inherited
+            managesSubscriptionAccount(claude, account)
               ? () => places.openConnect(account.id)
               : undefined
           }
@@ -276,7 +279,7 @@ export function ClaudeAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={!!claude.organizationId}
-      canManage={claude.canManageAccounts}
+      canManage={account ? managesSubscriptionAccount(claude, account) : claude.canManageAccounts}
       name={account ? subscriptionAccountName(account) : "this account"}
       onClose={onClose}
     />
