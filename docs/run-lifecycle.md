@@ -153,18 +153,29 @@ tell the model to inspect actual state before replay. Accepted Pause/Steer
 interruptions retain their independent receipt gate.
 
 **Requests a crashed worker left behind no longer pin the box.** A
-turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
-death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
-that was never adopted as a retained process and whose provider outcome is still
-unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
-and nothing reliably settles it. It used to refuse every capture, idle drain,
-idle containment and provider-deadline containment of its box, and to hold its
-attempt's quiescence open, until the provider killed the box uncaptured.
-The predicate does not prove the worker is dead; safety comes
-from what each caller does with it. Only a point-in-time (Modal native) capture
-may run around such a request: a drain, which terminates the box right after, and
-a warm capture, which records itself as having run around writers so the archive
-stays one generation behind. Tar-style captures keep it as a blocker. Containment
+request whose holder is gone, that was never adopted as a retained process and
+whose provider outcome is still unknown (`crashedWorkerOrphanAdmissionSql`) has
+no owner that can admit more work, and nothing reliably settles it. Two owners
+leave it: a turn attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), and an API-direct request
+(Files, Terminal, Browser and similar surfaces) whose API process died
+mid-operation. A live direct request heartbeats its holder throughout and
+settles before releasing it, so its admission outlives the holder only when the
+holder reaper removed a dead request's holder. Such a request used to refuse
+every capture, idle drain, idle containment and provider-deadline containment
+of its box, and to hold its attempt's quiescence open, until the provider killed
+the box uncaptured; a Docker box has no provider deadline, so its lease stayed
+draining for good. The predicate does not prove the owner is dead; safety comes
+from what each caller does with it. Only a point-in-time capture may run around
+such a request: a drain, which terminates the box right after, and a warm
+capture, which records itself as having run around writers so the archive stays
+one generation behind. A drain is point-in-time for Modal native snapshots and
+for Docker, which removes the exact container before it reads the host
+workspace (`providerDrainCaptureIsPointInTime`). The Docker stop needs the
+durable ownership receipt in the lease envelope: if the capture then fails, the
+next drain attempt re-attaches to the stopped container's workspace through that
+receipt, and a returning turn restores the container on the same workspace.
+Other tar-style captures keep the request as a blocker. Containment
 enrollment and the containment/deadline quiescence checks ignore it. The drain's
 cold commit rejects the exact request only after the reaper stopped the box (or
 proved it gone), so a late settlement by a still-running owner is fenced, and

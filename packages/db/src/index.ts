@@ -44572,8 +44572,10 @@ async function acquireLeaseOnce(
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
           // Capture may have failed after an earlier stop attempt recorded a
-          // cutoff. This provider was never stopped; a re-armed box must have
-          // a fresh charge horizon when its next drain reaches provider stop.
+          // cutoff. The box is wanted again: a provider that was never stopped
+          // keeps running, and a Docker container stopped for a capture is
+          // restored on its workspace by the arriving owner. Either way the
+          // re-armed box needs a fresh charge horizon for its next drain.
           if (warmBillingSnapshot(row)?.stopChargeAt) {
             await tx.execute(sql`
               update sandbox_leases
@@ -52329,14 +52331,18 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
-/** Whether a lease's provider capture images the paused box at one instant
- * (Modal native filesystem/directory snapshots). Mirrors the runtime's
- * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+/** Whether a lease's drain capture images the box at one instant: a Modal
+ * native filesystem/directory snapshot of the paused box, or a Docker host
+ * workspace read after the drain stopped the exact container (possible only
+ * when the envelope carries the durable ownership receipt that lets a retry
+ * re-attach to a stopped container's root). Mirrors the runtime's
+ * `providerDrainCaptureIsPointInTime` for the lease envelope: only such a
  * capture may run around a crashed worker's orphaned request, so
  * containment may treat the orphan as non-blocking only then; otherwise its
  * drain could never capture and the box would stay fenced until it died. */
-function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
-  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+function leaseDrainCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if ((backend !== "modal" && backend !== "docker") || !resumeState) return false;
+  if (typeof resumeState !== "object") return false;
   const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
   const session =
     sessionState && typeof sessionState === "object"
@@ -52346,6 +52352,10 @@ function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boole
     session.providerState && typeof session.providerState === "object"
       ? (session.providerState as Record<string, unknown>)
       : null;
+  if (backend === "docker") {
+    const receipt = providerState?.opengeniDockerWorkspaceOwnership;
+    return Boolean(receipt && typeof receipt === "object" && !Array.isArray(receipt));
+  }
   const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
   return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
 }
@@ -52429,7 +52439,7 @@ export async function enrollRetainedCommandContainment(
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
-            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+            writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
               ? "containment"
               : "physical",
           }))));
@@ -52560,7 +52570,7 @@ export async function enrollRetainedCommandContainment(
     // can finish. Only a point-in-time drain captures around it (the cold
     // commit settles it once the box is terminated); for a tar-style capture
     // it stays a blocker, or the enrolled drain could never capture.
-    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const pointInTime = leaseDrainCaptureIsPointInTime(initial.backend, initial.resumeState);
     const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
     // A tolerated orphan is captured around only by a point-in-time drain.
@@ -52730,7 +52740,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
           ? "containment"
           : "physical",
       }))
@@ -52786,7 +52796,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resume_state)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resume_state)
           ? "containment"
           : "physical",
       }))
