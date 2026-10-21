@@ -2620,7 +2620,11 @@ jobs:
   full-green:
     name: Publish fully green main SHA
     needs: [plan, test, deployment, images, merge-content]
-    if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
+    # Push runs always skip the dispatch-only automation-admission ancestor, so
+    # success() over the whole ancestry would never publish. The aggregate needs
+    # (test, images) already verify every lane they cover; require each direct
+    # need explicitly and never publish from a cancelled run.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && needs.merge-content.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
