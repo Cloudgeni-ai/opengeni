@@ -65175,6 +65175,9 @@ export async function getSandbox(
   access: string | { accountId: string; workspaceId: string; subjectId: string },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  // Sandbox ids are UUIDs. Anything else (for example a machine's display name)
+  // names no sandbox, so answer "not found" rather than failing the uuid cast.
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   if (typeof access !== "string") {
     return await withRlsContext(db, access, async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, access.subjectId);
@@ -65213,6 +65216,7 @@ export async function getSandboxForAttempt(
   },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   const projection = await withRlsContext(db, input, async (scopedDb) => {
     await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ value: { sandbox: SandboxRecord | null } | null }>(
