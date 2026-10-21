@@ -16,7 +16,10 @@ import {
   TOOL_SELECTION_PROTOCOL,
   type ToolSelector,
 } from "../packages/runtime/src/tool-discovery-decision";
-import { configuredEvalDecisionModel } from "./tool-discovery-eval/decision-backend";
+import {
+  configuredEvalDecisionModel,
+  warmDecisionModel,
+} from "./tool-discovery-eval/decision-backend";
 import { createChatComparisonSelector } from "./tool-discovery-eval/chat-comparison";
 import { legacySearchTools } from "./tool-discovery-eval/legacy-ranking";
 
@@ -34,6 +37,7 @@ const apiKey = process.env.DECISION_MODEL_API_KEY,
 if (!catalog || !queries || !out || !model || !decisionModel || !apiKey || !baseURL)
   throw new Error("Missing eval paths, model IDs or provider environment");
 const decisionBackend = option("decision-backend") ?? "openrouter";
+const warmup = process.argv.includes("--warmup");
 if (!["openai-compatible", "jev", "openai", "openrouter"].includes(decisionBackend))
   throw new Error("Unsupported decision backend");
 if (decisionBackend !== "openai-compatible" && option("decision-reasoning"))
@@ -42,6 +46,8 @@ const typed =
   decisionBackend !== "openai-compatible" && decisionModel !== "none"
     ? configuredEvalDecisionModel(decisionBackend, decisionModel)
     : undefined;
+if (warmup && decisionModel !== "none" && !typed)
+  throw new Error("Warmup is supported for current typed or no-model comparisons only");
 const raw = await Bun.file(catalog).json();
 const entries = Array.isArray(raw) ? raw : raw.tools;
 const tools = entries.map(
@@ -119,7 +125,8 @@ const provider = {
 } as ResolvedModelProvider;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const metadata = {
-  version: 5,
+  version: 6,
+  warmup,
   catalogSha256: hash(raw),
   queriesSha256: hash(cases),
   model,
@@ -135,10 +142,15 @@ const prior = (await Bun.file(out).exists()) ? await Bun.file(out).json() : unde
 if (prior && JSON.stringify(prior.metadata) !== JSON.stringify(metadata))
   throw new Error("Output belongs to a different experiment");
 const rows = prior?.rows ?? [];
+const warmups = prior?.warmups ?? [];
 const baselinePath = option("reuse-baseline");
 if (!prior && baselinePath) {
   const source = await Bun.file(baselinePath).json();
   if (source.model !== model) throw new Error("Baseline used a different agent model");
+  if (source.metadata?.catalogSha256 !== metadata.catalogSha256)
+    throw new Error("Baseline used a different catalog");
+  if (warmup && source.metadata?.warmup !== true)
+    throw new Error("A warmed comparison requires a warmed baseline");
   for (const c of cases) {
     const row = source.rows.find(
       (r: { id: string; arm: string; query: string }) =>
@@ -152,6 +164,42 @@ if (!prior && baselinePath) {
       decisionModelCostUsd: row.decisionCalls === 0 ? 0 : row.decisionModelCostUsd,
     });
   }
+}
+const pending = cases.some((c) =>
+  ["before", "after"].some(
+    (arm) => !rows.some((row: { id: string; arm: string }) => row.id === c.id && row.arm === arm),
+  ),
+);
+if (warmup && pending) {
+  const started = performance.now();
+  const response = await fetch(`${baseURL.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      reasoning: { effort: "none" },
+      messages: [{ role: "user", content: "Reply OK." }],
+    }),
+  });
+  if (!response.ok) throw new Error(`Agent warmup HTTP ${response.status}`);
+  const result = (await response.json()) as {
+    model?: string;
+    provider?: string;
+    usage?: { cost?: number; prompt_tokens?: number; completion_tokens?: number };
+  };
+  warmups.push({
+    kind: "main-agent",
+    ms: performance.now() - started,
+    usage: {
+      model: result.model ?? model,
+      provider: result.provider ?? null,
+      inputTokens: result.usage?.prompt_tokens ?? null,
+      outputTokens: result.usage?.completion_tokens ?? null,
+      costUsd: result.usage?.cost ?? null,
+    },
+  });
+  if (typed) warmups.push(await warmDecisionModel(typed.model));
+  await Bun.write(out, JSON.stringify({ metadata, model, decisionModel, warmups, rows }, null, 2));
 }
 for (const c of cases)
   for (const arm of ["before", "after"] as const) {
@@ -229,7 +277,7 @@ for (const c of cases)
     ];
     let discoveryCalls = 0,
       resultTokens = 0,
-      mainModelCostUsd = 0,
+      mainModelCostUsd: number | null = 0,
       firstTool: string | null = null,
       outcome = "no_tool";
     const trace: Array<Record<string, unknown>> = [];
@@ -254,9 +302,12 @@ for (const c of cases)
             }>;
           };
         }>;
-        usage: { cost?: number };
+        usage?: { cost?: number };
       };
-      mainModelCostUsd += result.usage.cost ?? 0;
+      mainModelCostUsd =
+        mainModelCostUsd !== null && typeof result.usage?.cost === "number"
+          ? mainModelCostUsd + result.usage.cost
+          : null;
       const message = result.choices[0]!.message;
       messages.push(message);
       if (!message.tool_calls?.length) break;
@@ -350,6 +401,7 @@ for (const c of cases)
           metadata,
           model,
           decisionModel,
+          warmups,
           scope:
             "Live simulated discovery only; stops before domain execution; every third frozen case",
           rows,
@@ -377,6 +429,9 @@ console.log(
         const mean = (key: string) =>
           selected.reduce((s: number, r: Record<string, unknown>) => s + Number(r[key]), 0) /
           selected.length;
+        const latencies = selected
+          .map((r: { ms: number }) => r.ms)
+          .sort((a: number, b: number) => a - b);
         return [
           arm,
           {
@@ -385,7 +440,12 @@ console.log(
             discoveryCalls: mean("discoveryCalls"),
             meanResultTokens: mean("resultTokens"),
             meanMs: mean("ms"),
-            meanMainModelCostUsd: mean("mainModelCostUsd"),
+            p95Ms: latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)] ?? null,
+            meanMainModelCostUsd: selected.every(
+              (r: Record<string, unknown>) => typeof r.mainModelCostUsd === "number",
+            )
+              ? mean("mainModelCostUsd")
+              : null,
             decisionCostSources: [
               ...new Set(
                 selected.flatMap(

@@ -35,7 +35,7 @@ credential. Configure the category as one deployment change.
 
 | Provider | Model example | Endpoint | Optional base URL |
 | --- | --- | --- | --- |
-| `jev` | `jev-1.13` | Existing TypeSafe `/v1/systemone` | `https://api.typesafe.ai` |
+| `jev` | `jev-latest` (existing client alias) | Existing TypeSafe `/v1/systemone` | `https://api.typesafe.ai` |
 | `openai` | `gpt-6-luna` | OpenAI `/v1/decisions` | `https://api.openai.com/v1` |
 | `openrouter` | `typesafe/jev-1.13` or `openai/gpt-6-luna-decisions` | OpenRouter `/api/alpha/decisions` | `https://openrouter.ai/api/alpha` |
 

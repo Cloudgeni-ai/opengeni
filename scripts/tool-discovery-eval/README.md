@@ -15,8 +15,10 @@ Improve the existing search/list/invoke path, not a second discovery API:
 **Recommendation (October 21):** keep no-model best-match-first as the free default;
 for optional paid selection, use **Jev behind the shared decision-model interface**.
 The tested route is OpenRouter's typed Decisions API, model `typesafe/jev-1.13`.
-It is faster end to end than both the old path and the no-model path on both current
-task sets, with 40/40 correct first tools. This is a small development sample, not
+It beats the old path's whole-discovery time on both catalogs in each warmed
+repeat, but the no-model path is faster on A in the pooled warm results. Jev's
+initial 40/40 correct first tools did **not** repeat: pooled warm accuracy is
+95% / 97.5%, versus 95% / 100% before. This is a small development sample, not
 a production speed or perfect-accuracy guarantee. GPT-OSS/Cerebras and nano remain
 historical comparison points only, not shipped production backends or defaults.
 
@@ -27,7 +29,90 @@ distinct real Decisions adapters, **not chat-completions fallbacks**. See
 [configuration, accounting and verified provider boundaries](../../docs/decision-models.md).
 No production configuration was changed by this evaluation.
 
-## Current typed-model results — October 21, 2026
+## Repeated warm selector runs — October 21, 2026
+
+After the initial current-model experiment below, each typed model ran the same
+60 queries per catalog **twice with an explicit transport/model warmup**. These
+are 60 distinct queries repeated, not 120 independent queries. Four model/catalog
+processes ran concurrently, each doing its two repeats sequentially. All 480
+measured requests returned valid answers; no case was omitted or relabeled.
+
+Warmups ask a small unrelated readiness question, not an evaluated query or its
+candidate prefix. They are excluded from measured rows but retained with their
+own usage/cost receipts. The eight selector warmups cost **$0.000110704 total**.
+Mean/p95 are empirical wall times, including transport, not confidence intervals
+or a guarantee of serving latency. Cost is provider-reported and identical across
+the two repeats for each query; models/versions and labels match the initial run.
+
+| Selector / catalog | Top-1 / top-3, repeat 1; repeat 2 | Mean / p95 ms, repeat 1; repeat 2 | Pooled mean / p95 ms | Mean USD/search |
+| --- | ---: | ---: | ---: | ---: |
+| Jev A | 98.3/98.3%; 96.7/98.3% | 343/410; 345/424 | 344/423 | $0.000593 |
+| Jev B | 98.3/98.3%; 98.3/98.3% | 339/414; 316/410 | 328/414 | $0.000387 |
+| Luna A | 88.3/88.3%; 88.3/88.3% | 617/797; 574/851 | 596/805 | $0.001652 |
+| Luna B | 86.7/86.7%; 86.7/86.7% | 553/747; 532/883 | 543/838 | $0.001203 |
+
+Pooled Jev top-1/top-3 is **97.5/98.3% on A, 98.3/98.3% on B**; Luna is
+88.3/88.3% and 86.7/86.7%. Off-label selections/search are 0.017/0.067 for Jev,
+0/0.033 for Luna, unchanged from the initial run. The Jev A ordering variation is
+retained, not hidden by quoting only the stronger repeat. This confirms the
+selector-level recommendation, separately from whole-discovery timing.
+
+### Repeated warm whole-discovery runs
+
+Current main agent `openai/gpt-6-luna`, same 20 distinct cases per catalog,
+**two warmed repeats**. Before/default are freshly interleaved within each repeat;
+Jev/Luna reuse the corresponding warmed baseline. Main-agent and selector readiness
+calls precede scored rows without preloading any evaluated query. Model/catalog
+processes overlap; this is not randomized provider-capacity isolation. Every case
+is included. These remain generic Chat Completions discovery-only simulations,
+stopped before domain execution—not native Responses latency or completed tasks.
+
+Pooled 40 observations per path/catalog (not 40 distinct tasks):
+
+| Catalog / path | Correct first domain tool | Calls | Mean / p95 total time | Received tokens | Main + selector USD/task |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A before | 95% | 1.30 | 3.937 / 6.469 s | 6,489 | $0.000978 |
+| A no model | 95% | 1.25 | 3.023 / 4.063 s | 1,636 | $0.000399 |
+| A Jev | 95% | 1.05 | 3.248 / 4.410 s | 1,375 | $0.000690 |
+| A Luna Decisions | 95% | 1.275 | 3.629 / 7.285 s | 1,471 | $0.001337 |
+| B before | 100% | 1.625 | 4.735 / 10.565 s | 9,473 | $0.001407 |
+| B no model | 97.5% | 1.60 | 3.757 / 7.718 s | 1,331 | $0.000387 |
+| B Jev | 97.5% | 1.20 | 3.221 / 5.234 s | 738 | $0.000558 |
+| B Luna Decisions | 95% | 1.30 | 3.654 / 6.065 s | 954 | $0.001282 |
+
+Jev's selector-only cost/task is $0.000336 / $0.000275; Luna's is
+$0.000956 / $0.000966. All received cost receipts are provider-reported, and no
+selector call failed. Costs above exclude separately recorded warmups.
+
+Full repeat-level results, with repeat 1 / repeat 2 in each cell:
+
+| Path | Correct | Calls | Mean seconds | p95 seconds | Tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A before | 95% / 95% | 1.40 / 1.20 | 4.221 / 3.654 | 8.411 / 5.413 | 6,928 / 6,050 |
+| A no model | 95% / 95% | 1.30 / 1.20 | 3.083 / 2.964 | 4.063 / 4.017 | 1,712 / 1,560 |
+| A Jev | 95% / 95% | 1.05 / 1.05 | 3.066 / 3.431 | 4.254 / 4.560 | 1,382 / 1,368 |
+| A Luna | 95% / 95% | 1.30 / 1.25 | 3.558 / 3.700 | 7.285 / 4.781 | 1,463 / 1,479 |
+| B before | 100% / 100% | 1.60 / 1.65 | 4.680 / 4.790 | 10.565 / 8.925 | 9,810 / 9,135 |
+| B no model | 95% / 100% | 1.60 / 1.60 | 3.847 / 3.668 | 7.718 / 4.865 | 1,226 / 1,437 |
+| B Jev | 100% / 95% | 1.25 / 1.15 | 3.246 / 3.196 | 5.176 / 5.234 | 774 / 702 |
+| B Luna | 100% / 90% | 1.35 / 1.25 | 3.837 / 3.470 | 6.119 / 5.750 | 735 / 1,173 |
+
+**The original 40/40 result is not a robust accuracy claim.** In the warmed repeats,
+both no-model and Jev lose 2.5 percentage points on B versus the larger-schema
+baseline, and Luna loses five. Jev is faster than before on both sets in each repeat,
+but is 225 ms slower than no-model on A in the pooled data. Luna's A repeat 2 is
+46 ms slower than before. The smallest Jev improvement against before is only
+223 ms on A repeat 2. These tradeoffs remain visible; there was no retuning,
+relabeling or rejection of unfavorable cases after the repeats.
+
+The additional warm experiment contains 480 all-query selector requests and 320
+discovery-trajectory observations. Reused baseline rows are counted only once in
+spend. Measured requests cost **$0.7416988**; **28 warmup requests cost $0.000262708**;
+total **$0.741961508**, all reported receipts. Warmups remain separate from accuracy,
+case counts and measured latency/cost averages. The initial run below remains
+available as evidence of variation, not pooled into these two warm repeats.
+
+## Initial typed-model results — October 21, 2026
 
 Both typed arms use the same 40 lexical candidates, common state and one predicate
 per candidate. The frozen threshold is **strictly above 0.5**, descending probability,
@@ -289,16 +374,16 @@ bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json
 
 # Current typed endpoints: set DECISION_MODEL_API_KEY in the environment.
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
-  --backend openrouter --model typesafe/jev-1.13 --candidates 40 --out jev-typed.json
+  --backend openrouter --model typesafe/jev-1.13 --candidates 40 --warmup --out jev-typed.json
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
-  --backend openrouter --model openai/gpt-6-luna-decisions --candidates 40 --out luna-typed.json
+  --backend openrouter --model openai/gpt-6-luna-decisions --candidates 40 --warmup --out luna-typed.json
 bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
   --decision-results jev-typed.json > jev-runtime.json
 # Main agent uses DECISION_MODEL_BASE_URL=https://openrouter.ai/api/v1;
 # typed decisions use their own endpoint, never that chat-completions base.
 bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
   --out jev-trajectories.json --model openai/gpt-6-luna --decision-backend openrouter \
-  --decision-model typesafe/jev-1.13 --implementation YOUR_REVISION
+  --decision-model typesafe/jev-1.13 --warmup --implementation YOUR_REVISION
 
 # Direct TypeSafe: existing Jev client, OPENGENI_JEV_API_KEY in the environment.
 # Optional OPENGENI_JEV_BASE_URL; use an explicit model ID for reproducibility.
@@ -345,6 +430,15 @@ as typed decisions. Use new output paths after a protocol change. Record actual
 model/provider and cost source; do not combine estimates and charges silently.
 Direct OpenAI uses `--backend openai --model gpt-6-luna` with its own Platform key.
 API-backed scripts spend on supplied accounts but execute no domain tools.
+
+`--warmup` makes one small readiness judgment before measured typed selections;
+trajectory runs also make one main-agent readiness request. Neither warmup uses a
+scored query or preloads its candidate prefix. Warmup receipts/timings are retained
+separately in `warmups`, excluded from measured rows but included when reporting
+total experimental spend. A completed output resumes without any warmup or paid
+call; a partially completed run records new warmups when it resumes in a new
+process. Use separate output files for each repeat, retain all cases, and compare
+both repeat-level and pooled latency rather than picking the faster repeat.
 
 ## Research
 

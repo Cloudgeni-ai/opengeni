@@ -318,7 +318,8 @@ describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => 
         "--implementation",
         "mock-test",
       ];
-      await run("tool-discovery-agent-eval.ts", agentArgs);
+      const agentOutput = await run("tool-discovery-agent-eval.ts", agentArgs);
+      expect(agentOutput).toContain('"p95Ms"');
       const trajectories = await Bun.file(paths.agent).json();
       expect(trajectories.rows.find((row: { arm: string }) => row.arm === "after")).toMatchObject({
         correct: true,
@@ -332,6 +333,50 @@ describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => 
       });
       await run("tool-discovery-agent-eval.ts", agentArgs);
       expect(decisionRequests).toBe(2);
+      const warmDecisionPath = join(directory, "decision-warm.json");
+      const warmDecisionArgs = [
+        ...decisionArgs.map((arg) => (arg === paths.decision ? warmDecisionPath : arg)),
+        "--warmup",
+      ];
+      await run("tool-discovery-decision-eval.ts", warmDecisionArgs);
+      const warmed = await Bun.file(warmDecisionPath).json();
+      expect(warmed.metadata.warmup).toBe(true);
+      expect(warmed.warmups).toHaveLength(1);
+      expect(warmed.warmups[0].usage.costUsd).toBe(jevCostUsd(1000));
+      expect(warmed.rows).toHaveLength(1);
+      expect(decisionRequests).toBe(4);
+      await run("tool-discovery-decision-eval.ts", warmDecisionArgs);
+      expect(decisionRequests).toBe(4);
+      const warmAgentPath = join(directory, "agent-warm.json");
+      const warmAgentArgs = [
+        ...agentArgs.map((arg) => (arg === paths.agent ? warmAgentPath : arg)),
+        "--warmup",
+      ];
+      await run("tool-discovery-agent-eval.ts", warmAgentArgs);
+      const warmAgent = await Bun.file(warmAgentPath).json();
+      expect(warmAgent.warmups.map((row: { kind: string }) => row.kind)).toEqual([
+        "main-agent",
+        "decision-model",
+      ]);
+      expect(warmAgent.rows).toHaveLength(2);
+      expect(warmAgent.rows.find((row: { arm: string }) => row.arm === "after").decisionCalls).toBe(
+        1,
+      );
+      expect(decisionRequests).toBe(6);
+      await run("tool-discovery-agent-eval.ts", warmAgentArgs);
+      expect(decisionRequests).toBe(6);
+      await run(
+        "tool-discovery-agent-eval.ts",
+        [
+          ...warmAgentArgs.map((arg) =>
+            arg === warmAgentPath ? join(directory, "warm-with-cold-baseline.json") : arg,
+          ),
+          "--reuse-baseline",
+          paths.agent,
+        ],
+        "requires a warmed baseline",
+      );
+      expect(decisionRequests).toBe(6);
       unavailable = true;
       const unavailablePath = join(directory, "agent-unavailable.json");
       await run(

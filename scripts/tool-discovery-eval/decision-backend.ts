@@ -2,6 +2,8 @@ import {
   createHttpDecisionModel,
   OPENAI_DECISIONS_ENDPOINT,
   OPENROUTER_DECISIONS_ENDPOINT,
+  predicate,
+  type DecisionModel,
 } from "../../packages/decisions/src";
 import {
   JevClient,
@@ -10,6 +12,15 @@ import {
   JEV_PRICE_PER_MILLION_INPUT_TOKENS_USD,
 } from "../../packages/jev/src/client";
 import { createJevDecisionModel } from "../../packages/jev/src/decision-model";
+
+/** Transport/model warmup, not a scored case or a cached candidate/query prefix. */
+export async function warmDecisionModel(model: DecisionModel) {
+  const started = performance.now();
+  const result = await model.decide("Ready for an evaluation run.", {
+    ready: predicate("Does the input state readiness?"),
+  });
+  return { kind: "decision-model", ms: performance.now() - started, usage: result.usage };
+}
 
 /** Explicit eval credentials, never a workspace/customer credential fallback. */
 export function configuredEvalDecisionModel(backend: string, model: string) {

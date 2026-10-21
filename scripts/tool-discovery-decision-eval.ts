@@ -21,7 +21,10 @@ import {
   toolDecisionRequest,
   parseToolDecision,
 } from "./tool-discovery-eval/chat-comparison";
-import { configuredEvalDecisionModel } from "./tool-discovery-eval/decision-backend";
+import {
+  configuredEvalDecisionModel,
+  warmDecisionModel,
+} from "./tool-discovery-eval/decision-backend";
 import type { DecisionResult, DecisionUsage } from "../packages/decisions/src";
 
 function option(name: string): string | undefined {
@@ -34,6 +37,7 @@ const catalogPath = option("catalog"),
 if (!catalogPath || !outputPath || !model)
   throw new Error("Required: --catalog, --out and --model");
 const backend = option("backend") ?? "openrouter";
+const warmup = process.argv.includes("--warmup");
 const typed =
   backend === "openai-compatible" ? undefined : configuredEvalDecisionModel(backend, model);
 const apiKey = process.env.DECISION_MODEL_API_KEY;
@@ -42,6 +46,7 @@ if (!typed && (!apiKey || !baseUrl))
   throw new Error("Comparison account key and base URL must be configured");
 if (typed && (option("provider") || option("reasoning")))
   throw new Error("Typed judgments do not use chat routing or reasoning flags");
+if (warmup && !typed) throw new Error("Warmup is supported for the current typed comparison only");
 const text = await Bun.file(catalogPath).text();
 const parsed = JSON.parse(text);
 const entries = (Array.isArray(parsed) ? parsed : parsed.tools) as Array<{
@@ -91,7 +96,8 @@ const instruction = TOOL_DECISION_INSTRUCTIONS;
 const provider = option("provider");
 const effort = option("reasoning") ?? "none";
 const metadata = {
-  requestVersion: 4,
+  requestVersion: 5,
+  warmup,
   backend,
   endpoint: typed?.metadata ?? { baseUrl },
   catalogSha256: createHash("sha256").update(text).digest("hex"),
@@ -109,6 +115,11 @@ const existing = (await Bun.file(outputPath).exists())
 if (JSON.stringify(existing.metadata) !== JSON.stringify(metadata))
   throw new Error("Output belongs to a different experiment");
 const rows = existing.rows as Array<Record<string, unknown>>;
+const warmups = existing.warmups ?? [];
+if (warmup && typed && cases.some((c) => !rows.some((row) => row.id === c.id))) {
+  warmups.push(await warmDecisionModel(typed.model));
+  await Bun.write(outputPath, JSON.stringify({ metadata, warmups, rows }, null, 2));
+}
 for (const c of cases) {
   if (rows.some((row) => row.id === c.id)) continue;
   const candidates = (
@@ -230,7 +241,7 @@ for (const c of cases) {
     ...measurement,
   };
   rows.push(row);
-  await Bun.write(outputPath, JSON.stringify({ metadata, rows }, null, 2));
+  await Bun.write(outputPath, JSON.stringify({ metadata, warmups, rows }, null, 2));
   console.log(
     JSON.stringify({
       id: c.id,
