@@ -12,6 +12,12 @@ import type { ReasoningEffort } from "@opengeni/contracts";
 import { encode } from "gpt-tokenizer/encoding/o200k_base";
 import { LazyToolRuntime } from "../packages/runtime/src/lazy-tool-transport";
 import { createToolDecisionModel } from "../packages/runtime/src/tool-discovery-decision";
+import { JevClient } from "../packages/jev/src/client";
+import {
+  createJevDecisionModel,
+  jevEvalConfiguration,
+  JEV_SELECTION_PROTOCOL,
+} from "./tool-discovery-eval/jev-decision";
 import { legacySearchTools } from "./tool-discovery-eval/legacy-ranking";
 
 function option(name: string) {
@@ -27,6 +33,16 @@ const apiKey = process.env.DECISION_MODEL_API_KEY,
   baseURL = process.env.DECISION_MODEL_BASE_URL;
 if (!catalog || !queries || !out || !model || !decisionModel || !apiKey || !baseURL)
   throw new Error("Missing eval paths, model IDs or provider environment");
+const decisionBackend = option("decision-backend") ?? "openai-compatible";
+if (!["openai-compatible", "jev"].includes(decisionBackend))
+  throw new Error("Unsupported decision backend");
+if (decisionBackend === "jev" && option("decision-reasoning"))
+  throw new Error("Jev uses typed judgments, not a reasoning flag");
+const jevConfig =
+  decisionBackend === "jev" && decisionModel !== "none"
+    ? jevEvalConfiguration(decisionModel)
+    : undefined;
+const jev = jevConfig ? new JevClient(jevConfig) : undefined;
 const raw = await Bun.file(catalog).json();
 const entries = Array.isArray(raw) ? raw : raw.tools;
 const tools = entries.map(
@@ -67,7 +83,7 @@ const pool = baseline.inspectSearchableTools().map((t) => ({ ...t, type: "functi
 const cases = (
   (await Bun.file(queries).json()) as Array<{ id: string; query: string; expected: string[] }>
 ).filter((_, i) => i % 3 === 0);
-let decisionReceipts: Array<{ provider?: string; costUsd?: number }> = [];
+let decisionReceipts: Array<{ provider?: string; costUsd?: number; model?: string }> = [];
 const client = new OpenAI({
   apiKey,
   baseURL,
@@ -76,9 +92,14 @@ const client = new OpenAI({
     if (response.ok) {
       const result = (await response.clone().json()) as {
         provider?: string;
+        model?: string;
         usage?: { cost?: number };
       };
-      decisionReceipts.push({ provider: result.provider, costUsd: result.usage?.cost });
+      decisionReceipts.push({
+        ...(result.provider ? { provider: result.provider } : {}),
+        ...(result.model ? { model: result.model } : {}),
+        ...(typeof result.usage?.cost === "number" ? { costUsd: result.usage.cost } : {}),
+      });
     }
     return response;
   },
@@ -94,12 +115,16 @@ const provider = {
 } as ResolvedModelProvider;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const metadata = {
-  version: 3,
+  version: 4,
   catalogSha256: hash(raw),
   queriesSha256: hash(cases),
   model,
   decisionModel,
-  decisionReasoning: effort,
+  decisionBackend,
+  agentBaseUrl: baseURL,
+  decisionBaseUrl: jevConfig?.baseUrl ?? baseURL,
+  decisionReasoning: jev ? null : effort,
+  decisionProtocol: jev ? JEV_SELECTION_PROTOCOL : null,
   implementation: option("implementation") ?? "working-tree",
 };
 const prior = (await Bun.file(out).exists()) ? await Bun.file(out).json() : undefined;
@@ -128,20 +153,40 @@ for (const c of cases)
   for (const arm of ["before", "after"] as const) {
     if (rows.some((r: { id: string; arm: string }) => r.id === c.id && r.arm === arm)) continue;
     let decisionCalls = 0,
+      decisionFailures = 0,
+      decisionHttpChunks = 0,
       decisionInputTokens = 0,
       decisionOutputTokens = 0;
     decisionReceipts = [];
-    const choose = createToolDecisionModel(
-      { client, provider, modelId: decisionModel },
-      {
-        reasoningEffort: effort as ReasoningEffort,
-        onUsage: async (usage) => {
-          decisionCalls++;
-          decisionInputTokens += usage.usage.inputTokens ?? 0;
-          decisionOutputTokens += usage.usage.outputTokens ?? 0;
-        },
-      },
-    );
+    const select = jev
+      ? createJevDecisionModel(jev, (receipt) => {
+          decisionInputTokens += receipt.usage.inputTokens;
+          decisionHttpChunks += receipt.requests;
+          decisionReceipts.push({
+            provider: "typesafe",
+            costUsd: receipt.costUsd,
+            model: receipt.model,
+          });
+        })
+      : createToolDecisionModel(
+          { client, provider, modelId: decisionModel },
+          {
+            reasoningEffort: effort as ReasoningEffort,
+            onUsage: async (usage) => {
+              decisionInputTokens += usage.usage.inputTokens ?? 0;
+              decisionOutputTokens += usage.usage.outputTokens ?? 0;
+            },
+          },
+        );
+    const choose: typeof select = async (input) => {
+      decisionCalls++;
+      try {
+        return await select(input);
+      } catch (error) {
+        decisionFailures++;
+        throw error;
+      }
+    };
     const runtime = makeRuntime(decisionModel === "none" ? undefined : choose);
     const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list")!;
     const wireTools = runtime.controlTools
@@ -266,13 +311,19 @@ for (const c of cases)
       discoveryCalls,
       resultTokens,
       decisionCalls,
+      decisionFailures,
+      decisionHttpChunks: jev ? decisionHttpChunks : null,
       decisionInputTokens,
-      decisionOutputTokens,
+      decisionOutputTokens: jev && decisionCalls > 0 ? null : decisionOutputTokens,
       mainModelCostUsd,
-      decisionModelCostUsd: decisionReceipts.every((r) => typeof r.costUsd === "number")
-        ? decisionReceipts.reduce((sum, r) => sum + r.costUsd!, 0)
-        : null,
+      decisionModelCostUsd:
+        decisionReceipts.length === decisionCalls &&
+        decisionReceipts.every((r) => typeof r.costUsd === "number")
+          ? decisionReceipts.reduce((sum, r) => sum + r.costUsd!, 0)
+          : null,
+      decisionCostSource: jev ? JEV_SELECTION_PROTOCOL.costSource : "provider-reported",
       decisionProviders: [...new Set(decisionReceipts.map((r) => r.provider).filter(Boolean))],
+      decisionModels: [...new Set(decisionReceipts.map((r) => r.model).filter(Boolean))],
       ms: performance.now() - started,
       trace,
     };
@@ -320,8 +371,9 @@ console.log(
             meanResultTokens: mean("resultTokens"),
             meanMs: mean("ms"),
             meanMainModelCostUsd: mean("mainModelCostUsd"),
+            decisionCostSource: jev ? JEV_SELECTION_PROTOCOL.costSource : "provider-reported",
             meanDecisionModelCostUsd: selected.every(
-              (r) => typeof r.decisionModelCostUsd === "number",
+              (r: Record<string, unknown>) => typeof r.decisionModelCostUsd === "number",
             )
               ? mean("decisionModelCostUsd")
               : null,

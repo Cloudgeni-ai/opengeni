@@ -12,7 +12,19 @@ Improve the existing search/list/invoke path, not a second discovery API:
 - Schemas are not shortened or inferred. Selected definitions are frozen on the search call and disclosed after its result. They never enter a changing earlier prompt or top-level tools block.
 - There is no default paid model, embedding index, extra credential, new inference timeout or concurrency quota. Unconfigured/unavailable selection uses the same best-match-first lexical path. Only selected schemas are loaded; alternatives remain compact.
 
-**Recommendation:** ship best-match-first without a paid model as the default and preserve existing native routing. On the **generic Chat Completions path tested live**, it was faster than the old path on both task sets in both repeats. For deployments prioritizing accuracy, the measured conditional GPT-OSS-120B low / fast route also beat the old path on both sets in both repeats and improved accuracy further. Keep it explicitly configured: this is not permission to route every deployment to that account/provider. It is slower than the new no-model default, and small repeated development samples do not guarantee a production latency win. Native routes have offline selection and SDK/wire regression evidence, **not a live native latency comparison**.
+**Recommendation (updated October 21):** retain best-match-first without a paid model as the default and preserve existing native routing. **Jev is the intended decision-model candidate**, using the existing `packages/jev` client behind the generic selection interface. Its eval arm is ready, but no authorized Jev key was available for this evaluation: accuracy, latency and cost results are **pending**, not inferred from other models. Do not recommend or configure GPT-OSS/Cerebras or nano as substitutes; their measurements below are comparison points only. Jev activation is not implemented or justified by this eval-preparation amendment. Its measured accuracy and whole-discovery time on both catalogs must inform that follow-up in this same draft.
+
+The no-model default was faster than the old path on both task sets in both repeats on the **generic Chat Completions path tested live**. This is a small development sample, not a production latency guarantee. Native routes have offline selection and SDK/wire regression evidence, **not a live native latency comparison**. All rows labeled “conditional fast”, “fast selection”, nano or Cerebras below refer to the earlier comparison experiments, **not Jev results or a recommended/default model**.
+
+### Jev arm: prepared, not yet measured
+
+`jev-decision.ts` implements the existing `ToolDecisionModel` callback without changing runtime controls or model-facing names. One common state contains the query and the same compact candidate shortlist as the other arms; one typed yes/no (`noul`) question asks whether each candidate belongs in the smallest directly requested set, rather than merely being related. The frozen experimental threshold is **strictly above 0.5**, with selected tools ordered by descending probability and stable candidate order on ties. This is not calibrated confidence or a promise of one tool per action: independent judgments may include alternatives, omit tools, or reorder multiple requested actions. Those errors remain visible in the ordinary accuracy/off-label measurements; raw scores are retained for audit, not silently used to tune the threshold.
+
+The adapter uses the existing client's chunking, retries and cancellation without new limits, timeouts or warm-up calls. Invalid probabilities reject the whole selection; generic runtime failure falls back to lexical selection. Exact names and strong matches still bypass inference. Retrieval records actual returned model version, input tokens, chunk count, scores and wall time; runtime replay and live **generic** trajectories use the same callback. Native selection can be replayed offline, but this does not add a live native-provider test.
+
+Jev `costUsd` is the existing client's **input-token estimate**, not a provider-reported charge. The rate is frozen in experiment metadata (currently `$0.042 / million input tokens` in the repository client, not independently revalidated here). Output tokens are unknown/null rather than invented. Live trajectories distinguish attempted decisions, failures and successful chunks; if a call fails before returning usage, its cost is unknown/null. The retrieval script stops resumably on such a failure instead of fabricating a free result. The client may retry, and its chunk count is not a count of HTTP retry attempts. Missing usage in a successful response inherits the existing client's zero-token behavior; such estimates must not be treated as billing proof.
+
+No production model configuration is changed by these scripts. The standalone retrieval arm needs only `OPENGENI_JEV_API_KEY`; the main agent in the live trajectory arm still needs its separately configured OpenAI-compatible account. Neither script executes a domain tool. Local mock tests cover the real client request, scoring, invalid output, cancellation, fallback, command wiring, offline native/generic replay and resume without making a paid call. A no-network preflight of all 120 real query shortlists passed the existing client's request planning: one chunk per query, maximum request bodies 65,340 / 40,641 bytes for A / B. This verifies request construction only, not provider acceptance or model quality.
 
 ## Dataset and method (October 20, 2026)
 
@@ -65,7 +77,7 @@ For comparison, isolated ranking and selection on **every query**, without the r
 | Lexical 40 → GPT-OSS-120B, low, Cerebras | 95.0% / 95.0% | 98.3% / 98.3% |
 | Whole compact catalog → GPT-5.4 nano | 83.3% / 93.3% | 85.0% / 90.0% |
 
-The final decision request uses candidate integer IDs, smallest-set instructions, and catalog-before-query messages. Exact ID validation rejects malformed/duplicate/out-of-range IDs. The full-catalog arm costs more and does not improve accuracy. The tested hybrid helps top-3, especially on B, but does not justify shipping an embedding runtime/index for this improvement. This does not rule out other embedding models or rerankers.
+The measured OpenAI-compatible decision request uses candidate integer IDs, smallest-set instructions, and catalog-before-query messages. Exact ID validation rejects malformed/duplicate/out-of-range IDs. The full-catalog arm costs more and does not improve accuracy. The tested hybrid helps top-3, especially on B, but does not justify shipping an embedding runtime/index for this improvement. This does not rule out other embedding models or rerankers. The prepared Jev arm uses typed candidate judgments instead; no Jev numbers are included in these tables.
 
 Exploratory trials are not substituted for final numbers: an early name-output trial produced invalid names; an earlier GPT-5.4 nano prompt scored 95.0/98.3% on A; an earlier Haiku trial on B returned many unnecessary tools (6.93 off-label tools/search). Those trials used different prompts/output formats. The table reports the final prompt, not the best observed run.
 
@@ -171,7 +183,19 @@ Install with `bun install --frozen-lockfile`. Export a real authorized catalog a
 ```sh
 bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json > ranking.json
 
-# Explicitly configured OpenAI-compatible account; no default key or endpoint.
+# Intended candidate: existing Jev client, with OPENGENI_JEV_API_KEY in the environment.
+# Optional OPENGENI_JEV_BASE_URL; use an explicit model ID for reproducibility.
+bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
+  --backend jev --model jev-latest --candidates 40 --out jev-decision.json
+bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
+  --decision-results jev-decision.json > jev-runtime.json
+# Live generic trajectories: DECISION_MODEL_API_KEY / DECISION_MODEL_BASE_URL
+# are for the main agent; the selector uses its separate OPENGENI_JEV_* settings.
+bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
+  --out jev-trajectories.json --model YOUR_AGENT_MODEL --decision-backend jev \
+  --decision-model jev-latest --implementation YOUR_REVISION
+
+# Comparison only: explicitly configured OpenAI-compatible selector account.
 # Set DECISION_MODEL_API_KEY and DECISION_MODEL_BASE_URL in your environment.
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
   --out decision.json --model YOUR_MODEL --candidates 40 --reasoning none
@@ -190,9 +214,13 @@ bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries querie
 # Set TOOL_DISCOVERY_EMBEDDING_MODULE to its transformers.js module path.
 bun scripts/tool-discovery-embedding-eval.ts --catalog catalog.json --queries queries.json \
   --out embedding.json --cache /path/to/model-cache
+
+# No-network adapter/CLI verification and eval-specific typecheck:
+bun test scripts/tool-discovery-eval/jev-decision.test.ts
+bunx --no-install tsc -p scripts/tool-discovery-eval/tsconfig.json
 ```
 
-The decision script validates catalog/query hashes and model/request metadata before resuming an output. The trajectory script validates the same experiment metadata and supports explicitly reusing baseline cases. Record provider, version, reasoning and actual cost; do not compare altered prompts as if they were the same arm. API-backed scripts spend on the account explicitly supplied; they execute no domain tools.
+The decision script validates catalog/query hashes, backend, endpoint and model/request metadata before resuming an output. The trajectory script validates the same experiment metadata and supports explicitly reusing baseline cases. The Jev protocol/threshold/cost-rate version is included; it does not reuse older OpenAI-compatible experiment outputs as Jev results. Use new output paths for this version of the scripts. For paired timing claims, run a fresh interleaved baseline and repeat rather than relying only on old baseline timings. Record provider, returned model version and cost source; never combine a client estimate and a reported charge without labeling the difference. API-backed scripts spend on the accounts explicitly supplied; they execute no domain tools.
 
 ## Research
 

@@ -4,7 +4,8 @@
  * DECISION_MODEL_API_KEY=... bun scripts/tool-discovery-decision-eval.ts \
  *   --catalog catalog.json --out results.json --model provider/model \
  *   [--candidates all|40] [--queries queries.json]
- * Uses a configured OpenAI-compatible provider. Never commits catalogs/results.
+ * --backend jev uses OPENGENI_JEV_API_KEY and the existing Jev client instead.
+ * Never commits catalogs/results or executes a domain tool.
  */
 import { createHash } from "node:crypto";
 import type { Tool } from "@openai/agents";
@@ -16,6 +17,13 @@ import {
   toolDecisionRequest,
   parseToolDecision,
 } from "../packages/runtime/src/tool-discovery-decision";
+import { JevClient } from "../packages/jev/src/client";
+import {
+  createJevDecisionModel,
+  jevEvalConfiguration,
+  JEV_SELECTION_PROTOCOL,
+  type JevDecisionReceipt,
+} from "./tool-discovery-eval/jev-decision";
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -26,10 +34,16 @@ const catalogPath = option("catalog"),
   model = option("model");
 if (!catalogPath || !outputPath || !model)
   throw new Error("Required: --catalog, --out and --model");
-const apiKey = process.env.DECISION_MODEL_API_KEY;
+const backend = option("backend") ?? "openai-compatible";
+if (!["openai-compatible", "jev"].includes(backend)) throw new Error("Unsupported backend");
+const jevConfig = backend === "jev" ? jevEvalConfiguration(model) : undefined;
+const apiKey = jevConfig?.apiKey ?? process.env.DECISION_MODEL_API_KEY;
 if (!apiKey) throw new Error("DECISION_MODEL_API_KEY is not configured");
-const baseUrl = process.env.DECISION_MODEL_BASE_URL;
+const baseUrl = jevConfig?.baseUrl ?? process.env.DECISION_MODEL_BASE_URL;
 if (!baseUrl) throw new Error("DECISION_MODEL_BASE_URL is not configured");
+if (backend === "jev" && (option("provider") || option("reasoning")))
+  throw new Error("Jev uses typed judgments, not provider-routing or reasoning flags");
+const jev = jevConfig ? new JevClient(jevConfig) : undefined;
 const text = await Bun.file(catalogPath).text();
 const parsed = JSON.parse(text);
 const entries = (Array.isArray(parsed) ? parsed : parsed.tools) as Array<{
@@ -79,15 +93,17 @@ const instruction = TOOL_DECISION_INSTRUCTIONS;
 const provider = option("provider");
 const effort = option("reasoning") ?? "none";
 const metadata = {
-  requestVersion: 2,
+  requestVersion: 3,
+  backend,
+  baseUrl,
   catalogSha256: createHash("sha256").update(text).digest("hex"),
   deferredTools: pool.length,
   candidates: candidateCount,
   querySha256: createHash("sha256").update(JSON.stringify(cases)).digest("hex"),
   model,
-  instruction,
+  instruction: jev ? JEV_SELECTION_PROTOCOL : instruction,
   provider: provider ?? null,
-  effort,
+  effort: jev ? null : effort,
 };
 const existing = (await Bun.file(outputPath).exists())
   ? await Bun.file(outputPath).json()
@@ -107,48 +123,97 @@ for (const c of cases) {
     }
   >;
   const started = performance.now();
-  const request = toolDecisionRequest({
+  const input = {
     query: c.query,
     candidates: candidates.map(decisionCandidate),
-  });
-  const format = request.outputFormat as {
-    name: string;
-    schema: Record<string, unknown>;
-    strict: boolean;
   };
-  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      reasoning: { effort },
-      ...(provider ? { provider: { order: [provider], allow_fallbacks: false } } : {}),
-      messages: request.messages,
-      response_format: {
-        type: "json_schema",
-        json_schema: { name: format.name, schema: format.schema, strict: format.strict },
-      },
-    }),
-  });
-  if (!response.ok)
-    throw new Error(
-      `Decision model HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`,
-    );
-  const result = (await response.json()) as {
-    choices: Array<{ message: { content: string } }>;
-    usage: { prompt_tokens: number; completion_tokens: number; cost?: number };
-    model: string;
-    provider?: string;
-  };
-  let selected: string[] = [],
+  let selected: readonly string[] = [],
     invalid = false;
-  try {
-    selected = parseToolDecision(
-      result.choices[0]!.message.content,
-      candidates.map(decisionCandidate),
-    );
-  } catch {
-    invalid = true;
+  let measurement: Record<string, unknown>;
+  if (jev && !input.candidates.length) {
+    measurement = {
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      costSource: "not-called-empty-shortlist",
+      model: null,
+      provider: null,
+      requests: 0,
+      candidateScores: [],
+    };
+  } else if (jev) {
+    let receipt: JevDecisionReceipt | undefined;
+    try {
+      selected = await createJevDecisionModel(jev, (result) => {
+        receipt = result;
+      })(input);
+    } catch (error) {
+      // Without a receipt, usage is unknown: stop and resume rather than invent a
+      // zero-cost failed result. Invalid scored responses retain their usage.
+      if (!receipt) throw error;
+      invalid = true;
+    }
+    if (!receipt) throw new Error("Decision model returned no measurement receipt");
+    measurement = {
+      inputTokens: receipt.usage.inputTokens,
+      outputTokens: null,
+      costUsd: receipt.costUsd,
+      costSource: JEV_SELECTION_PROTOCOL.costSource,
+      model: receipt.model,
+      provider: "typesafe",
+      requests: receipt.requests,
+      candidateScores: input.candidates.map((candidate, id) => ({
+        name: candidate.name,
+        probability: receipt!.answers[String(id)]?.probability ?? null,
+      })),
+    };
+  } else {
+    const request = toolDecisionRequest(input);
+    const format = request.outputFormat as {
+      name: string;
+      schema: Record<string, unknown>;
+      strict: boolean;
+    };
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        reasoning: { effort },
+        ...(provider ? { provider: { order: [provider], allow_fallbacks: false } } : {}),
+        messages: request.messages,
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: format.name, schema: format.schema, strict: format.strict },
+        },
+      }),
+    });
+    if (!response.ok)
+      throw new Error(
+        `Decision model HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`,
+      );
+    const result = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      usage: { prompt_tokens: number; completion_tokens: number; cost?: number };
+      model: string;
+      provider?: string;
+    };
+    try {
+      selected = parseToolDecision(
+        result.choices[0]!.message.content,
+        candidates.map(decisionCandidate),
+      );
+    } catch {
+      invalid = true;
+    }
+    measurement = {
+      inputTokens: result.usage.prompt_tokens,
+      outputTokens: result.usage.completion_tokens,
+      costUsd: result.usage.cost ?? null,
+      costSource: "provider-reported",
+      model: result.model,
+      provider: result.provider,
+    };
   }
   const row = {
     id: c.id,
@@ -164,11 +229,7 @@ for (const c of cases) {
     selected,
     invalid,
     ms: performance.now() - started,
-    inputTokens: result.usage.prompt_tokens,
-    outputTokens: result.usage.completion_tokens,
-    costUsd: result.usage.cost,
-    model: result.model,
-    provider: result.provider,
+    ...measurement,
   };
   rows.push(row);
   await Bun.write(outputPath, JSON.stringify({ metadata, rows }, null, 2));
@@ -180,7 +241,7 @@ for (const c of cases) {
       selected: selected.length,
       wronglyIncluded: row.wronglyIncluded,
       ms: row.ms,
-      costUsd: row.costUsd,
+      costUsd: measurement.costUsd,
     }),
   );
 }
@@ -195,8 +256,11 @@ console.log(
       meanWronglyIncluded: mean("wronglyIncluded"),
       meanMs: mean("ms"),
       p95Ms: sortedLatency[Math.ceil(rows.length * 0.95) - 1],
-      meanCostUsd: mean("costUsd"),
-      totalCostUsd: rows.reduce((s, r) => s + Number(r.costUsd), 0),
+      costSource: jev ? JEV_SELECTION_PROTOCOL.costSource : "provider-reported",
+      meanCostUsd: rows.every((r) => typeof r.costUsd === "number") ? mean("costUsd") : null,
+      totalCostUsd: rows.every((r) => typeof r.costUsd === "number")
+        ? rows.reduce((s, r) => s + Number(r.costUsd), 0)
+        : null,
     },
     null,
     2,
