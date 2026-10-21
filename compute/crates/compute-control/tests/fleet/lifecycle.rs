@@ -75,7 +75,7 @@ async fn a_host_registers_only_under_a_name_its_certificate_carries() {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 1024,
-            cpu_millis: None,
+            cpu_millis: 64_000,
             disk_mib: 1024,
         },
         capacity: roomy(),

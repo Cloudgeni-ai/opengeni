@@ -74,16 +74,12 @@ pub struct GroupView {
     /// The most processor time in millicores one live host guarantees
     /// now: the most removing one takes away.
     pub most_cpu_millis: u64,
-    /// Live hosts that do not say what processor time they guarantee:
-    /// while one does, processor time does not decide the group's size.
-    pub cpu_unreported: u32,
     /// Rooms on the live hosts for the largest sandbox by memory alone:
     /// [`ScalePolicy::rooms`] of each host's free memory, summed.
     pub memory_rooms: u64,
     /// Rooms on the live hosts for the largest sandbox by memory and
     /// processor time both, on the same host: [`ScalePolicy::rooms`] of
-    /// each host's free memory and processor time, summed. A host that
-    /// does not say what processor time it guarantees counts by memory.
+    /// each host's free memory and processor time, summed.
     pub rooms: u64,
 }
 
@@ -115,11 +111,10 @@ impl ScalePolicy {
 
     /// The spare processor time in millicores `view` should keep, when
     /// processor time decides the group's size, which it does once there
-    /// are live hosts and every one says what it guarantees, even none:
-    /// likewise.
+    /// are live hosts: likewise.
     #[must_use]
     pub fn target_cpu_millis(&self, view: &GroupView) -> Option<u64> {
-        if view.cpu_unreported > 0 || view.hosts == 0 {
+        if view.hosts == 0 {
             return None;
         }
         let share = view.cpu_millis * u64::from(self.spare_per_mille) / 1_000;
@@ -207,10 +202,11 @@ mod tests {
         max_hosts: 50,
     };
 
-    /// Hosts that do not guarantee processor time.
+    /// Hosts of 30 guaranteed processors each, all of them free, so memory
+    /// decides.
     fn view(hosts: u32, free_gib: u64) -> GroupView {
         let free_memory_mib = free_gib * 1024;
-        let rooms = POLICY.rooms(free_memory_mib, None);
+        let cpu_millis = u64::from(hosts) * 30_000;
         GroupView {
             hosts,
             booting: 0,
@@ -218,10 +214,12 @@ mod tests {
             stalled: 0,
             memory_mib: u64::from(hosts) * 100 * 1024,
             free_memory_mib,
-            cpu_unreported: hosts,
-            memory_rooms: rooms,
-            rooms,
-            ..GroupView::default()
+            cpu_millis,
+            free_cpu_millis: cpu_millis,
+            host_cpu_millis: 30_000,
+            most_cpu_millis: 30_000,
+            memory_rooms: POLICY.rooms(free_memory_mib, None),
+            rooms: POLICY.rooms(free_memory_mib, Some(cpu_millis)),
         }
     }
 
@@ -232,7 +230,6 @@ mod tests {
         view.free_cpu_millis = free * 1000;
         view.host_cpu_millis = 30_000;
         view.most_cpu_millis = 30_000;
-        view.cpu_unreported = 0;
         view.rooms = POLICY.rooms(view.free_memory_mib, Some(view.free_cpu_millis));
         view
     }
@@ -276,7 +273,6 @@ mod tests {
             ..POLICY
         };
         let mut lowered = view(4, 400);
-        lowered.cpu_unreported = 0;
         lowered.cpu_millis = 16_000;
         lowered.free_cpu_millis = 16_000;
         lowered.host_cpu_millis = 7500;
@@ -310,12 +306,6 @@ mod tests {
         assert_eq!(policy.decide(&view), ScaleDecision::Grow { to: 5 });
         view.rooms = 2;
         assert_eq!(policy.decide(&view), ScaleDecision::Hold);
-        // By memory alone while a host does not report processor time.
-        view.rooms = 0;
-        view.cpu_unreported = 1;
-        assert_eq!(policy.decide(&view), ScaleDecision::Hold);
-        view.memory_rooms = 1;
-        assert_eq!(policy.decide(&view), ScaleDecision::Grow { to: 5 });
     }
 
     #[test]
@@ -353,14 +343,6 @@ mod tests {
             POLICY.decide(&with_cpu(view(10, 10), 50)),
             ScaleDecision::Grow { to: 12 }
         );
-    }
-
-    #[test]
-    fn processor_time_counts_only_when_every_live_host_reports_it() {
-        let mut unreported = with_cpu(view(10, 250), 0);
-        unreported.cpu_unreported = 1;
-        assert_eq!(POLICY.decide(&unreported), ScaleDecision::Hold);
-        assert_eq!(POLICY.decide(&view(10, 250)), ScaleDecision::Hold);
     }
 
     #[test]

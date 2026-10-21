@@ -6,7 +6,6 @@
 
 use bytes::Bytes;
 use compute_fleet::{Fence, Found, Mutation, OwnerEpoch, Stamp, fence};
-use futures::TryStreamExt as _;
 use object_store::{PutMode, PutOptions, UpdateVersion, path::Path};
 
 use super::{ChunkStore, MAX_POINTER_BYTES};
@@ -23,10 +22,6 @@ const HEADER_BYTES: usize = STAMP_BYTES + 16;
 
 /// Where pointers are stored: in this format, with an owner in the header.
 pub(super) const POINTERS: &str = "pointers/v3";
-
-/// Where pointers were stored in older formats: without a write stamp
-/// (`v1`), and without an owner (`v2`).
-const OLDER_POINTERS: [&str; 2] = ["pointers/v1", "pointers/v2"];
 
 /// The save number of a deleted sandbox's tombstone, which tells it from
 /// any other pointer.
@@ -197,23 +192,6 @@ impl ChunkStore {
             return Err(Error::Invalid("pointer name"));
         }
         Ok(self.path(&format!("{POINTERS}/{name}")))
-    }
-
-    /// Refuses a store that holds pointers in an older format: this
-    /// release does not read them, so their copies would look absent and a
-    /// sweep would delete what they name. Such a store needs migrating; a
-    /// new prefix starts afresh.
-    pub async fn refuse_unstamped_pointers(&self) -> Result<()> {
-        for older in OLDER_POINTERS {
-            let prefix = self.path(older);
-            if self.backend.list(Some(&prefix)).try_next().await?.is_some() {
-                return Err(Error::Unsupported(
-                    "the store holds pointers in an older format (pointers/v1 or v2): \
-                     migrate them or use a new prefix",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Reads the pointer at `path`; `None` when there is none.

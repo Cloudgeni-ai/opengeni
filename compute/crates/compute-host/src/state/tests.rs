@@ -211,12 +211,6 @@ fn last_use_never_moves_backwards() {
     assert_eq!(record.last_used_ms, Some(2_000));
     Change::new().last_used(1_000).apply_to(&mut record);
     assert_eq!(record.last_used_ms, Some(2_000), "an older time is ignored");
-    // A record written before the field existed reads as never recorded.
-    let mut json = serde_json::to_value(Record::new(id(1), 0, allocation(), config())).unwrap();
-    assert!(json.get("last_used_ms").is_none());
-    json.as_object_mut().unwrap().remove("removing");
-    let old: Record = serde_json::from_value(json).unwrap();
-    assert_eq!(old.last_used_ms, None);
 }
 
 #[test]
@@ -232,8 +226,6 @@ fn the_backup_time_stays_until_a_newer_copy() {
     assert_eq!(record.backed_up_ms, Some(2_000));
     Change::new().backed_up(1_000).apply_to(&mut record);
     assert_eq!(record.backed_up_ms, Some(2_000), "an older time is ignored");
-    let json = serde_json::to_value(Record::new(id(1), 0, allocation(), config())).unwrap();
-    assert!(json.get("backed_up_ms").is_none(), "older agents read it");
 }
 
 #[test]

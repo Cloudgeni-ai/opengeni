@@ -61,20 +61,15 @@ const ZSTD_LEVEL: i32 = 1;
 
 pub(crate) use compute_pager::WakeProfile;
 
-/// `profile`'s page size, assuming the smallest for profiles without one.
-fn page_of(profile: &WakeProfile) -> u64 {
-    if valid_page(profile.page_size) {
-        profile.page_size
-    } else {
-        SMALLEST_PAGE
-    }
-}
-
 /// The pages to pack from an image of `memory_len` bytes: `profile`'s
 /// first pages, each once, up to [`READY_BYTES`]. Offsets outside the
-/// image are left out.
+/// image are left out, and a profile of no page size guest memory comes
+/// in packs nothing.
 fn packed(profile: &WakeProfile, memory_len: u64) -> Vec<u64> {
-    let page = page_of(profile);
+    let page = profile.page_size;
+    if !valid_page(page) {
+        return Vec::new();
+    }
     let mut seen = HashSet::new();
     profile
         .offsets
@@ -187,7 +182,7 @@ pub(crate) async fn put(
     if pages.is_empty() {
         return Ok(None);
     }
-    let page_size = page_of(profile);
+    let page_size = profile.page_size;
     // Stops the packing on a cancel or a failed upload.
     let stop = cancel.child_token();
     let (made, mut parts) = mpsc::channel(PARTS_IN_FLIGHT);

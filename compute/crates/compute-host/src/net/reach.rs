@@ -63,13 +63,6 @@ impl fmt::Display for Ports {
     }
 }
 
-impl Ports {
-    /// Whether `port` is one of them.
-    pub(crate) fn contains(self, port: u16) -> bool {
-        (self.first..=self.last).contains(&port)
-    }
-}
-
 impl FromStr for Ports {
     type Err = String;
 

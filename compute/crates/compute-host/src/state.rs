@@ -96,7 +96,7 @@ pub(crate) struct Allocation {
     pub link: Option<LinkAddresses>,
     /// Its disk's length, from when its first files were written. A disk
     /// keeps its length, in object storage too, whatever base image the
-    /// host has since; unknown for a record written before it was kept.
+    /// host has since; unknown only until then, before it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
@@ -137,10 +137,8 @@ pub(crate) struct Record {
     /// The store holds a copy matching the local files.
     pub archived: bool,
     /// Removal has begun; it finishes even across a restart.
-    #[serde(default)]
     pub removing: bool,
     /// Whether its guest knows it is this sandbox.
-    #[serde(default)]
     pub identity: Identity,
     /// Its last activity, in milliseconds since the Unix epoch, as of the
     /// record's latest write, so a restart does not reset how long it has
@@ -156,20 +154,14 @@ pub(crate) struct Record {
     /// ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
     /// The store refuses this host's writes once a later one holds it. A
     /// host outside a fleet keeps the first.
-    #[serde(default = "first_owner")]
     pub owner_epoch: u64,
     /// The number of the last save this owner began archiving, recorded
     /// before it began, so no two archives of one owner share a number.
-    #[serde(default)]
     pub saves: u64,
     /// Its removal leaves the store's copy, which belongs to a later owner
     /// or was handed on: the host drops only what it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
-}
-
-fn first_owner() -> u64 {
-    OwnerEpoch::FIRST.0
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -282,7 +274,6 @@ pub(crate) struct Change {
     /// The agent link the control service sent last, `None` inside for none;
     /// boxed, as most writes leave it.
     link: Option<Box<Option<compute_protocol::link::AgentLink>>>,
-    disk_bytes: Option<u64>,
 }
 
 impl Change {
@@ -364,13 +355,6 @@ impl Change {
         self
     }
 
-    /// Records the disk's length where the record does not know it yet,
-    /// as for one written before it was kept; a known length never changes.
-    pub fn disk_bytes(mut self, bytes: u64) -> Self {
-        self.disk_bytes = Some(bytes);
-        self
-    }
-
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -403,9 +387,6 @@ impl Change {
         }
         if let Some(link) = self.link {
             record.config.link = *link;
-        }
-        if let Some(bytes) = self.disk_bytes {
-            record.allocation.disk_bytes.get_or_insert(bytes);
         }
     }
 }

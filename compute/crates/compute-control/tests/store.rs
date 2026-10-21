@@ -26,8 +26,8 @@ fn random() -> u64 {
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
-        cpu_millis: None,
-        cpu_free_millis: None,
+        cpu_millis: 4000,
+        cpu_free_millis: 4000,
         disk_free_mib: 1024,
         ready: Vec::new(),
         awake: 0,
@@ -47,7 +47,7 @@ fn register(name: &str, attempt: u64, held: Vec<Held>) -> Register {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 4096,
-            cpu_millis: None,
+            cpu_millis: 4000,
             disk_mib: 4096,
         },
         capacity: capacity(),
@@ -683,10 +683,14 @@ async fn paused_e2b_lifecycles_are_read_a_page_at_a_time() {
     each(paused_lifecycles, paused_lifecycles).await;
 }
 
-/// A schema of its own in the test database, which `url` then uses, and
-/// a client to set it up and drop it with.
-async fn fresh_schema(url: &str) -> (String, String, tokio_postgres::Client) {
-    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+/// Replicas starting together on an empty database migrate it once, to
+/// the latest version, and starting again changes nothing.
+#[tokio::test]
+async fn replicas_starting_together_migrate_a_new_database_once() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .unwrap();
     tokio::spawn(connection);
@@ -696,39 +700,6 @@ async fn fresh_schema(url: &str) -> (String, String, tokio_postgres::Client) {
         .await
         .unwrap();
     let scoped = format!("{url} options='-c search_path={schema}'");
-    (schema, scoped, client)
-}
-
-/// A database a build from before the schema had versions made keeps its
-/// create requests, deleted ones retired from the upgrade on, and replicas
-/// starting together migrate it once.
-#[tokio::test]
-async fn a_database_from_before_schema_versions_is_upgraded_keeping_its_requests() {
-    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
-        return;
-    };
-    let (schema, scoped, client) = fresh_schema(&url).await;
-    client
-        .batch_execute(&format!(
-            "set search_path = {schema}; \
-             create table compute_create_requests ( \
-                 team text not null, request_id text not null, id text not null, \
-                 digest text not null, created_ms bigint not null, gone boolean not null, \
-                 primary key (team, request_id)); \
-             create index compute_create_requests_gone on compute_create_requests (created_ms) \
-                 where gone; \
-             insert into compute_create_requests values \
-                 ('team', 'kept', '{live}', 'd1', 1, false), \
-                 ('team', 'deleted', '{gone}', 'd2', 2, true);",
-            live = Id(SandboxId(1)),
-            gone = Id(SandboxId(2)),
-        ))
-        .await
-        .unwrap();
-    let before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
     let replicas: Vec<_> = (0..4)
         .map(|_| {
             let scoped = scoped.clone();
@@ -739,109 +710,18 @@ async fn a_database_from_before_schema_versions_is_upgraded_keeping_its_requests
     for replica in replicas {
         stores.push(replica.await.unwrap().expect("every replica starts"));
     }
-    let store = &stores[0];
-    let kept = store.request("team", "kept").await.unwrap().unwrap();
-    assert_eq!((kept.id, kept.gone_ms), (Id(SandboxId(1)), None));
-    let deleted = store.request("team", "deleted").await.unwrap().unwrap();
-    assert_eq!(deleted.id, Id(SandboxId(2)));
-    let retired = u128::from(deleted.gone_ms.expect("still retired"));
-    assert!(
-        retired >= before,
-        "retired from the upgrade on: {retired} < {before}"
-    );
-    // Pruning counts from then, so a week-old deletion is not forgotten at
-    // once.
-    assert_eq!(store.prune_requests(1_000).await.unwrap(), 0);
-    let version: i32 = client
-        .query_one(&format!("select version from {schema}.compute_schema"), &[])
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(version, 2);
+    let row = sandbox(HostId(1));
+    assert_eq!(stores[0].insert(&row).await.unwrap(), Write::Done);
     drop(stores);
-    // Starting again changes nothing.
     let again = PostgresStore::connect(&scoped, None, 2).await.unwrap();
-    assert_eq!(again.request("team", "kept").await.unwrap(), Some(kept));
-    drop(again);
-    client
-        .batch_execute(&format!("drop schema {schema} cascade"))
-        .await
-        .unwrap();
-}
-
-/// The copies a database at version 1 holds are next taken up from their
-/// files, and a replica from before version 2 writing beside it can only
-/// leave a copy counted as not whole: the exact statement it gives up on a
-/// host with raises the epoch past the mark.
-#[tokio::test]
-async fn a_replica_from_before_version_two_never_makes_a_copy_count_as_whole() {
-    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
-        return;
-    };
-    let (schema, scoped, client) = fresh_schema(&url).await;
-    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
-    let (owned, ownerless) = (sandbox(HostId(1)), sandbox(HostId(1)));
-    for row in [&owned, &ownerless] {
-        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
-    }
-    drop(store);
-    client
-        .batch_execute(&format!(
-            "set search_path = {schema}; \
-             alter table compute_sandboxes drop column whole_epoch; \
-             update compute_sandboxes set owner = null, epoch = epoch + 1 where id = '{}'; \
-             update compute_schema set version = 1;",
-            ownerless.id
-        ))
-        .await
-        .unwrap();
-    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
-    let whole = async |id| {
-        store
-            .sandbox(id)
-            .await
-            .unwrap()
-            .unwrap()
-            .ownership
-            .whole_copy()
-    };
-    assert!(!whole(owned.id).await);
-    assert!(!whole(ownerless.id).await);
+    assert_eq!(again.sandbox(row.id).await.unwrap(), Some(row));
     let version: i32 = client
         .query_one(&format!("select version from {schema}.compute_schema"), &[])
         .await
         .unwrap()
         .get(0);
     assert_eq!(version, 2);
-
-    // Handed off and given on by this release, the copy is whole...
-    let row = store.sandbox(ownerless.id).await.unwrap().unwrap();
-    let mut given = row.clone();
-    given.ownership = Ownership {
-        whole: Some(row.ownership.epoch),
-        ..row.ownership
-    }
-    .give(HostId(2))
-    .set;
-    assert_eq!(store.replace(&given).await.unwrap(), Write::Done);
-    assert!(whole(ownerless.id).await);
-    // ...until an earlier release gives up on its host with its own
-    // statement, which knows nothing of the mark.
-    client
-        .execute(
-            &format!(
-                "update {schema}.compute_sandboxes set owner = null, epoch = epoch + 1, \
-                 version = version + 1 where owner = $1"
-            ),
-            &[&2_i64],
-        )
-        .await
-        .unwrap();
-    let after = store.sandbox(ownerless.id).await.unwrap().unwrap();
-    assert_eq!(after.ownership.owner, None);
-    assert!(!after.ownership.whole_copy(), "{after:?}");
-    assert!(!after.ownership.give(HostId(3)).set.whole_copy());
-    drop(store);
+    drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
         .await

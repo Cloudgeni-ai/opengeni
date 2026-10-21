@@ -70,21 +70,6 @@ create table if not exists compute_create_requests (
     gone_ms bigint,
     primary key (team, request_id)
 );
--- A database a build from before the schema had versions made keeps its
--- requests: a deleted sandbox's request is retired from now on.
-alter table compute_create_requests add column if not exists gone_ms bigint;
-do $$
-begin
-    if exists (select 1 from information_schema.columns
-               where table_schema = current_schema()
-                 and table_name = 'compute_create_requests' and column_name = 'gone') then
-        update compute_create_requests
-            set gone_ms = (extract(epoch from clock_timestamp()) * 1000)::bigint
-            where gone and gone_ms is null;
-        alter table compute_create_requests drop column gone;
-    end if;
-end $$;
-drop index if exists compute_create_requests_gone;
 create index if not exists compute_create_requests_id on compute_create_requests (id);
 create index if not exists compute_create_requests_gone_ms on compute_create_requests (gone_ms)
     where gone_ms is not null;
@@ -93,11 +78,7 @@ create index if not exists compute_create_requests_gone_ms on compute_create_req
 /// Version 2: the owner epoch under which a sandbox's stored copy is its
 /// whole latest state (`whole_epoch`, see `Ownership::whole`); a host
 /// taking the sandbox up under any other epoch starts it from the copy's
-/// files. Nothing recorded which earlier copies were handed off, so every
-/// sandbox from before starts with none. A replica of an earlier release
-/// changes a row's epoch without this column, which leaves the copy
-/// counted as not whole: beside this version it can make a copy start
-/// from its files needlessly, never be restored when it should not.
+/// files.
 const MIGRATION_2: &str = "
 alter table compute_sandboxes add column if not exists whole_epoch bigint;
 ";

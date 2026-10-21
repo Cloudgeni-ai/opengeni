@@ -37,10 +37,7 @@
 //! ([`Ownership::whole_copy`]). A hand-off sets it to the epoch it leaves;
 //! a change whose owner held nothing of the sandbox (a give, or clearing an
 //! owner that held nothing) carries it on to the new epoch; every other
-//! change raises the epoch past it. That includes a change made by a
-//! service from before the mark existed, which writes the epoch but not
-//! the mark: such a service can only make a copy count as not whole, never
-//! as whole.
+//! change raises the epoch past it.
 
 use crate::SandboxId;
 use crate::ids::{HostId, OwnerEpoch};
@@ -321,15 +318,6 @@ mod tests {
         assert!(!given.lose().set.whole_copy());
         assert!(!given.lose().set.give(B).set.whole_copy());
         assert!(!given.release().set.reclaim(A).set.whole_copy());
-        // A service from before the mark raises the epoch and leaves the
-        // mark behind.
-        let older = Ownership {
-            owner: None,
-            epoch: given.epoch.next(),
-            ..given
-        };
-        assert!(!older.whole_copy());
-        assert!(!older.give(B).set.whole_copy());
         assert!(
             !Ownership {
                 whole: None,
