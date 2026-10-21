@@ -7,6 +7,7 @@ import { SessionHeader } from "@opengeni/react/app/components/rail/session-heade
 import type { SessionAdminAccessControl } from "@opengeni/react/app/components/session/session-admin-access";
 import { Section } from "@opengeni/react/ui/section";
 import type { Session } from "@opengeni/react/app/types";
+import { SessionShellAppContext } from "./session-shell-app-context";
 import "../src/styles.css";
 
 // Production components and styles; synthetic organization, people and session.
@@ -84,19 +85,21 @@ function Header({ active, testId }: { active: boolean; testId: string }) {
   const control = useControl(active);
   return (
     <div data-testid={testId} className="rounded-md border border-border">
-      <SessionHeader
-        session={session}
-        ancestors={[]}
-        connectionState="live"
-        status={session.status}
-        keyAuthRequired={false}
-        onForgetAccessKey={() => undefined}
-        inspectorOpen={false}
-        onToggleInspector={() => undefined}
-        onRename={async () => null}
-        onPin={async () => null}
-        adminAccess={control}
-      />
+      <SessionShellAppContext>
+        <SessionHeader
+          session={session}
+          ancestors={[]}
+          connectionState="live"
+          status={session.status}
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          adminAccess={control}
+        />
+      </SessionShellAppContext>
     </div>
   );
 }
