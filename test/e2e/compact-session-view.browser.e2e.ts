@@ -635,6 +635,10 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(archiveFixture.mutationStarted).toBe(true);
       const openSearch = async (query: string) => {
         await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();
+        await page
+          .getByRole("dialog", { name: "Command menu", exact: true })
+          .getByRole("option", { name: "Search messages", exact: true })
+          .click();
         const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
         await dialog
           .getByRole("searchbox", { name: "Search session titles and messages" })

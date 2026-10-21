@@ -16,6 +16,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import {
@@ -213,6 +214,8 @@ function useServerTitleSearch(
 export default function CommandMenu(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Where focus goes back to after a plain close. */
+  returnFocus: RefObject<HTMLElement | null>;
 }) {
   const actions = useAppActions();
   if (!actions) return null;
@@ -229,6 +232,7 @@ export default function CommandMenu(props: {
 function CommandMenuDialog(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  returnFocus: RefObject<HTMLElement | null>;
   env: ActionEnv;
   run(action: AppAction, chat?: SessionListRow | null, chord?: Chord): void;
   chordsFor(action: AppAction): Chord[];
@@ -242,6 +246,8 @@ function CommandMenuDialog(props: {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const ranAction = useRef(false);
+  /** Runs right after the menu has returned focus (see `AppAction.opensDialog`). */
+  const afterClose = useRef<(() => void) | null>(null);
   const listId = useId();
   const server = useServerTitleSearch(workspaceId, subjectId, focusChat ? "" : query, props.open);
 
@@ -252,12 +258,18 @@ function CommandMenuDialog(props: {
     setFocusChat(null);
     setActive(0);
     ranAction.current = false;
+    afterClose.current = null;
   }, [props.open]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
   const runAction = useCallback(
     (action: AppAction, chat: SessionListRow | null, chord?: Chord) => {
+      if (action.opensDialog) {
+        afterClose.current = () => run(action, action.forChat ? chat : undefined, chord);
+        close();
+        return;
+      }
       ranAction.current = true;
       close();
       run(action, action.forChat ? chat : undefined, chord);
@@ -481,9 +493,8 @@ function CommandMenuDialog(props: {
           icon: TextSearchIcon,
           title: `Search messages for “${trimmed}”`,
           run: () => {
-            ranAction.current = true;
+            afterClose.current = () => env.searchMessages(trimmed);
             close();
-            env.searchMessages(trimmed);
           },
         },
       ],
@@ -637,7 +648,18 @@ function CommandMenuDialog(props: {
           onCloseAutoFocus={(event) => {
             // An action moves focus where it belongs (the new chat's composer,
             // the title being renamed); only a plain close returns focus.
-            if (ranAction.current) event.preventDefault();
+            if (ranAction.current) {
+              event.preventDefault();
+              return;
+            }
+            const target = props.returnFocus.current;
+            if (target?.isConnected) {
+              event.preventDefault();
+              target.focus({ preventScroll: true });
+            }
+            const next = afterClose.current;
+            afterClose.current = null;
+            next?.();
           }}
           onEscapeKeyDown={(event) => {
             // Esc steps back out of a chat's actions before it closes the menu.

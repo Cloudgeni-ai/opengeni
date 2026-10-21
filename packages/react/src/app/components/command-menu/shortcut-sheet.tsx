@@ -3,7 +3,7 @@
  * person's own notation. It reads the action registry, so it never drifts from
  * what the keys actually do.
  */
-import { Fragment } from "react";
+import { Fragment, type RefObject } from "react";
 import { useAppActions } from "../../lib/actions/actions-provider";
 import { applicableChords, chordLabel, type Chord } from "../../lib/actions/chords";
 import {
@@ -45,6 +45,8 @@ type SheetRow = {
 export default function ShortcutSheet(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Where focus goes back to on close. */
+  returnFocus: RefObject<HTMLElement | null>;
 }) {
   const actions = useAppActions();
   if (!actions) return null;
@@ -80,6 +82,13 @@ export default function ShortcutSheet(props: {
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           (event.currentTarget as HTMLElement | null)?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          const target = props.returnFocus.current;
+          if (target?.isConnected) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
         }}
       >
         <div className="px-6 pt-6 pb-2 max-sm:px-5 max-sm:pt-5">

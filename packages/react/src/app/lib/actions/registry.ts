@@ -74,6 +74,11 @@ export type AppAction = {
   forChat?: boolean;
   /** Listed in the ⌘K menu (some exist only as keys). Default true. */
   inCommandMenu?: boolean;
+  /**
+   * Opens a dialog of its own. From ⌘K it runs once the menu has handed focus
+   * back, so the new dialog returns focus to the same place when it closes.
+   */
+  opensDialog?: boolean;
   /** Offered in ⌘K before anything is typed. */
   suggested?: boolean;
   /** The desktop menu bar section, when it appears there. */
@@ -271,6 +276,7 @@ export const APP_ACTIONS: readonly AppAction[] = [
     group: "navigate",
     icon: SearchIcon,
     keywords: ["find", "history", "full text"],
+    opensDialog: true,
     desktopMenu: "go",
     available: ALWAYS,
     run: (env) => env.searchMessages(),

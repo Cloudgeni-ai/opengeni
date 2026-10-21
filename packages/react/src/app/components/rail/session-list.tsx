@@ -4736,7 +4736,10 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => void chatOps.copyLink(props.session)}>
+        <ContextMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(props.session)}
+        >
           <LinkIcon className="size-4" />
           Copy link
           {copyLinkKeys ? <ContextMenuShortcut>{copyLinkKeys.label}</ContextMenuShortcut> : null}
@@ -4744,6 +4747,7 @@ function SessionRow(props: {
         {!props.session.archived ? (
           <>
             <ContextMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 contextPinSelection.current = true;
                 void props.onPin(props.session, !props.session.pinned, "row");
@@ -4972,6 +4976,7 @@ function RowActionsMenu({
           Rename
         </DropdownMenuItem>
         <DropdownMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
           onSelect={() => void chatOps.copyLink(session)}
           onClick={(event) => event.stopPropagation()}
         >
@@ -4982,6 +4987,7 @@ function RowActionsMenu({
         {!session.archived ? (
           <>
             <DropdownMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");

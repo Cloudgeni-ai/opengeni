@@ -51,19 +51,16 @@ function subsequenceScore(label: string, query: string): number | null {
   let position = 0;
   let score = 0;
   let previous = -2;
+  // Prefer the next letter inside the current word; otherwise only the start
+  // of a later word counts.
+  const fits = (found: number) =>
+    found === previous + 1 ||
+    starts.has(found) ||
+    (previous >= 0 && wordOf(found) === wordOf(previous));
   for (const character of query) {
     if (character === " ") continue;
     let found = label.indexOf(character, position);
-    // Prefer the next letter inside the current word; otherwise only the start
-    // of a later word counts.
-    while (
-      found >= 0 &&
-      found !== previous + 1 &&
-      !starts.has(found) &&
-      (previous < 0 || wordOf(found) !== wordOf(previous))
-    ) {
-      found = label.indexOf(character, found + 1);
-    }
+    while (found >= 0 && !fits(found)) found = label.indexOf(character, found + 1);
     if (found < 0) return null;
     score += found === previous + 1 ? 3 : starts.has(found) ? 2 : 0;
     previous = found;

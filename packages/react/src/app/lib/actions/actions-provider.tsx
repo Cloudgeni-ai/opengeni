@@ -146,16 +146,41 @@ export function ActionsProvider(props: { children: ReactNode }) {
 
   const railRef = useRef(rail);
   railRef.current = rail;
-  const openCommandMenu = useCallback(() => {
-    setSheet((current) => (current.open ? { ...current, open: false } : current));
-    // The phone drawer is a modal of its own; the menu replaces it.
-    if (railRef.current.drawerOpen) railRef.current.setDrawerOpen(false);
-    setMenu((current) => ({ open: !current.open, mounted: true, chat: null }));
+  // What had focus when the menu or sheet opened. They open from a key or a
+  // button anywhere (and load lazily the first time), so they return focus
+  // there themselves instead of relying on what the dialog saw when it mounted.
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const menuOpen = useRef(false);
+  const sheetOpen = useRef(false);
+  menuOpen.current = menu.open;
+  sheetOpen.current = sheet.open;
+  const rememberFocus = useCallback(() => {
+    if (menuOpen.current || sheetOpen.current || typeof document === "undefined") return;
+    // Opened from inside the phone drawer, which closes: come back to the
+    // drawer's persistent opener, as search does.
+    const drawerTrigger = railRef.current.drawerOpen
+      ? railRef.current.drawerTriggerRef.current
+      : null;
+    if (drawerTrigger) {
+      returnFocus.current = drawerTrigger;
+      return;
+    }
+    const active = document.activeElement;
+    returnFocus.current = active instanceof HTMLElement && active !== document.body ? active : null;
   }, []);
+  const openCommandMenu = useCallback(() => {
+    rememberFocus();
+    setSheet((current) => (current.open ? { ...current, open: false } : current));
+    // The phone drawer is a modal of its own; the menu replaces it and returns
+    // focus itself, so the retiring drawer must not take focus back.
+    railRef.current.handOffDrawer();
+    setMenu((current) => ({ open: !current.open, mounted: true, chat: null }));
+  }, [rememberFocus]);
   const openShortcutSheet = useCallback(() => {
+    rememberFocus();
     setMenu((current) => (current.open ? { ...current, open: false } : current));
     setSheet((current) => ({ open: !current.open, mounted: true }));
-  }, []);
+  }, [rememberFocus]);
 
   // Recent chats follow what is actually opened, in any way.
   useEffect(() => {
@@ -309,6 +334,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           <CommandMenu
             open={menu.open}
             onOpenChange={(open) => setMenu((current) => ({ ...current, open }))}
+            returnFocus={returnFocus}
           />
         </Suspense>
       ) : null}
@@ -317,6 +343,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           <ShortcutSheet
             open={sheet.open}
             onOpenChange={(open) => setSheet((current) => ({ ...current, open }))}
+            returnFocus={returnFocus}
           />
         </Suspense>
       ) : null}

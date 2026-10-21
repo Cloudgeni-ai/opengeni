@@ -436,6 +436,7 @@ export function SessionHeader({
           >
             <DropdownMenuItem
               className="lg:hidden"
+              aria-keyshortcuts={findKeys?.ariaKeys}
               onSelect={() => {
                 afterMenuClose.current = () => requestConversationFind(uiEvents);
               }}
@@ -452,7 +453,10 @@ export function SessionHeader({
               <PencilIcon />
               Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void chatOps.copyLink(session)}>
+            <DropdownMenuItem
+              aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+              onSelect={() => void chatOps.copyLink(session)}
+            >
               <LinkIcon />
               Copy link
               {copyLinkKeys ? (
@@ -461,6 +465,7 @@ export function SessionHeader({
             </DropdownMenuItem>
             <DropdownMenuItem
               className="lg:hidden"
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               disabled={pin.busy}
               onSelect={() => pin.toggle()}
             >
