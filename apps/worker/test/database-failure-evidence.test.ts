@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import { ToolCallError } from "@openai/agents";
-import { DatabaseTransactionError, SessionEventPersistenceError } from "@opengeni/db";
+import {
+  DatabaseTransactionError,
+  SessionEventPersistenceError,
+  KnowledgeLearningScopeChangedError,
+} from "@opengeni/db";
 import { RoutingMutationOutcomeUnknownError } from "@opengeni/runtime";
 import { MandatoryHistoryPersistenceError } from "../src/activities/agent-turn/quiescence";
 import {
@@ -33,7 +37,7 @@ test("unwrapped database failures retain SQLSTATE and identifiers without expand
     },
   );
   expect(agentRunFailurePayload(outer)).toEqual({
-    error: "Opengeni encountered a database error.",
+    error: "A database error occurred.",
     code: "db_failure",
     sqlState: "42501",
     database: {
@@ -58,6 +62,18 @@ test("plain domain failures and provider retry classification stay unchanged", (
   expect(agentRunFailurePayload(rateLimit)).not.toHaveProperty("database");
 });
 
+test("incompatible frozen learning is actionable, non-retryable and contains no database details", () => {
+  const error = new KnowledgeLearningScopeChangedError(
+    rawDatabaseFailure("42501", "Learning scope changed after acceptance"),
+  );
+  expect(agentRunFailurePayload(error)).toEqual({
+    error:
+      "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.",
+    code: "knowledge_learning_scope_changed",
+    retryable: false,
+  });
+});
+
 test("database transport failures add no raw driver cause or automatic retry", () => {
   const failure = Object.assign(new Error("Original database operation failed"), {
     cause: Object.assign(new Error("postgresql://fixture:synthetic@db.example.test/runtime"), {
@@ -79,7 +95,7 @@ test("five-character application codes do not become database diagnostics", () =
     routine: "exec_stmt_raise",
   });
   expect(agentRunFailurePayload(driver)).toEqual({
-    error: "Opengeni encountered a database error.",
+    error: "A database error occurred.",
     code: "db_failure",
     sqlState: "E1234",
     database: { severity: "ERROR", routine: "exec_stmt_raise" },
@@ -111,6 +127,7 @@ test("running-turn outages use structured database causes through SDK and histor
     "ECONNREFUSED",
     "ECONNRESET",
     "CONNECT_TIMEOUT",
+    "53300",
     "57P01",
     "57P02",
     "57P03",
@@ -497,7 +514,7 @@ test("database history wrappers and ORM transport errors keep raw evidence out o
     Object.assign(new Error("fixture-value"), { code: "CONNECTION_CLOSED" }),
   );
   expect(agentRunFailurePayload(transport)).toEqual({
-    error: "Opengeni encountered a database error.",
+    error: "A database error occurred.",
     code: "db_failure",
     sqlState: null,
   });
@@ -507,7 +524,7 @@ test("raw database payloads never expose SQL or acquire provider replay authorit
   for (const sqlState of ["40P01", "40001", "40003", "42501"]) {
     const error = rawDatabaseFailure(sqlState, "rate limit 429 fixture-value");
     const payload = agentRunFailurePayload(error);
-    expect(payload).toMatchObject({ error: "Opengeni encountered a database error.", sqlState });
+    expect(payload).toMatchObject({ error: "A database error occurred.", sqlState });
     expect(payload.retryable).not.toBe(true);
     expect(payload.code).not.toBe("provider_rate_limited");
     expect(JSON.stringify(payload)).not.toContain("fixture-value");

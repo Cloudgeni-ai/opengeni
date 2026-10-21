@@ -10,11 +10,11 @@ import {
   SignInMethodsView,
   providerLabel,
 } from "@/components/sign-in-methods";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { SettingRowSkeleton } from "@/components/ui/setting-row";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 import {

@@ -15,8 +15,15 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./file-access";
+import { FileAccess } from "./file-access";
+export * from "./app-shot";
+import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
+export * from "./site-publishing";
+export * from "./site-sql";
 export * from "./claude-subscription-usage";
+export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
 export * from "./model-account-choice";
@@ -133,6 +140,7 @@ export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
+export * from "./interaction-driver-diagnostic";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./api-key-presets";
@@ -142,7 +150,9 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./desktop-app";
 export * from "./vaults";
+export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
 export * from "./secret-generator";
@@ -150,6 +160,7 @@ export * from "./secret-totp";
 
 export {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -220,7 +231,6 @@ export {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
-  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -283,12 +293,13 @@ export {
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
 
-// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 13 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
 // enrolled as a first-class sandbox), then `opensandbox` (an optional
-// Kubernetes-native provisioned sandbox provider).
+// Kubernetes-native provisioned sandbox provider), then `compute` (Opengeni's
+// own microVM sandboxes; every box runs the Connected Machine agent).
 export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "docker",
@@ -303,11 +314,12 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
-// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Opengeni-owned identity carried beside the provider's opaque SDK envelope.
 // Provider serializers intentionally use different keys (`sandboxId`,
 // `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
 // new provider's private state shape. Existing envelopes remain readable via
@@ -330,6 +342,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
   opensandbox: ["sandboxId"],
+  compute: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -766,6 +779,42 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     persistable: true,
     supportsRunAs: false,
   },
+  // Opengeni compute: a managed microVM sandbox run by Opengeni itself.
+  // Every sandbox runs the Connected Machine agent, reached through its host's
+  // link to Opengeni's agent gateway, so the transport is the agent's (PTY,
+  // desktop frames, browser control and on-demand ports over the relay). The
+  // lifetime is a managed sandbox's: compute sleeps an idle sandbox itself
+  // and keeps its memory and disk across sleep, moves and host loss, so there
+  // is no hard lifetime and no idle killer, and a message to a sleeping
+  // sandbox wakes it. A portable tar is only the fallback that moves a
+  // workspace to another backend.
+  compute: {
+    backend: "compute",
+    backendId: "compute",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "relay-pty", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: true,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    // The box agent runs as root on Linux; each request still gates on the
+    // live agent's Hello `run_as` capability.
+    supportsRunAs: true,
+  },
 };
 
 export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
@@ -774,9 +823,18 @@ export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["standard", "priority", "fast"]),
+  z.enum(["standard", "priority", "fast", "ultrafast"]),
 );
 export type LatencyMode = z.infer<typeof LatencyMode>;
+
+/**
+ * A subscription account's observed model list records each model it offers
+ * at a service tier as `<slug>@<tier>` (for example `gpt-6-astra@ultrafast`),
+ * next to the plain slug. Slugs never contain `@`, so slug checks are unchanged.
+ */
+export function modelServiceTierCatalogEntry(slug: string, tierId: string): string {
+  return `${slug}@${tierId}`;
+}
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
@@ -784,6 +842,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "allowance_exhausted",
     /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
     "session_usage_limit_reached",
+    /** Organization seats are full; details.action points to the plan upgrade flow. */
+    "seat_limit_reached",
     "unauthenticated",
     "forbidden",
     "not_found",
@@ -994,6 +1054,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "browser_debug",
   "browser_downloads",
   "browser_download_save",
+  "browser_record",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -1005,6 +1066,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "excel_run",
   "secret_search",
   "secret_save",
   "secret_get",
@@ -1093,6 +1155,20 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_list",
   "site_files_upload",
   "site_files_delete",
+  "site_publication_get",
+  "site_publication_update",
+  "site_publication_apply_fix",
+  "site_hostname_check",
+  "site_sql_inspect",
+  "site_sql_enable",
+  "site_sql_migrate",
+  "site_sql_define_query",
+  "site_sql_query",
+  "site_sql_run",
+  "site_sql_execute",
+  "site_sql_export",
+  "site_sql_import",
+  "site_sql_reset",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -1125,6 +1201,7 @@ export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
   "browser_debug",
   "browser_downloads",
   "browser_download_save",
+  "browser_record",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -2873,6 +2950,108 @@ export function organizationModelCompactionThreshold(
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * What an ordinary Send does while the agent is working. `queue` runs the
+ * message after the current turn; `steer` has the agent read it at its next
+ * model step, after the current step's tool calls finish.
+ */
+export const WorkspaceBusySend = /* @__PURE__ */ defineSchema(() => z.enum(["queue", "steer"]));
+export type WorkspaceBusySend = z.infer<typeof WorkspaceBusySend>;
+
+/** The workspace's busy-Send preference; absent or invalid is `queue`. */
+export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { busySend?: unknown }).busySend
+      : undefined;
+  return value === "steer" ? "steer" : "queue";
+}
+
+/** How readily a realtime voice model decides the speaker is done and answers. */
+export const RealtimeTurnEagerness = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["low", "medium", "high"]),
+);
+export type RealtimeTurnEagerness = z.infer<typeof RealtimeTurnEagerness>;
+
+/**
+ * Voice settings for a realtime voice model. Every field is optional; an unset
+ * field keeps the provider's default. A model offers only the settings its
+ * catalog entry lists (`voices`/`customVoice`, `languages`, `turnEagerness`),
+ * and a value it does not offer is ignored rather than failing the call.
+ */
+export const RealtimeVoiceSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Voice the model speaks with: a listed voice id, or any provider voice id where `customVoice` is offered. */
+      voice: z.string().trim().min(1).max(128).optional(),
+      /** Conversation language (a catalog `languages` code or a BCP 47 tag), for models that need one. */
+      language: z.string().trim().min(1).max(64).optional(),
+      turnEagerness: RealtimeTurnEagerness.optional(),
+    })
+    .strict(),
+);
+export type RealtimeVoiceSettings = z.infer<typeof RealtimeVoiceSettings>;
+
+const realtimeVoiceModelKey = () =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .refine((key) => !["__proto__", "constructor", "prototype"].includes(key), "Invalid model ID");
+
+/**
+ * PATCH value of the workspace setting `realtimeVoice`: voice settings by
+ * realtime model id. Each listed model's settings are replaced; null removes
+ * that model's settings; unlisted models keep theirs.
+ */
+export const WorkspaceRealtimeVoicePatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .record(realtimeVoiceModelKey(), RealtimeVoiceSettings.nullable())
+    .refine((value) => Object.keys(value).length <= 64, "At most 64 voice models per patch"),
+);
+export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoicePatch>;
+
+/**
+ * The workspace's saved voice settings for one realtime model, or null when
+ * none are saved. Read leniently: a malformed entry reads as unset.
+ */
+export function resolveWorkspaceRealtimeVoiceSettings(
+  settings: unknown,
+  model: string,
+): RealtimeVoiceSettings | null {
+  const byModel =
+    settings !== null && typeof settings === "object"
+      ? (settings as { realtimeVoice?: unknown }).realtimeVoice
+      : undefined;
+  if (byModel === null || typeof byModel !== "object" || !Object.hasOwn(byModel, model)) {
+    return null;
+  }
+  const parsed = RealtimeVoiceSettings.safeParse((byModel as Record<string, unknown>)[model]);
+  return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : null;
+}
+
+/** Placement inherited by new top-level chats and schedules that follow the workspace. */
+export const WorkspaceDefaultExecutionTarget = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("managed") }).strict(),
+    z.object({ kind: z.literal("machine"), targetSandboxId: z.string().uuid() }).strict(),
+  ]),
+);
+export type WorkspaceDefaultExecutionTarget = z.infer<typeof WorkspaceDefaultExecutionTarget>;
+
+/** Invalid configured placement fails closed; it must never select another computer. */
+export function resolveWorkspaceDefaultExecutionTarget(
+  settings: unknown,
+): WorkspaceDefaultExecutionTarget | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { defaultExecutionTarget?: unknown }).defaultExecutionTarget
+      : undefined;
+  return value === undefined || value === null
+    ? null
+    : WorkspaceDefaultExecutionTarget.parse(value);
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -2914,6 +3093,7 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
       // null uses the deployment image.
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent configuration defaults for new sessions ("Defaults for new
       // sessions"). Validated leniently here and resolved by
       // resolveWorkspaceAgentDefaults, so a value written by a newer release can
@@ -2923,6 +3103,13 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // billed in Opengeni credits (current and future); absent allows them.
       // Read leniently so a malformed value never fails the whole bag.
       allowCreditModels: z.boolean().optional().catch(undefined),
+      // What an ordinary Send does in the console composer while the agent is
+      // working: "queue" (absent) runs it after the current turn, "steer" has
+      // the agent read it at its next model step. Read leniently.
+      busySend: WorkspaceBusySend.optional().catch(undefined),
+      // Realtime voice settings by realtime model id. Read leniently per model
+      // through resolveWorkspaceRealtimeVoiceSettings.
+      realtimeVoice: z.record(z.string(), z.unknown()).optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3115,10 +3302,14 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
       slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
       defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      defaultExecutionTarget: WorkspaceDefaultExecutionTarget.nullable().optional(),
       // Agent defaults for new sessions; null clears them.
       sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
       // False blocks every model billed in Opengeni credits in this workspace.
       allowCreditModels: z.boolean().optional(),
+      busySend: WorkspaceBusySend.optional(),
+      // Voice settings by realtime model id, merged per model; null removes one.
+      realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
     })
     .passthrough(),
 );
@@ -3394,7 +3585,7 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "viaTruncated",
 ]);
 
-/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+/** Bounded host provenance that cannot forge Opengeni-owned lineage fields. */
 export const ServiceTurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
   TurnInitiatorContext.superRefine((value, ctx) => {
     for (const key of reservedServiceTurnInitiatorContextKeys) {
@@ -3813,7 +4004,7 @@ export async function verifyEnrollmentBearer(
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
 /**
- * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * The Opengeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
  * an installed Connected Machine agent through native messaging, so the machine
  * must be connected before the extension can link up.
  */
@@ -5138,7 +5329,7 @@ export type CredentialAuthNeededReason =
   | "refresh_failed";
 
 /**
- * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * Host-owned run credentials are materialized below one Opengeni-owned sandbox
  * directory. Paths are relative POSIX names; the runtime validates traversal,
  * collisions, bounds, and modes before any content reaches a sandbox.
  */
@@ -5843,9 +6034,26 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
     remainingMicros: z.number().int().nonnegative(),
     /** Also pays for dictation and live voice, like general credits (signup credits). */
     coversVoice: z.boolean().optional(),
+    /** Monthly scoped allowance; allocated before other promotions. */
+    planCredit: z.boolean().optional(),
   }),
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
+export {
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingPlanBalance,
+} from "./subscription-plans";
+export {
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "./billing-subscriptions";
+import { BillingPlanBalance } from "./subscription-plans";
 
 export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -5856,6 +6064,8 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+    /** Absent/null until an operator or subscription worker activates this organization. */
+    plan: BillingPlanBalance.nullable().optional(),
   }),
 );
 export type BillingBalance = z.infer<typeof BillingBalance>;
@@ -6125,11 +6335,30 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
+ * Private marker on catalogs whose model-visible text is already complete in
+ * `content` (provenance and upload times were frozen when compaction created
+ * them). Projection must not append per-reference receipts to such a catalog.
+ * Catalogs without it keep their original projection byte for byte.
+ */
+export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
+  "opengeni_attachment_catalog_rendered" as const;
+/**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
+/**
+ * Private durable field on user history items: the longest side, in pixels,
+ * at which this message's image attachments are shown to the model. It is
+ * stamped when the message is accepted, so a later change of the bound never
+ * re-renders images that an earlier request already sent. Items without it
+ * keep their original full-resolution projection.
+ */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
+  "opengeni_attachment_image_max_dimension" as const;
+/** Bound stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
@@ -6279,7 +6508,13 @@ export type FileUploadStatus = z.infer<typeof FileUploadStatus>;
 
 export const FileAsset = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** "personal" is Only me: only its owner can open it. */
     scope: z.enum(["workspace", "personal"]).optional(),
+    /**
+     * The person the file belongs to, who alone can share it or limit it to
+     * themselves. Null for older shared files and output made without a person.
+     */
+    ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
     status: FileStatus,
@@ -6292,6 +6527,10 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     objectKey: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /** Present on upload, publish and sharing results: who can open the file. */
+    access: FileAccess.optional(),
+    /** A screenshot sent as an app-shot: the window it shows and what it said. */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6316,11 +6555,22 @@ export type FileListResponse = z.infer<typeof FileListResponse>;
 
 export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /**
+     * Who can open the file: "personal" (Only me) or "workspace". Omitted, a
+     * person's upload is shared with the workspace and an agent's upload
+     * follows its chat (Only me in an Only me chat).
+     */
     scope: z.enum(["workspace", "personal"]).optional(),
     filename: z.string().min(1),
     contentType: z.string().min(1),
     sizeBytes: z.number().int().positive(),
     sha256: z.string().min(1).optional(),
+    /**
+     * The upload is an app-shot: an image of another app's window plus what
+     * the window said. Stored with the file once and never changed. Only for
+     * images.
+     */
+    appShot: AppShotCapture.optional(),
   }),
 );
 export type CreateFileUploadRequest = z.infer<typeof CreateFileUploadRequest>;
@@ -6333,6 +6583,8 @@ export const CreateFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
     requiredHeaders: z.record(z.string(), z.string()),
     expiresAt: z.string(),
     maxSizeBytes: z.number().int().positive(),
+    /** Who will be able to open the file once it is uploaded. */
+    access: FileAccess.optional(),
   }),
 );
 export type CreateFileUploadResponse = z.infer<typeof CreateFileUploadResponse>;
@@ -6343,6 +6595,13 @@ export const CompleteFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CompleteFileUploadResponse = z.infer<typeof CompleteFileUploadResponse>;
+
+export const UpdateFileVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
+export type UpdateFileVisibilityResponse = z.infer<typeof UpdateFileVisibilityResponse>;
 
 export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -6992,14 +7251,23 @@ export const WorkspaceMemorySearchResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
+/** Exact unprefixed MCP tool names that stay on the first model request. */
+export const McpEagerToolNames = /* @__PURE__ */ defineSchema(() =>
+  z.array(z.string().min(1).max(200)).max(2000),
+);
+export type McpEagerToolNames = z.infer<typeof McpEagerToolNames>;
+
 export const ToolRef = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.literal("mcp"),
     id: z.string().min(1),
     // Session-scoped startup choice. `true` prepares this server's authorized
     // schemas before the first model request; absent/false keeps it behind
-    // progressive discovery. This never grants a server or tool permission.
-    eager: z.boolean().optional(),
+    // progressive discovery. A list of exact unprefixed tool names prepares the
+    // server before the first request too, but puts only those tools on it; the
+    // server's other tools stay searchable. This never grants a server or tool
+    // permission: a listed name the server does not authorize is ignored.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     // Non-fatal-on-connect marker for MCP server refs that can degrade
     // gracefully. On new input, absent/false is STRICT: the id must be configured
     // and an unavailable registered server fails closed when its preparation is
@@ -7012,6 +7280,9 @@ export const ToolRef = /* @__PURE__ */ defineSchema(() =>
     // configure the id, validation drops the ref. Auto-attached workspace-default
     // capability MCPs also use this marker.
     optional: z.boolean().optional(),
+    // Optional narrowing of this connection's tools. Empty means no tools;
+    // omission preserves the connection's authorized catalog.
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   }),
 );
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -7157,6 +7428,10 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     name: z.string().min(1).optional(),
     url: httpsUrl,
     allowedTools: z.array(z.string().min(1)).optional(),
+    // Seeds this server's selection `eager` marker (see ToolRef.eager) without
+    // turning an omitted `tools` list into an explicit allow-list: `true` or the
+    // exact unprefixed tool names the agent has from the first model request.
+    eager: z.union([z.boolean(), McpEagerToolNames]).optional(),
     timeoutMs: z.number().int().positive().optional(),
     cacheToolsList: z.boolean().optional(),
     // The caller resolves an approval pause with `user.approvalDecision`.
@@ -7320,15 +7595,45 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
 
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
-    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const eager = mergeToolRefEager(prior.eager, tool.eager);
+    const allowedTools =
+      prior.allowedTools === undefined
+        ? tool.allowedTools
+        : tool.allowedTools === undefined
+          ? prior.allowedTools
+          : prior.allowedTools.filter((name) => tool.allowedTools!.includes(name));
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
-      ...(eager ? { eager } : {}),
+      ...(eager !== undefined ? { eager } : {}),
+      ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
+}
+
+/**
+ * Combine two eager markers for the same server: `true` wins, otherwise the
+ * named tools are united in first-seen order. Undefined when neither asks for
+ * anything on the first request.
+ */
+export function mergeToolRefEager(
+  left: ToolRef["eager"],
+  right: ToolRef["eager"],
+): true | string[] | undefined {
+  if (left === true || right === true) return true;
+  const names = [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])];
+  return names.length > 0 ? [...new Set(names)] : undefined;
+}
+
+/**
+ * The exact tools a ref puts on the first model request: every tool (`true`),
+ * the named tools (a list), or none (absent/false).
+ */
+export function toolRefEagerToolNames(eager: ToolRef["eager"]): true | readonly string[] {
+  if (eager === true) return true;
+  return Array.isArray(eager) ? eager : [];
 }
 
 export function mergeResourceRefs(
@@ -8138,28 +8443,65 @@ export const CodexRealtimeWebrtcResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
 
-export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
+/** Open (or rotate) the provider WebSocket connection of an active realtime mode. */
+export const SessionRealtimeWebsocketRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
     realtimeId: z.string().uuid(),
     operationId: z.string().uuid(),
     expectedVersion: z.number().int().positive(),
     expectedConnectionEpoch: z.number().int().positive(),
     rotate: z.boolean(),
+    /**
+     * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+     * Providers that need a fixed conversation language use it; the others
+     * detect the spoken language themselves.
+     */
+    language: z.string().min(1).max(64).optional(),
+    /**
+     * Voice settings for this connection. Each set field overrides the
+     * workspace's saved settings for the model; `voiceSettings.language` also
+     * overrides `language`.
+     */
+    voiceSettings: RealtimeVoiceSettings.optional(),
   }).strict(),
 );
-export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+export type SessionRealtimeWebsocketRequest = z.infer<typeof SessionRealtimeWebsocketRequest>;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export const GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export const GatewayRealtimeInitialItem = /* @__PURE__ */ defineSchema(() =>
+export const SessionRealtimeWebsocketInitialItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     role: z.enum(["user", "developer", "assistant"]),
     text: z.string().min(1).max(131_072),
   }),
 );
-export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+export type SessionRealtimeWebsocketInitialItem = z.infer<
+  typeof SessionRealtimeWebsocketInitialItem
+>;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export const GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export const RealtimeWebsocketProtocol = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["openai", "ai-gateway"]),
+);
+export type RealtimeWebsocketProtocol = z.infer<typeof RealtimeWebsocketProtocol>;
+
+export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      protocol: RealtimeWebsocketProtocol,
+      /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+      protocols: z.array(z.string().min(1).max(16_384)).min(1).max(8),
+      /** First client event to send once the socket opens; null when the mint configured it. */
+      sessionUpdate: z.record(z.string(), z.unknown()).nullable(),
       token: z.string().min(1).max(16_384),
       url: z.string().url(),
       upstreamModelId: z.string().min(1).max(256),
@@ -8168,13 +8510,22 @@ export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
-      initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+      initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
+      /**
+       * Assistant transcripts carry inline delivery tags such as `[calm]`,
+       * which are spoken as tone, not words; clients drop them from transcripts.
+       */
+      transcriptAudioTags: z.boolean().optional(),
       replay: z.literal(false),
     })
     .strict(),
 );
-export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+export type SessionRealtimeWebsocketResponse = z.infer<typeof SessionRealtimeWebsocketResponse>;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export const GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export const ActivateCodexRealtimeConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
@@ -8315,6 +8666,8 @@ export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
     "workspace-gateway/openai/gpt-realtime-2.1",
     "workspace-gateway/openai/gpt-realtime-mini",
     "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
   ]),
 );
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
@@ -8323,7 +8676,13 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
   z.object({
     id: SessionRealtimeModel,
     label: z.string().min(1),
-    provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
+    provider: z.enum([
+      "OpenGeni",
+      "Connected Codex",
+      "Connected SuperGrok",
+      "Your Gateway",
+      "Your ElevenLabs",
+    ]),
     description: z.string().min(1),
     available: z.boolean(),
     unavailableReason: z.string().nullable(),
@@ -8334,6 +8693,23 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      */
     unavailableCode: z.string().min(1).max(64).nullable().optional(),
     recommended: z.boolean(),
+    /**
+     * Languages a conversation with this model can be set to, as the provider's
+     * language codes. Absent when the model detects the spoken language itself.
+     */
+    languages: z.array(z.string().min(1).max(64)).optional(),
+    /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+    voices: z
+      .array(z.object({ id: z.string().min(1).max(128), label: z.string().min(1).max(128) }))
+      .optional(),
+    /** Whether any provider voice id is accepted as `voice`, beyond the listed `voices`. */
+    customVoice: z.boolean().optional(),
+    /** Turn eagerness values this model accepts. Absent when it cannot be chosen. */
+    turnEagerness: z.array(RealtimeTurnEagerness).optional(),
+    /** The provider's defaults for the settings it offers, other than language. */
+    voiceDefaults: RealtimeVoiceSettings.optional(),
+    /** The workspace's saved voice settings for this model. */
+    workspaceVoiceSettings: RealtimeVoiceSettings.optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -8690,12 +9066,11 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
 export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
 export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
 export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
-export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 1024 * 1024;
 
 export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["user_message", "assistant_message", "tool_output"]),
@@ -8824,31 +9199,26 @@ export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
-  return z
-    .array(item)
-    .max(TIMELINE_ANNOTATION_MAX_COUNT)
-    .superRefine((annotations, ctx) => {
-      const ids = new Set<string>();
-      for (let index = 0; index < annotations.length; index += 1) {
-        const id = (annotations[index] as { id?: unknown }).id;
-        if (typeof id === "string" && ids.has(id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [index, "id"],
-            message: "annotation ids must be unique",
-          });
-        }
-        if (typeof id === "string") ids.add(id);
-      }
-      if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
-      ) {
+  return z.array(item).superRefine((annotations, ctx) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < annotations.length; index += 1) {
+      const id = (annotations[index] as { id?: unknown }).id;
+      if (typeof id === "string" && ids.has(id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+          path: [index, "id"],
+          message: "annotation ids must be unique",
         });
       }
-    });
+      if (typeof id === "string") ids.add(id);
+    }
+    if (timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
@@ -9220,6 +9590,12 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
     clientEventId: SessionOperationKey,
     expectedTurnVersion: z.number().int().positive(),
     controlEtag: z.string().min(1).optional(),
+    /**
+     * Interrupt the running turn now, cutting off its current step, instead
+     * of handing over at its next model step (the default). Also turns an
+     * already-waiting Steer into an immediate one.
+     */
+    interrupt: z.boolean().optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
@@ -10071,6 +10447,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: z.string().uuid(),
           })
           .strict(),
+        notice: z.string().optional(),
       })
       .passthrough(),
     z
@@ -10235,6 +10612,16 @@ export function renderSessionSystemUpdateBatch(
 export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
+ * A schedule must never stay stuck without its owner knowing. The platform
+ * pauses a schedule and tells its owner when runs cannot start; this covers
+ * what only the agent can see: a run that starts but cannot do its job. The
+ * key matches the platform's own schedule notice, so either updates the other
+ * in place. Rendered only into new occurrences; delivered ones keep their text.
+ */
+export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
+  "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
+
+/**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
  * merely background context. The user role here is conversational only: the
  * owning turn retains its immutable scheduler/service initiator and frozen
@@ -10272,6 +10659,7 @@ function renderScheduledOccurrenceTaskBatch(
     introduction,
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
+    SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [
@@ -11592,6 +11980,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
+    // Resolve once when a new run chat is accepted; recovery keeps that exact target.
+    executionTarget: z.literal("workspace_default").optional(),
     // Connected Machines are a concrete execution target, not a generic
     // sandbox backend. Persist the exact machine + optional cwd so every
     // generated session can seed its active route before its first turn.
@@ -11701,6 +12091,13 @@ export function knowledgeSourceAgentConfig(
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
+    if (value.executionTarget && (value.machineTarget || value.sandboxBackend !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["executionTarget"],
+        message: "workspace_default cannot be combined with machineTarget or sandboxBackend",
+      });
+    }
     if (value.machineTarget && value.sandboxBackend !== undefined) {
       context.addIssue({
         code: "custom",
@@ -11853,6 +12250,27 @@ export const ScheduledTaskAccountPlan = /* @__PURE__ */ /* @__PURE__ */ defineSc
 );
 export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
 
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so the schedule paused itself; resume it once the cause is fixed.
+ * `notified`: its scheduled runs kept failing or being skipped and its owner
+ * was told once; it keeps running. `message` says what would unblock it.
+ */
+export const ScheduledTaskBlocker = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["paused", "notified"]),
+      /** Stable machine reason, such as `scheduled_session_paused`. Readers must tolerate new ones. */
+      reason: z.string().min(1).max(128),
+      message: z.string().min(1).max(1000),
+      /** The run that showed the blocker (the first of a failing streak). */
+      runId: z.string().uuid(),
+      since: z.string(),
+    })
+    .strict(),
+);
+export type ScheduledTaskBlocker = z.infer<typeof ScheduledTaskBlocker>;
+
 export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().uuid(),
@@ -11903,6 +12321,13 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * authority. Absent when it could not be computed.
      */
     accountPlan: ScheduledTaskAccountPlan.optional(),
+    /**
+     * Read-only response projection: why this schedule paused itself
+     * (`paused`, shown while it stays paused) or why its owner was told its
+     * runs keep failing or being skipped (`notified`, shown while it stays
+     * active and until a run succeeds). Absent when nothing blocks it.
+     */
+    blocker: ScheduledTaskBlocker.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -11991,6 +12416,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       turnExecutionPolicy: z.unknown().optional(),
       resolvedSandboxBackend: SandboxBackend,
       resolvedSandboxOs: SandboxOs,
+      // Absent is a historical receipt: recover its task's explicit target.
+      // Null is an accepted managed placement, never a request to resolve again.
+      resolvedMachineTarget: z
+        .object({
+          targetSandboxId: z.string().uuid(),
+          workingDir: z.string().min(1).optional(),
+        })
+        .strict()
+        .nullable()
+        .optional(),
       resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
       resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
       resolvedFirstPartyMcpPermissions: z.array(Permission),
@@ -12111,6 +12546,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       generatedSessionBinding: z
         .object({
           createIdempotencyKey: z.string().min(1).max(512),
+          toolPolicy: SessionToolPolicy.optional(),
           effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
           nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
           codexCompactionMode: CodexCompactionMode,
@@ -12530,6 +12966,13 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       message: "agentConfig.goal cannot be used with an existing-session target",
     });
   }
+  if (value.runMode === "existing_session" && value.agentConfig.executionTarget) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "executionTarget"],
+      message: "executionTarget cannot be used with an existing-session target",
+    });
+  }
   if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
     context.addIssue({
       code: "custom",
@@ -12742,6 +13185,16 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["agentConfig", "goal"],
         message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+    if (
+      value.agentConfig?.executionTarget &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "executionTarget"],
+        message: "executionTarget cannot be used with an existing-session target",
       });
     }
     if (
@@ -13702,7 +14155,12 @@ export const AvailableOpenGeniSlackBots = /* @__PURE__ */ defineSchema(() =>
 );
 export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
 export const UpdateOpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
-  z.object({ enabled: z.boolean() }).strict(),
+  z
+    .object({
+      enabled: z.boolean(),
+      workspaceIds: z.array(z.string().uuid()).max(1000).nullable().optional(),
+    })
+    .strict(),
 );
 export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
   typeof UpdateOpenGeniSlackBotOrganizationAccess
@@ -13710,6 +14168,7 @@ export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
 export const OpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     enabled: z.boolean(),
+    workspaceIds: z.array(z.string().uuid()).nullable().optional(),
     generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   }),
 );
@@ -15259,6 +15718,10 @@ export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Appended only to a new result with positive native command-cleanup evidence. */
+export const CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE =
+  "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.";
+
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
 export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15311,6 +15774,7 @@ export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
       exitCode: z.number().int().nullable(),
       settlementReason: z.string().nullable(),
       failure: SessionCommandFailure.optional(),
+      backgroundChildrenStopped: z.literal(true).optional(),
       startedAt: z.string(),
       settledAt: z.string().nullable(),
       completionObservedAt: z.string().nullable().optional(),
@@ -15713,6 +16177,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     needsYouOnly: z.literal(true).optional(),
     /** Explicit receipt for the read-only (archived idle session) filter. */
     contentArchivedOnly: z.literal(true).optional(),
+    /** Explicit receipt for the started-or-messaged-by-you filter. */
+    mineOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -15917,6 +16383,7 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "sandbox.operation.started",
     "sandbox.operation.completed",
     "sandbox.operation.failed",
+    "sandbox.recovery.selected",
     "session.command.backgrounded",
     "session.command.finished",
     "session.wait.started",
@@ -16096,6 +16563,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
 export * from "./session-final-reply";
+export * from "./session-history";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
@@ -19735,6 +20203,25 @@ export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =
 );
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
+/** Published Sites facts the console needs to offer publishing (from OPENGENI_SITES_*). */
+export const ClientSitesConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Sites live at `<label>.<domain>`. */
+      domain: z.string().min(1),
+      /** `public` access may be chosen. */
+      publicEnabled: z.boolean(),
+      /** Agents may run for signed-out guests of public Sites. */
+      publicAgentsEnabled: z.boolean(),
+      /** `public` means any signed-in user; there are no guests. */
+      loginOnly: z.boolean(),
+      /** Every Site is served with noindex. */
+      forceNoindex: z.boolean(),
+    })
+    .strict(),
+);
+export type ClientSitesConfig = z.infer<typeof ClientSitesConfig>;
+
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.discriminatedUnion("mode", [
     z.object({
@@ -20406,6 +20893,7 @@ export const MachineKind = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type MachineKind = z.infer<typeof MachineKind>;
@@ -20422,6 +20910,7 @@ export const MachineConnectionAuthority = /* @__PURE__ */ defineSchema(() =>
     leaseExpiresAt: z.string().nullable(),
     duplicateRunnerDeniedCount: z.number().int().nonnegative(),
     duplicateRunnerDeniedAt: z.string().nullable(),
+    authenticationError: z.literal("credentials_expired").nullable().optional(),
   }),
 );
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
@@ -20463,6 +20952,14 @@ export const MachineUpdateStatus = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
 
+export const MachineUpdateBlocker = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    count: z.number().int().nonnegative().max(0xffff_ffff),
+  }),
+);
+export type MachineUpdateBlocker = z.infer<typeof MachineUpdateBlocker>;
+
 export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
   z.object({
     operationId: z.string().uuid(),
@@ -20473,6 +20970,7 @@ export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
       .regex(/^[0-9a-f]{64}$/)
       .nullable(),
     errorCode: z.string().nullable(),
+    blockers: z.array(MachineUpdateBlocker).optional(),
     retryable: z.boolean(),
     rolledBack: z.boolean(),
     requestedAt: z.string(),
@@ -20777,16 +21275,25 @@ export const MachineView = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineView = z.infer<typeof MachineView>;
 
-/**
- * GET /v1/workspaces/:ws/machines — the dashboard list. `activeSandboxId` /
- * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
- * activeSandboxId == the session's own group box is active).
- */
+/** Chat-visible explanation only, never authority to discover or use the machine. */
+export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sandboxId: z.string().uuid(),
+    machineName: z.string(),
+    ownerName: z.string().nullable(),
+    isOwner: z.boolean(),
+    queuedTurnBlocked: z.boolean(),
+  }),
+);
+export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     activeSandboxId: z.string().nullable(),
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
+    sessionMachineAccess: SessionMachineAccess.nullable().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;
@@ -20827,6 +21334,8 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
+        "personal_machine_permission_required",
+        "personal_machine_not_permitted",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",
@@ -20896,7 +21405,7 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
     }).optional(),
     latencyModes: z.array(
       z.object({
-        id: z.enum(["standard", "priority", "fast"]),
+        id: z.enum(["standard", "priority", "fast", "ultrafast"]),
         upstream: ModelCapabilitySupportV1,
         runnable: z.boolean(),
         billingMultiplierBps: z.number().int().positive().optional(),
@@ -21451,6 +21960,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
+    // Whether people can connect their own computers to this deployment. Absent
+    // on older servers: clients then treat it as unknown.
+    connectedMachines: z.boolean().optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.
@@ -21611,6 +22123,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         terminalEvents: z.boolean(),
       })
       .default({ fileSystem: false, git: false, terminalEvents: false }),
+    // Published Sites on this deployment (OPENGENI_SITES_*): null when
+    // publishing is off; absent from servers that predate published Sites.
+    sites: ClientSitesConfig.nullable().optional(),
   }),
 );
 export type ClientConfig = z.infer<typeof ClientConfig>;

@@ -103,7 +103,7 @@ function key(permissions: Permission[] = ["workspace:admin"], workspaceKey = fal
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   track(
-    spyOn(db, "requireWorkspace").mockResolvedValue({
+    spyOn(db, "getWorkspace").mockResolvedValue({
       id: workspaceId,
       accountId,
       kind: "shared",
@@ -467,6 +467,9 @@ describe("archived session import HTTP adapters", () => {
     const headers = key();
     track(spyOn(core, "requireSessionAuthorization").mockResolvedValue(null));
     track(spyOn(db, "getSession").mockResolvedValue(imported.session as never));
+    // Routes that only need the session's existence and sequence read the
+    // narrow sequence projection instead of the full session.
+    track(spyOn(db, "getSessionEventSequence").mockResolvedValue(0));
     const admission = track(
       spyOn(core, "acceptSessionUserMessage").mockRejectedValue(
         new core.ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY"),

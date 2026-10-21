@@ -9,7 +9,7 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 
 const GROUPS: Record<SessionBrowseGroupBy, string> = {
   activity: "Last activity",
@@ -80,6 +80,8 @@ export function SessionBrowseOrderControls({
   status,
   onStatusChange,
   needsYouCount = 0,
+  mineOnly,
+  onMineOnlyChange,
   showEmptyGroups,
   onShowEmptyGroupsChange,
 }: {
@@ -91,6 +93,9 @@ export function SessionBrowseOrderControls({
   onStatusChange: (value: SessionBrowseStatus) => void;
   /** Authorized active workstreams waiting on the person, counted beside "Needs you". */
   needsYouCount?: number;
+  /** Only workstreams the person started or messaged. */
+  mineOnly: boolean;
+  onMineOnlyChange: (value: boolean) => void;
   showEmptyGroups: boolean;
   onShowEmptyGroupsChange: (value: boolean) => void;
 }) {
@@ -103,6 +108,12 @@ export function SessionBrowseOrderControls({
         counts={{ "needs-you": needsYouCount }}
         onChange={onStatusChange}
       />
+      <DropdownMenuCheckboxItem
+        checked={mineOnly}
+        onCheckedChange={(checked) => onMineOnlyChange(checked === true)}
+      >
+        Only mine
+      </DropdownMenuCheckboxItem>
       <DropdownMenuSeparator />
       <ViewSubmenu label="Group by" value={groupBy} choices={GROUPS} onChange={onGroupByChange} />
       <ViewSubmenu label="Sort by" value={sortBy} choices={SORTS} onChange={onSortByChange} />

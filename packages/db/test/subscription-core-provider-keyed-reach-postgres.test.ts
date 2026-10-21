@@ -78,6 +78,9 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+// Patches the owner reader 0730 derives from: held back with 0715 and replayed
+// after 0730.
+const PERSONAL_QUARANTINE_EXPIRY = "0884_subscription_core_personal_quarantine_expiry.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -447,7 +450,8 @@ beforeAll(async () => {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${API_KEY_CONNECTIONS}),
       (${PERSONAL_CONNECT_FORMAT}),
-      (${PERSONAL_CONNECTION_VERSIONS}), ('0752_subscription_personal_sharing.sql')`;
+      (${PERSONAL_CONNECTION_VERSIONS}), ('0752_subscription_personal_sharing.sql'),
+      (${PERSONAL_QUARANTINE_EXPIRY})`;
     for (const later of [...LATER_MIGRATIONS, ...MAINTENANCE_MIGRATIONS])
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
@@ -506,7 +510,8 @@ beforeAll(async () => {
   const later = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await later`delete from schema_migrations
-      where name in (${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${PERSONAL_CONNECTION_VERSIONS}, '0752_subscription_personal_sharing.sql')`;
+      where name in (${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${PERSONAL_CONNECTION_VERSIONS}, '0752_subscription_personal_sharing.sql',
+        ${PERSONAL_QUARANTINE_EXPIRY})`;
     await migrate(database.ownerUrl);
   } finally {
     await later.end();
@@ -711,6 +716,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const constraints = await database!.admin<{ name: string; definition: string }[]>`
         select conname as name, pg_get_constraintdef(oid) as definition from pg_constraint
         where conrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
+          -- PostgreSQL 18 also lists column NOT NULL constraints here.
+          and contype <> 'n'
         order by contype, conname`;
       // 0689's connection key, primary key and reach check stay; the
       // provider is keyed by the registry.

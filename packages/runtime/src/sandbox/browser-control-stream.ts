@@ -1,6 +1,43 @@
 export const CONTROLLER_STREAM_MAX_INPUT = 128 * 1024;
 const MAX_HEADER_BYTES = 64 * 1024;
 
+/** The machine family that runs the controller command. POSIX hosts use
+ * `/bin/sh`, curl and base64. Windows has no POSIX shell or base64 utility, so
+ * Windows PowerShell 5.1 (present on every supported Windows) relays the same
+ * curl config to the system curl.exe and base64-encodes its exact bytes. */
+export type ControllerStreamHost = "posix" | "windows";
+
+const MARKER = "OPENGENI_CONTROLLER_END_V1";
+
+// Single quotes only: the script crosses a Windows command line as one argv
+// element, where embedded double quotes are not reliably preserved. The stdin
+// writer encoding is set without a BOM before the child pipe is created; a BOM
+// would make curl reject the first config line.
+const WINDOWS_STREAM_SCRIPT = [
+  "$ErrorActionPreference='Stop'",
+  "$i=New-Object IO.MemoryStream",
+  "[Console]::OpenStandardInput().CopyTo($i)",
+  "[Console]::InputEncoding=New-Object Text.UTF8Encoding($false)",
+  "$s=New-Object Diagnostics.ProcessStartInfo",
+  "$s.FileName=[IO.Path]::Combine([Environment]::SystemDirectory,'curl.exe')",
+  "$s.Arguments='--disable --config -'",
+  "$s.UseShellExecute=$false",
+  "$s.CreateNoWindow=$true",
+  "$s.RedirectStandardInput=$true",
+  "$s.RedirectStandardOutput=$true",
+  "$s.RedirectStandardError=$true",
+  "$p=[Diagnostics.Process]::Start($s)",
+  "$e=$p.StandardError.ReadToEndAsync()",
+  "$i.WriteTo($p.StandardInput.BaseStream)",
+  "$p.StandardInput.Close()",
+  "$o=New-Object IO.MemoryStream",
+  "$p.StandardOutput.BaseStream.CopyTo($o)",
+  "$p.WaitForExit()",
+  `$t=[Text.Encoding]::ASCII.GetBytes([string][char]10+'${MARKER}'+$p.ExitCode)`,
+  "$o.Write($t,0,$t.Length)",
+  "[Console]::Out.Write([Convert]::ToBase64String($o.ToArray()))",
+].join(";");
+
 /** One command over the existing binary-input transport. The command is static
  * with a stable trailer so replayed command output remains readable; all
  * authority and page data stay on stdin.
@@ -12,13 +49,14 @@ export function controllerStreamRequest(input: {
   body?: string;
   timeoutMs: number;
   maxBytes: number;
-}): { cmd: string; stdin: Uint8Array; marker: string } {
+  host?: ControllerStreamHost;
+}): { cmd: string; shell: string; stdin: Uint8Array; marker: string } {
   const quote = (value: string): string => {
     if (/[\r\n\0]/u.test(value)) throw new Error("invalid controller request value");
     return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
   };
   const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1_000));
-  const marker = "OPENGENI_CONTROLLER_END_V1";
+  const marker = MARKER;
   const config = [
     "silent",
     "show-error",
@@ -39,8 +77,12 @@ export function controllerStreamRequest(input: {
   if (stdin.byteLength > CONTROLLER_STREAM_MAX_INPUT) {
     throw new RangeError("controller command input is too large");
   }
+  if (input.host === "windows") {
+    return { cmd: WINDOWS_STREAM_SCRIPT, shell: "powershell", stdin, marker };
+  }
   return {
     cmd: `(curl --disable --config -; controller_exit=$?; printf '\\n${marker}%s' "$controller_exit") | base64`,
+    shell: "/bin/sh",
     stdin,
     marker,
   };

@@ -2,7 +2,9 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   browserDeadlineCheckpoint,
   createDb,
+  createSession,
   getBrowserPrivateCheckpointAuthority,
+  listRetainedBrowserDownloads,
   migrate,
 } from "@opengeni/db";
 import { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
@@ -17,6 +19,7 @@ import {
   type CapturePlacementBrowserStateInput,
   type PlacementBrowserStateCaptureReceipt,
 } from "@opengeni/runtime";
+import type { RetainedDownloadSource } from "@opengeni/core";
 import type { ObjectStorage } from "@opengeni/storage";
 import { seedBrowserDeadlineCheckpoint } from "../../../test/fixtures/browser-deadline-checkpoint";
 import { createBrowserDeadlineCheckpointActivities } from "../src/activities/browser-deadline-checkpoint";
@@ -65,18 +68,34 @@ function receipt(input: CapturePlacementBrowserStateInput): PlacementBrowserStat
   };
 }
 
-function activities(controller: Pick<BrowserControlClient, "captureState" | "endSession">) {
+function activities(
+  controller: Pick<BrowserControlClient, "captureState" | "endSession"> & {
+    downloads?: (tokens: { controlToken: string; viewToken: string }) => RetainedDownloadSource;
+  },
+  objects: Map<string, { size: number; sha256: string }> = new Map(),
+) {
   const settings = testSettings({
     sandboxOwnershipEnabled: true,
     environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
   });
   const storage = {
-    createPutUrl: async () => ({
-      url: "https://storage.example.test/checkpoint",
+    bucket: "test-files",
+    maxSinglePutSizeBytes: 5 * 1024 ** 3,
+    createPutUrl: async ({ key }: { key: string }) => ({
+      url: `https://storage.example.test/${key}`,
       requiredHeaders: {},
       expiresAt: new Date(Date.now() + 60_000),
     }),
-  } as ObjectStorage;
+    fileExists: async (file: { objectKey: string }) => objects.has(file.objectKey),
+    headFile: async (file: { objectKey: string }) => {
+      const object = objects.get(file.objectKey)!;
+      return {
+        ContentLength: object.size,
+        ContentType: "application/octet-stream",
+        Metadata: { sha256: object.sha256 },
+      };
+    },
+  } as unknown as ObjectStorage;
   return createBrowserDeadlineCheckpointActivities(
     async () => ({ settings, db: client.db, objectStorage: storage }) as ControlActivityServices,
     async ({ target, lease }) => {
@@ -183,4 +202,75 @@ test("lease replacement during capture cannot publish or remove the only source 
   await expect(worker.checkpointBrowserBeforeDeadline(target)).rejects.toThrow("authority changed");
   expect(await getBrowserPrivateCheckpointAuthority(client.db, target)).toBeNull();
   expect(cleanups).toBe(0);
+});
+
+test("a completed download is kept as a workspace file before the browser is saved", async () => {
+  const target = await seedBrowserDeadlineCheckpoint(owned);
+  // Every real browser was created by a session; retention reads that record.
+  const source = await createSession(client.db, {
+    accountId: target.accountId,
+    workspaceId: target.workspaceId,
+    initialMessage: "initial",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+  });
+  await owned.admin`insert into browser_session_associations (
+    account_id, workspace_id, browser_session_id, session_id, relationship, actor_subject_id
+  ) values (${target.accountId}, ${target.workspaceId}, ${target.browserSessionId},
+    ${source.id}, 'created', 'fixture-human')`;
+  const objects = new Map<string, { size: number; sha256: string }>();
+  const order: string[] = [];
+  const download = {
+    id: crypto.randomUUID(),
+    browserSessionId: target.browserSessionId,
+    controllerGeneration: target.controllerGeneration,
+    targetId: "target-1",
+    filename: "report.pdf",
+    status: "completed" as const,
+    receivedBytes: 42,
+    totalBytes: 42,
+    sha256: "c".repeat(64),
+    version: 2,
+    startedAt: "2026-10-17T10:00:00.000Z",
+    settledAt: "2026-10-17T10:00:01.000Z",
+    failureCode: null,
+  };
+  const worker = activities(
+    {
+      captureState: async (input) => {
+        order.push("capture");
+        return receipt(input);
+      },
+      endSession: async () => {
+        order.push("end");
+      },
+      downloads: (tokens) => {
+        expect(tokens.controlToken.length).toBeGreaterThan(0);
+        return {
+          listDownloads: async () => ({
+            browserSessionId: target.browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            downloads: [download, { ...download, id: crypto.randomUUID(), status: "failed" }],
+          }),
+          exportDownload: async (downloadId, request) => {
+            expect(downloadId).toBe(download.id);
+            order.push("export");
+            const key = new URL(request.upload.url).pathname.slice(1);
+            objects.set(key, { size: download.receivedBytes, sha256: download.sha256 });
+            return { sizeBytes: download.receivedBytes, sha256: download.sha256 };
+          },
+        };
+      },
+    },
+    objects,
+  );
+  expect(await worker.checkpointBrowserBeforeDeadline(target)).toEqual({ status: "suspended" });
+  expect(order).toEqual(["export", "capture", "end"]);
+  const kept = await listRetainedBrowserDownloads(client.db, target);
+  expect(kept).toHaveLength(1);
+  expect(kept[0]).toMatchObject({ download: { id: download.id }, safeFilename: "report.pdf" });
 });

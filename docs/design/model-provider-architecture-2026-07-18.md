@@ -44,7 +44,7 @@ Those seams are not yet one explicit product contract:
    `codex-subscription`.
 3. Billing ownership is derived from Codex-specific routing state rather than a
    model/provider contract. A future externally billed provider could therefore
-   be charged as OpenGeni-managed usage.
+   be charged as Opengeni-managed usage.
 4. Reasoning and hosted web search are booleans. The catalog cannot express
    supported reasoning levels, a required/default reasoning mode, function
    calling, structured output, latency/priority modes, streaming transport, or
@@ -595,7 +595,7 @@ The implementation must prove:
   access after alias removal;
 - BYOK is not accidentally enabled by generic provider configuration;
 - connected-subscription billing remains external and deployment-key billing
-  remains OpenGeni-metered in managed mode;
+  remains Opengeni-metered in managed mode;
 - an explicit per-turn switch is turn-local, an omitted follow-up uses session
   preference, and goal/child semantics match this ADR;
 - approval resume, capacity wait, and worker recovery retain the same V1 policy;

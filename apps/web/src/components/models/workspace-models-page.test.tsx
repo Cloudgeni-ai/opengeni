@@ -11,6 +11,7 @@ import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { ModelsView } from "@/lib/models-route";
+import { useConsoleSharedQueries } from "@/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -242,6 +243,8 @@ const client = {
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
   listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  getWorkspaceSubscriptionUsagePools: mock(async (_workspaceId: string) => ({ pools: [] })),
+  getOrganizationSubscriptionUsagePools: mock(async (_organizationId: string) => ({ pools: [] })),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -317,7 +320,7 @@ mock.module("@/components/default-session-model", () => ({
   ),
 }));
 // Menus and confirms as plain buttons: the real ones are Radix portals.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -419,7 +422,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
       keptForPeople: ["A"],
     }),
   ).toEqual({
-    text: "New work uses this workspace's Codex accounts. A, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+    text: "New work uses this workspace's Codex accounts together with the organization's other accounts. A, kept as this workspace's own, serves only the people chosen for it.",
     blocked: false,
   });
 });
@@ -587,6 +590,7 @@ let organizationList = false;
 let workspaceSettingsAdmin: boolean | undefined;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
+  useConsoleSharedQueries(client);
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
     organizationList ? {} : { workspace: "workspace-a" },
   );
@@ -639,6 +643,13 @@ async function render(
 async function cleanup({ container, root }: { container: HTMLElement; root: Root }) {
   await act(async () => root.unmount());
   container.remove();
+}
+
+/** Start an explicitly cold mock scenario without relying on teardown timers. */
+async function renderColdModelsFixture(): ReturnType<typeof render> {
+  const { clearSharedQueries } = await import("@/lib/shared-query");
+  clearSharedQueries(client);
+  return render();
 }
 
 /** The description under the section titled `title`, or undefined. */
@@ -748,7 +759,7 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit shows the last accounts and live usage at once while re-reading", async () => {
+  test("a fresh revisit renders retained accounts and live usage without reads; Refresh re-reads", async () => {
     // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
     const { retainSharedQueries } = await import("@/lib/shared-query");
     const release = retainSharedQueries(client);
@@ -767,6 +778,7 @@ describe("Codex rows", () => {
         }),
     );
     const overviewReads = client.codexOverview.mock.calls.length;
+    const accountReads = client.listCodexAccounts.mock.calls.length;
     const second = await render();
     try {
       // Back on Models: the account and its last LIVE reading render at once
@@ -774,7 +786,12 @@ describe("Codex rows", () => {
       expect(second.container.textContent).toContain("Team plan");
       expect(second.container.textContent).toContain("75% left");
       expect(second.container.textContent).not.toContain("10% left");
+      expect(client.codexOverview.mock.calls.length).toBe(overviewReads);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads);
+      expect(second.container.textContent).toContain("Updated just now");
+      await act(async () => button(second.container, "Refresh")!.click());
       expect(client.codexOverview.mock.calls.length).toBe(overviewReads + 1);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads + 1);
       await act(async () => resolve(overviewFor("acct-1", 40)));
       await flush();
       expect(second.container.textContent).toContain("40% left");
@@ -784,7 +801,50 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit whose live read fails says Usage unavailable, not the older reading", async () => {
+  test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
+    const { useCodexSubscriptions } = await import("@/components/codex-connection");
+    const { retainSharedQueries, peekSharedQuery } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    let remaining = 1;
+    client.codexOverview.mockImplementation(async () => {
+      const value = overviewFor("acct-1", remaining ? 0 : 100);
+      value.accounts["acct-1"]!.resetCredits.availableCount = remaining;
+      return value;
+    });
+    let afterRedemption!: () => Promise<void>;
+    function Reader() {
+      const codex = useCodexSubscriptions({
+        client: client as never,
+        workspaceId: "workspace-a",
+        canManage: true,
+      });
+      afterRedemption = codex.refreshUsage;
+      return <span>{codex.overviewMap["acct-1"]?.resetCredits.availableCount ?? "loading"}</span>;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("1");
+      await act(async () => root.render(null));
+      // The provider's redemption settles only after the account page was left.
+      remaining = 0;
+      await act(async () => afterRedemption());
+      expect(
+        peekSharedQuery(client, ["model-settings", "codex-overview", "workspace-a"]),
+      ).toBeNull();
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("0");
+      expect(client.codexOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      release();
+    }
+  });
+
+  test("an explicit live refresh failure says Usage unavailable, not the older reading", async () => {
     const { retainSharedQueries } = await import("@/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
@@ -804,6 +864,7 @@ describe("Codex rows", () => {
     try {
       // While this visit's read runs, the last live reading stands in.
       expect(second.container.textContent).toContain("75% left");
+      await act(async () => button(second.container, "Refresh")!.click());
       await act(async () => reject(new Error("Provider unavailable")));
       await flush();
       // The read failed: the row no longer presents the old reading as current.
@@ -828,10 +889,31 @@ describe("Codex rows", () => {
     expect(peekSharedQuery(client, ["codex-accounts", "workspace-a"])).toBeNull();
     const second = await render();
     try {
-      // A cold read on mount, then the usual re-read after the live usage read.
-      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 2);
+      // Only the invalidated account list is cold; the live overview is still fresh.
+      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 1);
     } finally {
       await cleanup(second);
+      release();
+    }
+  });
+
+  test("a retained live overview older than five minutes revalidates on revisit", async () => {
+    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    const first = await render();
+    await cleanup(first);
+    const reads = client.codexOverview.mock.calls.length;
+    const originalNow = Date.now;
+    const later = originalNow() + 5 * 60_000 + 1;
+    Date.now = () => later;
+    let second: Awaited<ReturnType<typeof render>> | undefined;
+    try {
+      second = await render();
+      expect(client.codexOverview.mock.calls.length).toBe(reads + 1);
+      expect(second.container.textContent).toContain("75% left");
+    } finally {
+      Date.now = originalNow;
+      if (second) await cleanup(second);
       release();
     }
   });
@@ -891,6 +973,14 @@ describe("Models list", () => {
   });
 
   test("one flat Accounts list: no provider group headers, no unconnected providers", async () => {
+    // Picked automatically, the server lists the organization's accounts beside this workspace's.
+    accounts = {
+      ...accounts,
+      accounts: [
+        ...accounts.accounts,
+        codexAccount({ id: "org-1", label: "Company plan", source: "organization" }),
+      ],
+    };
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
@@ -903,9 +993,9 @@ describe("Models list", () => {
       expect(text).not.toContain("ChatGPT plan");
       expect(button(view.container, "More actions for Codex")).toBeUndefined();
       expect(button(view.container, "Edit")).toBeUndefined();
-      // This workspace's account, then the organization's pool, muted.
+      // The organization's account and this workspace's, both in use.
       expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(2);
-      expect(text).toContain("Not in use");
+      expect(text).not.toContain("Not in use");
       // Every account says who it is for. Without organization rights the
       // organization's "Available in" can't be read, so it says who shares it.
       expect(text).toContain("Design preview only");
@@ -1063,7 +1153,7 @@ describe("Codex pool controls", () => {
     try {
       expect(view.container.querySelector('[role="radiogroup"]')).toBeNull();
       expect(view.container.textContent).toContain(
-        "New work uses this workspace's Codex account. The organization's accounts are set aside while this workspace has its own.",
+        "New work uses this workspace's Codex account together with the organization's accounts.",
       );
       expect(button(view.container, "Use automatically")).toBeUndefined();
     } finally {
@@ -1099,10 +1189,10 @@ describe("Codex pool controls", () => {
     const view = await render();
     try {
       expect(view.container.textContent).toContain(
-        "New work uses the organization's Codex account. Connect an account here to use your own instead.",
+        "New work uses the organization's Codex account. Accounts connected here are used together with it.",
       );
       await act(async () =>
-        button(view.container, "Always use the organization's accounts")!.click(),
+        button(view.container, "Use only the organization's accounts")!.click(),
       );
       await flush();
       expect(client.requestJson).toHaveBeenCalledWith(
@@ -1196,7 +1286,7 @@ describe("Codex pool controls", () => {
 });
 
 describe("Codex account page", () => {
-  test("opens from the row, maps Use for new work to the allocator, and goes back", async () => {
+  test("opens from the row, maps Enable account to the allocator, and goes back", async () => {
     const view = await render();
     try {
       const row = view.container.querySelector<HTMLElement>("[data-row-action]")!;
@@ -1204,7 +1294,7 @@ describe("Codex account page", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
       const toggle = view.container.querySelector<HTMLButtonElement>(
-        'button[role="switch"][aria-label="Use Team plan for new work"]',
+        'button[role="switch"][aria-label="Enable Team plan"]',
       )!;
       expect(toggle.getAttribute("aria-checked")).toBe("true");
       await act(async () => toggle.click());
@@ -1289,7 +1379,7 @@ describe("Codex account page", () => {
       // No green "Connected", no "Organization" chip, no aside repeating the header.
       expect(text).not.toContain("Connected");
       expect(text).not.toContain("Belongs to");
-      expect(text).not.toContain("Use for new work");
+      expect(text).not.toContain("Enable account");
       expect(view.container.querySelector('button[role="switch"]')).toBeNull();
       expect(button(view.container, /Disconnect/)).toBeUndefined();
       expect(button(view.container, /Rename/)).toBeUndefined();
@@ -1332,7 +1422,7 @@ describe("Codex account page", () => {
     expect(await setAside(undefined)).toBe(true);
   });
 
-  test("the pool notice counts only the workspace's own accounts", async () => {
+  test("picked automatically, the pool notice says both pools are used", async () => {
     accounts = {
       ...accounts,
       accounts: [
@@ -1344,8 +1434,11 @@ describe("Codex account page", () => {
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("New work uses this workspace's Codex account.");
-      expect(text).toContain("while this workspace has its own");
+      // Counts only the workspace's own, and sets nothing aside.
+      expect(text).toContain(
+        "New work uses this workspace's Codex account together with the organization's accounts.",
+      );
+      expect(text).not.toContain("Set aside");
     } finally {
       await cleanup(view);
     }
@@ -1353,47 +1446,103 @@ describe("Codex account page", () => {
 });
 
 describe("Connect Codex", () => {
-  for (const mode of ["automatic", "organization"] as const) {
-    test(`asks which subscriptions to use while the organization's are in use (${mode})`, async () => {
+  test("picked automatically, a new account joins the organization's without asking", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [],
+      source: {
+        ...source,
+        mode: "automatic",
+        effectiveSource: "organization",
+        workspaceAvailable: false,
+      },
+    };
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.textContent).not.toContain("Use this account for new work?");
+      expect(view.container.querySelector('[role="radio"]')).toBeNull();
+      await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
+      await flush();
+      expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
+      // Connecting never pins the source.
+      expect(client.requestJson.mock.calls.filter(([method]) => method === "PATCH")).toEqual([]);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  for (const choice of ["together", "organization"] as const) {
+    test(`set to only the organization's accounts, asks whether to use the new one (${choice})`, async () => {
       accounts = {
         ...accounts,
         accounts: [],
-        source: { ...source, mode, effectiveSource: "organization", workspaceAvailable: false },
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: false,
+        },
       };
+      const originalOpen = window.open;
+      window.open = (() => null) as typeof window.open;
+      client.codexConnectStart.mockImplementationOnce(async () => ({
+        userCode: "ABCD-EFGH",
+        verificationUri: "https://auth.example.test/device",
+        state: "device-state",
+        intervalSeconds: 2,
+      }));
+      client.codexConnectPoll.mockImplementation(async () => ({
+        status: "connected",
+        plan: "pro",
+        accountId: null,
+      }));
       // An account owned by this workspace is connected by an owner or admin, in context.
       asOrganizationAdmin();
       const view = await render();
       try {
         await act(async () => navigateTo({ view: "connect:codex" }));
         await flush();
-        expect(view.container.textContent).toContain(
-          "Use this account instead of the organization's subscriptions?",
-        );
+        expect(view.container.textContent).toContain("Use this account for new work?");
         const submit = button(view.container, "Sign in with ChatGPT")!;
         await act(async () => submit.click());
         await flush();
         expect(client.codexConnectStart).not.toHaveBeenCalled();
         expect(view.container.textContent).toContain(
-          "Choose which subscriptions new work should use.",
+          "Choose whether new work should use this account.",
         );
-        const keep = [...view.container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
-          (radio) => radio.textContent?.includes("Keep the organization's subscriptions"),
+        const pick = [...view.container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+          (radio) =>
+            radio.textContent?.includes(
+              choice === "together"
+                ? "Use it with the organization's subscriptions"
+                : "Keep using only the organization's",
+            ),
         )!;
-        await act(async () => keep.click());
+        await act(async () => pick.click());
         await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
         await flush();
         expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
-        // Keeping the organization's pins an automatic source first; an explicit one stays.
+        // Nothing changes before the account exists.
+        expect(client.requestJson.mock.calls.filter(([method]) => method === "PATCH")).toEqual([]);
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 2_300)));
+        await flush();
+        expect(client.codexConnectPoll).toHaveBeenCalledWith("workspace-a", "device-state");
+        // Using it returns to the automatic choice, which uses both; keeping changes nothing.
         const patches = client.requestJson.mock.calls.filter(([method]) => method === "PATCH");
         expect(patches).toEqual(
-          mode === "automatic"
-            ? [["PATCH", "/v1/workspaces/workspace-a/codex/source", { mode: "organization" }]]
+          choice === "together"
+            ? [["PATCH", "/v1/workspaces/workspace-a/codex/source", { mode: "automatic" }]]
             : [],
         );
       } finally {
+        window.open = originalOpen;
+        client.codexConnectPoll.mockImplementation(async () => ({ status: "pending" }));
         await cleanup(view);
       }
-    });
+    }, 10_000);
   }
 
   test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
@@ -1462,7 +1611,7 @@ describe("Opengeni credits", () => {
     }));
   });
 
-  test("leads the Accounts list and counts as a payer, opening Billing for billing admins", async () => {
+  test("heads the pay-as-you-go group and counts as a payer, opening Billing for billing admins", async () => {
     noAccounts();
     creditsDeployment(["billing:manage"]);
     (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
@@ -1482,6 +1631,27 @@ describe("Opengeni credits", () => {
     expect(lastNavigation?.search.fromLabel).toBe("Design preview · Models");
     expect(lastNavigation?.search.from).toBe("/workspaces/workspace-a/settings?section=models");
     await cleanup(view);
+  });
+
+  test("subscriptions come first and credits open the pay-as-you-go group below them", async () => {
+    creditsDeployment([]);
+    const view = await render(false, "organization-a");
+    try {
+      await flush();
+      const headings = [...view.container.querySelectorAll("h3")].map((h) => h.textContent);
+      expect(headings).toContain("Subscriptions");
+      expect(headings).toContain("Pay as you go");
+      const text = view.container.textContent ?? "";
+      const subscriptions = text.indexOf("Subscriptions");
+      const codexRow = text.indexOf("Team plan");
+      const payAsYouGo = text.lastIndexOf("Pay as you go", text.indexOf("Opengeni credits"));
+      expect(subscriptions).toBeGreaterThanOrEqual(0);
+      expect(codexRow).toBeGreaterThan(subscriptions);
+      expect(payAsYouGo).toBeGreaterThan(codexRow);
+      expect(text.indexOf("Opengeni credits")).toBeGreaterThan(payAsYouGo);
+    } finally {
+      await cleanup(view);
+    }
   });
 
   test("is a plain row without the balance for people who can't read billing", async () => {
@@ -1542,6 +1712,8 @@ describe("One Models page for the organization and the workspace", () => {
 
   test("owners and admins see the organization's accounts, set aside here, and open their page", async () => {
     organizationAdmin = true;
+    // Set to use only its own accounts: the organization's are set aside.
+    accounts = { ...accounts, source: { ...source, mode: "workspace" } };
     routeOrganizationReads();
     client.getModelConnectionAccess.mockImplementation(async () => ({
       policy: openPolicy,
@@ -1659,7 +1831,7 @@ describe("One Models page for the organization and the workspace", () => {
     client.getModelConnectionAccess.mockImplementation(async () => {
       throw new Error("Connection request failed");
     });
-    const failedView = await render();
+    const failedView = await renderColdModelsFixture();
     try {
       await flush();
       const failedRow = [
@@ -1711,9 +1883,9 @@ describe("One Models page for the organization and the workspace", () => {
     const view = await render();
     try {
       const text = () => view.container.textContent ?? "";
-      // One organization account besides its own: "account is".
+      // One organization account besides its own: "account".
       expect(text()).toContain(
-        "New work uses this workspace's Codex account. The organization's account is set aside while this workspace has its own.",
+        "New work uses this workspace's Codex account together with the organization's account.",
       );
       const ownRow = () =>
         [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
@@ -2096,6 +2268,36 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:codex" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).not.toBe("Connect Codex");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("SUB-OWN-09: a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Connect a subscription or an API key for everyone in Design preview.",
+      );
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+        (row) => row.textContent ?? "",
+      );
+      for (const provider of ["Codex", "SuperGrok", "Claude subscription", "OpenRouter"]) {
+        expect(rows.some((row) => row.includes(provider))).toBe(true);
+      }
+      // Codex signs in for this workspace, not for the organization.
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      expect(view.container.textContent).toContain(
+        "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
+      );
+      expect(view.container.textContent).not.toContain("Which workspaces can use it");
     } finally {
       await cleanup(view);
     }
@@ -2508,6 +2710,58 @@ describe("One Models page for the organization and the workspace", () => {
       }
     });
 
+    test("retains successful access across navigation but reads a deliberately cold error fixture", async () => {
+      const { retainSharedQueries } = await import("@/lib/shared-query");
+      const release = retainSharedQueries(client);
+      organizationAdmin = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      let view: Awaited<ReturnType<typeof render>> | undefined;
+      try {
+        view = await render();
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(view.container.textContent).toContain("Selected people");
+        const reads = client.getModelConnectionAccess.mock.calls.length;
+        expect(reads).toBeGreaterThan(0);
+        await cleanup(view);
+        view = undefined;
+
+        client.getModelConnectionAccess.mockImplementation(async () => {
+          throw new Error("Connection request failed");
+        });
+        // Replacing a loader is not an invalidation: a fresh retained read
+        // still serves ordinary navigation without making another request.
+        view = await render();
+        await flush();
+        expect(view.container.textContent).toContain("Selected people");
+        expect(view.container.textContent).not.toContain("Couldn't check who can use it");
+        expect(client.getModelConnectionAccess.mock.calls.length).toBe(reads);
+        await cleanup(view);
+        view = undefined;
+
+        // Holding retention makes this boundary deterministic: without the
+        // explicit clear the failing loader is never called, even on remount.
+        view = await renderColdModelsFixture();
+        await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(reads);
+        expect(view.container.textContent).toContain("Couldn't check who can use it");
+        expect(view.container.textContent).not.toContain("Selected people");
+      } finally {
+        if (view) await cleanup(view);
+        release();
+      }
+    });
+
     test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's, in use for those people where placement serves them", async () => {
       organizationAdmin = true;
       accounts = {
@@ -2557,7 +2811,7 @@ describe("One Models page for the organization and the workspace", () => {
         source: { ...source, mode: "workspace" as const, effectiveSource: "workspace" as const },
       };
       accounts = workspaceSource;
-      const workspaceOnly = await render();
+      const workspaceOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
@@ -2573,7 +2827,7 @@ describe("One Models page for the organization and the workspace", () => {
       // With no other account of its own, new work starts only for those people,
       // not "can't start … none are connected".
       accounts = { ...workspaceSource, accounts: [], activeAccountId: null };
-      const keptOnly = await render();
+      const keptOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
@@ -2603,7 +2857,7 @@ describe("One Models page for the organization and the workspace", () => {
             held.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const pendingView = await render();
+      const pendingView = await renderColdModelsFixture();
       try {
         expect(pendingView.container.textContent).not.toContain("New Codex work");
         // Nor a guessed tag or "Not in use" on the row still reading.
@@ -2623,9 +2877,13 @@ describe("One Models page for the organization and the workspace", () => {
       client.getModelConnectionAccess.mockImplementation(async () => {
         throw new Error("Connection request failed");
       });
-      const failedView = await render();
+      const accessReadsBeforeFailure = client.getModelConnectionAccess.mock.calls.length;
+      const failedView = await renderColdModelsFixture();
       try {
         await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(
+          accessReadsBeforeFailure,
+        );
         expect(failedView.container.textContent).not.toContain("New Codex work");
         // Its row says so, with the way to read it again.
         const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
@@ -2665,7 +2923,7 @@ describe("One Models page for the organization and the workspace", () => {
             ? new Promise((resolve) => heldLists.push(() => resolve(callList(...args))))
             : callList(...args),
       );
-      const listPending = await render();
+      const listPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(heldLists.length).toBeGreaterThan(0);
@@ -2687,7 +2945,7 @@ describe("One Models page for the organization and the workspace", () => {
         return callList(...args);
       });
       // Its error row (with Try again) keeps the list from reading "No model providers connected".
-      const listFailed = await render();
+      const listFailed = await renderColdModelsFixture();
       try {
         await flush();
         expect(listFailed.container.textContent).toContain(
@@ -2730,7 +2988,7 @@ describe("One Models page for the organization and the workspace", () => {
             );
           }),
       );
-      const twoKept = await render();
+      const twoKept = await renderColdModelsFixture();
       try {
         await flush();
         expect(rowsNamed(twoKept.container, "Zeta plan")).toHaveLength(1);
@@ -2765,7 +3023,7 @@ describe("One Models page for the organization and the workspace", () => {
             heldOrg.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const organizationPending = await render();
+      const organizationPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(organizationPending.container.textContent).toContain(
@@ -2781,11 +3039,11 @@ describe("One Models page for the organization and the workspace", () => {
         ...workspaceSource,
         source: { ...source, mode: "automatic" as const, effectiveSource: "workspace" as const },
       };
-      const automatic = await render();
+      const automatic = await renderColdModelsFixture();
       try {
         await flush();
         expect(automatic.container.textContent).toContain(
-          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's other accounts. Team plan, kept as this workspace's own, serves only the people chosen for it.",
         );
       } finally {
         await cleanup(automatic);
@@ -2802,7 +3060,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const noOne = await render();
+      const noOne = await renderColdModelsFixture();
       try {
         await flush();
         expect(noOne.container.textContent).toContain(
@@ -2825,7 +3083,7 @@ describe("One Models page for the organization and the workspace", () => {
           effectiveSource: "organization" as const,
         },
       };
-      const organizationOnly = await render();
+      const organizationOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(organizationOnly.container, "Team plan")[0]!;
@@ -2848,7 +3106,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const notKept = await render();
+      const notKept = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(notKept.container, "Team plan")[0]!;
@@ -3095,6 +3353,7 @@ describe("One Models page for the organization and the workspace", () => {
 
     test("another workspace's own account isn't available here and sets nothing aside", async () => {
       organizationAdmin = true;
+      accounts = { ...accounts, source: { ...source, mode: "workspace" } };
       const research = {
         ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
         ownInWorkspaceIds: ["workspace-b"],
@@ -3135,7 +3394,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
         // The notice counts only the organization's account known to reach here.
         expect(view.container.textContent).toContain(
-          "The organization's account is set aside while this workspace has its own.",
+          "The organization's account is never used here, even if none are connected.",
         );
       } finally {
         await cleanup(view);
@@ -3173,6 +3432,7 @@ describe("One Models page for the organization and the workspace", () => {
 
     test("no set-aside reason while an organization account's reach loads", async () => {
       organizationAdmin = true;
+      accounts = { ...accounts, source: { ...source, mode: "workspace" } };
       client.requestJson.mockImplementation(async (method: string, path: string) => {
         if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
           return {
@@ -3184,9 +3444,8 @@ describe("One Models page for the organization and the workspace", () => {
         return {};
       });
       let resolveAccess: (value: unknown) => void = () => undefined;
-      client.getModelConnectionAccess.mockImplementation(
-        () => new Promise((resolve) => (resolveAccess = resolve)),
-      );
+      const pendingAccess = new Promise((resolve) => (resolveAccess = resolve));
+      client.getModelConnectionAccess.mockImplementation(() => pendingAccess);
       const view = await render();
       try {
         await flush();
@@ -3265,7 +3524,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(older.container.textContent).toContain(
-          "The organization's accounts are set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's accounts.",
         );
       } finally {
         await cleanup(older);
@@ -3276,7 +3535,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(current.container.textContent).toContain(
-          "The organization's account is set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's account.",
         );
       } finally {
         await cleanup(current);
@@ -3513,7 +3772,7 @@ describe("One Models page for the organization and the workspace", () => {
     accounts = {
       ...accounts,
       accounts: [own],
-      source: { ...source, organizationAvailable: true },
+      source: { ...source, mode: "workspace", organizationAvailable: true },
     };
     const older = await render();
     try {

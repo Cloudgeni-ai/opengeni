@@ -26,6 +26,21 @@ function databaseError(overrides: Record<string, unknown> = {}): Error {
 }
 
 describe("session event persistence failure truth", () => {
+  test("atomic checkpoints never retry an uncertain commit with an older rollback cause", async () => {
+    let attempts = 0;
+    await expect(
+      runIdempotentPersistenceTransaction({ stage: "atomic_checkpoint" }, async () => {
+        attempts++;
+        throw Object.assign(new Error("commit acknowledgement lost"), {
+          code: "ECONNRESET",
+          cause: { code: "40P01" },
+        });
+      }),
+    ).rejects.toMatchObject({
+      details: { attempts: 1, sqlState: null, retryOutcome: "not_retryable" },
+    });
+    expect(attempts).toBe(1);
+  });
   test("recognizes raw postgres transport failures without message heuristics", () => {
     for (const code of [
       "CONNECTION_CLOSED",
@@ -298,6 +313,65 @@ describe("session event persistence failure truth", () => {
     expect((caught as Error).message).not.toContain(source.message);
     expect((caught as Error).message).not.toContain(syntheticValue);
     expect(nestedPostgresSqlState(caught)).toBe("23505");
+  });
+
+  test("a schema change under the transaction is retried after a short wait", async () => {
+    // A rolling migration changed a column type while a routine called by
+    // this transaction was already planned against the old one.
+    const delays: number[] = [];
+    let attempts = 0;
+    const result = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.toolCall.output"],
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw databaseError({ cause: { code: "42883", severity: "ERROR", routine: "op_error" } });
+        }
+        return "persisted";
+      },
+    );
+    expect(result).toBe("persisted");
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([250]);
+  });
+
+  test("a schema error that persists stays a non-retryable failure after bounded waits", async () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    let retries = 0;
+    const caught = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.toolCall.output"],
+        correlationId: "schema-change-correlation",
+        onRetry: () => {
+          retries += 1;
+        },
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+      async () => {
+        attempts += 1;
+        throw databaseError({ cause: { code: "42883", severity: "ERROR" } });
+      },
+    ).catch((error) => error);
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([250, 1_000]);
+    expect(retries).toBe(0);
+    expect(caught).toBeInstanceOf(SessionEventPersistenceError);
+    expect((caught as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_failure",
+      sqlState: "42883",
+      attempts: 3,
+      retryOutcome: "not_retryable",
+    });
   });
 });
 

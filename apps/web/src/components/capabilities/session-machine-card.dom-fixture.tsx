@@ -77,6 +77,12 @@ const fleet = {
 };
 mock.module("@/lib/use-workspace-machines", () => ({ useWorkspaceMachines: () => fleet }));
 mock.module("@/api", () => ({ apiBaseUrl: "https://app.example.test" }));
+let desktop: ReturnType<
+  typeof import("@/components/desktop/this-computer").useDesktopThisComputer
+> = null;
+mock.module("@/components/desktop/this-computer", () => ({
+  useDesktopThisComputer: () => desktop,
+}));
 const copyTextToClipboard = mock(async (_text: string) => true);
 mock.module("@opengeni/react/clipboard", () => ({ copyTextToClipboard }));
 
@@ -168,6 +174,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 beforeEach(() => {
+  desktop = null;
   mintCount = 0;
   attach.mockClear();
   enableMachineScreenControl.mockClear();
@@ -246,6 +253,57 @@ async function click(element: HTMLElement | null) {
 }
 
 describe("Connected Machine conversation card", () => {
+  test("desktop connects in one click and opens setup only for outstanding system permissions", async () => {
+    const { defaultThisComputerLabels } = await import("@opengeni/react/this-computer");
+    const openSetup = mock(() => {});
+    const connect = mock(async (_options: { screenControl: boolean }) => ({
+      state: "connected" as const,
+      busy: false,
+      error: null,
+      machineName: "This laptop",
+    }));
+    desktop = {
+      workspaceId: "workspace",
+      productName: "Opengeni",
+      platform: "linux",
+      labels: defaultThisComputerLabels(),
+      openSetup,
+      computer: {
+        status: { state: "not_installed", busy: false, error: null, machineName: "This laptop" },
+        acting: false,
+        actionError: null,
+        canDisconnect: true,
+        connect,
+        refresh: () => {},
+        pause: async () => {},
+        resume: async () => {},
+        disconnect: async () => {},
+        requestPermission: async () => {},
+      },
+    };
+    const h = await render();
+    try {
+      await click(h.button("Use this computer"));
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledWith({ screenControl: true });
+      expect(openSetup).not.toHaveBeenCalled();
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      desktop.computer.status = {
+        state: "connected",
+        busy: false,
+        error: null,
+        machineName: "This laptop",
+        permissions: [{ id: "screenRecording", granted: false }],
+      };
+      await h.rerender();
+      await click(h.button("Use this computer"));
+      expect(openSetup).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
   test("mints a command on demand, notices the new machine and moves the chat onto it", async () => {
     const consent = {
       mode: "session",
@@ -264,14 +322,22 @@ describe("Connected Machine conversation card", () => {
       // Nothing is minted until the person asks for a command.
       expect(mintEnrollToken).not.toHaveBeenCalled();
 
-      await click(h.button("Connect a machine"));
+      await click(h.button("Connect a computer"));
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      expect(h.command()).toBe("");
+      expect(h.dialogText()).toContain("Open app and connect");
+      await click(
+        [...(h.dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) =>
+          button.textContent?.startsWith("Connect a server instead"),
+        ) ?? null,
+      );
       expect(mintEnrollToken).toHaveBeenCalledTimes(1);
       // Only me is the default, and the command is minted for it.
       expect(mintEnrollToken.mock.calls[0]).toEqual([
         "workspace",
         { scope: "user", allowScreenControl: false },
       ]);
-      expect(h.dialogText()).toContain("Connect a machine");
+      expect(h.dialogText()).toContain("Use your computer");
       expect(h.dialogText()).toContain("Who can use it?");
       const command = h.command;
       expect(command()).toContain("https://app.example.test/install.sh");
@@ -331,7 +397,7 @@ describe("Connected Machine conversation card", () => {
       const store = h.container.querySelector<HTMLAnchorElement>(`a[href="${STORE_URL}"]`);
       expect(store?.textContent).toContain("Add to Chrome");
       expect(store?.target).toBe("_blank");
-      expect(h.text()).toContain("Add OpenGeni Browser on Studio Mac");
+      expect(h.text()).toContain("Add Opengeni Browser on Studio Mac");
       // The outcome is announced through a live region that stays mounted.
       expect(h.container.querySelector('[role="status"][aria-live="polite"]')?.textContent).toBe(
         "This chat now runs on Studio Mac.",
@@ -379,7 +445,7 @@ describe("Connected Machine conversation card", () => {
     try {
       // A reachable machine makes "Use in this chat" the one primary action.
       expect(h.text()).toContain("Choose where this chat runs.");
-      expect(h.button("Connect a machine")).toBeNull();
+      expect(h.button("Connect a computer")).toBeNull();
       expect(h.button("Connect another machine")).toBeNull();
       expect(h.button("Use build-box in this chat")?.textContent).toBe("Use");
       // An offline machine is listed but cannot take the chat.
@@ -403,7 +469,7 @@ describe("Connected Machine conversation card", () => {
     const h = await render();
     try {
       expect(h.text()).toContain("Ask a workspace admin to connect a machine.");
-      expect(h.button("Connect a machine")).toBeNull();
+      expect(h.button("Connect a computer")).toBeNull();
     } finally {
       await h.close();
     }
@@ -413,11 +479,11 @@ describe("Connected Machine conversation card", () => {
     fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
     const h = await render();
     try {
-      expect(h.button("Connect a machine")).toBeNull();
+      expect(h.button("Connect a computer")).toBeNull();
       await click(h.button("Connect another machine"));
-      expect(mintEnrollToken).toHaveBeenCalledTimes(1);
-      expect(h.dialogText()).toContain("Connect a machine");
-      expect(h.command()).toContain("oget_token1.sig");
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      expect(h.dialogText()).toContain("Use your computer");
+      expect(h.command()).toBe("");
     } finally {
       await h.close();
     }
@@ -445,13 +511,13 @@ describe("Connected Machine conversation card", () => {
         mac({ allowScreenControl: true, runtime: runtime(true, granted(false, false, false)) }),
       ];
       await h.rerender();
-      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Screen Recording for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
         pane: "screen_recording",
       });
       expect(h.text()).toContain(
-        "On the Mac, switch on OpenGeni under Screen Recording. Choose Quit & Reopen if macOS asks.",
+        "On the Mac, switch on Opengeni under Screen Recording. Choose Quit & Reopen if macOS asks.",
       );
       await click(h.button("Open again"));
       expect(openMachinePrivacySettings).toHaveBeenCalledTimes(2);
@@ -461,7 +527,7 @@ describe("Connected Machine conversation card", () => {
         mac({ allowScreenControl: true, runtime: runtime(true, granted(true, false, false)) }),
       ];
       await h.rerender();
-      expect(h.text()).toContain("Allow Accessibility for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Accessibility for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({ pane: "accessibility" });
 
@@ -561,6 +627,12 @@ describe("Connected Machine conversation card", () => {
       // A plain Connect another machine afterwards starts from the defaults.
       await click(h.dialogButton("Close"));
       await click(h.button("Connect another machine"));
+      expect(h.command()).toBe("");
+      await click(
+        [...(h.dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) =>
+          button.textContent?.startsWith("Connect a server instead"),
+        ) ?? null,
+      );
       expect(mintEnrollToken.mock.calls.at(-1)).toEqual([
         "workspace",
         { scope: "user", allowScreenControl: false },
@@ -613,7 +685,7 @@ describe("Connected Machine conversation card", () => {
     ];
     const h = await render();
     try {
-      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Screen Recording for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
         pane: "screen_recording",
@@ -732,8 +804,8 @@ describe("Connected Machine conversation card", () => {
     fleet.machines = [sessionBox, machine("mac", "Studio Mac", { state: "offline" })];
     const h = await render();
     try {
-      await click(h.button("Connect a machine"));
-      expect(h.command()).toContain("oget_token1.sig");
+      await click(h.button("Connect a computer"));
+      expect(h.command()).toBe("");
       fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
       await h.rerender();
       // A workspace machine says so; Done just closes.
@@ -745,7 +817,7 @@ describe("Connected Machine conversation card", () => {
       expect(h.text()).toContain("Studio Mac connected.");
 
       await click(h.button("Connect another machine"));
-      expect(h.dialogText()).toContain("Connect a machine");
+      expect(h.dialogText()).toContain("Use your computer");
       await click(h.dialogButton("Close"));
       expect(h.dialog()).toBeNull();
       // Nothing that appears later is treated as just connected.
@@ -790,7 +862,7 @@ describe("Connected Machine conversation card", () => {
     const h = await render();
     try {
       expect(h.text()).toContain("You don't have access to this workspace's machines.");
-      expect(h.button("Connect a machine")).toBeNull();
+      expect(h.button("Connect a computer")).toBeNull();
       expect(listAttachedBrowsers).not.toHaveBeenCalled();
     } finally {
       await h.close();

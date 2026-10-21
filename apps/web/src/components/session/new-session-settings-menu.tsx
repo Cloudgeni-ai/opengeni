@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { MachineView } from "@opengeni/react/machines";
 import { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "@opengeni/react/usage";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
@@ -13,9 +14,9 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ComposerMenuHeader } from "@/components/ui/composer-menu";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ComposerMenuHeader } from "@opengeni/react/ui/composer-menu";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import {
   RadioGroup,
   RadioRow,
@@ -23,14 +24,14 @@ import {
   type MenuBodyPresentation,
 } from "./composer-menu-radio";
 export type { MenuBodyPresentation } from "./composer-menu-radio";
-import { HelpTip } from "@/components/ui/inline-help";
-import { Input } from "@/components/ui/input";
-import { Notice } from "@/components/ui/notice";
+import { HelpTip } from "@opengeni/react/ui/inline-help";
+import { Input } from "@opengeni/react/ui/input";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
   rememberedMachineFolder,
@@ -84,10 +85,11 @@ export type RunsOnChoices = {
 export function hasRunsOnChoices(
   choices: Pick<
     RunsOnChoices,
-    "machines" | "rigs" | "selfhostedPrimary" | "noManagedSandbox" | "fleetLoadFailed"
+    "machines" | "rigs" | "selfhostedPrimary" | "noManagedSandbox" | "fleetLoadFailed" | "draft"
   >,
 ): boolean {
   return (
+    choices.draft.compute.kind === "machine" ||
     choices.selfhostedPrimary ||
     choices.fleetLoadFailed ||
     choices.machines.length > 0 ||
@@ -102,7 +104,7 @@ export function runsOnSummary(choices: RunsOnChoices): string {
     const sandboxId = draft.compute.sandboxId;
     return (
       choices.machines.find((machine) => machine.sandboxId === sandboxId)?.name ??
-      "Choose a machine"
+      (sandboxId ? "Machine unavailable" : "Choose a machine")
     );
   }
   if (choices.noManagedSandbox) return NO_COMPUTER_LABEL;
@@ -117,7 +119,12 @@ export function runsOnSummary(choices: RunsOnChoices): string {
  * Why "Runs on" keeps Send disabled, if it does. The choice lives behind "+",
  * so the page says what is missing and where to fix it.
  */
-export type RunsOnAttention = "fleet-load-failed" | "connect-machine" | "pick-machine" | null;
+export type RunsOnAttention =
+  | "fleet-load-failed"
+  | "connect-machine"
+  | "pick-machine"
+  | "machine-unavailable"
+  | null;
 
 export function runsOnAttention(
   choices: Pick<RunsOnChoices, "draft" | "machines" | "fleetLoadFailed"> & {
@@ -128,7 +135,13 @@ export function runsOnAttention(
   if (choices.fleetLoadFailed) return "fleet-load-failed";
   if (choices.fleetLoading) return null;
   const compute = choices.draft.compute;
-  if (compute.kind !== "machine" || compute.sandboxId !== null) return null;
+  if (compute.kind !== "machine") return null;
+  if (compute.sandboxId !== null)
+    return choices.machines.some(
+      (item) => item.sandboxId === compute.sandboxId && isMachineComputeSelectable(item.state),
+    )
+      ? null
+      : "machine-unavailable";
   return choices.machines.length === 0 ? "connect-machine" : "pick-machine";
 }
 
@@ -163,6 +176,12 @@ export function RunsOnNotice(props: {
       </Notice>
     );
   }
+  if (props.attention === "machine-unavailable")
+    return (
+      <Notice tone="waiting" live="polite">
+        Machine unavailable. Reconnect it or choose another under + &gt; Runs on.
+      </Notice>
+    );
   if (props.attention === "connect-machine") {
     return (
       <Notice tone="waiting" live="polite" action={props.connectAction}>
@@ -220,7 +239,11 @@ export function RunsOnMenuBody(
   }, [compute]);
   const personalRigs = props.rigs.filter((rig) => rig.scope === "user");
   const workspaceRigs = props.rigs.filter((rig) => rig.scope !== "user");
-  const showWhere = props.selfhostedPrimary || props.machines.length > 0 || props.fleetLoadFailed;
+  const showWhere =
+    compute.kind === "machine" ||
+    props.selfhostedPrimary ||
+    props.machines.length > 0 ||
+    props.fleetLoadFailed;
   const whereValue =
     compute.kind === "sandbox"
       ? props.selfhostedPrimary
@@ -232,7 +255,10 @@ export function RunsOnMenuBody(
 
   const selectSandbox = () => {
     if (compute.kind === "sandbox") return;
-    props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+    props.onComputeChange({
+      ...draft,
+      compute: { kind: "sandbox", backend: "" },
+    });
   };
   const selectMachine = (machine: MachineView) => {
     if (compute.kind === "machine" && compute.sandboxId === machine.sandboxId) return;
@@ -389,7 +415,10 @@ export function RunsOnMenuBody(
                   onChange={(event) =>
                     props.onComputeChange({
                       ...draft,
-                      compute: { ...compute, folder: { kind: "path", path: event.target.value } },
+                      compute: {
+                        ...compute,
+                        folder: { kind: "path", path: event.target.value },
+                      },
                     })
                   }
                   onKeyDown={(event) => {
@@ -515,7 +544,7 @@ export function UsageLimitMenuBody(props: {
     value.kind === "limit" && !parsed.ok && (value.text.trim() || props.showRequiredError)
       ? parsed.error
       : null;
-  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS;
+  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS(t);
   return (
     <>
       <ComposerMenuHeader title={labels.title} leading={props.leading} />

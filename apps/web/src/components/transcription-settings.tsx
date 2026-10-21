@@ -9,9 +9,9 @@ import {
 } from "@opengeni/sdk";
 import { cn } from "@/lib/utils";
 import { RowSelect } from "@/components/settings/row-select";
-import type { SelectOption } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import type { SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",

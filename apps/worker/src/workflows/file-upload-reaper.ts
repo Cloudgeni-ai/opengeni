@@ -1,4 +1,4 @@
-import { proxyActivities } from "@temporalio/workflow";
+import { patched, proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
 
 const reaperActivity = proxyActivities<
@@ -8,6 +8,7 @@ const reaperActivity = proxyActivities<
     | "maintainRetainedScreenshots"
     | "maintainBrowserStateArtifacts"
     | "recoverVideoGenerationWorkflows"
+    | "recoverSessionTitleWorkflows"
     | "reconcileRecentModelCallFacts"
   >
 >({
@@ -21,5 +22,8 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   await reaperActivity.maintainRetainedScreenshots();
   await reaperActivity.maintainBrowserStateArtifacts();
   await reaperActivity.recoverVideoGenerationWorkflows();
+  if (patched("independent-session-title-recovery-v1")) {
+    await reaperActivity.recoverSessionTitleWorkflows();
+  }
   await reaperActivity.reconcileRecentModelCallFacts();
 }

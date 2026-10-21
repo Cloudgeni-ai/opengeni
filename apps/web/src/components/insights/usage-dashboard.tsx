@@ -1,25 +1,25 @@
 import { CalendarIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { HelpTip, InlineHelp } from "@/components/ui/inline-help";
+import { Button } from "@opengeni/react/ui/button";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { HelpTip, InlineHelp } from "@opengeni/react/ui/inline-help";
 import {
   ListRow,
   ListRowSkeleton,
   RowList,
   type RowListColumn,
   type RowListSort,
-} from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { ReasonTooltip } from "@/components/ui/disabled-reason";
-import { SECTION_TITLE_CLASS } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { StatGroup, StatTile, type StatDelta } from "@/components/ui/stat-tile";
+} from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { ReasonTooltip } from "@opengeni/react/ui/disabled-reason";
+import { Section, SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { StatGroup, StatTile, type StatDelta } from "@opengeni/react/ui/stat-tile";
 import { useAppContext } from "@/context";
-import { apiErrorAdvice, isPermissionDenied } from "@/lib/api-error";
+import { apiErrorAdvice, isPermissionDenied } from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
 
 import {
@@ -76,6 +76,8 @@ import {
   type TokenClassId,
 } from "./usage-format";
 import { loadUsage, loadUsageCalls, type UsageLoad } from "./usage-source";
+import { SitePlatformUsageSection } from "./site-platform-usage-section";
+import { SiteAiUsageSection } from "./site-ai-usage-section";
 import {
   activeFilterCount,
   nextUsageSearch,
@@ -310,6 +312,18 @@ export function UsageDashboard(props: UsageDashboardProps) {
           your own API keys aren't charged by Opengeni; their amounts are list-price estimates.
         </p>
       </div>
+      {props.scope.kind === "workspace" ? (
+        <Section title="Sites" contentClassName="flex flex-col gap-6">
+          {query.range !== "custom" ? (
+            <SiteAiUsageSection
+              client={client}
+              workspaceId={props.scope.workspaceId}
+              range={query.range}
+            />
+          ) : null}
+          <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
+        </Section>
+      ) : null}
     </div>
   );
 }

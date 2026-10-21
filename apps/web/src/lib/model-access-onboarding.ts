@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   ClientModel,
@@ -82,7 +83,7 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
  * Without a family (the new-chat composer fallback when both the selected
  * model and the server-resolved default are unavailable), a selectable Codex,
  * SuperGrok, or workspace provider wins over the free deployment model; an
- * organization-paid provider ranks after the free model, and OpenGeni-credit
+ * organization-paid provider ranks after the free model, and Opengeni-credit
  * models are never chosen implicitly here. The resolved default is what moves
  * a workspace with credits onto the credits model.
  */
@@ -90,7 +91,7 @@ export function preferredConnectedModelId(
   models: readonly WorkspaceModelCatalogModel[],
   family?: ConnectedModelFamily,
 ): string | null {
-  const rows = projectPickerRows([...models]).filter((row) => row.selectable);
+  const rows = projectPickerRows(t, [...models]).filter((row) => row.selectable);
   if (family) return rows.find((row) => rowMatchesFamily(row, family))?.id ?? null;
   const sorted = sortPickerRows(rows);
   return (
@@ -137,14 +138,14 @@ export async function applyConnectedModelToNewSessionDraft(
       ? [catalog.defaultSelection, catalog.creditsSelection].find(
           (selection) =>
             selection &&
-            projectPickerRows(catalog.models).some(
+            projectPickerRows(t, catalog.models).some(
               (row) =>
                 row.id === selection.model && row.selectable && rowMatchesFamily(row, "credits"),
             ),
         )
       : undefined;
   const modelId = preferredModelId
-    ? (projectPickerRows(catalog.models).find(
+    ? (projectPickerRows(t, catalog.models).find(
         (row) =>
           row.id === preferredModelId &&
           row.selectable &&

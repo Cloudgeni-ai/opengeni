@@ -7,6 +7,7 @@
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
 // data wiring and passes the real slots.
+import { t } from "@/lib/console-text";
 import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
@@ -47,7 +48,7 @@ import {
   type SessionAdminAccessControl,
 } from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,8 +56,8 @@ import {
   DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "@/lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";
@@ -193,7 +194,13 @@ export function SessionHeader({
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
-    displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
+    displayLatency === "fast"
+      ? "Fast"
+      : displayLatency === "ultrafast"
+        ? "Ultrafast"
+        : displayLatency === "priority"
+          ? "Priority"
+          : null,
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
@@ -223,7 +230,11 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap">
+    <header
+      data-window-drag
+      data-titlebar
+      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+    >
       {leading}
       {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
@@ -531,7 +542,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name = label ?? SESSION_STATUS_META[status].label;
+  const name = label ?? SESSION_STATUS_META(t)[status].label;
   return (
     <span
       data-compact-session-status={status}

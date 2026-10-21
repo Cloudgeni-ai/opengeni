@@ -75,6 +75,16 @@ Once no API image older than 0527 can run, a later rolling migration drops
 
 ## Verified signup trial runtime switch (0521)
 
+**Current behavior after 0845:** new verified signup receipts carry zero money
+and establish one-human/one-org eligibility for monthly Free credit. Existing
+positive trial balances remain untouched. Neither of the legacy money switches
+below disables eligibility or re-enables a signup bonus. No production config
+edit is needed to stop bonus money; monthly funding still requires enabled
+subscription plans and the configured free-credit model policy. There is no
+eligibility backfill. See [subscription plans](subscription-plans.md).
+
+The remainder of this section documents the historical, pre-0845 money switch.
+
 `0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
 no drain and no `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then
 run the normal `db:provision-roles`. Its seed revision allows grants, so this
@@ -645,14 +655,17 @@ operation, source, and outcome labels. The same observer emits
 (`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
 subject, tool-name, argument, result, credential, or approval-token values.
 
-## MCP provider OAuth short-state rollout (0507)
+## MCP provider OAuth short state (0507)
 
-Apply rolling migration `0507_integration_oauth_pending_states.sql`, then deploy
-the new API with `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED=false` on all
-replicas. Once every old API replica has drained, set the flag to `true` in a
-separate configuration rollout. Both flag values accept old and short callback
-states; only new replicas can read short states. Providers such as Resend that
-limit `state` length work after the flag is enabled.
+MCP OAuth always sends providers a short signed reference as `state` and keeps
+the full callback context encrypted in `integration_oauth_pending_states`
+(rolling migration `0507_integration_oauth_pending_states.sql`). Callbacks still
+accept a full signed state, so grants started before an upgrade finish normally.
+The former `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` switch is retired:
+the API ignores it with a one-time startup warning, so remove it from deployment
+configuration. An API older than migration 0507 cannot read a short reference;
+when upgrading straight from one, a connect started on a new replica whose
+callback lands on an old replica during the rollout fails and the user retries.
 
 ## Personal GitHub OAuth
 
@@ -790,7 +803,7 @@ bind NodePorts to loopback with
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
-`/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
+`/opengeni-agent-minisign.pub`, `/agent`, and `/desktop` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
@@ -1034,7 +1047,16 @@ bun run db:provision-roles
 bun run db:assert-runtime-posture
 ```
 
-The Job receives the ordinary runtime Secret first and the separate
+The Job reads an incoming-release ConfigMap snapshot created before its hook,
+not the previous release's still-live workload ConfigMap. Chart-managed runtime
+Secrets (`secret.create=true`) receive the same hook-scoped snapshot treatment;
+externally managed runtime and migration Secrets must already contain the desired
+values before Helm runs. Migration and catalog-import snapshots reuse the
+canonical chart rendering and follow their Job's hook events at an earlier
+weight, with cleanup after the hook event succeeds. See the
+[chart hook settings contract](../deploy/helm/opengeni/README.md#hook-release-settings).
+
+After that config source, the Job receives the ordinary runtime Secret first and the separate
 migration-only Secret second. This gives the assertion the restricted
 `OPENGENI_DATABASE_URL` while keeping the owner URL and provisioning password
 out of API and worker pods. Its default command serializes `db:migrate`,
@@ -1931,10 +1953,24 @@ SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish pa
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
-and admits only the exact commit the workflow run is on: npm provenance attests
-that commit, so the workflow, checkout and published source must all match, and
-an older ancestor is rejected. If `main` moves before the dispatch, publish the
-new `main` commit instead. The runtime includes these pins beside
+and accepts its own commit or a normally merged ancestor with successful exact-source
+main CI. For an ancestor, its controller and package source remain separate and
+the signed provenance names both; the run's head SHA is not the package source.
+Select the source-named artifact from the successful canonical publisher run.
+The artifact is uploaded by the run's credential-free `confirm` job once npm serves
+every accepted version. npm processes accepted writes asynchronously, sometimes for
+more than 18 minutes; if `confirm` fails because a version is still invisible after
+its 30-minute window, re-run that failed job. It publishes nothing and completes
+the same run.
+Environment approval and ordinary image/CI/deployment checks remain mandatory.
+Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
+reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+The publisher runs its bundled controller on pinned native Node while keeping
+package builds on Bun. Retained signed provenance and sanitized diagnostics help
+investigate failed writes but are not registry acknowledgements. Never reuse an
+unknown version; any explicitly authorized replacement must use a fresh run and
+version after diagnosis and review.
+See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
@@ -1951,6 +1987,14 @@ rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
 `workflow_dispatch` candidate/acceptance/publication. Official source ancestry
 is `origin/production`. The `production` pointer already exists; do not
 recreate it and do not force-push.
+
+When first activating workspace default machines and scheduled
+`executionTarget: workspace_default`, replace the API and both worker roles
+without old/new runtime overlap before accepting those settings. Older binaries
+ignore the new placement fields and would use the deployment backend instead.
+Migration 0864 itself supports rolling schema compatibility; that does not make
+mixed-version placement semantics safe. Existing chats and already accepted
+occurrences retain their frozen machine.
 
 Protect `production`: no force-push; merge commits only (disable squash and
 rebase-and-merge); required checks `Admit production PR head` and
@@ -2214,15 +2258,20 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
-Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml` to
-`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>`.
-The publisher uses the existing `public-release` OIDC identity, verifies the tag's
-immutable digest and source label after registry logout, pulls anonymously, and
-runs the installed artifact runtime doctor while rejecting `.unavailable`.
-The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` and
-`canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
-error-tolerant job, not publication gates.
+Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd).
+Its browser controller must match the server revision, so protected main CI
+builds it with the other canary images, pushes
+`ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-<source-sha>`, verifies the
+tag resolves anonymously, and records the digest as `images.desktop` in the
+`canary-images-<source-sha>` receipt. A deployment that takes its images from
+that receipt should set Helm `desktop.imageRef` to
+`ghcr.io/cloudgeni-ai/opengeni-desktop@<images.desktop.digest>` in the same change.
+`.github/workflows/publish-desktop-image.yml` is dispatch-only. It publishes
+`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>` through
+the `public-release` OIDC identity, verifies the tag's immutable digest and
+source label after registry logout, pulls anonymously, and runs the installed
+artifact runtime doctor while rejecting `.unavailable`. Use it to refresh the
+default pin below. The workflow retains publication evidence.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override
@@ -2506,7 +2555,10 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
 Every migration declares `-- deployment-mode: rolling` or
 `-- deployment-mode: maintenance`. Rolling migrations apply while the previous
 release keeps serving; a maintenance migration needs every API, control and
-turn worker database login drained first. Before an upgrade, run the
+turn worker database login drained first. Rolling is the default: new
+maintenance migrations must state a `-- maintenance-justification:`, and
+incompatible changes are split into expand/contract steps across releases
+([migrations-expand-contract.md](migrations-expand-contract.md)). Before an upgrade, run the
 read-only plan from the new release's API image against the live database to
 decide whether the rollout needs a drain:
 
@@ -2593,7 +2645,34 @@ The chart defaults API, worker, and web deployments to zero-surge rolling update
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
-Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
+The in-cluster Postgres runs PostgreSQL 18 (`pgvector/pgvector:pg18-bookworm`). An
+init container checks the data directory's major version before the server
+starts. A directory from an older major (for example one created by an earlier
+chart that defaulted to PostgreSQL 17) does not start until you choose:
+
+- keep the old major: set `postgres.image.tag` back to that major's image
+  (for example `pg17`), or
+- upgrade in place: take a backup, plan a short outage, and set
+  `postgres.majorUpgrade.enabled=true` with `postgres.majorUpgrade.fromImage` at
+  the old major on the same OS release (the default is
+  `pgvector/pgvector:pg17`). The init container runs `pg_upgrade --link`, keeps
+  the old directory as `pgdata.pre-upgrade-from-<major>` and then starts
+  PostgreSQL 18. Until the new server has started once, rolling back is
+  restoring that directory and the old image; after that, restore from backup.
+  Before Helm touches the StatefulSet, a pre-upgrade hook Job rehearses the
+  upgrade: it copies the running server's schema (no rows) into a scratch
+  cluster of the old major and runs PostgreSQL 18's `pg_upgrade --check`
+  against it. If the check fails, the release fails while the old server keeps
+  serving, and the Job's log names the objects to change. Allow its time in the
+  Helm timeout (`postgres.majorUpgrade.preflight.activeDeadlineSeconds`).
+  Every extension library the old databases use must exist in the new image
+  (drop unused extensions whose library is missing first). Afterwards run
+  `vacuumdb --all --analyze-in-stages --missing-stats-only`, then
+  `vacuumdb --all --analyze-only`, and `ALTER EXTENSION ... UPDATE` for each
+  extension, turn `majorUpgrade.enabled` off again, and delete the retained
+  directory once you have verified the new cluster.
+
+Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
 - NATS: official NATS Helm chart, or an existing managed/customer NATS endpoint.
 - Temporal: Temporal Cloud, an existing customer endpoint, or the official Temporal Helm chart connected to external persistence.
@@ -2724,7 +2803,26 @@ example `OPENGENI_DATABASE_URL=postgres://.../opengeni?sslmode=require` for AWS
 RDS. If a different provider or customer database requires a custom CA, mount
 that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
-separate from the OpenGeni-to-Temporal client settings below.
+separate from the Opengeni-to-Temporal client settings below.
+
+Budget PostgreSQL connections across processes, not just current activity:
+each API has a runtime pool (`OPENGENI_API_DATABASE_POOL_MAX`, default 32) and
+a separate managed-auth pool (maximum 10); each worker has the default runtime
+pool (10) plus one readiness connection. Web and relay do not open SQL pools.
+Include each deployment's independent surge, old terminating pods that are
+still draining, Temporal's per-service default and visibility pools, one-shot
+migration/provisioning jobs, catalog import (default pool 10), and operator
+connections. Subtract PostgreSQL's reserved slots from `max_connections`.
+Pools are lazy; observed idle/active counts are not the rollout upper bound.
+Set server capacity against that budget and measured backend memory rather
+than shrinking application pools to fit an accidental server default.
+
+Scoped transactions retry transient connection acquisition up to eight times
+with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
+sleep, plus driver connection time). This never replays a callback that has
+started or a failed savepoint. Running turns whose database connection remains
+unavailable, including SQLSTATE 53300, use the existing fenced exact-attempt
+recovery lane; ordinary data/authentication failures remain failures.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
@@ -2746,6 +2844,11 @@ Use this boundary when building a production cluster:
 The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` when the database URL goes through
+  a transaction-pooling proxy on a port other than 6432. Opengeni uses named
+  prepared statements on direct connections, which saves a round trip and a
+  re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
+  including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
@@ -2774,7 +2877,18 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
+  subscription API/webhook plan writes (and the separately integrated maintenance
+  service); prepaid top-ups remain independent. Configure the operator runtime
+  plan catalog's monthly USD Stripe prices first; Enterprise is operator-only.
+  Subscription checkout, immediate paid upgrades, period-end changes/cancellation
+  and portal access live under `/v1/billing/subscription`; the `plans` GET returns
+  runtime prices, credit, seats and self-service availability. All new subscription
+  endpoints return 404 while disabled; ordinary top-up webhooks continue to run.
+  Disabled subscription deliveries are retained but not marked processed, so they
+  can be replayed after activation. Stripe readiness/products/webhook configuration
+  are separate operator activation work, not performed by this flag.
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` is a legacy compatibility flag after migration 0845: new verified first self-service signups always receive a zero-value Free eligibility receipt, never a separate bonus. The flag and historical runtime money switch cannot disable eligibility or restore bonus money. Existing positive trial grants remain untouched; no old user is backfilled. Enabled subscription maintenance issues monthly Free funding under the current plan catalog and free-credit model policy. `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` provides the signup receipt's bootstrap scope until a runtime policy exists; a positive Free grant never silently becomes unrestricted when scope is missing. See [subscription plans](subscription-plans.md) and [scoped promotional credits](scoped-promotional-credits.md). No payment card is required. Completed in-flight usage can create general debt, and future top-ups repay it first; cards are not automatically charged. New work without an explicit model uses the existing funded-model resolution described in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -2784,6 +2898,20 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin used for every provider-rate credit price (built-in and operator model rates, web search, transcription, and live voice). Set an integer from `0` through `10000`; `0` bills the configured provider API rates without an added margin. Unset preserves current pricing behavior. It does not change provider-cost reporting or direct fixed customer credit prices (such as video-generation tariffs). Set the same value on both API and worker processes. For Helm, configure both:
+
+  ```yaml
+  api:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  worker:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  ```
+
+  This is a code/configuration capability only; deployments should opt in separately.
 - Promotional codes are entered and reviewed in the app; paid Stripe top-ups have no promotion-code field.
   Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
   origins; Checkout and billing-portal return URLs may use that configured web
@@ -2836,6 +2964,17 @@ charge.dispute.updated
 customer.created
 customer.updated
 ```
+
+With subscription plans enabled, also subscribe to
+`customer.subscription.created`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `invoice.paid`, and `invoice.payment_failed`.
+Only a paid subscription invoice grants monthly plan credit; a subscription
+update or failed invoice never grants. Paid invoices replace, rather than stack
+with, the previous Free/paid period. Downgrades and cancellation are period-end
+operations. Configure Stripe's hosted portal accordingly before enabling plan
+changes there; the API's `change` endpoint uses a period-end subscription schedule.
+Ordinary subscription refunds/disputes remain an operator procedure; the automatic
+duplicate-subscription recovery cancels/refunds only the detected duplicate.
 
 Credits are granted only once Stripe reports the Checkout payment `paid`: at
 `checkout.session.completed` for immediate payment methods, or at
@@ -3316,14 +3455,37 @@ annotations (read/send timeouts of at least `3600` seconds, buffering off). Flip
 `selfhosted.enabled=true` together with `relay.enabled=true` and the NATS
 callout.
 
-### Ingress channel affinity
+### Multi-replica relay routing
 
-The relay pairs a channel's producer and consumer in a per-replica in-memory
-registry, so both dials for a given channel must reach the SAME relay replica.
-When running more than one relay replica behind an L7 ingress, configure the
-ingress to route both dials for a channel to the same backend (consistent-hash or
-session affinity keyed on the channel); otherwise a producer and consumer can
-land on different replicas and never pair.
+No ingress affinity, cookie stickiness, query hashing, or headless ingress backend
+is required. The producer's initial registration selects a relay owner and returns
+a signed, channel-bound routing hint. The agent includes that hint in the stream
+descriptor; the API carries it in the viewer's public relay URL. A different relay
+receiving that dial verifies the ordinary stream token and the hint, then proxies
+one WebSocket hop to the owner. Pairing, replay rings, epoch fences and rate
+accounting remain in the owner's existing registry. Stream bytes do not traverse
+Postgres or the control-plane broker.
+
+The chart automatically advertises each pod's IP with
+`OPENGENI_RELAY_ADVERTISE_IP` and allows only same-release relay-to-relay traffic
+on the stream port. Other deployments should set that variable to each replica's
+private, peer-reachable IP and allow peers to reach its `OPENGENI_RELAY_BIND` port.
+IP literals support IPv4 and IPv6; no peer DNS service is needed. Leaving it unset
+retains standalone operation. Do not advertise an ingress or load-balancer IP.
+
+A route names a process incarnation as well as an address, so a recycled pod IP
+cannot accept the previous owner's channel. Producer reconnects retain a live
+owner. If that owner is unavailable, the producer registers a replacement and
+updates its stream descriptor; scoped terminal refreshes return the new route
+without creating another shell. Viewers rejected by the old route refresh their
+existing stream grant. As before, losing a relay owner loses its in-memory replay
+tail; this is not durable terminal output storage.
+
+Roll out the matching relay image and server/runtime first, then the agent release
+that understands the additive owner-route fields. Older agents remain compatible
+with standalone relays but do not supply routes for affinity-free multi-replica
+pairing. Existing pre-upgrade producer channels acquire routes when re-registered.
+No frontend protocol change or special ingress-controller configuration is needed.
 
 ### Runtime-secret keys
 
@@ -3404,6 +3566,19 @@ this way. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. The
 agent fetches the release manifest from `OPENGENI_PUBLIC_BASE_URL`, so automatic
 updates also need it set.
 
+### Desktop app distribution
+
+The API also serves the desktop app's downloads at auth-exempt paths under
+`/desktop`: `/desktop/install.sh` (the macOS and Linux installer, defaulting to
+this deployment's `OPENGENI_PUBLIC_BASE_URL`), `/desktop/latest/<file>` (a 302 to
+that file on the current `desktop-v` release, for example
+`/desktop/latest/Opengeni-mac.dmg`), and `/desktop/latest` (the release page).
+The web app's account menu links to them. The current release is the newest
+stable `desktop-v` tag on the `OPENGENI_AGENT_RELEASES_BASE_URL` repository,
+cached for ten minutes; set `OPENGENI_DESKTOP_STABLE_VERSION` to pin a version,
+which a release host other than GitHub requires. Route `/desktop` to the `api`
+service in the ingress.
+
 ### Enrolling a machine
 
 Enrollment binds a machine to a workspace and requires the enable flag. Two paths
@@ -3431,7 +3606,7 @@ Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 
 - `local` bootstraps a local default account/workspace.
 - `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
-- `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
+- `managed` uses Better Auth for browser human auth, Opengeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
 
 Configured deployments using `OPENGENI_AUTH_REQUIRED=true` reuse
 `OPENGENI_ACCESS_KEY` to sign internal first-party delegation when

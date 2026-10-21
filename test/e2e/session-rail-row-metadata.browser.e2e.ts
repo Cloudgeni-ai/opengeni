@@ -162,7 +162,7 @@ describe("Session rail row metadata in Chromium", () => {
     }
   });
 
-  test("contains every production-width row and keeps titles clear of real metadata", async () => {
+  test("contains every production-width row and ends title fades before metadata", async () => {
     const rail = page.getByTestId("production-session-rail");
     expect((await rail.boundingBox())?.width).toBe(244);
     expect(await rail.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -193,7 +193,15 @@ describe("Session rail row metadata in Chromium", () => {
       const metadataBox = await metadata.boundingBox();
       expect(titleBox).not.toBeNull();
       expect(metadataBox).not.toBeNull();
-      expect(titleBox!.x + titleBox!.width).toBeLessThanOrEqual(metadataBox!.x + 0.5);
+      // The fade stays inside the title column with a clear 4px gap before
+      // the first metadata slot; no title text paints beneath icons.
+      expect(titleBox!.x + titleBox!.width).toBeCloseTo(metadataBox!.x - 4, 0);
+      const style = await row.locator("[data-session-row-title]").evaluate((element) => {
+        const computed = getComputedStyle(element);
+        return { mask: computed.maskImage, overflow: computed.textOverflow };
+      });
+      expect(style.mask).toContain("linear-gradient");
+      expect(style.overflow).toBe("clip");
     }
   });
 

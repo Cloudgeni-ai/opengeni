@@ -65,7 +65,9 @@ export function workspaceGatewaySecretArguments(input: {
   settings: Settings;
   grant: AccessGrant;
   /** Connected vaults (1Password, host) for the resolved acting subject. */
-  providersForSubject?: ((subjectId: string | null) => VaultProviderRegistry) | undefined;
+  providersForSubject?:
+    | ((subjectId: string | null, site?: SiteSecretContext | null) => VaultProviderRegistry)
+    | undefined;
 }): ToolGatewayArgumentResolver {
   const encryptionKey = environmentsEncryptionKeyBytes(input.settings) ?? null;
   return async (call) => {
@@ -92,7 +94,12 @@ export function workspaceGatewaySecretArguments(input: {
       workspaceGatewaySecretPrincipal(input.grant, site),
       {
         capabilityEnabled: true,
-        ...(input.providersForSubject ? { providersForSubject: input.providersForSubject } : {}),
+        ...(input.providersForSubject
+          ? {
+              providersForSubject: (subjectId: string | null) =>
+                input.providersForSubject!(subjectId, site),
+            }
+          : {}),
       },
     );
     const hook = createSecretArgumentResolver({

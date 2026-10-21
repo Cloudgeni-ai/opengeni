@@ -183,6 +183,57 @@ export function parseExtensionReady(value: unknown): ExtensionReady {
   };
 }
 
+export type AgentUnavailableReason =
+  | "agent_not_running"
+  | "agent_outdated"
+  | "extension_outdated"
+  | "agent_error";
+
+/**
+ * The agent side's explanation, sent once before it closes a connection it
+ * cannot take. Agents that predate it close without one.
+ */
+export type AgentUnavailable = {
+  type: "unavailable";
+  reason: AgentUnavailableReason;
+  agentVersion: string | null;
+  detail: string | null;
+};
+
+const AGENT_UNAVAILABLE_REASONS: readonly string[] = [
+  "agent_not_running",
+  "agent_outdated",
+  "extension_outdated",
+  "agent_error",
+];
+
+export function isAgentUnavailable(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { type?: unknown }).type === "unavailable"
+  );
+}
+
+/**
+ * Deliberately tolerant: this message explains a version difference, so it
+ * must read from an agent of any version. Unknown reasons are agent errors.
+ */
+export function parseAgentUnavailable(value: unknown): AgentUnavailable {
+  const envelope = requireRecord(value, "agent unavailable message");
+  if (envelope.type !== "unavailable") throw new Error("agent unavailable message is invalid");
+  const optionalText = (field: unknown, maxLength: number): string | null =>
+    typeof field === "string" && field.trim() ? field.trim().slice(0, maxLength) : null;
+  return {
+    type: "unavailable",
+    reason: AGENT_UNAVAILABLE_REASONS.includes(envelope.reason as string)
+      ? (envelope.reason as AgentUnavailableReason)
+      : "agent_error",
+    agentVersion: optionalText(envelope.agentVersion, 64),
+    detail: optionalText(envelope.detail, 512),
+  };
+}
+
 function parseBridgeCommand(value: unknown): BridgeCommand {
   const command = requireRecord(value, "bridge command");
   switch (command.type) {

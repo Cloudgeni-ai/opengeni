@@ -389,7 +389,7 @@ describe("migration 0302 personal-workspace session ownership", () => {
 // The trigger is SECURITY DEFINER and reads FORCE-RLS `organization_memberships`
 // behind a transaction-local lifecycle marker. The shared harness migrates as
 // the container SUPERUSER, for whom FORCE RLS never engages, so the definer's
-// real read boundary is invisible there. This block reproduces OpenGeni's
+// real read boundary is invisible there. This block reproduces Opengeni's
 // documented deployment posture: a NOSUPERUSER NOBYPASSRLS migration owner.
 describe("migration 0302 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
   let owned: OwnerMigratedTestDatabase | null = null;

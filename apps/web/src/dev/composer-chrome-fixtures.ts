@@ -1,5 +1,6 @@
 // Deterministic mock data for the SessionChrome DEV harness
 // (`/dev/composer-chrome`). No live session, queue, or goal APIs.
+import { t } from "@/lib/console-text";
 import type {
   ComposerState,
   UseFileAttachmentsResult,
@@ -362,7 +363,7 @@ function catalogModel(
   };
 }
 
-export const galleryModelRows: PickerModelRow[] = projectPickerRows([
+export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   catalogModel({
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",

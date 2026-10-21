@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { Fragment } from "react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
@@ -29,6 +30,7 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { coveredModelChoice, freeCreditGap } from "@/lib/free-credit-gap";
 import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
@@ -69,6 +71,8 @@ import {
   ToolReviewHistoryProvider,
   SessionChrome,
   KnowledgeActivityProvider,
+  LearningRefusalActionsProvider,
+  type LearningRefusalPlace,
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
@@ -129,13 +133,20 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { checkVoiceDeployment, isApiErrorStatus, showVoiceUpdatePrompt } from "@/api";
-import { voiceRelaunchUrl, withVoiceDeploymentGuard } from "@/lib/voice-deployment-guard";
-import { userErrorText } from "@/lib/api-error";
+import { isApiErrorStatus, voiceRealtimeClient } from "@/api";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
+import {
+  SessionRunsOnMenuBody,
+  SessionMachinePickerAction,
+  useSessionRunsOn,
+} from "@/components/session/sandbox-switcher";
+import {
+  currentSessionMachineAccess,
+  SessionMachineAccessNotice,
+} from "@/components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -157,10 +168,11 @@ import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
+import type { SessionArtifactSourceCache } from "@/lib/session-artifact-discovery";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -234,7 +246,7 @@ import {
   firstPartySessionToolOptionsFor,
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
-import { stableJson } from "@opengeni/contracts";
+import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import type { ChatSendContext } from "@/components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "@/lib/github-app-connect";
@@ -922,7 +934,7 @@ export function SessionRoute({
         });
         return;
       }
-      await attachSessionCapability(capabilityClient, workspaceId, sessionId, connected);
+      await attachSessionCapability(t, capabilityClient, workspaceId, sessionId, connected);
       toast.success(`${item.name} connected`, {
         description: "It is available to new tool calls in this session.",
       });
@@ -954,6 +966,7 @@ export function SessionRoute({
       void (async () => {
         await refreshCapabilityCatalog(workspaceId);
         await completeSessionCapabilityOAuth(
+          t,
           capabilityClient,
           workspaceId,
           sessionId,
@@ -1336,6 +1349,39 @@ export function SessionRoute({
           search: { memory: memoryId },
         })
       }
+      onLearningRefusalOpen={(place) => {
+        switch (place.kind) {
+          case "skill":
+            // The Skills page opens one Skill from its raw `open` parameter.
+            void navigate({
+              href: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?section=skills&open=${encodeURIComponent(`skill:${place.skillId}`)}`,
+            });
+            return;
+          case "skills":
+            void navigate({
+              to: "/workspaces/$workspaceId/plugins",
+              params: { workspaceId },
+              search: { section: "skills" },
+            });
+            return;
+          case "instructions":
+            void navigate({
+              to: "/workspaces/$workspaceId/state",
+              params: { workspaceId },
+              search: { view: "instructions" },
+            });
+            return;
+          case "knowledge":
+            void navigate({ to: "/workspaces/$workspaceId/state", params: { workspaceId } });
+            return;
+          case "learning-settings":
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "learning" },
+            });
+        }
+      }}
       onNewSession={() =>
         void navigate({
           to: "/workspaces/$workspaceId/sessions",
@@ -1491,7 +1537,7 @@ function SessionDock(props: {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
-  const artifactRefreshSequence = useMemo(() => {
+  const artifactRefresh = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index];
       if (
@@ -1501,11 +1547,14 @@ function SessionDock(props: {
           event.type === "turn.failed" ||
           event.type === "turn.cancelled")
       ) {
-        return event.sequence;
+        // Tool output re-reads the chat and only sub-sessions with new
+        // activity; the end of a turn re-reads everything once.
+        return { sequence: event.sequence, complete: event.type !== "agent.toolCall.output" };
       }
     }
-    return 0;
+    return { sequence: 0, complete: true };
   }, [props.events]);
+  const artifactRefreshSequence = artifactRefresh.sequence;
   // Tool output may have published a file or Site: let the Artifacts page show
   // its cached rows on the next visit but refetch them.
   useEffect(() => {
@@ -1515,6 +1564,7 @@ function SessionDock(props: {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
+    completeRefresh: artifactRefresh.complete,
   });
   const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
     context.client,
@@ -1715,6 +1765,8 @@ function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
   refreshSequence: number;
+  /** Re-read every sub-session instead of only those with new activity. */
+  completeRefresh: boolean;
 }): Readonly<{
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
@@ -1724,6 +1776,12 @@ function useSessionEditableArtifactSummaries(input: {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
   const [retrySequence, setRetrySequence] = useState(0);
+  const sourceCache = useRef<{
+    key: string;
+    client: typeof context.client;
+    retrySequence: number;
+    cache: SessionArtifactSourceCache;
+  } | null>(null);
   const [loaded, setLoaded] = useState<{
     key: string;
     client: typeof context.client;
@@ -1733,6 +1791,19 @@ function useSessionEditableArtifactSummaries(input: {
 
   useEffect(() => {
     let current = true;
+    if (
+      input.completeRefresh ||
+      sourceCache.current?.key !== authorityKey ||
+      sourceCache.current.client !== context.client ||
+      sourceCache.current.retrySequence !== retrySequence
+    )
+      sourceCache.current = {
+        key: authorityKey,
+        client: context.client,
+        retrySequence,
+        cache: new Map(),
+      };
+    const cache = sourceCache.current.cache;
     setLoaded((previous) =>
       previous?.key === authorityKey &&
       previous.client === context.client &&
@@ -1755,6 +1826,7 @@ function useSessionEditableArtifactSummaries(input: {
           input.sessionId,
           () => current,
           context.client,
+          cache,
         );
         if (current) {
           setLoaded((previous) => ({
@@ -1789,6 +1861,7 @@ function useSessionEditableArtifactSummaries(input: {
   }, [
     authorityKey,
     context.client,
+    input.completeRefresh,
     input.refreshSequence,
     input.sessionId,
     input.workspaceId,
@@ -1856,6 +1929,8 @@ function SessionChatPane(props: {
   resolveSessionTitle: (sessionId: string) => string | null;
   /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
+  /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
+  onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
@@ -1875,12 +1950,7 @@ function SessionChatPane(props: {
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
   const realtimeClient = useMemo(
-    () =>
-      withVoiceDeploymentGuard(context.client, {
-        decide: checkVoiceDeployment,
-        relaunch: (model) => window.location.assign(voiceRelaunchUrl(window.location.href, model)),
-        prompt: showVoiceUpdatePrompt,
-      }),
+    () => voiceRealtimeClient(context.client, () => window.location.href),
     [context.client],
   );
   // Opened on a moment (an inbox item, a notification): when it is older than
@@ -1979,7 +2049,7 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
-  const computeLabel = sessionComputeLabel(fleet.machines);
+  const computeLabel = sessionComputeLabel(t, fleet.machines);
   const loadRetainedScreenshot = useMemo(
     () =>
       createSessionRetainedScreenshotLoader(
@@ -2065,7 +2135,7 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     terminal,
   ]);
-  const agentsSignal = useMemo(() => sessionAgentsSignal(props.agentNodes), [props.agentNodes]);
+  const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2190,6 +2260,10 @@ function SessionChatPane(props: {
   );
   // "+" > Runs on: the compute this chat runs on and the machines it can move to.
   const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
+  const machineAccess = currentSessionMachineAccess(
+    runsOn.fleet.sessionMachineAccess,
+    props.session.activeSandboxId,
+  );
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -2218,7 +2292,7 @@ function SessionChatPane(props: {
   // it here, so it goes through the same move as the machine card (repoint, then
   // a message that carries that consent). Other machines only repoint.
   const runsOnAttach = runsOn.fleet.attach;
-  const runsOnPreviousSandboxId = runsOn.activeMachine?.sandboxId ?? null;
+  const runsOnPreviousSandboxId = runsOn.fleet.activeSandboxId;
   // While the chat runs on the person's own machine (only its owner sees it in
   // their list), each message renews their consent for this chat, so a chat
   // whose move message never landed recovers on the next ordinary Send. The
@@ -2234,10 +2308,13 @@ function SessionChatPane(props: {
     context.accessContext === null ||
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
+  const reloadSessionAfterMachineChange = props.onReloadSession;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
-        await runsOnAttach(machine.sandboxId);
+        if (!(await runsOnAttach(machine.sandboxId)))
+          return "The machine change could not be confirmed. Try refreshing the machine list.";
+        await reloadSessionAfterMachineChange();
         return null;
       }
       const result = await moveChatToMachine({
@@ -2249,12 +2326,17 @@ function SessionChatPane(props: {
         sendMessage: (message) =>
           context.client.sendMessage(props.session.workspaceId, props.session.id, message),
       });
-      return result.moved ? null : result.reason;
+      if (result.moved) await reloadSessionAfterMachineChange();
+      return result.moved
+        ? null
+        : (result.reason ??
+            "The machine change could not be confirmed. Refresh the machine list and try again.");
     },
     [
       context.client,
       props.session.id,
       props.session.workspaceId,
+      reloadSessionAfterMachineChange,
       readChatSendContext,
       runsOnAttach,
       runsOnCanMessage,
@@ -2276,7 +2358,7 @@ function SessionChatPane(props: {
     (item: AuthNeededItem) => {
       const recommendation = item.setupRequest
         ? item
-        : sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+        : sessionAuthRecommendation(t, item, context.workspaceCapabilityCatalog);
       return recommendation ? (
         <Suspense
           fallback={
@@ -2475,13 +2557,15 @@ function SessionChatPane(props: {
     context.client,
     workspace?.id ?? null,
     props.session.rigId,
-    fixedResourceCatalogEnabled,
+    fixedResourceCatalogEnabled &&
+      hasWorkspacePermission(context.accessContext, props.session.workspaceId, "rigs:use"),
   );
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
     accessSubjectId: context.accessContext.subjectId,
+    accessContext: context.accessContext,
     managedSelfContext: context.managedSelfContext,
     workspace,
     session: props.session,
@@ -2501,6 +2585,7 @@ function SessionChatPane(props: {
       policyValid: composerPolicyValidRef.current,
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+      machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
       personalLoading:
         durableToolsSaving ||
         durableToolsSaveInFlight.current ||
@@ -2533,6 +2618,9 @@ function SessionChatPane(props: {
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+    busySend: resolveWorkspaceBusySend(workspace?.settings),
+    // The console always offers the other choice beside Send.
+    offerQueue: true,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
@@ -2645,6 +2733,13 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Free credit can still cover other models after this model's credit ran out.
+  const creditGap = props.creditExhausted
+    ? freeCreditGap(modelCatalog.rows, props.session.model, {
+        selectedModel: composerPolicy?.model,
+        preferredModel: modelCatalog.defaultSelection?.model,
+      })
+    : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
@@ -2656,6 +2751,7 @@ function SessionChatPane(props: {
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+          creditGap,
         ).reason
       }
     </div>
@@ -2664,6 +2760,16 @@ function SessionChatPane(props: {
   const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
   const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, model);
+  // The banner's one-click switch: the same model, effort and speed coercion as the picker.
+  const chooseCoveredModel = (id: string) => {
+    const row = findPickerRow(modelCatalog.rows, id);
+    const choice =
+      row && !modelPickerDisabled ? coveredModelChoice(row, reasoningEffort, latencyMode) : null;
+    if (!choice) return;
+    setComposerModel(choice.model);
+    setComposerReasoningEffort(choice.effort);
+    if (choice.latencyMode !== null) setComposerLatencyMode(choice.latencyMode);
+  };
   const matchesFrozenSessionPolicy = Boolean(
     composerPolicy &&
     composerPolicy.model === props.session.model &&
@@ -3149,6 +3255,8 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            freeCreditGap={creditGap}
+            onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={
               context.clientConfig.billingMode === "stripe" &&
@@ -3292,168 +3400,173 @@ function SessionChatPane(props: {
           {
             <>
               <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-                <KnowledgeActivityProvider
-                  onInspect={props.onMemoryClick}
-                  onRetryFile={(fileId) =>
-                    composer.send(
-                      `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
-                    )
-                  }
-                  retryDisabled={
-                    composer.hasDraftContent() ||
-                    composer.sending ||
-                    composer.draftLoading ||
-                    !hasComposerPolicy
-                  }
-                >
-                  <ToolReviewHistoryProvider
-                    events={props.events}
-                    load={loadRecordedToolReview}
-                    onViewDetails={viewToolReviewDetails}
+                <LearningRefusalActionsProvider onOpen={props.onLearningRefusalOpen}>
+                  <KnowledgeActivityProvider
+                    onInspect={props.onMemoryClick}
+                    onRetryFile={(fileId) =>
+                      composer.send(
+                        `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
+                      )
+                    }
+                    retryDisabled={
+                      composer.hasDraftContent() ||
+                      composer.sending ||
+                      composer.draftLoading ||
+                      !hasComposerPolicy
+                    }
                   >
-                    <MessageTimeline
-                      resolveLink={consoleLinkResolver}
-                      renderMessageSender={renderMessageSender}
-                      allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                      trailingState={
-                        <>
-                          {/* Recovery follows the failed request, only in the latest history window.
-                        Credit exhaustion also surfaces on idle sessions. */}
-                          {failureRecovery}
-                          {props.approvals.length > 0 &&
-                            props.session.status === "requires_action" && (
-                              <ApprovalSurface
-                                approvals={props.approvals}
-                                selectedApprovalId={selectedApprovalId}
-                                onSelectedApprovalChange={setSelectedApprovalId}
-                                loadReview={loadToolReview}
-                                onViewDetails={viewToolReviewDetails}
-                                onApprove={(approval) => decideApproval(approval.id, "approve")}
-                                onReject={(approval) => decideApproval(approval.id, "reject")}
-                              />
-                            )}
-                          <Suspense fallback={null}>
-                            <SessionSkillReviews
-                              key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
-                              context={context}
-                              workspaceId={props.session.workspaceId}
-                              sessionId={props.session.id}
-                              events={props.events}
-                            />
-                          </Suspense>
-                          {props.humanInput.requests.length > 0 &&
-                          props.session.status === "requires_action" ? (
-                            <div className="pb-1" data-human-input-timeline-surface="">
-                              <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                                <HumanInputSurface
-                                  loadSkillReview={loadSkillReview}
-                                  allowedSaveTo={secretSaveTargets(
-                                    context.accessContext,
-                                    props.session.workspaceId,
-                                  )}
-                                  requests={props.humanInput.requests}
-                                  respondingRequestId={props.humanInput.respondingRequestId}
-                                  error={props.humanInput.mutationError?.message}
-                                  onSubmit={async (requestId, response) => {
-                                    // A failed send resolves null. Reject so the card
-                                    // keeps what was typed (including a secret) to retry.
-                                    if (!(await props.humanInput.respond(requestId, response))) {
-                                      throw new Error("Your answer wasn't sent. Try again.");
-                                    }
-                                  }}
-                                />
-                              </Suspense>
-                            </div>
-                          ) : null}
-                        </>
-                      }
-                      turnSummary={{ rolling: true }}
-                      key={props.session.id}
-                      className="h-full"
-                      items={timelineWithStartup}
-                      searchTarget={activeSearchTarget}
-                      focusSequence={momentSequence}
+                    <ToolReviewHistoryProvider
                       events={props.events}
-                      status={props.session.status}
-                      computeLabel={computeLabel}
-                      renderMessageText={renderMessageText}
-                      renderMessageActions={renderMessageActions}
-                      onAnnotate={composer.addAnnotation}
-                      draftAnnotations={composer.annotations}
-                      onDraftAnnotationSelect={composer.requestAnnotationReview}
-                      onOpenSession={props.onOpenSession}
-                      resolveSessionTitle={props.resolveSessionTitle}
-                      onMemoryClick={props.onMemoryClick}
-                      onReconnect={props.onReconnect}
-                      renderAuthNeeded={renderAuthNeeded}
-                      resolveProviderLogo={props.resolveProviderLogo}
-                      loadRetainedScreenshot={loadRetainedScreenshot}
-                      loadRetainedArtifact={loadRetainedArtifact}
-                      loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                      hasOlder={props.hasOlder}
-                      loadingOlder={props.loadingOlder}
-                      onLoadOlder={props.onLoadOlder}
-                      hasNewer={props.hasNewer}
-                      loadingNewer={props.loadingNewer}
-                      onLoadNewer={props.onLoadNewer}
-                      loadingOldest={props.loadingOldest}
-                      onJumpToStart={async () => {
-                        await props.onJumpToStart();
-                      }}
-                      onJumpToLatest={props.onJumpToLatest}
-                      emptyState={
-                        // Clear view hides history, not the retained failure or retry operation.
-                        failureRecovery ??
-                        (props.queue.stoppingPreviousAttempt ? (
-                          <EmptyState
-                            className="min-h-[24rem]"
-                            icon={
-                              <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                            }
-                            title={
-                              props.queue.effectiveControl?.state === "paused"
-                                ? "Stopping current work"
-                                : "Stopping previous work"
-                            }
-                            description={
-                              props.queue.effectiveControl?.state === "paused"
-                                ? "Waiting for the current command to stop safely. Queued work stays saved."
-                                : "Your direction is saved. It starts after the previous command stops safely."
-                            }
-                          />
-                        ) : props.initialLoading ? (
-                          <div className="flex min-h-[24rem]">
-                            <LoadingPanel />
-                          </div>
-                        ) : props.historyReloadFailed ? (
-                          <ProblemPanel
-                            title="Conversation couldn't be loaded"
-                            description="Your saved messages are unchanged. Try loading them again."
-                            action={
-                              <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
-                                Retry conversation
-                              </Button>
-                            }
-                          />
-                        ) : (
-                          <EmptyState
-                            className="min-h-[24rem]"
-                            icon={
-                              props.session.status === "running" ||
-                              props.session.status === "recovering" ? (
+                      load={loadRecordedToolReview}
+                      onViewDetails={viewToolReviewDetails}
+                    >
+                      <MessageTimeline
+                        resolveLink={consoleLinkResolver}
+                        renderMessageSender={renderMessageSender}
+                        allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                        trailingState={
+                          <>
+                            {/* Recovery follows the failed request, only in the latest history window.
+                        Credit exhaustion also surfaces on idle sessions. */}
+                            {failureRecovery}
+                            {props.approvals.length > 0 &&
+                              props.session.status === "requires_action" && (
+                                <ApprovalSurface
+                                  approvals={props.approvals}
+                                  selectedApprovalId={selectedApprovalId}
+                                  onSelectedApprovalChange={setSelectedApprovalId}
+                                  loadReview={loadToolReview}
+                                  onViewDetails={viewToolReviewDetails}
+                                  onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                  onReject={(approval) => decideApproval(approval.id, "reject")}
+                                />
+                              )}
+                            <Suspense fallback={null}>
+                              <SessionSkillReviews
+                                key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                                context={context}
+                                workspaceId={props.session.workspaceId}
+                                sessionId={props.session.id}
+                                events={props.events}
+                              />
+                            </Suspense>
+                            {props.humanInput.requests.length > 0 &&
+                            props.session.status === "requires_action" ? (
+                              <div className="pb-1" data-human-input-timeline-surface="">
+                                <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                                  <HumanInputSurface
+                                    loadSkillReview={loadSkillReview}
+                                    allowedSaveTo={secretSaveTargets(
+                                      context.accessContext,
+                                      props.session.workspaceId,
+                                    )}
+                                    requests={props.humanInput.requests}
+                                    respondingRequestId={props.humanInput.respondingRequestId}
+                                    error={props.humanInput.mutationError?.message}
+                                    onSubmit={async (requestId, response) => {
+                                      // A failed send resolves null. Reject so the card
+                                      // keeps what was typed (including a secret) to retry.
+                                      if (!(await props.humanInput.respond(requestId, response))) {
+                                        throw new Error("Your answer wasn't sent. Try again.");
+                                      }
+                                    }}
+                                  />
+                                </Suspense>
+                              </div>
+                            ) : null}
+                          </>
+                        }
+                        turnSummary={{ rolling: true }}
+                        key={props.session.id}
+                        className="h-full"
+                        items={timelineWithStartup}
+                        searchTarget={activeSearchTarget}
+                        focusSequence={momentSequence}
+                        events={props.events}
+                        status={props.session.status}
+                        computeLabel={computeLabel}
+                        renderMessageText={renderMessageText}
+                        renderMessageActions={renderMessageActions}
+                        onAnnotate={composer.addAnnotation}
+                        draftAnnotations={composer.annotations}
+                        onDraftAnnotationSelect={composer.requestAnnotationReview}
+                        onOpenSession={props.onOpenSession}
+                        resolveSessionTitle={props.resolveSessionTitle}
+                        onMemoryClick={props.onMemoryClick}
+                        onReconnect={props.onReconnect}
+                        renderAuthNeeded={renderAuthNeeded}
+                        resolveProviderLogo={props.resolveProviderLogo}
+                        loadRetainedScreenshot={loadRetainedScreenshot}
+                        loadRetainedArtifact={loadRetainedArtifact}
+                        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                        hasOlder={props.hasOlder}
+                        loadingOlder={props.loadingOlder}
+                        onLoadOlder={props.onLoadOlder}
+                        hasNewer={props.hasNewer}
+                        loadingNewer={props.loadingNewer}
+                        onLoadNewer={props.onLoadNewer}
+                        loadingOldest={props.loadingOldest}
+                        onJumpToStart={async () => {
+                          await props.onJumpToStart();
+                        }}
+                        onJumpToLatest={props.onJumpToLatest}
+                        emptyState={
+                          // Clear view hides history, not the retained failure or retry operation.
+                          failureRecovery ??
+                          (props.queue.stoppingPreviousAttempt ? (
+                            <EmptyState
+                              className="min-h-[24rem]"
+                              icon={
                                 <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                              ) : (
-                                <MessagesSquareIcon className="size-4" />
-                              )
-                            }
-                            title={timelineEmptyStateCopy.title}
-                            description={timelineEmptyStateCopy.description}
-                          />
-                        ))
-                      }
-                    />
-                  </ToolReviewHistoryProvider>
-                </KnowledgeActivityProvider>
+                              }
+                              title={
+                                props.queue.effectiveControl?.state === "paused"
+                                  ? "Stopping current work"
+                                  : "Stopping previous work"
+                              }
+                              description={
+                                props.queue.effectiveControl?.state === "paused"
+                                  ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                  : "Your direction is saved. It starts after the previous command stops safely."
+                              }
+                            />
+                          ) : props.initialLoading ? (
+                            <div className="flex min-h-[24rem]">
+                              <LoadingPanel />
+                            </div>
+                          ) : props.historyReloadFailed ? (
+                            <ProblemPanel
+                              title="Conversation couldn't be loaded"
+                              description="Your saved messages are unchanged. Try loading them again."
+                              action={
+                                <Button
+                                  variant="outline"
+                                  onClick={() => void props.onJumpToLatest()}
+                                >
+                                  Retry conversation
+                                </Button>
+                              }
+                            />
+                          ) : (
+                            <EmptyState
+                              className="min-h-[24rem]"
+                              icon={
+                                props.session.status === "running" ||
+                                props.session.status === "recovering" ? (
+                                  <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                ) : (
+                                  <MessagesSquareIcon className="size-4" />
+                                )
+                              }
+                              title={timelineEmptyStateCopy.title}
+                              description={timelineEmptyStateCopy.description}
+                            />
+                          ))
+                        }
+                      />
+                    </ToolReviewHistoryProvider>
+                  </KnowledgeActivityProvider>
+                </LearningRefusalActionsProvider>
               </div>
             </>
           }
@@ -3487,6 +3600,16 @@ function SessionChatPane(props: {
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
                 session={props.session}
+                machineAccess={machineAccess}
+                machineAction={
+                  <SessionMachinePickerAction
+                    queuedWork
+                    runsOn={runsOn}
+                    workspaceId={props.session.workspaceId}
+                    rigId={props.session.rigId}
+                    move={moveRunsOn}
+                  />
+                }
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}
@@ -3565,8 +3688,27 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
-                  unavailableModelNotice || usageLimitNotice ? (
+                  unavailableModelNotice ||
+                  usageLimitNotice ||
+                  (machineAccess && !machineAccess.isOwner) ? (
                     <>
+                      {!(
+                        props.session.admissionBlock?.reason === "database_claim_rejected" &&
+                        props.session.admissionBlock.sqlState === "42501" &&
+                        machineAccess?.queuedTurnBlocked
+                      ) ? (
+                        <SessionMachineAccessNotice
+                          access={machineAccess}
+                          action={
+                            <SessionMachinePickerAction
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId}
+                              move={moveRunsOn}
+                            />
+                          }
+                        />
+                      ) : null}
                       {unavailableModelNotice}
                       {usageLimitNotice}
                     </>
@@ -3720,8 +3862,13 @@ function SessionChatPane(props: {
                     : props.creditExhausted &&
                         (props.session.status === "failed" || props.session.status === "idle")
                       ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death.
-                        "Out of Opengeni credits — add credits to continue."
+                        // the reply turn dies the same budget death. With free
+                        // credit left for other models, a covered model revives it.
+                        creditGap
+                        ? creditGap.selectionUsable
+                          ? "Send a follow-up…"
+                          : "Your free credits don't cover this model — choose another model or add credits."
+                        : "Out of Opengeni credits — add credits to continue."
                       : "Send a follow-up…"
                 }
                 controls={

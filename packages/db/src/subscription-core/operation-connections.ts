@@ -29,6 +29,8 @@ import {
 import { SubscriptionCoreError } from "./errors";
 import {
   subscriptionCoreOperations,
+  subscriptionCoreQuotaBlocksNow,
+  subscriptionCoreUsageMergeOptions,
   type SubscriptionCoreConnectionCredential,
   type SubscriptionCoreConnectionCredentialLoad,
   type SubscriptionCoreConnectionRefreshDeps,
@@ -270,6 +272,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       deps: SubscriptionCoreConnectionResolverDeps = {},
     ): {
       getToken: () => Promise<SubscriptionCoreConnectionToken>;
+      getFreshToken: () => Promise<SubscriptionCoreConnectionToken | null>;
       refresh: () => Promise<SubscriptionCoreConnectionToken>;
     } {
       const load = deps.load ?? operations().loadSubscriptionCoreConnectionCredential;
@@ -496,7 +499,13 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       });
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
       const applied = await operations()
-        .recordSubscriptionCoreUsageObservation(db, scope, connectionId, quota)
+        .recordSubscriptionCoreUsageObservation(
+          db,
+          scope,
+          connectionId,
+          quota,
+          subscriptionCoreUsageMergeOptions(provider.adapter, response),
+        )
         .catch(() => ({ applied: false, recovered: false }));
       return {
         kind: "read",
@@ -530,10 +539,12 @@ export const subscriptionCoreOperationConnections = memoByProvider(
     /**
      * Re-read live usage before a stored exhaustion is treated as current
      * (design 5.3, EP-N22): each shared connection of the workspace's pool
-     * whose stored quota is exhausted now and was not observed within
-     * `minIntervalMs` is probed on its own, in the caller's explicit
-     * workspace context. Probe failures keep the stored exhaustion. Returns
-     * the connections whose exhaustion ended (the caller wakes waiters).
+     * whose stored quota blocks now (exhausted, or a model cooldown runs that
+     * the adapter's reading can end: `subscriptionCoreQuotaBlocksNow`) and
+     * was not observed within `minIntervalMs` is probed on its own, in the
+     * caller's explicit workspace context. Probe failures keep the stored
+     * state. Returns the connections whose exhaustion or cooldown ended (the
+     * caller wakes waiters).
      */
     async function refreshExhaustedSubscriptionCoreQuota(
       db: Database,
@@ -551,7 +562,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       if (ids.length === 0) return [];
       const stale = (await readStoredQuotaRows(db, scope, ids)).filter((row) => {
         const quota = decodeSubscriptionQuota(row);
-        if (!quota || quotaCapacity(quota, now).kind !== "exhausted") return false;
+        if (!subscriptionCoreQuotaBlocksNow(provider.adapter, quota, now)) return false;
         const updatedAt = row.quota_updated_at ? new Date(row.quota_updated_at).getTime() : 0;
         return now - updatedAt >= minIntervalMs;
       });

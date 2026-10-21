@@ -42,6 +42,7 @@ import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import type { Settings } from "@opengeni/config";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { servingCatalogForBlockedTurn } from "./agent-turn/subscription-serving-catalog";
+import { refreshExhaustedCodexCoreQuota } from "./subscription-core-codex-quota";
 import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
 import type { CodexCapacityWaitRef, SignalCodexCapacityWorkflow } from "./types";
 import { workflowIdForSession } from "./common";
@@ -110,6 +111,17 @@ export const CODEX_CORE_WAIT_BINDING: CoreWaitBinding = {
   evaluatePlacement: (db, request) => evaluateSubscriptionCoreCodexPlacement(db, request),
   wakeWaiters: (db, input) => wakeSubscriptionCoreCodexCapacityWaiters(db, input),
   reconcileWaiter: (db, input) => reconcileSubscriptionCoreCodexCapacityWait(db, input),
+  // OpenAI can reset a Codex limit before the reset it reported, so a parked
+  // turn re-reads `/wham/usage` (rate-limited per connection) at each bounded
+  // recheck instead of sleeping until a stale reset.
+  refreshBeforeReconcile: ({ db, settings }, turn) =>
+    refreshExhaustedCodexCoreQuota({
+      db,
+      settings,
+      accountId: turn.accountId,
+      workspaceId: turn.workspaceId,
+      personalTurn: turn,
+    }),
 };
 
 export type CoreCodexWakeDeliveryResult = {

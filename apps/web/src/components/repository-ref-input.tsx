@@ -1,7 +1,7 @@
 import { CheckIcon, GitBranchIcon, Loader2Icon } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
-import { Input } from "@/components/ui/input";
+import { Input } from "@opengeni/react/ui/input";
 import { cn } from "@/lib/utils";
 import type { GitHubRepositoryBranch } from "@/types";
 

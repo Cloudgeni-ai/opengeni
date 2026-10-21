@@ -12,8 +12,8 @@ const { ComposerMobilePlusPanel, PANEL_DIALOG_TITLE } =
   await import("./composer-mobile-plus-panel");
 const { RunsOnMenuBody, VisibilityMenuBody } =
   await import("@/components/session/new-session-settings-menu");
-const { Dialog } = await import("@/components/ui/dialog");
-const { DropdownMenu } = await import("@/components/ui/dropdown-menu");
+const { Dialog } = await import("@opengeni/react/ui/dialog");
+const { DropdownMenu } = await import("@opengeni/react/ui/dropdown-menu");
 const { emptySessionDraft } = await import("@/lib/session-create");
 
 afterAll(() => GlobalRegistrator.unregister());

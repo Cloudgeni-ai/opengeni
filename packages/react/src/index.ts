@@ -47,6 +47,25 @@ export type {
 } from "./client";
 export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+export {
+  createOpenGeniText,
+  OpenGeniMessagesProvider,
+  useOpenGeniLocale,
+  useOpenGeniText,
+} from "./messages/runtime";
+export type {
+  MessageParamValue,
+  OpenGeniMessageCatalog,
+  OpenGeniMessageKey,
+  OpenGeniMessageParams,
+  OpenGeniMessages,
+  OpenGeniMessagesProviderProps,
+  OpenGeniText,
+  PluralCategory,
+} from "./messages/runtime";
+export { englishMessages } from "./messages/en";
+export { SINGLE_SEND_WORDING, singleSendText } from "./messages/single-send";
+export { SingleSendWording } from "./messages/runtime";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -65,6 +84,8 @@ export type {
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export {
   SESSION_EVENT_BROWSER_MAX_BYTES,
@@ -90,6 +111,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
   InitialComposerDraft,
@@ -218,6 +240,7 @@ export type {
   UseWorkspaceSessionsResult,
 } from "./hooks/use-workspace-sessions";
 export { useSessionBackgroundCommands } from "./hooks/use-session-background-commands";
+export { useWorkspaceBackgroundCommands } from "./hooks/use-workspace-background-commands";
 export type {
   UseSessionBackgroundCommandsOptions,
   UseSessionBackgroundCommandsResult,
@@ -452,6 +475,8 @@ export type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
   UserMessageItem,
   WorkerItem,
@@ -573,6 +598,11 @@ export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation, SessionConversationView } from "./components/session-conversation";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {
   NewConversationController,
@@ -688,12 +718,16 @@ export type {
 } from "./components/markdown";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
@@ -808,6 +842,7 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
+export { markClassicScrollbars } from "./lib/scrollbars";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,
@@ -838,6 +873,11 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";

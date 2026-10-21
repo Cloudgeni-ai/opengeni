@@ -654,7 +654,7 @@ export const SCENARIOS: Scenario[] = [
       if (!run.check("service-account token available", Boolean(token))) return;
       const ws = `/v1/workspaces/${context.workspaceId}`;
       // Rerunnable: unlink the test vaults and drop gate connections from an
-      // earlier run. Unlinking is OpenGeni-only; 1Password is never changed.
+      // earlier run. Unlinking is Opengeni-only; 1Password is never changed.
       const cleanup = async () => {
         const listed: any[] =
           (await context.owner.request("GET", `${ws}/vaults`)).json?.vaults ?? [];

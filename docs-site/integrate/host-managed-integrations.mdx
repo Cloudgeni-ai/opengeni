@@ -43,7 +43,7 @@ const { secret } = await og.putWorkspaceCredentialProvider(workspaceId, {
 
 Each request names the workspace, session, turn, and the user who started the work, so you can scope credentials to them. Respond with `ok` plus the credentials and an optional `expiresAt`, `not_applicable`, or `auth_needed` with a message to show the user.
 
-For multiple Git installations on one host, return a renewable repository-scoped helper through `files` and `fileEnvironment`, and configure it with `environment.GIT_CONFIG_*`. Set `credential.useHttpPath=true` and clear `credential.helper` before adding your helper. OpenGeni preserves this declared helper chain during the initial clone as well as later Git commands; it does not inherit ambient image helpers. Explicit OpenGeni connection selections remain separate.
+For multiple Git installations on one host, return a renewable repository-scoped helper through `files` and `fileEnvironment`, and configure it with `environment.GIT_CONFIG_*`. Set `credential.useHttpPath=true` and clear `credential.helper` before adding your helper. Opengeni preserves this declared helper chain during the initial clone as well as later Git commands; it does not inherit ambient image helpers. Explicit Opengeni connection selections remain separate.
 
 ## Webhooks
 

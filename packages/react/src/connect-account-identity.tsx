@@ -5,6 +5,7 @@ import {
   accountServiceCapability,
   connectionServicePresentation,
 } from "./connection-service-presentation";
+import { useOpenGeniText } from "./messages/runtime";
 
 /** Service presentation never changes which exact credential is acted on. */
 export function ConnectAccountIdentity({
@@ -16,6 +17,7 @@ export function ConnectAccountIdentity({
   client?: OpenGeniClient | undefined;
   capabilities: CapabilityCatalogItem[];
 }) {
+  const t = useOpenGeniText();
   const item = accountServiceCapability(account, capabilities);
   const service = connectionServicePresentation({ id: account.providerId, label: account.label });
   const name = item?.name ?? service.name;
@@ -25,7 +27,9 @@ export function ConnectAccountIdentity({
       <div>
         <strong>{name}</strong>
         <small>
-          {account.ownership === "personal" ? "Only you" : "Workspace connection"}
+          {account.ownership === "personal"
+            ? t("connectAccountIdentity.onlyYou")
+            : t("connectAccountIdentity.workspaceConnection")}
           {name !== account.label ? ` · ${account.label}` : ""}
         </small>
       </div>

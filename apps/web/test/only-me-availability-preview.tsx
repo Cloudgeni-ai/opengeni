@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { PrivateChatsRow } from "../src/components/organization/security-page";
-import { Section } from "../src/components/ui/section";
+import { Section } from "@opengeni/react/ui/section";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import "../src/styles.css";
 

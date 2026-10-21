@@ -124,12 +124,13 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "interaction",
     name: "Browser and computer",
-    description: "Use browser sessions, connected computers, and human input.",
+    description: "Use browser sessions, connected computers, Excel workbooks, and human input.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("interaction_") ||
       tool.startsWith("browser_") ||
-      tool.startsWith("computer_"),
+      tool.startsWith("computer_") ||
+      tool.startsWith("excel_"),
   },
   {
     id: "secrets",
@@ -157,6 +158,9 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("editable_artifact_") ||
       tool.startsWith("site_data_") ||
       tool.startsWith("site_files_") ||
+      tool.startsWith("site_publication_") ||
+      tool === "site_hostname_check" ||
+      tool.startsWith("site_sql_") ||
       tool.startsWith("capability_") ||
       tool === "custom_mcp_setup_request",
   },

@@ -6,7 +6,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -15,7 +15,7 @@ import { sessionStateLabel } from "../src/lib/session-rail";
 import { RowQuickActions } from "../src/components/rail/session-list";
 import { SessionRowContent } from "../src/components/rail/session-row-content";
 import { SessionRowHoverDetails } from "../src/components/rail/session-row-hover-details";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "../src/components/ui/hover-card";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@opengeni/react/ui/hover-card";
 import { cn } from "../src/lib/utils";
 import type { Session } from "../src/types";
 import "../src/styles.css";
@@ -87,6 +87,8 @@ function SessionRailRowMetadataFixture() {
             onSortByChange={setSortBy}
             status={status}
             onStatusChange={setStatus}
+            mineOnly={false}
+            onMineOnlyChange={() => {}}
             showEmptyGroups={showEmptyGroups}
             onShowEmptyGroupsChange={setShowEmptyGroups}
           />

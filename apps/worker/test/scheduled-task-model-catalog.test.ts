@@ -3,10 +3,12 @@ import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
+  createOrganizationModelProviderCustomModel,
   createScheduledTask,
   createSession,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
+  encryptEnvironmentValue,
   getScheduledTaskRunByProducerKey,
   getScheduledTaskRunAcceptedExecution,
   listSessions,
@@ -109,13 +111,14 @@ async function waitForBackendBlockedBy(blockerPid: number, description: string):
   throw new Error(`${description} did not block behind backend ${blockerPid}`);
 }
 
-function activities() {
+function activities(settings: Parameters<typeof testSettings>[0] = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          ...settings,
         }),
         db: client.db,
         bus: new MemoryEventBus(),
@@ -287,12 +290,91 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     });
 
     if (!dispatchPromise) throw new Error("scheduled occurrence dispatch was not started");
-    expect(await dispatchPromise).toEqual({
+    // The refusal is recorded as a visible run instead of vanishing silently.
+    expect(await dispatchPromise).toMatchObject({
       action: "blocked",
-      reason: "scheduled_run_terminal",
+      reason: "scheduled_model_unavailable",
     });
-    expect(await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).toHaveLength(0);
+    const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      admissionRefusal: { reason: "scheduled_model_unavailable" },
+    });
     expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(0);
+  }, 60_000);
+
+  test("starts a fresh occurrence on an organization Claude model the organization serves", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `scheduled-claude-account-${suffix}`,
+      accountName: "Scheduled Claude account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `scheduled-claude-workspace-${suffix}`,
+      workspaceName: "Scheduled Claude workspace",
+      subjectId: `user:scheduled-claude-owner-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})`;
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "claude_subscription",
+      upstreamModelId: "claude-opus-5-5",
+      operationId: crypto.randomUUID(),
+    });
+    // The organization is on the shared subscription core with a serving
+    // organization-wide Claude connection.
+    await shared!.admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${grant.accountId}::uuid, 'claude', true)
+      on conflict (account_id, provider) do update set enabled = excluded.enabled`;
+    const label = `scheduled-claude-${suffix}`;
+    await shared!.admin`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        allow_personal_workspaces, provider_account_id, provider_subject_id, label, status
+      ) values (
+        ${grant.accountId}::uuid, 'claude', 'subscription',
+        ${encryptEnvironmentValue(Buffer.alloc(32, 41), "scheduled-claude-credential")}, 'shared',
+        'organization', true, ${label}, ${label}, ${label}, 'active'
+      )`;
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      ownerSubjectId: grant.subjectId,
+      name: "Separate agent on an organization Claude model",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-claude-${suffix}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Reply OK",
+        model: "organization-claude-subscription/claude-opus-5-5",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+
+    const result = await activities({ claudeSubscriptionEnabled: true }).dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `scheduled-claude-${suffix}`,
+    });
+
+    expect(result).toMatchObject({ action: "start" });
+    const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.sessionId).toBeTruthy();
   }, 60_000);
 
   test("orders fresh occurrence admission before the task row behind a queued retirement", async () => {
@@ -405,13 +487,15 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       ]);
       expect(updated.name).toBe("Custom-model lock-order occurrence updated");
       expect(retired).toMatchObject({ outcome: "success" });
-      expect(dispatch).toEqual({
+      expect(dispatch).toMatchObject({
         action: "blocked",
-        reason: "scheduled_run_terminal",
+        reason: "scheduled_model_unavailable",
       });
-      expect(await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).toHaveLength(
-        0,
-      );
+      const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({
+        admissionRefusal: { reason: "scheduled_model_unavailable" },
+      });
       expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(0);
     } finally {
       releaseUpdate();

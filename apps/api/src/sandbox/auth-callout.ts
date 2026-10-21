@@ -36,7 +36,12 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { verifyEnrollmentBearer } from "@opengeni/contracts";
-import { claimEnrollmentConnection, getEnrollment, type Database } from "@opengeni/db";
+import {
+  claimEnrollmentConnection,
+  getEnrollment,
+  recordEnrollmentExpiredCredentials,
+  type Database,
+} from "@opengeni/db";
 import {
   createResponderConnection,
   decodeAuthRequest,
@@ -178,6 +183,27 @@ export async function handleAuthorizationRequest(
 
   const claims = await verifyEnrollmentBearer(secret, bearer);
   if (!claims) {
+    // Only a signature-verified expired bearer may identify a machine for the
+    // dashboard. Never trust identifiers from an invalid token's payload.
+    const expired = await verifyEnrollmentBearer(secret, bearer, 0);
+    if (
+      expired &&
+      expired.exp <= Math.floor(Date.now() / 1000) &&
+      expired.agentId === expired.enrollmentId
+    ) {
+      const enrollment = await getEnrollment(deps.db, expired.workspaceId, expired.enrollmentId);
+      if (
+        enrollment?.status === "active" &&
+        enrollment.credentialGeneration === expired.credentialGeneration
+      ) {
+        await recordEnrollmentExpiredCredentials(deps.db, {
+          accountId: enrollment.accountId,
+          workspaceId: expired.workspaceId,
+          enrollmentId: expired.enrollmentId,
+          credentialGeneration: expired.credentialGeneration,
+        });
+      }
+    }
     // Invalid signature / malformed / expired bearer. NEVER log the bearer value.
     warnDenial(
       deps,
@@ -229,6 +255,13 @@ export async function handleAuthorizationRequest(
     connectionInstanceId,
     leaseMs: AGENT_CONNECTION_LEASE_MS,
   });
+  // The takeover point. A second live process is refused (and counted) while
+  // the holder's lease lasts, so two processes of one enrollment running at
+  // once is a rare edge: a partitioned holder whose lease lapsed. Its requesters
+  // were answered and its commands settled lost when the new process claimed,
+  // but it keeps running what it ran. If it holds the connection again later,
+  // its operation inventory on that connection is answered with the operations
+  // Opengeni no longer recognises, and it stops them (operation-inventory.ts).
   if (!claim.claimed) {
     warnDenial(
       deps,

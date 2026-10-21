@@ -83,7 +83,7 @@ void opengeni_terminal_ready_builtin_unload(char *name) {
 }
 
 static char *documentation[] = {
-  "Register the one-shot OpenGeni Bash 5.2 Readline input-readiness callback.",
+  "Register the one-shot Opengeni Bash 5.2 Readline input-readiness callback.",
   "--probe checks the loaded Bash ABI contract without registering a callback.",
   NULL,
 };

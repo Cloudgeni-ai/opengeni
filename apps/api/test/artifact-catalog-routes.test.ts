@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { type EditableArtifactApplicationPort } from "@opengeni/core";
+import {
+  type EditableArtifactApplicationPort,
+  type SessionAuthorizationPort,
+} from "@opengeni/core";
 import { type ArtifactCatalogCandidate } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { getTableName, type SQL } from "drizzle-orm";
@@ -50,7 +53,10 @@ function fixture(
     absentSession?: boolean;
     agentAttempt?: Partial<Parameters<typeof signDelegatedAccessToken>[1]>;
     file?: Record<string, unknown>;
+    files?: Array<Record<string, unknown>>;
     image?: Record<string, unknown>;
+    images?: Array<Record<string, unknown>>;
+    sessionAuthorization?: SessionAuthorizationPort;
     pinUnavailable?: boolean;
     /** The pinned Site is someone else's Only me Site, so the viewer cannot see it. */
     hiddenSite?: boolean;
@@ -59,6 +65,7 @@ function fixture(
   const reads: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]> = [];
   const queries: Array<{ sql: string; params: unknown[] }> = [];
   const selectedTables: string[] = [];
+  const selectConditions: Array<{ table: string; sql: string; params: unknown[] }> = [];
   const siteVisibilityChecks: Array<{ sql: string; params: unknown[] }> = [];
   const db = {
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
@@ -71,12 +78,37 @@ function fixture(
         return [];
       }
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
+      if (compiled.sql.includes("target.id as target_id")) {
+        expect(compiled.params).toContain(workspaceId);
+        expect(compiled.params).toContain(sessionId);
+        // The consolidated authorization read returns target facts even when
+        // no caller attempt is present. Missing/RLS-hidden targets stay absent;
+        // missing caller/turn facts must not grant an agent live authority.
+        return options.absentSession
+          ? []
+          : [
+              {
+                target_id: sessionId,
+                target_account_id: accountId,
+                target_root_session_id: sessionId,
+                target_visibility: options.privateSession ? "user_private" : "workspace_shared",
+                target_authority_epoch: 1,
+                target_owner_subject_id: options.privateSession ? "user:someone-else" : null,
+                target_agent_access: "workspace",
+                target_memory_scope: "workspace",
+                caller_account_id: null,
+                caller_root_session_id: null,
+                turn_id: null,
+              },
+            ];
+      }
       if (
         compiled.sql.includes("current_setting('opengeni.account_id'") ||
         compiled.sql.includes("current_setting('opengeni.subject_id'")
       )
         return [
           {
+            resolved_account_id: accountId,
             account_id: accountId,
             workspace_id: workspaceId,
             subject_id: "user:catalog",
@@ -86,7 +118,6 @@ function fixture(
             personal_resource_actor_subject_id: "",
           },
         ];
-      if (compiled.sql.includes('session.root_session_id as "rootSessionId"')) return [];
       if (
         compiled.sql.includes("set_config") ||
         compiled.sql.includes("pg_advisory_xact_lock_shared")
@@ -96,6 +127,7 @@ function fixture(
     },
     select: (fields?: Record<string, unknown>) => {
       let tableName = "";
+      let params: unknown[] = [];
       const builder = {
         from: (table: unknown) => {
           tableName = getTableName(table as never);
@@ -103,17 +135,34 @@ function fixture(
           return builder;
         },
         where: (condition?: SQL) => {
+          if (condition) {
+            const compiled = new PgDialect().sqlToQuery(condition);
+            params = compiled.params;
+            selectConditions.push({ table: tableName, ...compiled });
+          }
           if (tableName === "workspace_artifacts" && condition)
             siteVisibilityChecks.push(new PgDialect().sqlToQuery(condition));
           return builder;
         },
         innerJoin: () => builder,
         leftJoin: () => builder,
-        then: (resolve: (value: unknown[]) => unknown, reject?: (error: unknown) => unknown) =>
-          Promise.resolve(tableName === "files" && options.file ? [options.file] : []).then(
-            resolve,
-            reject,
-          ),
+        then: (resolve: (value: unknown[]) => unknown, reject?: (error: unknown) => unknown) => {
+          const files = options.files ?? (options.file ? [options.file] : []);
+          const images = options.images ?? (options.image ? [options.image] : []);
+          return Promise.resolve(
+            tableName === "files"
+              ? files.filter((file) => params.includes(file.id))
+              : tableName === "generated_image_artifacts"
+                ? images
+                    .filter((image) => params.includes(image.artifactId))
+                    .map((artifact) => ({
+                      artifact,
+                      file: files.find((file) => file.id === artifact.artifactId),
+                      uploadStatus: "uploaded",
+                    }))
+                : [],
+          ).then(resolve, reject);
+        },
         limit: async () => {
           if (tableName === "workspaces") return [{ accountId }];
           if (tableName === "workspace_artifacts")
@@ -122,6 +171,8 @@ function fixture(
             return options.image && options.file
               ? [{ artifact: options.image, file: options.file, uploadStatus: "uploaded" }]
               : [];
+          // Catalog provenance also checks the exact source projection after
+          // session authorization; keep its RLS-hidden case independent.
           if (tableName === "sessions" && options.absentSession) return [];
           if (tableName === "sessions" && fields)
             return [
@@ -150,6 +201,7 @@ function fixture(
     db,
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
     managedAuth: null,
+    ...(options.sessionAuthorization ? { sessionAuthorization: options.sessionAuthorization } : {}),
     ...(options.read
       ? {
           editableArtifacts: {
@@ -187,7 +239,16 @@ function fixture(
       },
       body: JSON.stringify(body),
     });
-  return { app, request, pin, reads, queries, selectedTables, siteVisibilityChecks };
+  return {
+    app,
+    request,
+    pin,
+    reads,
+    queries,
+    selectedTables,
+    selectConditions,
+    siteVisibilityChecks,
+  };
 }
 
 test("pin mutations require publish plus target-domain read authority and validate closed input", async () => {
@@ -604,4 +665,197 @@ test("generated images and explicit files use retained references, never storage
     items: [],
     nextCursor: null,
   });
+});
+
+test("catalog batches file ACL and image metadata reads while preserving response order", async () => {
+  for (const kind of ["file", "image"] as const) {
+    const files = Array.from({ length: 20 }, (_, index) => ({
+      id: `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      accountId,
+      workspaceId,
+      filename: `report-${index}.png`,
+      safeFilename: `report-${index}.png`,
+      status: "ready",
+      contentType: "image/png",
+      sizeBytes: 10,
+      sha256: "a".repeat(64),
+      bucket: "private",
+      objectKey: "private",
+      createdAt: new Date(createdAt),
+      updatedAt: new Date(createdAt),
+    }));
+    const images = files.map((file) => ({
+      artifactId: file.id,
+      accountId,
+      workspaceId,
+      sessionId,
+      status: "ready",
+      sourceStrategy: "provider_adapter",
+      width: 32,
+      height: 32,
+      createdAt: new Date(createdAt),
+      updatedAt: new Date(createdAt),
+    }));
+    const { request, selectedTables, selectConditions } = fixture(
+      [files.map((file) => candidate(file.id, kind))],
+      { files, images },
+    );
+    const response = await request(`kind=${kind}&limit=100`, ["files:read"]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = await response.json();
+    expect(body.items.map((item: { id: string }) => item.id)).toEqual(files.map((file) => file.id));
+    expect(selectedTables.filter((table) => table === "files")).toHaveLength(3);
+    expect(selectedTables.filter((table) => table === "generated_image_artifacts")).toHaveLength(
+      kind === "image" ? 3 : 0,
+    );
+    for (const condition of selectConditions.filter(
+      ({ table }) => table === "files" || table === "generated_image_artifacts",
+    )) {
+      expect(
+        condition.params.filter((param) => files.some((file) => file.id === param)).length,
+      ).toBeLessThanOrEqual(8);
+      expect(condition.params).toContain(workspaceId);
+      if (condition.table === "files")
+        expect(condition.sql).toContain("google_drive_file_authorized");
+    }
+    expect(
+      body.items.every((item: { sourceSessionId?: string }) => item.sourceSessionId === undefined),
+    ).toBe(true);
+  }
+});
+
+test("editable reads overlap within a bounded window and preserve pagination and denied rows", async () => {
+  const ids = Array.from({ length: 20 }, (_, index) => (index + 1).toString(16).padStart(32, "0"));
+  let active = 0;
+  let peak = 0;
+  const { request, reads } = fixture([ids.map((id) => candidate(id, "document"))], {
+    read: async (input) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, input.artifactId === ids[0] ? 15 : 1));
+      active--;
+      if (input.artifactId === ids[0]) throw new EditableArtifactApplicationError("forbidden");
+      return {
+        scope: input.scope,
+        id: input.artifactId,
+        modality: "document",
+        title: "Report",
+        lifecycle: "active",
+        createdAt,
+        updatedAt: createdAt,
+      } as never;
+    },
+  });
+  const response = await request("kind=document&limit=9");
+  expect(response.status, await response.clone().text()).toBe(200);
+  const body = await response.json();
+  expect(body.items.map((item: { id: string }) => item.id)).toEqual(ids.slice(1, 10));
+  expect(body.nextCursor).toBeString();
+  expect(peak).toBe(8);
+  // Nine returned rows, one denial, one authorized lookahead. No full-page prefetch.
+  expect(reads).toHaveLength(11);
+});
+
+test("catalog does not read beyond the authorized lookahead row", async () => {
+  const ids = Array.from({ length: 12 }, (_, index) => (index + 1).toString(16).padStart(32, "0"));
+  const { request } = fixture([ids.map((id) => candidate(id, "document"))], {
+    read: async (input) => {
+      if (input.artifactId === ids[10]) throw new EditableArtifactApplicationError("unavailable");
+      return {
+        scope: input.scope,
+        id: input.artifactId,
+        modality: "document",
+        title: "Report",
+        lifecycle: "active",
+        createdAt,
+        updatedAt: createdAt,
+      } as never;
+    },
+  });
+  const response = await request("kind=document&limit=9");
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect((await response.json()).items).toHaveLength(9);
+});
+
+test("concurrent provenance reads deduplicate the source and keep host denials and outages fail closed", async () => {
+  for (const outcome of ["allow", "deny", "unavailable"] as const) {
+    let calls = 0;
+    const { request, queries, selectedTables } = fixture(
+      [[candidate("site-a"), candidate("site-b"), candidate("site-c")]],
+      {
+        sessionAuthorization: {
+          authorizeSession: async () => {
+            calls++;
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            if (outcome === "unavailable") throw new Error("host unavailable");
+            return outcome === "allow"
+              ? { allowed: true }
+              : { allowed: false, reason: "not_found" };
+          },
+        },
+      },
+    );
+    const response = await request("", ["artifacts:read", "sessions:read"]);
+    expect(calls).toBe(1);
+    expect(queries.filter(({ sql }) => sql.includes("target.id as target_id"))).toHaveLength(1);
+    if (outcome === "unavailable") {
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toContain(sessionId);
+    } else {
+      expect(response.status, await response.clone().text()).toBe(200);
+      const body = await response.json();
+      expect(body.items.map((item: { sourceSessionId?: string }) => item.sourceSessionId)).toEqual(
+        Array(3).fill(outcome === "allow" ? sessionId : undefined),
+      );
+      expect(selectedTables.filter((table) => table === "sessions")).toHaveLength(
+        outcome === "allow" ? 1 : 0,
+      );
+    }
+  }
+});
+
+test("mixed file batches omit denied and pending files and never read their generated metadata", async () => {
+  const ids = Array.from(
+    { length: 4 },
+    (_, index) => `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+  );
+  const files = ids.slice(1).map((id, index) => ({
+    id,
+    accountId,
+    workspaceId,
+    filename: `report-${index}.png`,
+    safeFilename: `report-${index}.png`,
+    status: index === 0 ? "pending" : "ready",
+    contentType: "image/png",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+    bucket: "private",
+    objectKey: "private",
+    createdAt: new Date(createdAt),
+    updatedAt: new Date(createdAt),
+  }));
+  const images = files.map((file, index) => ({
+    artifactId: file.id,
+    accountId,
+    workspaceId,
+    sessionId,
+    status: index === 1 ? "pending" : "ready",
+    sourceStrategy: "provider_adapter",
+    width: 32,
+    height: 32,
+    createdAt: new Date(createdAt),
+    updatedAt: new Date(createdAt),
+  }));
+  const { request, selectConditions } = fixture([ids.map((id) => candidate(id, "image"))], {
+    files,
+    images,
+  });
+  const response = await request("kind=image", ["files:read"]);
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect((await response.json()).items.map((item: { id: string }) => item.id)).toEqual([ids[3]]);
+  const imageRead = selectConditions.find(({ table }) => table === "generated_image_artifacts")!;
+  expect(imageRead.params).not.toContain(ids[0]);
+  expect(imageRead.params).not.toContain(ids[1]);
+  expect(imageRead.params).toContain(ids[2]);
+  expect(imageRead.params).toContain(ids[3]);
 });

@@ -7,7 +7,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { GaugeIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import { useAppContext } from "@/context";
 import { CONSOLE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";

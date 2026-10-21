@@ -18,10 +18,10 @@ import {
   type AccessLevel,
   type CapabilityLearning,
 } from "@/components/agent/capability-learning";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Checkbox } from "@/components/ui/field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Select } from "@/components/ui/select";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Checkbox } from "@opengeni/react/ui/field";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { Select } from "@opengeni/react/ui/select";
 import {
   AGENT_CAPABILITY_GROUPS,
   AGENT_STARTING_POINTS,

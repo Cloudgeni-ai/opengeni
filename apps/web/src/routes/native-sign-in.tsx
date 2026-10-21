@@ -2,11 +2,11 @@ import { SmartphoneIcon } from "lucide-react";
 import { useState } from "react";
 
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FormPage } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { type NativeSignInSearch, useNativeSignInContext } from "@/lib/native-sign-in-context";
 
 /* ----------------------------------------------------------------------------
@@ -16,8 +16,20 @@ import { type NativeSignInSearch, useNativeSignInContext } from "@/lib/native-si
    the app redeems it for its own credential, which it can sign out alone.
    -------------------------------------------------------------------------- */
 
-/** Only an app callback (`<scheme>://auth/callback`) is ever navigated to. */
-export function nativeCallbackUrl(redirectUri: string | undefined): URL | null {
+/** The Office add-in's callback page, on this same web origin. */
+export const OFFICE_ADDIN_CALLBACK_PATH = "/office/auth-callback.html";
+
+/**
+ * Only an app callback (`<scheme>://auth/callback`) or the Office add-in's
+ * callback page on this very origin is ever navigated to.
+ */
+export function nativeCallbackUrl(
+  redirectUri: string | undefined,
+  origin: string | undefined = globalThis.location?.origin,
+): URL | null {
+  if (origin && redirectUri === `${origin}${OFFICE_ADDIN_CALLBACK_PATH}`) {
+    return new URL(redirectUri);
+  }
   if (!redirectUri || !/^[a-z][a-z0-9+.-]*:\/\/auth\/callback$/u.test(redirectUri)) return null;
   const url = new URL(redirectUri);
   return ["http:", "https:", "javascript:", "data:", "file:"].includes(url.protocol) ? null : url;
@@ -26,7 +38,19 @@ export function nativeCallbackUrl(redirectUri: string | undefined): URL | null {
 export function nativeDeviceLabel(search: NativeSignInSearch): string {
   const name = search.device_name?.trim();
   if (name) return name;
-  return search.platform === "android" ? "this Android device" : "this iPhone or iPad";
+  switch (search.platform) {
+    case "android":
+      return "this Android device";
+    case "macos":
+      return "this Mac";
+    case "windows":
+    case "linux":
+      return "this computer";
+    case "office":
+      return "the Opengeni add-in in Excel";
+    default:
+      return "this iPhone or iPad";
+  }
 }
 
 export function NativeSignInRoute({ search }: { search: NativeSignInSearch }) {
@@ -61,8 +85,16 @@ export function NativeSignInRoute({ search }: { search: NativeSignInSearch }) {
     <ConsentFrame>
       <FormPage
         leading={<LogoTile icon={<SmartphoneIcon />} />}
-        title="Sign in to the Opengeni app"
-        description="The app acts as you, never with more than you can do. Sign it out from the app at any time."
+        title={
+          search.platform === "office"
+            ? "Sign in to the Opengeni add-in"
+            : "Sign in to the Opengeni app"
+        }
+        description={
+          search.platform === "office"
+            ? "The add-in acts as you, never with more than you can do. Sign it out from the add-in at any time."
+            : "The app acts as you, never with more than you can do. Sign it out from the app at any time."
+        }
         submitLabel="Allow"
         pendingLabel="Signing in…"
         pending={leaving}

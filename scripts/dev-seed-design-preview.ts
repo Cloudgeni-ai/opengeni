@@ -178,7 +178,8 @@ class Client {
     const setCookie = response.headers.getSetCookie?.() ?? [];
     for (const value of setCookie) {
       const pair = value.split(";")[0]!;
-      if (pair.startsWith("better-auth.session_token=")) this.cookie = pair;
+      // An https public origin makes Better Auth use the __Secure- cookie prefix.
+      if (/^(?:__Secure-)?better-auth\.session_token=/.test(pair)) this.cookie = pair;
     }
     const text = await response.text();
     let parsed: any = text;
@@ -2250,7 +2251,8 @@ async function seedConversations(
         where workspace_id = ${ws} and id = ${id} and vault_policy = '{"mode":"all"}'::jsonb`;
     }
 
-    // Finalize the session-activity gate exactly as the API does.
+    // This seed script retains the legacy writer protocol during the expand
+    // release. The stamp trigger also assigns activity_xid to these rows.
     await tx`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`;
     await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
     await tx.unsafe(

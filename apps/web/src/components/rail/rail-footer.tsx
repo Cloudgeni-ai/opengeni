@@ -7,6 +7,8 @@ import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { DesktopAppSubmenu } from "@/components/desktop-app-menu";
+import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
 import {
   accountMenuAriaLabel,
@@ -26,9 +28,9 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
 const FeedbackDialog = lazy(() =>
@@ -149,8 +151,15 @@ export function RailFooter() {
                   supportEmail={context.clientConfig.supportEmail}
                   onSendFeedback={onSendFeedback}
                 />
-                <DropdownMenuSeparator />
-                {managed ? (
+                <DesktopAppSubmenu />
+                {hasDesktopAccounts() ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DesktopAccountMenuItems />
+                  </>
+                ) : null}
+                {hasDesktopAccounts() ? null : <DropdownMenuSeparator />}
+                {hasDesktopAccounts() ? null : managed ? (
                   <DropdownMenuItem
                     variant="destructive"
                     onSelect={() => {

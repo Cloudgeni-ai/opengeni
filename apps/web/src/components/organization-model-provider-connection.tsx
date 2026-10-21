@@ -18,16 +18,17 @@ import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
 import { useClaudeUsage } from "@/components/models/claude-usage";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  invalidateSharedQueries,
+  peekSharedQuery,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@/lib/shared-query";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter, Opper) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,
 // so Organization settings > Models reuses the row and the provider's page.
-
-/** A failed read, kept whole so the page can show advice and its API facts. */
-function readError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
-}
 
 export function useOrganizationProviderConnection({
   organizationId,
@@ -44,20 +45,51 @@ export function useOrganizationProviderConnection({
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const hasCatalogConnection = Boolean(catalogConnection);
-  const [connection, setConnection] = useState<Connection | null>(null);
-  const [models, setModels] = useState<CustomModel[]>([]);
+  const connectionKey = [
+    "model-settings",
+    "organization-provider",
+    organizationId,
+    providerKind,
+    "connection",
+  ] as const;
+  const modelsKey = [
+    "model-settings",
+    "organization-provider",
+    organizationId,
+    providerKind,
+    "models",
+  ] as const;
+  const connectionQuery = useSharedQuery(
+    client,
+    connectionKey,
+    () => client.getOrganizationModelProviderConnection(organizationId, providerKind),
+    { enabled: enabled && !hasCatalogConnection, staleTimeMs: 5 * 60_000 },
+  );
+  const modelsQuery = useSharedQuery(
+    client,
+    modelsKey,
+    async () =>
+      (await client.listOrganizationProviderCustomModels(organizationId, providerKind)).models,
+    { enabled, staleTimeMs: 5 * 60_000 },
+  );
+  const connection = connectionQuery.data;
+  const models = modelsQuery.data ?? [];
+  const { refresh: readConnection } = connectionQuery;
+  const { refresh: readModels } = modelsQuery;
+  const loaded = !connectionQuery.loading;
+  const modelsLoaded = !modelsQuery.loading;
   const [slug, setSlug] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [connectionError, setConnectionError] = useState<Error | null>(null);
-  const [modelsError, setModelsError] = useState<Error | null>(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pendingRemovalState, setPendingRemovalState] = useState<CustomModel | null>(null);
-  const activeRef = useRef(true);
-  const connectionGenerationRef = useRef(0);
-  const modelsGenerationRef = useRef(0);
+  const identity = JSON.stringify([organizationId, providerKind, enabled, hasCatalogConnection]);
+  const epochRef = useRef({ client, identity, active: true });
+  if (epochRef.current.client !== client || epochRef.current.identity !== identity) {
+    epochRef.current.active = false;
+    epochRef.current = { client, identity, active: true };
+  }
+  const epoch = epochRef.current;
   const pendingSaveRef = useRef<{
     key: string;
     version: number;
@@ -72,11 +104,19 @@ export function useOrganizationProviderConnection({
   const restoreRemovalFocusRef = useRef(false);
 
   useEffect(() => {
-    activeRef.current = true;
+    epoch.active = true;
+    setConnectionBusy(false);
+    setModelBusy(false);
+    setRemovingId(null);
+    setSlug("");
+    setPendingRemovalState(null);
+    pendingSaveRef.current = null;
+    pendingCreateRef.current = null;
+    pendingDeletesRef.current.clear();
     return () => {
-      activeRef.current = false;
+      epoch.active = false;
     };
-  }, []);
+  }, [epoch]);
 
   const connected = catalogConnection?.connected ?? connection?.status === "active";
 
@@ -95,24 +135,16 @@ export function useOrganizationProviderConnection({
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
     if (!enabled || hasCatalogConnection) return undefined;
-    const generation = ++connectionGenerationRef.current;
-    try {
-      const result = await client.getOrganizationModelProviderConnection(
-        organizationId,
-        providerKind,
-      );
-      if (!activeRef.current || generation !== connectionGenerationRef.current) return undefined;
-      setConnection(result);
-      setConnectionError(null);
-      setLoaded(true);
-      return result;
-    } catch (error) {
-      if (!activeRef.current || generation !== connectionGenerationRef.current) return undefined;
-      setConnectionError(readError(error));
-      setLoaded(true);
-      return undefined;
-    }
-  }, [client, organizationId, providerKind, enabled, hasCatalogConnection]);
+    await readConnection();
+    const snapshot = peekSharedQuery<Connection>(client, [
+      "model-settings",
+      "organization-provider",
+      organizationId,
+      providerKind,
+      "connection",
+    ]);
+    return snapshot?.error ? undefined : snapshot?.data;
+  }, [client, organizationId, providerKind, enabled, hasCatalogConnection, readConnection]);
 
   const claudeUsage = useClaudeUsage({
     client,
@@ -127,34 +159,21 @@ export function useOrganizationProviderConnection({
 
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
     if (!enabled) return undefined;
-    const generation = ++modelsGenerationRef.current;
-    try {
-      const result = await client.listOrganizationProviderCustomModels(
-        organizationId,
-        providerKind,
-      );
-      if (!activeRef.current || generation !== modelsGenerationRef.current) return undefined;
-      setModels(result.models);
-      setModelsError(null);
-      setModelsLoaded(true);
-      return result.models;
-    } catch (error) {
-      if (!activeRef.current || generation !== modelsGenerationRef.current) return undefined;
-      setModelsError(readError(error));
-      setModelsLoaded(true);
-      return undefined;
-    }
-  }, [client, organizationId, providerKind, enabled]);
-
-  const refresh = useCallback(async () => {
-    await Promise.all([refreshConnection(), refreshModels()]);
-  }, [refreshConnection, refreshModels]);
-
-  useEffect(() => void refresh(), [refresh]);
+    await readModels();
+    const snapshot = peekSharedQuery<CustomModel[]>(client, [
+      "model-settings",
+      "organization-provider",
+      organizationId,
+      providerKind,
+      "models",
+    ]);
+    return snapshot?.error ? undefined : (snapshot?.data ?? undefined);
+  }, [client, organizationId, providerKind, enabled, readModels]);
 
   async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
-    if (!key || catalogConnection || connectionBusy) return false;
+    if (!epoch.active || !enabled || !key || catalogConnection || connectionBusy) return false;
+    const write = sharedQueryWriter(client);
     const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
@@ -163,7 +182,6 @@ export function useOrganizationProviderConnection({
         ? pending.operationId
         : crypto.randomUUID();
     pendingSaveRef.current = { key: credentialIdentity, version, operationId };
-    connectionGenerationRef.current += 1;
     setConnectionBusy(true);
     const journey = beginIntegrationConnect(
       modelConnectionClass(providerKind) ?? "other",
@@ -177,10 +195,10 @@ export function useOrganizationProviderConnection({
       });
     const commit = (saved: Connection) => {
       journey.finish("connected");
+      write(connectionKey, saved);
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return;
       pendingSaveRef.current = null;
-      setConnection(saved);
-      setConnectionError(null);
-      setLoaded(true);
       toast.success(`${meta.title} connected for shared workspaces`);
     };
     try {
@@ -201,20 +219,22 @@ export function useOrganizationProviderConnection({
       // A newer version can belong to another administrator. Only the mutation's
       // idempotent receipt proves that this token and identity were committed.
       journey.finish(integrationConnectErrorOutcome(finalError));
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return false;
       await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
         description: userErrorText(finalError),
       });
       return false;
     } finally {
-      if (activeRef.current) setConnectionBusy(false);
+      if (epoch.active) setConnectionBusy(false);
     }
   }
 
   async function disconnect(): Promise<boolean> {
-    if (catalogConnection) return false;
+    if (!epoch.active || !enabled || catalogConnection) return false;
     if (!connection || connection.status !== "active") return true;
-    connectionGenerationRef.current += 1;
+    const write = sharedQueryWriter(client);
     setConnectionBusy(true);
     const operationId = crypto.randomUUID();
     const mutate = () =>
@@ -229,12 +249,14 @@ export function useOrganizationProviderConnection({
       } catch {
         revoked = await mutate();
       }
-      setConnection(revoked);
-      setConnectionError(null);
-      setLoaded(true);
+      write(connectionKey, revoked);
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return true;
       toast.success(`${meta.title} disconnected`);
       return true;
     } catch (error) {
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return false;
       const reconciled = await refreshConnection();
       if (reconciled === null || reconciled?.status === "revoked") {
         toast.success(`${meta.title} disconnected`);
@@ -245,13 +267,15 @@ export function useOrganizationProviderConnection({
       });
       return false;
     } finally {
-      if (activeRef.current) setConnectionBusy(false);
+      if (epoch.active) setConnectionBusy(false);
     }
   }
 
   async function addModel(upstreamModelId?: string): Promise<void> {
     const submittedSlug = upstreamModelId ?? slug;
     if (
+      !epoch.active ||
+      !enabled ||
       modelBusy ||
       !submittedSlug ||
       submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
@@ -262,7 +286,7 @@ export function useOrganizationProviderConnection({
     const pending = pendingCreateRef.current;
     const operationId = pending?.slug === submittedSlug ? pending.operationId : crypto.randomUUID();
     pendingCreateRef.current = { slug: submittedSlug, operationId };
-    modelsGenerationRef.current += 1;
+    const write = sharedQueryWriter(client);
     setModelBusy(true);
     const mutate = () =>
       client.createOrganizationProviderCustomModel(organizationId, providerKind, {
@@ -274,16 +298,17 @@ export function useOrganizationProviderConnection({
           : {}),
       });
     const commit = (saved: CustomModel) => {
-      pendingCreateRef.current = null;
-      setModels((current) => [
-        ...current.filter(
+      const cachedModels = peekSharedQuery<CustomModel[]>(client, modelsKey)?.data ?? [];
+      write(modelsKey, [
+        ...cachedModels.filter(
           (candidate) =>
             candidate.id !== saved.id && candidate.upstreamModelId !== saved.upstreamModelId,
         ),
         saved,
       ]);
-      setModelsError(null);
-      setModelsLoaded(true);
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return;
+      pendingCreateRef.current = null;
       setSlug((current) => (current === submittedSlug ? "" : current));
       toast.success(`${meta.title} model added`, {
         description: connected
@@ -300,6 +325,8 @@ export function useOrganizationProviderConnection({
       }
       commit(saved);
     } catch (error) {
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return;
       const reconciled = await refreshModels();
       const committed = reconciled?.find((model) => model.upstreamModelId === submittedSlug);
       if (committed) commit(committed);
@@ -308,7 +335,7 @@ export function useOrganizationProviderConnection({
           description: userErrorText(error),
         });
     } finally {
-      if (activeRef.current) {
+      if (epoch.active) {
         setModelBusy(false);
         modelInputRef.current?.focus();
       }
@@ -316,8 +343,9 @@ export function useOrganizationProviderConnection({
   }
 
   async function removeModel(model: CustomModel): Promise<boolean> {
+    if (!epoch.active || !enabled) return false;
+    const write = sharedQueryWriter(client);
     setRemovingId(model.id);
-    modelsGenerationRef.current += 1;
     const operationId = pendingDeletesRef.current.get(model.id) ?? crypto.randomUUID();
     pendingDeletesRef.current.set(model.id, operationId);
     const mutate = () =>
@@ -326,10 +354,14 @@ export function useOrganizationProviderConnection({
         expectedVersion: model.version,
       });
     const commit = () => {
+      const current = peekSharedQuery<CustomModel[]>(client, modelsKey)?.data ?? [];
+      write(
+        modelsKey,
+        current.filter((candidate) => candidate.id !== model.id),
+      );
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return;
       pendingDeletesRef.current.delete(model.id);
-      setModels((current) => current.filter((candidate) => candidate.id !== model.id));
-      setModelsError(null);
-      setModelsLoaded(true);
       toast.success(`${meta.title} model removed`);
     };
     try {
@@ -341,6 +373,8 @@ export function useOrganizationProviderConnection({
       commit();
       return true;
     } catch (error) {
+      void invalidateSharedQueries(client, ["model-settings"]);
+      if (!epoch.active) return false;
       const reconciled = await refreshModels();
       if (reconciled && !reconciled.some((candidate) => candidate.id === model.id)) {
         commit();
@@ -351,7 +385,7 @@ export function useOrganizationProviderConnection({
       });
       return false;
     } finally {
-      if (activeRef.current) setRemovingId(null);
+      if (epoch.active) setRemovingId(null);
     }
   }
 
@@ -365,8 +399,8 @@ export function useOrganizationProviderConnection({
     connected,
     settled: !enabled || ((catalogConnection?.loaded ?? loaded) && modelsLoaded),
     hidden: !enabled || Boolean(catalogConnection),
-    error: catalogConnection?.error ?? connectionError,
-    customModelsError: modelsError,
+    error: catalogConnection?.error ?? connectionQuery.error,
+    customModelsError: modelsQuery.error,
     customModels: models,
     customModelsLoaded: modelsLoaded,
     claudeUsage: providerKind === "claude_subscription" ? claudeUsage : undefined,

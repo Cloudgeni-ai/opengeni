@@ -20,28 +20,32 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { toast } from "sonner";
 
 import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DiffView } from "@/components/ui/diff-view";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, TextArea, TextInput } from "@/components/ui/field";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DiffView } from "@opengeni/react/ui/diff-view";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, TextArea, TextInput } from "@opengeni/react/ui/field";
 import { InAppHelpLink } from "@/components/in-app-help-link";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { inAppClick } from "@/lib/in-app-click";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { ToolbarSummary } from "@/components/ui/toolbar";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { inAppClick } from "@opengeni/react/ui/in-app-click";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { ToolbarSummary } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@/context";
-import { apiErrorFacts } from "@/lib/api-error";
-import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@/lib/permissions";
 
 import { errorText } from "./knowledge-data";
 import { Markdown } from "./knowledge-markdown";
@@ -146,20 +150,32 @@ export interface ReviewQueue {
 export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueue {
   const context = useAppContext();
   const workspace = context.workspaces.find((each) => each.id === workspaceId) ?? null;
+  const canReviewKnowledge =
+    hasWorkspacePermission(context.accessContext, workspaceId, "documents:search") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
   const canManage = canManageWorkspaceSettings(
     context.accessContext,
     workspace,
     context.managedSelfContext,
   );
+  // Workspace Skills are collaborative team content: anyone who can manage
+  // workspace documents may review them (the API gate is documents:manage).
+  const canManageSkills = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "documents:manage",
+  );
   const canManageOrganization = workspace
     ? hasAccountPermission(context.accessContext, workspace.accountId, "account:admin")
     : false;
   const [state, setState] = useState<{
+    identity: string;
     items: ReviewItem[];
     partial: boolean;
     error: string | null;
   } | null>(null);
   const [retry, setRetry] = useState(0);
+  const identity = `${context.accessContext.subjectId}:${workspaceId}:${canReviewKnowledge}:${canManage}:${canManageSkills}:${canManageOrganization}`;
 
   useEffect(() => {
     let current = true;
@@ -169,12 +185,15 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
       let partial = false;
       const items: ReviewItem[] = [];
       const [batches, instructions, skills] = await Promise.allSettled([
-        client.listKnowledgeReviewBatches(workspaceId, { limit: 20 }),
+        canReviewKnowledge
+          ? client.listKnowledgeReviewBatches(workspaceId, { limit: 20 })
+          : Promise.resolve({ batches: [], nextCursor: null }),
         canManage
           ? client.listAgentInstructionReviews(workspaceId)
           : Promise.resolve({ entries: [], nextCursor: null }),
         client.listWorkspaceSkills(workspaceId, { limit: 100 }),
       ]);
+      if (!current) return;
       if (batches.status === "fulfilled") {
         partial ||= Boolean(batches.value.nextCursor);
         const pages = await Promise.allSettled(
@@ -226,7 +245,7 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
         for (const skill of skills.value.skills) {
           const allowed =
             skill.scope === "user" ||
-            (skill.scope === "organization" ? canManageOrganization : canManage);
+            (skill.scope === "organization" ? canManageOrganization : canManageSkills);
           if (!skill.pendingRevisionIds.length || !allowed) continue;
           items.push({
             kind: "skill",
@@ -238,16 +257,29 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
           });
         }
       } else failures.push(errorText(skills.reason));
-      if (current) setState({ items, partial, error: failures.length ? failures[0]! : null });
+      if (current)
+        setState({ identity, items, partial, error: failures.length ? failures[0]! : null });
     })();
     return () => {
       current = false;
     };
-  }, [context, workspaceId, canManage, canManageOrganization, refresh, retry]);
+  }, [
+    context,
+    workspaceId,
+    canReviewKnowledge,
+    canManage,
+    canManageSkills,
+    canManageOrganization,
+    identity,
+    refresh,
+    retry,
+  ]);
+
+  const currentState = state?.identity === identity ? state : null;
 
   const groups = useMemo(() => {
     const result: ReviewGroup[] = [];
-    for (const item of state?.items ?? []) {
+    for (const item of currentState?.items ?? []) {
       const key =
         item.kind === "knowledge"
           ? `batch:${item.batch.id}`
@@ -265,16 +297,16 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
         });
     }
     return result;
-  }, [state]);
+  }, [currentState]);
   const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
 
   return {
     items,
     groups,
     count: items.length,
-    partial: state?.partial ?? false,
-    loading: state === null,
-    error: state?.error ?? null,
+    partial: currentState?.partial ?? false,
+    loading: currentState === null,
+    error: currentState?.error ?? null,
     reload: useCallback(() => setRetry((value) => value + 1), []),
   };
 }

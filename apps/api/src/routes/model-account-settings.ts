@@ -27,7 +27,8 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 const Uuid = z.string().uuid();
 

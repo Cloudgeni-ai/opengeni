@@ -1,4 +1,5 @@
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -9,7 +10,8 @@ import {
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
+import { anyOf } from "./sql-arrays";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
@@ -562,6 +564,9 @@ export async function lockWorkspaceInferenceControl(
   mode: WorkspaceControlLockMode,
   options: WorkspaceControlLockOptions = {},
 ): Promise<WorkspaceControlRow> {
+  // Some admission commands acquire control before the session writer helper.
+  // Keep the Site conversation -> control -> session order on those paths too.
+  await lockSiteRuntimeAdmission(db, workspaceId);
   const budget = lockBudgetFor(options);
   const [prior] = budget
     ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
@@ -698,6 +703,63 @@ export type SessionEventWriteLocks = {
   attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
 };
 
+type SessionEventWriteProjectionInput = SessionEventWriteLockInput & {
+  /** Event-only appenders need identity, ownership and projection fields, not frozen inputs. */
+  rowProjection?: "full" | "event";
+};
+
+const eventWorkspaceColumns = {
+  id: schema.workspaces.id,
+  accountId: schema.workspaces.accountId,
+};
+const eventSessionColumns = {
+  id: schema.sessions.id,
+  accountId: schema.sessions.accountId,
+  workspaceId: schema.sessions.workspaceId,
+  activeTurnId: schema.sessions.activeTurnId,
+  lastSequence: schema.sessions.lastSequence,
+  authorityEpoch: schema.sessions.authorityEpoch,
+  executionAuthorityEpoch: schema.sessions.executionAuthorityEpoch,
+  visibility: schema.sessions.visibility,
+  ownerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+};
+const eventTurnColumns = {
+  id: schema.sessionTurns.id,
+  accountId: schema.sessionTurns.accountId,
+  workspaceId: schema.sessionTurns.workspaceId,
+  sessionId: schema.sessionTurns.sessionId,
+  executionGeneration: schema.sessionTurns.executionGeneration,
+  activeAttemptId: schema.sessionTurns.activeAttemptId,
+  status: schema.sessionTurns.status,
+  metadata: schema.sessionTurns.metadata,
+  createdAt: schema.sessionTurns.createdAt,
+  version: schema.sessionTurns.version,
+};
+const eventAttemptColumns = {
+  id: schema.sessionTurnAttempts.id,
+  accountId: schema.sessionTurnAttempts.accountId,
+  workspaceId: schema.sessionTurnAttempts.workspaceId,
+  sessionId: schema.sessionTurnAttempts.sessionId,
+  turnId: schema.sessionTurnAttempts.turnId,
+  executionGeneration: schema.sessionTurnAttempts.executionGeneration,
+  state: schema.sessionTurnAttempts.state,
+  authorityEpoch: schema.sessionTurnAttempts.authorityEpoch,
+  authorityVisibility: schema.sessionTurnAttempts.authorityVisibility,
+  authorityOwnerOrganizationMembershipId:
+    schema.sessionTurnAttempts.authorityOwnerOrganizationMembershipId,
+};
+
+export type SessionEventWriteFenceLocks = {
+  control: WorkspaceControlRow | null;
+  workspace: Pick<typeof schema.workspaces.$inferSelect, keyof typeof eventWorkspaceColumns> | null;
+  sessions: Array<Pick<typeof schema.sessions.$inferSelect, keyof typeof eventSessionColumns>>;
+  cursors: SessionEventWriteLocks["cursors"];
+  turns: Array<Pick<typeof schema.sessionTurns.$inferSelect, keyof typeof eventTurnColumns>>;
+  attempts: Array<
+    Pick<typeof schema.sessionTurnAttempts.$inferSelect, keyof typeof eventAttemptColumns>
+  >;
+};
+
 /**
  * Establish the one canonical lock prefix for every `session_events` writer:
  *
@@ -732,25 +794,40 @@ export type SessionEventWriteLocks = {
  * They use the explicit `already_locked` stages, while retaining the same
  * monotonic table order. New event writers should prefer one complete call.
  *
- * Retained-screenshot prepare is not an event writer, but its INSERT still
- * KEY SHAREs the turn and attempt through FKs. It must take this same prefix
+ * Retained-screenshot and generated-image prepare are not event writers, but
+ * their INSERTs KEY SHARE the turn and attempt through FKs. They take this prefix
  * first: PostgreSQL fires those FK checks in catalog name/OID order, which can
  * be attempt-then-turn and otherwise deadlocks against this helper.
  */
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection: "event" },
+): Promise<SessionEventWriteFenceLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection?: "full" },
+): Promise<SessionEventWriteLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks>;
 export async function lockSessionEventWriteRows(
   db: Database,
-  input: SessionEventWriteLockInput,
-): Promise<SessionEventWriteLocks> {
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks> {
+  await lockSiteRuntimeAdmission(db, input.workspaceId, input.sessionIds ?? []);
   const controlLock = input.controlLock;
   const control =
     controlLock === "share" || controlLock === "update"
       ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
       : null;
 
-  let workspace: typeof schema.workspaces.$inferSelect | null = null;
+  const eventOnly = input.rowProjection === "event";
+  const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
+  let workspace: SessionEventWriteFenceLocks["workspace"] = null;
   if ((input.workspaceLock ?? "key_share") === "key_share") {
     const [lockedWorkspace] = await db
-      .select()
+      .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
       .from(schema.workspaces)
       .where(eq(schema.workspaces.id, input.workspaceId))
       .for("key share")
@@ -763,12 +840,12 @@ export async function lockSessionEventWriteRows(
   let sessions =
     sessionIds.length > 0
       ? await db
-          .select()
+          .select(sessionColumns)
           .from(schema.sessions)
           .where(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
-              inArray(schema.sessions.id, sessionIds),
+              anyOf(schema.sessions.id, sessionIds),
             ),
           )
           .orderBy(schema.sessions.id)
@@ -804,12 +881,12 @@ export async function lockSessionEventWriteRows(
     // Re-read only after owning the cursor so the attempt fence evaluates the
     // latest committed session state while later semantic writers wait here.
     sessions = await db
-      .select()
+      .select(sessionColumns)
       .from(schema.sessions)
       .where(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
-          inArray(schema.sessions.id, sessionIds),
+          anyOf(schema.sessions.id, sessionIds),
         ),
       )
       .orderBy(schema.sessions.id)
@@ -843,12 +920,12 @@ export async function lockSessionEventWriteRows(
   const turns =
     turnIds.length > 0
       ? await db
-          .select()
+          .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
           .from(schema.sessionTurns)
           .where(
             and(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurns.id, turnIds),
+              anyOf(schema.sessionTurns.id, turnIds),
             ),
           )
           .orderBy(schema.sessionTurns.id)
@@ -859,12 +936,12 @@ export async function lockSessionEventWriteRows(
   const attempts =
     attemptIds.length > 0
       ? await db
-          .select()
+          .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
           .from(schema.sessionTurnAttempts)
           .where(
             and(
               eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurnAttempts.id, attemptIds),
+              anyOf(schema.sessionTurnAttempts.id, attemptIds),
             ),
           )
           .orderBy(schema.sessionTurnAttempts.id)
@@ -1541,6 +1618,31 @@ function projectEffectiveControl(
   };
 }
 
+/**
+ * Open settlement work (stopping background commands, unfinished
+ * interruptions) is rare, while requested targets can root large subtrees with
+ * long histories. Both summaries therefore start from the small open set and
+ * walk parent edges upward to the requested targets. Sessions have one parent,
+ * so a descendant within SESSION_ANCESTRY_LIMIT edges of a target is exactly an
+ * open row whose bounded ancestor walk reaches that target; the path array
+ * stops legacy cycles the same way the downward walk did.
+ */
+function openSettlementAncestorsSql(workspaceId: string, origins: SQL): SQL {
+  return sql`ancestors(origin_session_id, session_id, depth, path) as (
+      select origin.session_id, origin.session_id, 0::integer, array[origin.session_id]::uuid[]
+      from (select distinct session_id from ${origins}) origin
+      union all
+      select ancestor.origin_session_id, step.parent_session_id, ancestor.depth + 1,
+        ancestor.path || step.parent_session_id
+      from ancestors ancestor
+      join ${schema.sessions} step
+        on step.workspace_id = ${workspaceId} and step.id = ancestor.session_id
+      where step.parent_session_id is not null
+        and not step.parent_session_id = any(ancestor.path)
+        and ancestor.depth < ${SESSION_ANCESTRY_LIMIT}
+    )`;
+}
+
 async function stoppingBackgroundCommandCounts(
   db: Database,
   workspaceId: string,
@@ -1548,21 +1650,20 @@ async function stoppingBackgroundCommandCounts(
 ): Promise<Map<string, number>> {
   const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    descendants(target_id, session_id, depth, path) as (
-      select target.id, target.id, 0::integer, array[target.id]::uuid[] from targets target
-      union all
-      select parent.target_id, child.id, parent.depth + 1, parent.path || child.id
-      from descendants parent
-      join ${schema.sessions} child
-        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.session_id
-      where not child.id = any(parent.path) and parent.depth < ${SESSION_ANCESTRY_LIMIT}
-    )
-    select descendant.target_id as "sessionId", count(distinct command.id)::integer as "commandCount"
-    from descendants descendant
-    join ${schema.sessionBackgroundCommands} command
-      on command.workspace_id = ${workspaceId} and command.session_id = descendant.session_id
-      and command.state = 'stopping'
-    group by descendant.target_id
+    stopping as materialized (
+      -- session_background_commands_active_session_idx holds only running and
+      -- stopping commands.
+      select command.id, command.session_id
+      from ${schema.sessionBackgroundCommands} command
+      where command.workspace_id = ${workspaceId}
+        and command.state = 'stopping'
+    ),
+    ${openSettlementAncestorsSql(workspaceId, sql`stopping`)}
+    select target.id as "sessionId", count(distinct command.id)::integer as "commandCount"
+    from targets target
+    join ancestors ancestor on ancestor.session_id = target.id
+    join stopping command on command.session_id = ancestor.origin_session_id
+    group by target.id
   `);
   return new Map(
     rows.map((row: { sessionId: string; commandCount: number | string }) => [
@@ -1577,10 +1678,9 @@ async function settlementAttemptCounts(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Map<string, SettlementAttemptCounts>> {
-  // Drive the projection from the requested targets through the indexed
-  // parent_session_id edge. The inverse plan scanned every interruption in a
-  // workspace before walking upward, making one session read proportional to
-  // a high-volume orchestrator workspace's entire interruption history.
+  // session_attempt_interruptions_open_settlement_idx holds only interruptions
+  // that are unsettled or whose attempt may not have quiesced yet, so this read
+  // is proportional to open work, not to subtree size or interruption history.
   const rows = await db.execute<{
     sessionId: string;
     attemptCount: number | string;
@@ -1588,57 +1688,52 @@ async function settlementAttemptCounts(
     quiescencePendingCount: number | string;
   }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    descendant_sessions(target_id, session_id, depth, path) as (
-      select target.id, target.id, 0::integer, array[target.id]::uuid[]
-      from targets target
-      union all
+    open_interruptions as materialized (
       select
-        descendant.target_id,
-        child.id,
-        descendant.depth + 1,
-        descendant.path || child.id
-      from descendant_sessions descendant
-      join ${schema.sessions} child
-        on child.workspace_id = ${workspaceId}
-       and child.parent_session_id = descendant.session_id
-      where not child.id = any(descendant.path)
-        and descendant.depth < ${SESSION_ANCESTRY_LIMIT}
-    ), interruptions as (
-      select
-        descendant.target_id,
+        interruption.session_id,
         interruption.attempt_id,
-        bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
-          as interruption_pending,
-        bool_or(
-          interruption.state in ('settled', 'rejected_stale')
-          and attempt.quiesced_at is null
-        ) as quiescence_pending
-      from descendant_sessions descendant
-      join ${schema.sessionAttemptInterruptions} interruption
-        on interruption.workspace_id = ${workspaceId}
-       and interruption.session_id = descendant.session_id
+        interruption.state in ('pending', 'delivered', 'acknowledged') as interruption_pending,
+        interruption.state in ('settled', 'rejected_stale')
+          and attempt.quiesced_at is null as quiescence_pending
+      from ${schema.sessionAttemptInterruptions} interruption
       join ${schema.sessionTurnAttempts} attempt
         on attempt.workspace_id = interruption.workspace_id
        and attempt.id = interruption.attempt_id
-      where (
+      where interruption.workspace_id = ${workspaceId}
+        and (
+          interruption.state in ('pending', 'delivered', 'acknowledged')
+          or not interruption.attempt_quiesced
+        )
+        and (
           interruption.state in ('pending', 'delivered', 'acknowledged')
           or (
             interruption.state in ('settled', 'rejected_stale')
             and attempt.quiesced_at is null
           )
         )
-      group by descendant.target_id, interruption.attempt_id
+    ),
+    ${openSettlementAncestorsSql(workspaceId, sql`open_interruptions`)},
+    interruptions as (
+      select
+        target.id as target_id,
+        interruption.attempt_id,
+        bool_or(interruption.interruption_pending) as interruption_pending,
+        bool_or(interruption.quiescence_pending) as quiescence_pending
+      from targets target
+      join ancestors ancestor on ancestor.session_id = target.id
+      join open_interruptions interruption
+        on interruption.session_id = ancestor.origin_session_id
+      group by target.id, interruption.attempt_id
     )
     select
-      target.id as "sessionId",
-      count(interruption.attempt_id)::integer as "attemptCount",
-      count(interruption.attempt_id)
-        filter (where interruption.interruption_pending)::integer as "interruptionPendingCount",
-      count(interruption.attempt_id)
-        filter (where interruption.quiescence_pending)::integer as "quiescencePendingCount"
-    from targets target
-    join interruptions interruption on interruption.target_id = target.id
-    group by target.id
+      target_id as "sessionId",
+      count(attempt_id)::integer as "attemptCount",
+      count(attempt_id) filter (where interruption_pending)::integer
+        as "interruptionPendingCount",
+      count(attempt_id) filter (where quiescence_pending)::integer
+        as "quiescencePendingCount"
+    from interruptions
+    group by target_id
   `);
   return new Map(
     rows.map(
@@ -4190,6 +4285,15 @@ export async function autoResumeSessionBranchInTransaction(
     automatic: true,
     reason: input.reason,
     actor: input.actor,
+  });
+  // The override unblocks the whole branch, exactly like an explicit Resume:
+  // descendants whose workflows closed under the Pause (capacity waits, parked
+  // recoveries, active goals, pending updates, decided approvals) need the
+  // same fresh wake. The steered session's own input carries its wake too.
+  await registerDescendantWakes(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    reason: "session_auto_resume",
   });
   return {
     revision,

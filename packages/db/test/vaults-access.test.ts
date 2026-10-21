@@ -14,6 +14,7 @@ import {
   createVault,
   createWorkspace,
   encryptEnvironmentValue,
+  ensureDefaultVault,
   ensureManagedAccessForUser,
   ensureTaskVault,
   getVault,
@@ -649,6 +650,110 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         },
         allowOrganization: true,
       });
+    });
+
+    test("AX-4: an Only-me vault is available where its owner chooses, and always at home", async () => {
+      if (!client) return;
+      const [other] = await world.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${world.accountId}::uuid, 'Second shared')
+        returning id::text as id`;
+      const secondWorkspaceId = other!.id;
+      await world.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+        values (${world.accountId}::uuid, ${secondWorkspaceId}::uuid, ${world.member.subjectId}, 'member',
+          ${JSON.stringify(["sessions:create", "sessions:read", "secrets:use"])}::text::jsonb)`;
+      const personIn = (subjectId: string, workspaceId: string): SecretPrincipal => ({
+        kind: "human",
+        accountId: world.accountId,
+        workspaceId,
+        subjectId,
+        verifiedHuman: true,
+        viaApiKey: false,
+      });
+      const memberIn = (workspaceId: string) => personIn(world.member.subjectId, workspaceId);
+      const here = world.subject(world.member.subjectId);
+      const home = world.subject(world.member.subjectId, world.personalWorkspaceId);
+
+      // A new Only-me vault starts in the workspace it was added from.
+      const narrow = await createVault(world.db, here, { name: "Started here", ownerKind: "user" });
+      expect(narrow.availability?.allowedWorkspaceIds).toEqual([world.workspaceId]);
+      const written = await world.item(here, narrow, "KEY_started_here", "value-started-here");
+      const extra = { [written.id]: "startedHere" };
+      const reaches = async (workspaceId: string) =>
+        (await reach(world, memberIn(workspaceId), extra)).labels.includes("startedHere");
+      expect(await reaches(world.workspaceId)).toBe(true);
+      expect(await reaches(world.personalWorkspaceId)).toBe(true);
+      expect(await reaches(secondWorkspaceId)).toBe(false);
+      await expectVaultError(
+        getVault(world.db, world.subject(world.member.subjectId, secondWorkspaceId), {
+          vaultId: narrow.id,
+        }),
+        "vault_not_found",
+      );
+
+      // The owner moves it from home, where it is always reachable.
+      const atHome = await getVault(world.db, home, { vaultId: narrow.id });
+      const moved = await updateVault(world.db, home, {
+        vaultId: narrow.id,
+        expectedGeneration: atHome.generation,
+        availability: {
+          allowedWorkspaceIds: [secondWorkspaceId, secondWorkspaceId],
+          allowPersonalWorkspaces: true,
+        },
+      });
+      expect(moved.availability?.allowedWorkspaceIds).toEqual([secondWorkspaceId]);
+      expect(await reaches(world.workspaceId)).toBe(false);
+      expect(await reaches(secondWorkspaceId)).toBe(true);
+      expect(await reaches(world.personalWorkspaceId)).toBe(true);
+
+      // An empty list keeps it at home only; null makes it available everywhere.
+      const homeOnly = await updateVault(world.db, home, {
+        vaultId: narrow.id,
+        expectedGeneration: moved.generation,
+        availability: { allowedWorkspaceIds: [], allowPersonalWorkspaces: true },
+      });
+      expect(homeOnly.availability?.allowedWorkspaceIds).toEqual([]);
+      expect(await reaches(secondWorkspaceId)).toBe(false);
+      expect(await reaches(world.personalWorkspaceId)).toBe(true);
+      await updateVault(world.db, home, {
+        vaultId: narrow.id,
+        expectedGeneration: homeOnly.generation,
+        availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+      });
+      expect(await reaches(world.workspaceId)).toBe(true);
+      expect(await reaches(secondWorkspaceId)).toBe(true);
+
+      // Nobody else reaches it, wherever it is available.
+      const adminHere = personIn(world.orgAdmin.subjectId, world.workspaceId);
+      expect((await reach(world, adminHere, extra)).labels).not.toContain("startedHere");
+
+      // An explicit availability on create wins over the default.
+      const everywhere = await createVault(world.db, here, {
+        name: "Everywhere from the start",
+        ownerKind: "user",
+        availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+      });
+      expect(everywhere.availability?.allowedWorkspaceIds).toBeNull();
+
+      // The default vault stays available everywhere.
+      const defaultVault = await ensureDefaultVault(
+        world.db,
+        world.subject(world.member.subjectId, secondWorkspaceId),
+        {
+          workspaceId: secondWorkspaceId,
+          ownerKind: "user",
+        },
+      );
+      expect(defaultVault.isDefault).toBe(true);
+      expect(defaultVault.availability?.allowedWorkspaceIds).toBeNull();
+      await expectVaultError(
+        updateVault(world.db, here, {
+          vaultId: defaultVault.id,
+          expectedGeneration: defaultVault.generation,
+          availability: { allowedWorkspaceIds: [world.workspaceId], allowPersonalWorkspaces: true },
+        }),
+        "vault_permission_denied",
+      );
     });
 
     test("AX-2: narrowing is a subset of the parent, applies at resolve time and spares the task vault", async () => {

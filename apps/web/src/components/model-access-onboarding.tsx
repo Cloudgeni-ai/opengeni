@@ -18,14 +18,14 @@ import {
 import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
 import { CreditsPrize } from "@/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
-import { Button } from "@/components/ui/button";
-import { ListRow } from "@/components/ui/list-row";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
 import { validTopupAmount } from "@/lib/format";
-import { userErrorText } from "@/lib/api-error";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
@@ -724,18 +724,31 @@ export function ModelAccessOnboardingPanel({
 
   if (startingCredits || won) {
     const currency = startingCredits?.balance?.currency ?? "usd";
-    const trialAmount = startingCredits?.balance
+    const startingAmount = startingCredits?.balance
       ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
+      : null;
+    const monthlyPlan =
+      !won &&
+      startingCredits?.balance?.plan?.key === "free" &&
+      startingCredits.balance.plan.creditScoped
+        ? startingCredits.balance.plan
+        : null;
+    const monthlyAmount = monthlyPlan
+      ? formatCreditAmount(monthlyPlan.creditGrantedMicros, currency)
       : null;
     const wonAmount = won ? formatCreditAmount(won.amountMicros, "usd") : null;
     const heading = won
       ? won.free
         ? `You got ${wonAmount} in free credits`
         : `You added ${wonAmount} in credits`
-      : trialAmount
-        ? `You got ${trialAmount} in free credits`
-        : "You got free Opengeni credits";
-    const prizeMicros = won ? won.amountMicros : (startingCredits?.balance?.balanceMicros ?? null);
+      : monthlyAmount
+        ? `${monthlyAmount} in free credits every month`
+        : startingAmount
+          ? `You got ${startingAmount} in free credits`
+          : "You got free Opengeni credits";
+    const prizeMicros = won
+      ? won.amountMicros
+      : (monthlyPlan?.creditRemainingMicros ?? startingCredits?.balance?.balanceMicros ?? null);
     return (
       <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
         <CelebrationBurst key={won?.celebration ?? 0} />
@@ -745,11 +758,21 @@ export function ModelAccessOnboardingPanel({
               key={won?.celebration ?? 0}
               amountMicros={prizeMicros}
               currency={won ? "usd" : currency}
-              label={won ? (won.free ? "Coupon redeemed" : "Credits added") : "Free credits"}
+              label={
+                won
+                  ? won.free
+                    ? "Coupon redeemed"
+                    : "Credits added"
+                  : monthlyPlan
+                    ? "Monthly Free credit"
+                    : "Free credits"
+              }
               caption={
                 won && won.balanceMicros !== null
                   ? `Your balance is now ${formatCreditAmount(won.balanceMicros, "usd")}`
-                  : `Added to ${organizationName || "your organization"}`
+                  : monthlyPlan
+                    ? "Resets monthly · Unused credit doesn't roll over"
+                    : `Added to ${organizationName || "your organization"}`
               }
             />
           ) : null}
@@ -759,7 +782,9 @@ export function ModelAccessOnboardingPanel({
             {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            Start chatting. No card or API key needed.
+            {monthlyPlan
+              ? "For the free-credit models. No card or API key needed."
+              : "Start chatting. No card or API key needed."}
           </p>
           <Button
             type="button"

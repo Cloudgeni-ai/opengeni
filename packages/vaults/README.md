@@ -12,6 +12,12 @@ This package owns:
   and the in-memory fake), plus `VaultProviderError` and its codes;
 - `createVaultProviderRegistry`, which picks the provider for a vault;
 - `createProviderCallBudget`, the per-attempt provider call budget;
+- `createRemoteVaultProvider`, the adapter for vaults served over Opengeni's
+  signed remote protocol (`opengeni.vault.v1`): an embedder's receiver built
+  with `@opengeni/sdk/external-vault-receiver`, or the customer-run
+  `@opengeni/vaults-bitwarden-bridge`. The caller supplies the bounded HTTP
+  transport (`createFetchRemoteVaultTransport` adapts a pinned fetch) and the
+  trusted `ctx.authority`;
 - the shell splice contract (`spliceShellCommand`, `dialectFromShell`) used
   by `exec_command` and `run_on` to turn references into per-command
   environment variables;
@@ -20,3 +26,11 @@ This package owns:
 
 Providers never see principals: access is decided before a provider is called.
 Provider errors always map to a `VaultProviderErrorCode`; nothing is swallowed.
+
+Listings are read with `listProviderVaults` and `listProviderItems` (bounded
+enumeration for discovery), or with `readProviderVaultInventory` and
+`readProviderItemInventory`, which also report whether the listing is
+`consistent`: one response, or every page under one snapshot. Only a
+consistent inventory may remove items from a mirror. A multi-page listing
+without a snapshot proves only what it contains, so a vault served without
+snapshots is mirrored only while its listing fits in one page.

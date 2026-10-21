@@ -3,14 +3,14 @@ import { Link } from "@tanstack/react-router";
 import { GaugeIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRowSkeleton } from "@/components/ui/setting-row";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { CONSOLE_ALLOWANCE_LABELS, formatCredits } from "@/lib/usage-allowances";
 import { MemberLimitsSection, type MemberName } from "./member-limits-section";
@@ -83,17 +83,19 @@ export function WorkspaceUsagePage({
   }
   if (summary.state === "unlimited") {
     return (
-      <EmptyState
-        variant="page"
-        icon={<GaugeIcon />}
-        title="No usage limits here"
-        description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
-          isOwner
-            ? "Set a budget to cap what this workspace spends each month."
-            : "Organization owners can set a monthly budget."
-        }`}
-        action={manageBudget}
-      />
+      <SectionStack>
+        <EmptyState
+          variant="page"
+          icon={<GaugeIcon />}
+          title="No usage limits here"
+          description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
+            isOwner
+              ? "Set a budget to cap what this workspace spends each month."
+              : "Organization owners can set a monthly budget."
+          }`}
+          action={manageBudget}
+        />
+      </SectionStack>
     );
   }
   const own = summary.member;

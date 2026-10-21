@@ -2,21 +2,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRightIcon, CircleCheckIcon, LoaderCircleIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DestructiveConfirm,
   showUndoToast,
   type ConfirmDependency,
 } from "@/components/ui/destructive-confirm";
-import { Checkbox, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { Checkbox, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { cn } from "@/lib/utils";
-import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 
 import { KIT_NOW, currentWorkspace, you } from "../../fixtures";
@@ -147,9 +147,11 @@ export function ConnectPage({
 
   const pool = accountsOf(data, scope);
   const newName = NEW_ACCOUNT_NAMES.find((name) => !pool.some((each) => each.name === name));
+  // Only a workspace set to use just the organization's accounts asks.
   const orgPoolInUse =
     scope === "workspace" &&
     questions.q13 === "segmented" &&
+    data.legacySource === "organization" &&
     effectiveSource(data, questions, scenario) === "organization";
   const gateways = data.gateways[scope];
 
@@ -227,8 +229,8 @@ export function ConnectPage({
     );
   }
 
-  // Codex: sign in with a device code, then (if the organization's pool is in
-  // use) say which subscriptions new work should use.
+  // Codex: sign in with a device code, then (if the workspace is set to use
+  // only the organization's accounts) say whether new work should use it.
   const signedIn = signin === "done";
   const askSource = signedIn && orgPoolInUse;
   return (
@@ -260,7 +262,7 @@ export function ConnectPage({
       }
       onSubmit={async () => {
         if (askSource && !useChoice) {
-          setUseError("Choose which subscriptions new work should use.");
+          setUseError("Choose whether new work should use this account.");
           return false;
         }
         await wait(900);
@@ -299,18 +301,15 @@ export function ConnectPage({
             scope === "organization"
               ? { ...value, orgAccounts: [...value.orgAccounts, account] }
               : { ...value, workspaceAccounts: [...value.workspaceAccounts, account] };
-          // Automatic uses this workspace's accounts once one is connected; "keep"
-          // saves the organization as an explicit choice.
-          if (!askSource) return next;
-          return {
-            ...next,
-            legacySource: useChoice === "organization" ? "organization" : "automatic",
-          };
+          // "Use it" returns to the automatic choice, which uses both; "keep"
+          // leaves the explicit choice as it is.
+          if (!askSource || useChoice === "organization") return next;
+          return { ...next, legacySource: "automatic" };
         });
         toast.success(`Added ${account.name}`, {
           description:
             askSource && useChoice === "organization"
-              ? `New work keeps using subscriptions from ${ORG_NAME} until you switch.`
+              ? `New work keeps using only subscriptions from ${ORG_NAME} until you change this.`
               : undefined,
         });
       }}
@@ -369,8 +368,8 @@ export function ConnectPage({
         {askSource ? (
           <ChoiceCards
             variant={picks.choice}
-            label="Use this account instead of the organization's subscriptions?"
-            description={`New work in ${currentWorkspace.name} uses one or the other, never both.`}
+            label="Use this account for new work?"
+            description={`${currentWorkspace.name} is set to use only the organization's subscriptions.`}
             value={useChoice}
             onValueChange={(value) => {
               setUseChoice(value);
@@ -379,14 +378,14 @@ export function ConnectPage({
             error={useError}
           >
             <ChoiceCard
-              value="workspace"
-              title="Use this account"
-              description={`New work here switches to this workspace's accounts and stops using subscriptions from ${ORG_NAME}.`}
+              value="together"
+              title="Use it with the organization's subscriptions"
+              description={`New work here uses this account and the subscriptions from ${ORG_NAME}.`}
             />
             <ChoiceCard
               value="organization"
-              title="Keep the organization's subscriptions"
-              description="This account stays connected but isn't used until you switch."
+              title="Keep using only the organization's"
+              description="This account stays connected but isn't used until you change this."
             />
           </ChoiceCards>
         ) : null}

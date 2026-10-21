@@ -30,12 +30,13 @@ import {
 } from "../src/index";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { withRestoredSessionActivityRlsContext } from "../src/database";
+import { withLegacySessionActivityRlsContext as withRestoredSessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import {
   INTERRUPTED_TURN_RETIREMENT_MIGRATION as MIGRATION,
   parseInterruptedTurnRetirementManifest,
   type InterruptedTurnRetirementManifest,
 } from "../src/interrupted-turn-retirement-migration";
+import { stageSiteSessionAudienceColumns } from "./vault-policy-column-fixture";
 
 let shared: NonNullable<Awaited<ReturnType<typeof acquireOwnerMigratedTestDatabase>>>;
 let client: ReturnType<typeof createDb>;
@@ -47,10 +48,22 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     for (const name of await readdir(join(import.meta.dir, "../drizzle"))) {
-      if (name.endsWith(".sql") && name >= MIGRATION)
+      if (
+        name.endsWith(".sql") &&
+        name >= MIGRATION &&
+        name !== "0834_session_activity_xid.sql" &&
+        name !== "0809_session_open_settlement_index.sql"
+      )
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(shared.ownerUrl);
+    // The repair schema stops before 0764 (0793 stays marked applied), except
+    // for the real additive xid writer and interruption-index migrations needed
+    // by today's adapter and cancellation reader.
+    // That adapter also names the 0793 Site audience columns.
+    await stageSiteSessionAudienceColumns(shared.ownerUrl);
+    // Current event readers also project 0810's nullable usage source key.
+    await owner`alter table session_events add column usage_source_key text`;
     await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
   } finally {
     await owner.end();
@@ -93,8 +106,13 @@ async function start(
   },
   options: { goal?: boolean; requestedSessionId?: string } = {},
 ) {
+  // This schema stops before 0764, so 0851's atomic agent-child creation seam
+  // is absent. Child creates carry no request subject and keep the ordinary
+  // insert path; machine-tree witnesses are outside this fixture's scope.
+  const { subjectId: requestSubjectId, ...tenant } = scope;
   const session = await createSession(client.db, {
-    ...scope,
+    ...tenant,
+    ...(parent ? {} : { subjectId: requestSubjectId }),
     ...(options.requestedSessionId ? { requestedSessionId: options.requestedSessionId } : {}),
     initialMessage: "Accepted work",
     resources: [],

@@ -26,3 +26,27 @@ describe("API application database pool capacity", () => {
     },
   );
 });
+
+describe("database prepared statements", () => {
+  test("stays unset so the pool decides from the connection URL", () => {
+    expect(getSettings({}).databasePreparedStatements).toBeUndefined();
+    expect(
+      getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: " " }).databasePreparedStatements,
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["false", false],
+    ["0", false],
+    ["true", true],
+    ["on", true],
+  ])("accepts an explicit %s", (value, expected) => {
+    expect(
+      getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: value }).databasePreparedStatements,
+    ).toBe(expected);
+  });
+
+  test("rejects a value that is not a boolean", () => {
+    expect(() => getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: "sometimes" })).toThrow();
+  });
+});

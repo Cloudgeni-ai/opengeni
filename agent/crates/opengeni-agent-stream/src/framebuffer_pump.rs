@@ -227,9 +227,10 @@ mod tests {
                 agent_id: "ag".to_string(),
                 kind: v1::StreamKind::Desktop as i32,
                 port: 6080,
+                relay_route: None,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
+            credential: crate::RelayCredential::fixed("wss://relay/stream", "ogs_x"),
+            activity: crate::ActivityStamp::untracked(),
         }
     }
 

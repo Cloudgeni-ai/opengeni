@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { modelCallTimingColumns, modelCallTimingOrNull } from "./model-call-timing";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1105,6 +1106,7 @@ export async function countOnlineMachines(
       .where(
         and(
           eq(schema.enrollments.workspaceId, workspaceId),
+          eq(schema.enrollments.kind, "machine"),
           eq(schema.enrollments.status, "active"),
           gte(schema.enrollments.lastSeenAt, cutoff),
         ),
@@ -1314,6 +1316,7 @@ async function insertModelCallFactFromUsageEvent(
       listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
+      ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
       occurredAt: event.occurredAt,
       connectionId:
         provider === "codex-subscription"
@@ -1486,37 +1489,65 @@ export async function reconcileModelCallFacts(
       session_id: string;
       source_key: string;
     }>(sql`
-      select usage_row.turn_id, usage_row.session_id,
-        substr(usage_row.source_resource_id, 38) as source_key
-      from ${schema.usageEvents} usage_row
-      where usage_row.workspace_id = ${input.workspaceId}::uuid
-        and usage_row.event_type = 'model.cost'
-        and usage_row.source_resource_type = 'model_response'
-        and usage_row.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
-        and usage_row.occurred_at < ${input.until.toISOString()}::timestamp with time zone
-        and usage_row.turn_id is not null
-        and usage_row.session_id is not null
-        and left(usage_row.source_resource_id, 37) = usage_row.turn_id::text || ':'
-        and not exists (
+      -- The source key is materialized first so the fact lookup compares plain
+      -- columns. Under forced RLS a comparison with substr() (not leakproof)
+      -- cannot enter the index condition, so every fact of the turn was
+      -- policy-checked per ledger row: seconds per workspace instead of ms.
+      with usage_row as materialized (
+        select usage_event.id, usage_event.workspace_id, usage_event.turn_id,
+          usage_event.session_id, usage_event.occurred_at,
+          substr(usage_event.source_resource_id, 38) as source_key
+        from ${schema.usageEvents} usage_event
+        where usage_event.workspace_id = ${input.workspaceId}::uuid
+          and usage_event.event_type = 'model.cost'
+          and usage_event.source_resource_type = 'model_response'
+          and usage_event.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
+          and usage_event.occurred_at < ${input.until.toISOString()}::timestamp with time zone
+          and usage_event.turn_id is not null
+          and usage_event.session_id is not null
+          and left(usage_event.source_resource_id, 37) = usage_event.turn_id::text || ':'
+      ), missing as materialized (
+        select usage_row.* from usage_row
+        where not exists (
           select 1
           from ${schema.modelCallFacts} fact
           where fact.workspace_id = usage_row.workspace_id
             and fact.turn_id = usage_row.turn_id
-            and fact.source_key = substr(usage_row.source_resource_id, 38)
+            and fact.source_key = usage_row.source_key
         )
+      ), repairable_key as materialized (
+        -- Read each missing turn once. An EXISTS directly against session_events
+        -- may hash the entire event history or repeatedly policy-check every
+        -- event of a long turn: payload ->> is not leakproof under forced RLS.
+        -- Materialize extracted keys after the keyed, RLS-protected turn reads.
+        -- OFFSET 0 keeps the lateral lookup keyed even with low RLS estimates.
+        -- Reading payload also covers historical events whose usage_source_key
+        -- was intentionally not backfilled when their turn had already closed.
+        -- DISTINCT also preserves EXISTS semantics for historical empty keys,
+        -- which the current-usage unique index intentionally excludes.
+        select distinct missing_turn.turn_id, missing_turn.session_id, event.source_key
+        from (select distinct workspace_id, session_id, turn_id from missing) missing_turn
+        cross join lateral (
+          select event.payload->>'sourceKey' as source_key
+          from ${schema.sessionEvents} event
+          where event.workspace_id = ${input.workspaceId}::uuid
+            and event.session_id = missing_turn.session_id
+            and event.turn_id = missing_turn.turn_id
+            and event.type = 'agent.model.usage'
+            and event.turn_association = 'current'
+          offset 0
+        ) event
+      )
+      select usage_row.turn_id, usage_row.session_id, usage_row.source_key
+      from missing usage_row
+      left join repairable_key event
+        on event.session_id = usage_row.session_id
+        and event.turn_id = usage_row.turn_id
+        and event.source_key = usage_row.source_key
       -- Rows with no usage event stay missing on every pass; rank them last so
       -- they cannot starve repairable rows out of the bounded page.
       order by
-        not exists (
-          select 1
-          from ${schema.sessionEvents} event
-          where event.workspace_id = usage_row.workspace_id
-            and event.session_id = usage_row.session_id
-            and event.turn_id = usage_row.turn_id
-            and event.type = 'agent.model.usage'
-            and event.turn_association = 'current'
-            and event.payload->>'sourceKey' = substr(usage_row.source_resource_id, 38)
-        ),
+        event.turn_id is null,
         usage_row.occurred_at,
         usage_row.id
       limit ${limit + 1}

@@ -152,7 +152,7 @@ async function recordConnectionOperation(
   });
 }
 
-function mapModel(
+export function mapOrganizationModelProviderCustomModel(
   row: typeof schema.organizationModelProviderCustomModels.$inferSelect,
 ): OrganizationModelProviderCustomModel {
   return {
@@ -167,6 +167,8 @@ function mapModel(
     updatedAt: row.updatedAt,
   };
 }
+
+const mapModel = mapOrganizationModelProviderCustomModel;
 
 export async function getOrganizationModelProviderConnection(
   db: Database,
@@ -373,9 +375,20 @@ export async function loadOrganizationModelProviderApiKey(
   db: Database,
   settings: Settings,
   input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  prepared?: {
+    loadOrganizationCredentials: boolean;
+    encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  },
 ): Promise<string | null> {
   const key = environmentsEncryptionKeyBytes(settings);
+  if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
+    throw new Error("Prepared provider credentials do not match encryption settings");
+  }
   if (!key) return null;
+  if (prepared) {
+    const encrypted = prepared.encryptedCredentials[input.providerKind];
+    return encrypted === undefined ? null : decryptEnvironmentValue(key, encrypted);
+  }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
@@ -391,6 +404,27 @@ export async function loadOrganizationModelProviderApiKey(
       )
       .limit(1);
     return row ? decryptEnvironmentValue(key, row.credentialEncrypted) : null;
+  });
+}
+
+/** Execution metadata only, under the same tenant scope as the credential loader. */
+export async function getOrganizationModelProviderExecutionConnectionId(
+  db: Database,
+  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+): Promise<string | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.organizationModelProviderConnections.id })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row?.id ?? null;
   });
 }
 

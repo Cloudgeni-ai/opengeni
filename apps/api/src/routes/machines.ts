@@ -36,6 +36,7 @@ import {
   updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
@@ -64,6 +65,7 @@ import {
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { parseRequestJson } from "../http/request-body";
+import { requireFullAccessIfAgent } from "../http/acting-person";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -110,6 +112,30 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
+    if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(400, { message: "sessionId must be a UUID" });
+    }
+    if (sessionId) {
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.read",
+          surface: "http",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found", cause: error });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }
     const response = await listMachines(
       { db, settings },
       {
@@ -204,7 +230,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // caller's choices applied; PUT .../audience applies it in one transaction at
   // the previewed generation. The enrollment, sandbox ID, credentials and live
   // connection stay, so chats, schedules and the installed agent keep working.
-  // People decide this, not agents: an agent attempt is refused.
+  // A person decides this: in the app, through the API, or through an agent
+  // they gave their full access (admin access, a full-access connected agent),
+  // which acts as them. An agent acting as itself, or one with less than the
+  // person's full access, is refused: the change decides who else can use the
+  // machine.
   async function requireAudienceCaller(c: Context, workspaceId: string) {
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -216,9 +246,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertSelfhostedEnabled();
     if (grantHasAgentAttemptAuthority(grant)) {
       throw new HTTPException(403, {
-        message: "only a person can change who can use a machine",
+        message:
+          "only a person, or an agent they gave admin access acting as them, can change who can use a machine",
       });
     }
+    requireFullAccessIfAgent(c, "Changing who can use a machine");
     return grant;
   }
 
@@ -315,7 +347,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/privacy-settings ───────────
   // Open one macOS Privacy & Security pane on the connected Mac, so the person
-  // only flips the switch for OpenGeni. Opening a pane grants nothing.
+  // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -442,6 +474,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       subjectId: grant.subjectId,
     });
+    ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {
         db,

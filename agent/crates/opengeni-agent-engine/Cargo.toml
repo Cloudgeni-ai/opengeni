@@ -7,6 +7,7 @@ description = "Transport-agnostic op engine for the Opengeni Connected-Machine r
 
 [dependencies]
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

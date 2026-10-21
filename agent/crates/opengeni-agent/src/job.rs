@@ -113,6 +113,10 @@ pub enum JobCommand {
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
+    /// The consumer stored the result and released it (wire: `OpRelease`,
+    /// already checked against the terminal frame by the registry). Ends a
+    /// completed job's lingering collection; ignored while it still runs.
+    Release,
     /// Stop pumping and hand the job, untouched, to a successor process image
     /// (an in-place agent update). The reply carries everything needed to
     /// resume it, or `None` if the state could not be exported, in which case
@@ -262,6 +266,8 @@ pub struct JobExit {
     pub outcome: JobOutcome,
     /// Wall-clock job duration in milliseconds.
     pub duration_ms: u64,
+    /// Normal shell-exit cleanup stopped observed live child processes.
+    pub background_children_stopped: bool,
     /// stdout totals + digest.
     pub stdout: ChannelStats,
     /// stderr totals + digest.
@@ -273,6 +279,7 @@ impl JobExit {
         ExitRecord {
             outcome: self.outcome.clone(),
             duration_ms: self.duration_ms,
+            background_children_stopped: self.background_children_stopped,
             stdout_total: self.stdout.total_bytes,
             stdout_digest: self.stdout.digest.to_hex().to_string(),
             stderr_total: self.stderr.total_bytes,
@@ -286,6 +293,8 @@ impl JobExit {
 pub struct ExitRecord {
     outcome: JobOutcome,
     duration_ms: u64,
+    #[serde(default)]
+    background_children_stopped: bool,
     stdout_total: u64,
     stdout_digest: String,
     stderr_total: u64,
@@ -305,6 +314,7 @@ impl ExitRecord {
         Ok(JobExit {
             outcome: self.outcome.clone(),
             duration_ms: self.duration_ms,
+            background_children_stopped: self.background_children_stopped,
             stdout: ChannelStats {
                 total_bytes: self.stdout_total,
                 digest: digest(&self.stdout_digest)?,
@@ -346,6 +356,8 @@ pub struct JobState {
     stderr_total: u64,
     child_done: bool,
     child_code: i32,
+    #[serde(default)]
+    background_children_stopped: bool,
     pending_outcome: Option<JobOutcome>,
     /// Time the job had been running for.
     elapsed_ms: u64,
@@ -484,6 +496,7 @@ pub async fn run_job(
         child: Some(child),
         child_done: false,
         child_code: -1,
+        background_children_stopped: false,
         stdin,
         stdout,
         stderr,
@@ -622,6 +635,7 @@ pub async fn run_job_resumed(
         child,
         child_done: state.child_done,
         child_code: state.child_code,
+        background_children_stopped: state.background_children_stopped,
         stdin: StdinFeed::spawn(stdin_pipe, stdin.unwrap_or_default()),
         stdout,
         stderr,
@@ -798,6 +812,7 @@ enum Event {
 }
 
 /// The per-job pump state. One instance per job task; nothing is shared.
+#[allow(clippy::struct_excessive_bools)] // Cleanup evidence is independent of pump/transport progress.
 struct Pump {
     retention: RetentionLog,
     retention_config: RetentionConfig,
@@ -816,6 +831,7 @@ struct Pump {
     /// `None` only after the exec was handed to a successor.
     child: Option<ContainedExec>,
     child_done: bool,
+    background_children_stopped: bool,
     /// The child's exit code once `child_done` (`-1` for signal deaths,
     /// mirroring one-shot exec response semantics).
     child_code: i32,
@@ -889,6 +905,10 @@ impl Pump {
                 Event::ChildExit(Ok(status)) => {
                     self.child_done = true;
                     self.child_code = status.code().unwrap_or(-1);
+                    self.background_children_stopped = self
+                        .child
+                        .as_ref()
+                        .is_some_and(ContainedExec::background_children_stopped);
                 }
                 Event::ChildExit(Err(error)) => {
                     self.child_done = true;
@@ -942,6 +962,7 @@ impl Pump {
         let exit = JobExit {
             outcome,
             duration_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            background_children_stopped: self.background_children_stopped,
             stdout: ChannelStats {
                 total_bytes: self.stdout_total,
                 digest: self.stdout_hash.finalize(),
@@ -1047,6 +1068,11 @@ impl Pump {
                     completed.notify_one();
                 }
             }
+            JobCommand::Release => {
+                if self.exit_fence.is_some() {
+                    self.final_acked = true;
+                }
+            }
             JobCommand::Cancel => {
                 // Idempotent; once the child is done the natural result stands
                 // (the registry answers a late OpCancel with AlreadyComplete).
@@ -1130,6 +1156,7 @@ impl Pump {
             stderr_total: self.stderr_total,
             child_done: self.child_done,
             child_code: self.child_code,
+            background_children_stopped: self.background_children_stopped,
             pending_outcome: self.pending_outcome.clone(),
             elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             deadline_ms: self.deadline.map(|deadline| {
@@ -2614,13 +2641,23 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_lingering_job_hands_over_its_result() {
-        let mut job = job("echo done; exit 3").start();
+        let mut job = job("sleep 60 >/dev/null 2>&1 & echo done; exit 3").start();
         let (exit_seq, exit) = job.wait_exit().await;
+        assert!(exit.background_children_stopped);
         let exit_seq = exit_seq.expect("exit retained");
         let (reply, receipt) = oneshot::channel();
         job.send(JobCommand::Handover { reply }).await;
         let handover = timeout(WAIT, receipt).await.unwrap().unwrap().unwrap();
         assert!(handover.exec.is_none());
+        assert!(
+            handover
+                .state
+                .exit()
+                .unwrap()
+                .unwrap()
+                .1
+                .background_children_stopped
+        );
         assert_eq!(
             handover
                 .state

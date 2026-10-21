@@ -5,10 +5,11 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant, SiteDataDescribeResponse } from "@opengeni/contracts";
 import {
   createPostgresSiteDataStore,
-  getSiteDataAgentSession,
+  getSiteDataScheduledTaskId,
   getSiteDataSite,
   parseSiteDataPath,
   readSiteDataPath,
+  recordSitePlatformUsageInTransaction,
   recordUsageEvent,
   SiteDataError,
   type Database,
@@ -745,17 +746,21 @@ export function siteDataActor(grant: AccessGrant, subjectId: string | null): str
 const PERSONLESS_MANAGER_KINDS = new Set(["api_key", "configured_key", "service"]);
 
 /**
- * Managers may manage the Site's data, each with `artifacts:publish`: its
- * owner, a workspace admin, an agent acting for one of those people, or a
- * person-less workspace API key, configured key or service credential. A Site
- * without an owner is managed by its creator. An agent without a person (for
- * example a person-less scheduled task) is a viewer, whatever credential
- * started it. Agents whose session came from a Site page are clamped to that
- * Site's viewer rules in resolveSiteDataAccess.
+ * Managers may manage the Site's data and publication, each with
+ * `artifacts:publish`: any person in the workspace who can see the Site (its
+ * owner, a workspace admin or any other member with artifact publishing), an
+ * agent acting for one of those people, or a person-less workspace API key,
+ * configured key or service credential. Sites are shared, versioned work, like
+ * every other artifact, so a teammate can keep a Site someone else started
+ * running. Who can see a Site is still its audience: an "Only me" Site never
+ * reaches anyone but its owner. An agent without a person (for example a
+ * person-less scheduled task) is a viewer, whatever credential started it. A
+ * member agent's origin surface does not change this role, and a Site frame
+ * always gets viewer reach.
  */
 export function siteDataRole(
   grant: AccessGrant,
-  site: Pick<SiteDataSite, "ownerSubjectId" | "createdBySubjectId">,
+  _site: Pick<SiteDataSite, "ownerSubjectId" | "createdBySubjectId">,
   subjectId: string | null,
 ): "manager" | "viewer" {
   if (!hasPermission(grant.permissions, "artifacts:publish", grant.permissionMode)) return "viewer";
@@ -764,8 +769,7 @@ export function siteDataRole(
     return grant.principalKind !== undefined && PERSONLESS_MANAGER_KINDS.has(grant.principalKind)
       ? "manager"
       : "viewer";
-  const owner = site.ownerSubjectId ?? site.createdBySubjectId ?? null;
-  return owner !== null && owner === subjectId ? "manager" : "viewer";
+  return "manager";
 }
 
 export type SiteDataSurface = {
@@ -776,50 +780,86 @@ export type SiteDataSurface = {
 };
 
 /**
+ * A viewer of a published Site, resolved and authorized by site-runtime (the
+ * gateway-signed API): a signed-in person (`user:<subject>`) or an anonymous
+ * guest (`guest:<visitor>`). Always a framed viewer of exactly this Site;
+ * guests reach only what each collection's guest rule allows.
+ */
+export type PublishedSiteDataViewer = {
+  kind: "published_viewer";
+  accountId: string;
+  workspaceId: string;
+  site: SiteDataSite;
+  principal: string;
+  guest: boolean;
+};
+
+/** Who is calling Site Data: an access grant, or a published Site viewer. */
+export type SiteDataAuthority = AccessGrant | PublishedSiteDataViewer;
+
+function isPublishedViewer(authority: SiteDataAuthority): authority is PublishedSiteDataViewer {
+  return (authority as { kind?: unknown }).kind === "published_viewer";
+}
+
+function publishedViewerAccess(
+  deps: SiteDataDeps,
+  viewer: PublishedSiteDataViewer,
+  siteId: string,
+  surface: SiteDataSurface,
+): SiteDataAccess {
+  if (viewer.site.id !== siteId)
+    throw new SiteDataError("forbidden", "A Site can only use its own data");
+  if (surface.management)
+    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
+  if (viewer.site.status !== "active")
+    throw new SiteDataError("forbidden", "This Site is archived");
+  const caller: SiteDataCaller = {
+    accountId: viewer.accountId,
+    workspaceId: viewer.workspaceId,
+    siteId,
+    role: "viewer",
+    principal: viewer.principal,
+    actor: viewer.principal,
+    framed: true,
+    ...(viewer.guest ? { guest: true } : {}),
+  };
+  const subjectId = viewer.principal.startsWith("user:")
+    ? viewer.principal.slice("user:".length)
+    : null;
+  const limits = siteDataLimits(deps.settings);
+  return {
+    site: viewer.site,
+    caller,
+    subjectId,
+    store: siteDataStore(deps.db),
+    limits,
+    writeOptions: {
+      limits,
+      validate: validateSiteDataRecord,
+      afterWrite: (tx, summary) => meterSiteData(tx, viewer, caller, subjectId, "write", summary),
+    },
+  };
+}
+
+/**
  * Resolve the Site and caller. not_found when the caller cannot see the Site
  * (by audience); forbidden for an archived Site (viewers and Site frames) and
  * for management by anyone but a manager outside the Site frame.
  */
 export async function resolveSiteDataAccess(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  authority: SiteDataAuthority,
   siteId: string,
   surface: SiteDataSurface = {},
 ): Promise<SiteDataAccess> {
+  if (isPublishedViewer(authority)) return publishedViewerAccess(deps, authority, siteId, surface);
+  const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
-  // An agent whose session (or spawning lineage, root session, or current
-  // turn) came from a Site page acts for that page: it gets the same frame
-  // clamp as the page. A lineage that cannot be read in full fails closed:
-  // viewer reach on the one Site it names, or no Site Data at all.
   const agentIds = agentSessionIds(grant);
-  const agentSession = agentIds
-    ? await getSiteDataAgentSession(deps.db, scope, agentIds.sessionId, agentIds.turnId)
+  const scheduledTaskId = agentIds
+    ? await getSiteDataScheduledTaskId(deps.db, scope, agentIds.sessionId)
     : null;
-  const siteAgent =
-    agentSession !== null &&
-    (agentSession.originSiteIds.length > 0 || agentSession.siteTurn || !agentSession.complete);
-  if (siteAgent) {
-    const [origin, ...others] = agentSession.originSiteIds;
-    const knownSite = origin !== undefined && others.length === 0;
-    // A known Site origin limits the agent to that Site. Without exactly one
-    // known origin (a Site turn, or a lineage that could not be read in full)
-    // the agent reaches no Site Data.
-    if (!knownSite || origin !== siteId)
-      throw new SiteDataError(
-        "forbidden",
-        agentSession.complete || knownSite
-          ? "An agent started from a Site page can only use that Site's data"
-          : "This agent's session history could not be confirmed, so it cannot use Site Data",
-      );
-    if (surface.management)
-      throw new SiteDataError(
-        "forbidden",
-        agentSession.complete
-          ? "An agent started from a Site page cannot manage Site Data"
-          : "This agent's session history could not be confirmed, so it cannot manage Site Data",
-      );
-  }
-  const framed = siteAgent || (surface.frameSiteId !== undefined && surface.frameSiteId !== null);
+  const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
   if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
     throw new SiteDataError("forbidden", "A Site can only use its own data");
   const viewer = await siteViewerForGrant(deps.db, grant);
@@ -838,7 +878,7 @@ export async function resolveSiteDataAccess(
     workspaceId: grant.workspaceId,
     siteId,
     role,
-    principal: siteDataPrincipal(grant, viewer.subjectId, agentSession?.scheduledTaskId ?? null),
+    principal: siteDataPrincipal(grant, viewer.subjectId, scheduledTaskId),
     actor: siteDataActor(grant, viewer.subjectId),
     framed,
   };
@@ -861,11 +901,15 @@ export async function resolveSiteDataAccess(
 /**
  * Usage metering in `usage_only` mode (docs/credit-boundaries-rollout.md): the
  * workspace pays for viewer-triggered usage; events are recorded in the write
- * transaction and never debit credits until a reviewed rate is enabled.
+ * transaction and never debit credits until a reviewed rate is enabled. The
+ * workspace's Site storage level (Site SQL plus Site Data) is refreshed in
+ * its platform usage in the same transaction; any charge for it settles with
+ * the next platform usage the API meters (a Site SQL call or a gateway
+ * request report).
  */
 export async function meterSiteData(
   tx: Database,
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
   caller: SiteDataCaller,
   subjectId: string | null,
   kind: "write" | "upload",
@@ -879,6 +923,11 @@ export async function meterSiteData(
     sourceResourceType: "site",
     sourceResourceId: caller.siteId,
   };
+  await recordSitePlatformUsageInTransaction(
+    tx,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    { refreshStorage: true },
+  );
   if (kind === "upload") {
     await recordUsageEvent(tx, {
       ...common,

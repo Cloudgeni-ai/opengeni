@@ -226,7 +226,7 @@ describe("migration 0301 session list snapshot and pin visibility", () => {
     `;
     expect(pinPolicy?.permissive).toBe(false);
     expect(pinPolicy?.using).toContain("current_subject_id()");
-    expect(pinPolicy?.check).toContain("session_reference_visible");
+    expect(pinPolicy?.check).toMatch(/session_reference_visible|FROM sessions session_row/);
     expect(pinPolicy?.check).not.toContain("current_subject_id()");
   }, 180_000);
 

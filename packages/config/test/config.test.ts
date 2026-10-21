@@ -20,11 +20,15 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   getSettings,
+  calculateVoiceInputCost,
+  defaultVoiceInputPricing,
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
   McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
+  computeGatewayConfigured,
+  computeSettingsIssues,
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
@@ -115,6 +119,52 @@ describe("optional resource credits and verified signup trial", () => {
         getSettings(),
       ),
     ).toThrow("paid rates must be safe integers");
+  });
+});
+
+describe("deployment credit margin override", () => {
+  test("is unset by default and accepts the inclusive basis-point range", () => {
+    expect(withEnv({}, () => getSettings()).creditMarginBpsOverride).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(0);
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "10000" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(10_000);
+  });
+
+  test("rejects non-integer and out-of-range margins", () => {
+    for (const value of ["-1", "10001", "1.5", "not-a-number"]) {
+      expect(() =>
+        withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("overrides transcription list margins while preserving provider cost", () => {
+    const pricing = defaultVoiceInputPricing["gpt-transcribe"]!;
+    const usage = { kind: "duration" as const, seconds: 60 };
+    const unset = withEnv({}, () => getSettings());
+    const zero = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings());
+    const nonDefault = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "1000" }, () =>
+      getSettings(),
+    );
+
+    expect(calculateVoiceInputCost(pricing, usage)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_725,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, zero.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_500,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, nonDefault.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_950,
+    });
+    expect(unset.creditMarginBpsOverride).toBeUndefined();
   });
 });
 
@@ -588,14 +638,6 @@ describe("Google Drive integration settings", () => {
     expect(settings.googleDriveClientSecret).toBe("client-secret");
   });
 
-  test("keeps short MCP OAuth state issuance off until the callback reader is deployed", () => {
-    expect(withEnv({}, () => getSettings()).integrationsOauthShortStateEnabled).toBe(false);
-    expect(
-      withEnv({ OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "true" }, () => getSettings())
-        .integrationsOauthShortStateEnabled,
-    ).toBe(true);
-  });
-
   test("requires the Google OAuth client id and secret together", () => {
     expect(() =>
       withEnv(
@@ -1046,18 +1088,22 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
-describe("retired organization-tenancy activation switch", () => {
-  test("is accepted and ignored for any value so existing deployments keep booting", () => {
-    for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
-      const settings = withEnv(
-        value === undefined
-          ? {}
-          : { OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: value },
-        () => getSettings(),
-      );
-      expect(settings).not.toHaveProperty("organizationTenancyCanonicalActivationEnabled");
-    }
-  });
+describe("retired deployment switches", () => {
+  test.each([
+    [
+      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+      "organizationTenancyCanonicalActivationEnabled",
+    ],
+    ["OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED", "integrationsOauthShortStateEnabled"],
+  ])(
+    "%s is accepted and ignored for any value so existing deployments keep booting",
+    (name, key) => {
+      for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
+        const settings = withEnv(value === undefined ? {} : { [name]: value }, () => getSettings());
+        expect(settings).not.toHaveProperty(key);
+      }
+    },
+  );
 });
 
 describe("Temporal connection security", () => {
@@ -2422,6 +2468,23 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow();
   });
 
+  test("parses optional Modal region placement", () => {
+    expect(withEnv({}, () => getSettings()).modalRegions).toBeUndefined();
+    expect(withEnv({ OPENGENI_MODAL_REGIONS: "  " }, () => getSettings()).modalRegions).toBe(
+      undefined,
+    );
+    expect(withEnv({ OPENGENI_MODAL_REGIONS: "eu" }, () => getSettings()).modalRegions).toEqual([
+      "eu",
+    ]);
+    expect(
+      withEnv({ OPENGENI_MODAL_REGIONS: " US-East-1 , us-west-2" }, () => getSettings())
+        .modalRegions,
+    ).toEqual(["us-east-1", "us-west-2"]);
+    for (const invalid of ["eu,", "eu,eu", "eu west", "1eu"]) {
+      expect(() => withEnv({ OPENGENI_MODAL_REGIONS: invalid }, () => getSettings())).toThrow();
+    }
+  });
+
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {
     expect(withEnv({}, () => getSettings()).sandboxArtifactRuntimeEnabled).toBe(false);
     expect(
@@ -2472,6 +2535,34 @@ describe("backend-gated sandbox required-credential validation", () => {
         () => getSettings(),
       ),
     ).not.toThrow();
+  });
+
+  test("e2b connection: the domain is a host name, the addresses are URLs", () => {
+    const base = { OPENGENI_SANDBOX_BACKEND: "e2b", OPENGENI_E2B_API_KEY: "ek" };
+    const settings = withEnv(
+      {
+        ...base,
+        OPENGENI_E2B_DOMAIN: "sandboxes.example.com:8443",
+        OPENGENI_E2B_API_URL: "https://api.example.com",
+        OPENGENI_E2B_SANDBOX_URL: "https://envd.example.com",
+      },
+      () => getSettings(),
+    );
+    expect(settings.e2bDomain).toBe("sandboxes.example.com:8443");
+    expect(settings.e2bApiUrl).toBe("https://api.example.com");
+    expect(settings.e2bSandboxUrl).toBe("https://envd.example.com");
+    for (const domain of [
+      "https://sandboxes.example.com",
+      "sandboxes.example.com/x",
+      ".example.com",
+    ]) {
+      expect(() => withEnv({ ...base, OPENGENI_E2B_DOMAIN: domain }, () => getSettings())).toThrow(
+        "e2bDomain",
+      );
+    }
+    expect(() =>
+      withEnv({ ...base, OPENGENI_E2B_API_URL: "api.example.com" }, () => getSettings()),
+    ).toThrow("e2bApiUrl");
   });
 
   test("runloop/e2b/blaxel/cloudflare each gate their own single credential", () => {
@@ -2574,6 +2665,51 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow(
       "OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted",
     );
+  });
+
+  test("compute is validated only when selected and needs the gateway and relay", () => {
+    // Not selected: nothing compute-related is required.
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
+    ).not.toThrow();
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "compute" }, () => getSettings())).toThrow(
+      "OPENGENI_COMPUTE_API_URL is required",
+    );
+    const ready = {
+      OPENGENI_SANDBOX_BACKEND: "compute",
+      OPENGENI_COMPUTE_API_URL: "http://compute.test:8080",
+      OPENGENI_COMPUTE_API_KEY: "k",
+      OPENGENI_COMPUTE_LINK_URL: "wss://opengeni.test/v1/compute/agent-link",
+      OPENGENI_SELFHOSTED_RELAY_URL: "wss://relay.opengeni.test",
+      OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    };
+    const settings = withEnv(ready, () => getSettings());
+    expect(computeSettingsIssues(settings)).toEqual([]);
+    expect(computeGatewayConfigured(settings)).toBe(true);
+    expect(settings.computeVcpus).toBe(2);
+    expect(settings.computeMemoryMib).toBe(4096);
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_LINK_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_LINK_URL is required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_SELFHOSTED_RELAY_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_MEMORY_REQUEST_MIB: "8192" }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed");
+    const production = {
+      ...settings,
+      environment: "production" as const,
+      computeLinkUrl: "ws://opengeni.test/v1/compute/agent-link",
+    };
+    expect(
+      computeSettingsIssues(production).some((issue) => issue.includes("must use https")),
+    ).toBe(true);
+    expect(computeSettingsIssues(production).some((issue) => issue.includes("wss:// URL"))).toBe(
+      true,
+    );
+    // Modal stays the default and compute is never required by default.
+    expect(computeGatewayConfigured(withEnv({}, () => getSettings()))).toBe(false);
   });
 
   test("SANDBOX_REQUIRED_ENV + requiredSandboxEnvForBackend agree", () => {
@@ -2706,7 +2842,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(250_001);
-    expect(settings.sandboxIdleGraceMs).toBe(150_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
   });
 
   test("default rotation lead reserves the larger ordinary capture when drain timeout is shorter", () => {
@@ -2738,8 +2874,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       },
       () => getSettings(),
     );
-    // Derived strictly between the 150s idle grace and the 250.001s lead.
-    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+    // Derived strictly between the 60s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(155_000);
   });
 
   test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
@@ -2802,8 +2938,8 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         .sandboxIdleCommandContainmentMs,
     ).toBe(2_400_000);
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
-    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "60000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(60000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
     ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
@@ -2829,10 +2965,17 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
     // A derived window that cannot fit disables idle containment instead of
     // failing boot: these idle timeouts boot exactly as before.
+    // A long explicit idle grace leaves no room under these idle timeouts.
     for (const seconds of ["960", "1000"]) {
       expect(
-        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
-          .sandboxIdleCommandContainmentMs,
+        withEnv(
+          {
+            ...modal,
+            OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+            OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds,
+          },
+          () => getSettings(),
+        ).sandboxIdleCommandContainmentMs,
       ).toBeUndefined();
     }
     // Without an explicit idle timeout the hard lifetime governs and 30m fits.
@@ -3002,7 +3145,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       providerIdleTimeoutMs: null,
       rotationLeadMs: null,
     });
-    expect(settings.sandboxIdleGraceMs).toBe(900_000);
+    expect(settings.sandboxIdleGraceMs).toBe(60_000);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
   });
 

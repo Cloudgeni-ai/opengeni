@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type {
   PrReviewAppRegistration,
   PrReviewManagedGitHubSetup,
@@ -9,14 +10,14 @@ import { OpenGeniPrReviewClient } from "@opengeni/sdk/pr-review";
 import { BotIcon, CheckCircle2Icon, CopyIcon, Loader2Icon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
+import { Textarea } from "@opengeni/react/ui/textarea";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
@@ -165,7 +166,7 @@ export function PrReviewSetupCard(props: {
   const reviewModelRows = modelCatalog.rows.filter(
     (row) => row.billingClass === "opengeni_credits" || row.billingClass === "codex_subscription",
   );
-  const modelGroups = groupPickerRowsByBillingClass(reviewModelRows);
+  const modelGroups = groupPickerRowsByBillingClass(t, reviewModelRows);
   const defaultModel = context.clientConfig.defaultModel;
   const defaultModelRow = findPickerRow(reviewModelRows, defaultModel);
   const defaultModelLabel = defaultModelRow

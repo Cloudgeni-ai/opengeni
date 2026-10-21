@@ -38,6 +38,7 @@ import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@ope
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -112,25 +113,29 @@ export function NativeSessionScreen({
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
+  // not a queue, and no Steer to learn.
   return (
-    <NativeTimelineMessagesProvider messages={timelineMessages}>
-      <SessionScreenBody
-        controller={controller}
-        composer={composerSlots}
-        trailing={trailing}
-        topBar={topBar}
-        bottomInset={bottomInset}
-        keyboardBottomOffset={keyboardBottomOffset}
-        feedback={feedback}
-        humanInputMessages={humanInputMessages}
-        approvalMessages={approvalMessages}
-        client={client}
-        models={models}
-        renderComposer={renderComposer}
-        renderMessageActions={hostMessageActions}
-        {...timelineProps}
-      />
-    </NativeTimelineMessagesProvider>
+    <SingleSendWording enabled={controller.composer.singleSend === true}>
+      <NativeTimelineMessagesProvider messages={timelineMessages}>
+        <SessionScreenBody
+          controller={controller}
+          composer={composerSlots}
+          trailing={trailing}
+          topBar={topBar}
+          bottomInset={bottomInset}
+          keyboardBottomOffset={keyboardBottomOffset}
+          feedback={feedback}
+          humanInputMessages={humanInputMessages}
+          approvalMessages={approvalMessages}
+          client={client}
+          models={models}
+          renderComposer={renderComposer}
+          renderMessageActions={hostMessageActions}
+          {...timelineProps}
+        />
+      </NativeTimelineMessagesProvider>
+    </SingleSendWording>
   );
 }
 
@@ -272,6 +277,12 @@ function SessionScreenBody({
         value: composer.value,
         onChangeText: composer.setValue,
         onSend: () => void composer.send(),
+        // The other choice beside Send while the agent works: Queue when
+        // Send steers, Steer when Send queues.
+        alternateSend: composer.alternateSend ?? null,
+        ...(composer.sendAlternate
+          ? { onAlternateSend: () => void composer.sendAlternate?.() }
+          : {}),
         canSend: composer.canSend && !busy,
         sending: composer.sending,
         running: controller.runActive,
@@ -307,6 +318,7 @@ function SessionScreenBody({
             <QueueDock
               queue={queue}
               composer={composer}
+              singleSend={composer.singleSend === true}
               onComposerFocus={() => composerInput.current?.focus()}
               leading={
                 <SessionSignals
@@ -478,6 +490,7 @@ function StuckCard({
 
 /** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
 export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   if (attachments.attachments.length === 0) return null;
@@ -500,7 +513,11 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
             <View key={item.id} style={{ width: 56, height: 56 }}>
               <Pressable
                 accessibilityRole={failed ? "button" : "image"}
-                accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+                accessibilityLabel={
+                  failed
+                    ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                    : item.name
+                }
                 disabled={!failed}
                 onPress={() => void attachments.retry(item.id)}
                 style={{
@@ -543,7 +560,9 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
               </Pressable>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Remove ${item.name}`}
+                accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                  name: item.name,
+                })}
                 onPress={() => attachments.remove(item.id)}
                 hitSlop={8}
                 style={{
@@ -580,7 +599,11 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
           >
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+              accessibilityLabel={
+                failed
+                  ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                  : item.name
+              }
               disabled={!failed}
               onPress={() => void attachments.retry(item.id)}
               style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 }}
@@ -596,12 +619,14 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                 }}
               >
                 {item.name}
-                {failed ? " · tap to retry" : ""}
+                {failed ? t("native.timeline.sessionScreen.tapToRetrySuffix") : ""}
               </Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Remove ${item.name}`}
+              accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                name: item.name,
+              })}
               onPress={() => attachments.remove(item.id)}
               hitSlop={6}
               style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
@@ -621,8 +646,9 @@ function DraftConflictStrip(props: {
   onResolve: (choice: "keep_mine" | "use_remote") => void;
 }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const c = theme.colors;
-  const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const messages = { ...defaultChatComposerMessages(t), ...props.messages };
   const text = { ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] };
   return (
     <View

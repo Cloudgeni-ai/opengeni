@@ -9,6 +9,7 @@ import {
   type ParsedSessionUsageLimitReachedRefusal,
   type SessionUsageLimit,
 } from "@opengeni/sdk/session-usage-limits";
+import { type OpenGeniText } from "../messages/runtime";
 
 /** Share of the limit at which a quiet, dismissible near-limit notice appears. */
 export const SESSION_USAGE_LIMIT_NEAR_FRACTION = 0.8;
@@ -55,40 +56,40 @@ export type SessionUsageLimitLabels = {
   dismiss: string;
 };
 
-export const DEFAULT_SESSION_USAGE_LIMIT_LABELS: SessionUsageLimitLabels = {
-  title: "Usage limit",
-  explanation:
-    "API-equivalent model usage for this chat and its agents. In-progress requests may take usage above the limit.",
-  notYourBill:
-    "Estimated from model list prices, whoever pays for the model. It's not your bill and doesn't change your credits.",
-  noLimit: "No limit",
-  pauseAt: (limit) => `Pause at ${limit}`,
+export const DEFAULT_SESSION_USAGE_LIMIT_LABELS = (t: OpenGeniText): SessionUsageLimitLabels => ({
+  title: t("usage.sessionUsageLimit.usageLimit"),
+  explanation: t("usage.sessionUsageLimit.apiEquivalentModelUsageFor"),
+  notYourBill: t("usage.sessionUsageLimit.estimatedFromModelListPrices"),
+  noLimit: t("usage.sessionUsageLimit.noLimit"),
+  pauseAt: (limit) => t("usage.sessionUsageLimit.pauseAtLimit", { limit }),
   usedOfLimit: (used, limit) => `${used} of ${limit}`,
-  atLeastOfLimit: (used, limit) => `At least ${used} of ${limit}`,
+  atLeastOfLimit: (used, limit) => t("usage.sessionUsageLimit.atLeastUsedOfLimit", { used, limit }),
   used: (used) => `${used} used`,
-  atLeastUsed: (used) => `At least ${used} used`,
-  preparing: "Preparing usage",
-  unavailable: "Usage unavailable",
-  unpricedNote: "Some model usage has no known price, so it isn't counted.",
-  legacyNote: "This chat started before usage limits, so some earlier usage may be missing.",
-  preparingNote: "Earlier usage is still being counted. You can set a limit when it's ready.",
-  unavailableNote: "Couldn't read this chat's usage right now. A set limit still applies.",
-  staleNote: "Couldn't refresh, so this may be out of date. The limit still applies.",
-  reachedTitle: "Usage limit reached",
-  reachedAmount: (amount) => `${amount} API-equivalent model usage.`,
-  reachedRemedy: "Raise or remove the limit to continue.",
-  reachedGoalRemedy: "Raise or remove the limit, then resume the goal.",
-  reachedReadOnlyRemedy: "Someone who can run the main task can raise or remove its limit.",
-  near: (percent, amount) => `This task has used ${percent}% of its usage limit (${amount}).`,
-  changeLimit: "Change limit",
-  openMainTask: "Open main task",
-  dismiss: "Dismiss",
-};
+  atLeastUsed: (used) => t("usage.sessionUsageLimit.atLeastUsedUsed", { used }),
+  preparing: t("usage.sessionUsageLimit.preparingUsage"),
+  unavailable: t("usage.sessionUsageLimit.usageUnavailable"),
+  unpricedNote: t("usage.sessionUsageLimit.someModelUsageHasNo"),
+  legacyNote: t("usage.sessionUsageLimit.thisChatStartedBeforeUsage"),
+  preparingNote: t("usage.sessionUsageLimit.earlierUsageIsStillBeing"),
+  unavailableNote: t("usage.sessionUsageLimit.couldnTReadThisChat"),
+  staleNote: t("usage.sessionUsageLimit.couldnTRefreshSoThis"),
+  reachedTitle: t("usage.sessionUsageLimit.usageLimitReached"),
+  reachedAmount: (amount) => t("usage.sessionUsageLimit.amountApiEquivalentModelUsage", { amount }),
+  reachedRemedy: t("usage.sessionUsageLimit.raiseOrRemoveTheLimit"),
+  reachedGoalRemedy: t("usage.sessionUsageLimit.raiseOrRemoveTheLimit2"),
+  reachedReadOnlyRemedy: t("usage.sessionUsageLimit.someoneWhoCanRunThe"),
+  near: (percent, amount) =>
+    t("usage.sessionUsageLimit.thisTaskHasUsedPercent", { percent, amount }),
+  changeLimit: t("usage.sessionUsageLimit.changeLimit"),
+  openMainTask: t("usage.sessionUsageLimit.openMainTask"),
+  dismiss: t("usage.sessionUsageLimit.dismiss"),
+});
 
 export function sessionUsageLimitLabels(
+  t: OpenGeniText,
   overrides?: Partial<SessionUsageLimitLabels>,
 ): SessionUsageLimitLabels {
-  return { ...DEFAULT_SESSION_USAGE_LIMIT_LABELS, ...overrides };
+  return { ...DEFAULT_SESSION_USAGE_LIMIT_LABELS(t), ...overrides };
 }
 
 export type SessionUsageLimitState =
@@ -144,6 +145,7 @@ const UNKNOWN: SessionUsageLimitSummary = {
  * nothing rather than "No limit" or "$0".
  */
 export function summarizeSessionUsageLimit(
+  t: OpenGeniText,
   usage: SessionUsageLimit | null | undefined,
   overrides?: Partial<SessionUsageLimitLabels>,
   options?: {
@@ -155,17 +157,18 @@ export function summarizeSessionUsageLimit(
   },
 ): SessionUsageLimitSummary {
   if (!usage) return UNKNOWN;
-  const summary = summarizeFresh(usage, overrides);
+  const summary = summarizeFresh(t, usage, overrides);
   if (!options?.stale) return summary;
-  const labels = sessionUsageLimitLabels(overrides);
+  const labels = sessionUsageLimitLabels(t, overrides);
   return { ...summary, stale: true, notes: [...summary.notes, labels.staleNote] };
 }
 
 function summarizeFresh(
+  t: OpenGeniText,
   usage: SessionUsageLimit,
   overrides?: Partial<SessionUsageLimitLabels>,
 ): SessionUsageLimitSummary {
-  const labels = sessionUsageLimitLabels(overrides);
+  const labels = sessionUsageLimitLabels(t, overrides);
   const base = {
     inherited: usage.inherited,
     rootSessionId: usage.rootSessionId,
@@ -238,13 +241,14 @@ function summarizeFresh(
  * carries the amounts that applied when the server refused.
  */
 export function summarizeSessionUsageLimitRefusal(
+  t: OpenGeniText,
   refusal: Pick<
     ParsedSessionUsageLimitReachedRefusal,
     "limitMicros" | "usedMicros" | "rootSessionId"
   >,
   overrides?: Partial<SessionUsageLimitLabels>,
 ): SessionUsageLimitSummary {
-  const labels = sessionUsageLimitLabels(overrides);
+  const labels = sessionUsageLimitLabels(t, overrides);
   return {
     ...UNKNOWN,
     state: "reached",

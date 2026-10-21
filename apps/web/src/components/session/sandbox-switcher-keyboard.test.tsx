@@ -10,9 +10,9 @@ GlobalRegistrator.register();
 mock.module("@/lib/use-workspace-rigs", () => ({ useWorkspaceRigs: () => ({ rigs: [] }) }));
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { SessionRunsOnMenuBody } = await import("./sandbox-switcher");
+const { SessionRunsOnMenuBody, SessionMachinePickerAction } = await import("./sandbox-switcher");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
-  await import("@/components/ui/dropdown-menu");
+  await import("@opengeni/react/ui/dropdown-menu");
 
 let container: HTMLDivElement;
 let root: Root;
@@ -103,6 +103,43 @@ function row(name: string) {
   if (!result) throw new Error(`No menu radio named ${name}`);
   return result;
 }
+
+test("notice action opens the existing picker, keeps errors visible, and closes after a confirmed move", async () => {
+  let fail = true;
+  const move = mock(async () => (fail ? "Machine changed; refresh and try again." : null));
+  const value = runsOn();
+  value.activeMachine = null;
+  value.activeName = "Alex's machine";
+  value.machines = [
+    ...machines.slice(1),
+    { ...machines[2]!, sandboxId: "personal", name: "My laptop", scope: "user" },
+  ];
+  await act(async () =>
+    root.render(
+      <SessionMachinePickerAction
+        runsOn={value}
+        workspaceId="workspace"
+        rigId={null}
+        move={move}
+        queuedWork
+      />,
+    ),
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(document.body.textContent).not.toContain("My laptop");
+  const target = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((item) =>
+      item.textContent?.includes("Build machine"),
+    )!;
+  await act(async () => target().click());
+  expect(move).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("Machine changed");
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  fail = false;
+  await act(async () => target().click());
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
 
 test("existing chat machine choices participate in menu focus, skip offline, and stay open on selection", async () => {
   const value = runsOn();

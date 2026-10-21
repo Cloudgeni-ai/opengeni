@@ -13,6 +13,9 @@ import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-
 import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
 import { LightboxProvider, useLightboxOptional } from "../src/timeline/screenshot-lightbox";
 import { registerDom } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -486,7 +489,7 @@ describe("ChatComposer attachments", () => {
       />,
     );
 
-    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText));
     expect(container.textContent ?? "").toContain("preserved.png");
     expect(container.querySelector('[aria-label="Remove preserved.png"]')).not.toBeNull();
     expect(sendButton(container)?.disabled).toBe(false);
@@ -576,7 +579,7 @@ describe("ChatComposer attachments", () => {
     );
 
     expect(container.textContent ?? "").toContain(
-      "Couldn’t attach this file because Opengeni is open over HTTP.",
+      "Couldn’t attach this file because this page is open over HTTP.",
     );
     expect(container.textContent ?? "").toContain(
       "Open the secure site or configure HTTPS for this deployment.",

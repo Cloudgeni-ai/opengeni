@@ -2,18 +2,32 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 import { RetainedArtifactReferenceSchema } from "./retained-output";
+import { WorkspaceArtifactVisibility } from "./artifacts";
+import { FileAccess } from "./file-access";
 
 /**
- * Channel-A currently returns one bounded binary-safe read. Keep publication
+ * Largest publishable sandbox file: one object-storage PUT. Files up to
+ * SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES are read through Channel-A; larger
+ * files are hashed and uploaded by the box itself.
+ */
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
+
+/**
+ * Channel-A returns one bounded binary-safe read. Keep inline publication
  * below that ceiling so an extra sentinel byte can distinguish an exact file
  * from a truncated prefix.
  */
-export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export const SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES = 25 * 1024 * 1024 - 1;
 
 export const PublishSandboxFileArtifactRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       path: z.string().min(1).max(4_096),
+      /**
+       * Who can open the published file. Omitted: the chat's own audience
+       * (Only me in an Only me chat, else the workspace).
+       */
+      visibility: WorkspaceArtifactVisibility.optional(),
     })
     .strict(),
 );
@@ -30,6 +44,8 @@ export const SandboxFileArtifactReceipt = /* @__PURE__ */ defineSchema(() =>
       sandboxPath: z.string().min(1).max(4_096),
       filename: z.string().min(1).max(1_024),
       artifact: RetainedArtifactReferenceSchema,
+      /** Who can open the file. Absent from receipts made before files had audiences. */
+      access: FileAccess.optional(),
     })
     .strict()
     .superRefine((value, context) => {

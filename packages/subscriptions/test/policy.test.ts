@@ -17,9 +17,12 @@ import {
   mapReasoningLevel,
   modelPermitted,
   quotaCapacity,
+  quotaBlockClaim,
   quotaObservationApplies,
+  quotaAfterRateLimitReset,
   rankConnections,
   spreadHash,
+  storedQuotaDocument,
   type Ineligibility,
   type PlacementInput,
   type SubscriptionConnection,
@@ -740,6 +743,48 @@ describe("shared quota model", () => {
     ).toEqual({ kind: "unknown" });
   });
 
+  test("a confirmed rate-limit reset invalidates stale exhausted windows and the stored deadline", () => {
+    const weeklyReset = NOW + 5 * 86_400_000;
+    // The stored reading says the weekly window is spent until next week.
+    const stale = quota({
+      windows: [
+        { id: "primary", usedPercent: 40, resetsAt: NOW + 3_600_000, status: "ok" },
+        { id: "secondary", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+      ],
+      modelCooldowns: { "codex/spark": NOW + 60_000 },
+      exhaustedUntil: weeklyReset,
+      exhaustedKind: "quota",
+      exhaustedClaim: { until: weeklyReset, observedAt: NOW - 1_000, windowIds: ["secondary"] },
+    });
+    expect(quotaCapacity(stale, NOW)).toEqual({ kind: "exhausted", resetsAt: weeklyReset });
+
+    const reset = quotaAfterRateLimitReset(stale, NOW);
+    expect(quotaCapacity(reset, NOW)).toEqual({ kind: "unknown" });
+    expect(reset).toMatchObject({
+      windows: [
+        { id: "primary", usedPercent: null, resetsAt: null, status: "unknown" },
+        { id: "secondary", usedPercent: null, resetsAt: null, status: "unknown" },
+      ],
+      // Model cooldowns are not rate-limit windows.
+      modelCooldowns: { "codex/spark": NOW + 60_000 },
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      observedAt: NOW,
+      observedRefreshGeneration: 1,
+    });
+    expect(reset.exhaustedClaim).toBeUndefined();
+    expect(storedQuotaDocument(reset).exhaustedClaim).toBeUndefined();
+    // A usage reading fetched before the reset no longer replaces it.
+    expect(
+      applyQuotaObservation(
+        { refreshGeneration: 1, quota: reset },
+        { ...stale, observedAt: NOW - 1 },
+      ),
+    ).toBe(reset);
+    // Nothing left to invalidate: unchanged.
+    expect(quotaAfterRateLimitReset(reset, NOW + 1)).toBe(reset);
+  });
+
   test("SUB-ELIG-06: an observation from an older credential generation never replaces the current quota", () => {
     const current = quota({ observedAt: NOW - 100, observedRefreshGeneration: 2 });
     const stale = quota({
@@ -1241,6 +1286,15 @@ describe("explicit choices, personal fallback and explained waits", () => {
   });
 
   test("SUB-ACCESS-06, SUB-SEL-04: an explicit choice that can never serve says so; one that can recover waits for it (D-24)", () => {
+    const disabled = input({
+      connections: [connection("codex-1", "codex", { allocatorEnabled: false })],
+      session: { binding: explicit("codex-1") },
+    });
+    expect(decidePlacement(disabled)).toEqual({
+      kind: "wait",
+      reason: "pinned_account_disabled",
+      earliestResetAt: null,
+    });
     const outOfScope = connection("codex-elsewhere", "codex", {
       ownership: {
         kind: "shared",
@@ -1576,6 +1630,98 @@ describe("quota freshness and observations", () => {
         { ...partial, observedRefreshGeneration: 2 },
       )!.windows,
     ).toEqual(partial.windows);
+  });
+
+  test("a block keeps a claim only while every observation that set its deadline explained it", () => {
+    const until = NOW + 60_000;
+    const claim = (windowIds: string[], at = NOW - 1_000, deadline = until) => ({
+      until: deadline,
+      observedAt: at,
+      windowIds,
+    });
+    const claimed = quota({
+      observedAt: NOW - 1_000,
+      modelCooldowns: { "claude/a": until },
+      modelCooldownClaims: { "claude/a": claim(["five_hour"]) },
+      exhaustedUntil: until,
+      exhaustedKind: "quota",
+      exhaustedClaim: claim(["seven_day"]),
+    });
+    // Equal deadlines from two explained refusals: the window ids are joined.
+    const again = quota({
+      observedAt: NOW,
+      source: "response_headers",
+      modelCooldowns: { "claude/a": until },
+      modelCooldownClaims: { "claude/a": claim(["seven_day_opus"], NOW) },
+      exhaustedUntil: until,
+      exhaustedKind: "quota",
+      exhaustedClaim: claim(["five_hour"], NOW),
+    });
+    const joined = applyQuotaObservation({ refreshGeneration: 1, quota: claimed }, again)!;
+    expect(quotaBlockClaim(joined, "claude/a")).toEqual(
+      claim(["five_hour", "seven_day_opus"], NOW),
+    );
+    expect(quotaBlockClaim(joined, null)).toEqual(claim(["seven_day", "five_hour"], NOW));
+
+    // An unexplained refusal with the same deadline drops the claim.
+    const unexplained = quota({
+      observedAt: NOW,
+      source: "response_headers",
+      modelCooldowns: { "claude/a": until },
+      exhaustedUntil: until,
+      exhaustedKind: "quota",
+    });
+    const dropped = applyQuotaObservation({ refreshGeneration: 1, quota: claimed }, unexplained)!;
+    expect(dropped.modelCooldowns).toEqual({ "claude/a": until });
+    expect(quotaBlockClaim(dropped, "claude/a")).toBeNull();
+    expect(quotaBlockClaim(dropped, null)).toBeNull();
+    expect(dropped.modelCooldownClaims).toBeUndefined();
+    expect(dropped.exhaustedClaim).toBeUndefined();
+
+    // A later unexplained deadline replaces the block, and its claim with it.
+    const longer = applyQuotaObservation(
+      { refreshGeneration: 1, quota: claimed },
+      quota({
+        observedAt: NOW,
+        source: "response_headers",
+        modelCooldowns: { "claude/a": until + 1 },
+      }),
+    )!;
+    expect(longer.modelCooldowns).toEqual({ "claude/a": until + 1 });
+    expect(quotaBlockClaim(longer, "claude/a")).toBeNull();
+    // An earlier observation does not decide the kept deadline: its claim stands.
+    const kept = applyQuotaObservation(
+      { refreshGeneration: 1, quota: claimed },
+      quota({
+        observedAt: NOW,
+        source: "usage_endpoint",
+        modelCooldowns: { "claude/a": until - 1 },
+      }),
+    )!;
+    expect(quotaBlockClaim(kept, "claude/a")).toEqual(claim(["five_hour"]));
+
+    // A claim tied to another deadline, or naming no window, explains nothing.
+    const mismatched = quota({
+      modelCooldowns: { "claude/a": until, "claude/b": until },
+      modelCooldownClaims: {
+        "claude/a": claim(["five_hour"], NOW, until + 1),
+        "claude/b": claim([]),
+        "claude/c": claim(["five_hour"]),
+      },
+      exhaustedUntil: until,
+      exhaustedClaim: claim(["seven_day"], NOW, until - 1),
+    });
+    expect(quotaBlockClaim(mismatched, "claude/a")).toBeNull();
+    expect(quotaBlockClaim(mismatched, "claude/b")).toBeNull();
+    expect(quotaBlockClaim(mismatched, "claude/c")).toBeNull();
+    expect(quotaBlockClaim(mismatched, null)).toBeNull();
+    const stored = storedQuotaDocument(mismatched);
+    expect("modelCooldownClaims" in stored).toBe(false);
+    expect("exhaustedClaim" in stored).toBe(false);
+    expect(storedQuotaDocument(claimed)).toMatchObject({
+      modelCooldownClaims: { "claude/a": claim(["five_hour"]) },
+      exhaustedClaim: claim(["seven_day"]),
+    });
   });
 });
 

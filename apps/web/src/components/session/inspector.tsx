@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
@@ -16,11 +17,15 @@ import { toast } from "sonner";
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
 import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
 import { sessionSandboxLabel } from "@/components/session/sandbox-switcher";
-import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Select } from "@/components/ui/select";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
+import { ScrollArea } from "@opengeni/react/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@opengeni/react/ui/tabs";
+import { Select } from "@opengeni/react/ui/select";
 import { useAppContext } from "@/context";
 import { eventDisplayLabel, isTerminalSessionStatus } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
@@ -41,7 +46,7 @@ export function SessionInspector(props: {
 }) {
   const startupDetails = useStartupDetails();
   const startupPhases = useMemo(
-    () => buildTimeline(props.events).filter((item) => item.kind === "startup-phase"),
+    () => buildTimeline(t, props.events).filter((item) => item.kind === "startup-phase"),
     [props.events],
   );
   const context = useAppContext();
@@ -138,7 +143,7 @@ export function SessionInspector(props: {
       ? fleet.loading
         ? "Checking…"
         : "Unavailable"
-      : sessionSandboxLabel(props.session.sandboxBackend);
+      : sessionSandboxLabel(t, props.session.sandboxBackend);
   const displayEvents = props.events;
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
@@ -240,7 +245,7 @@ export function SessionInspector(props: {
                 />
                 <InfoRow
                   label="Effort"
-                  value={labelReasoningEffort(props.session.reasoningEffort)}
+                  value={labelReasoningEffort(t, props.session.reasoningEffort)}
                 />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />

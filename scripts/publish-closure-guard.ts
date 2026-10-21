@@ -356,9 +356,12 @@ if (
   failures.push("@opengeni/connect must remain dependency-free and framework-neutral.");
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
-if (reactPeerDependencies["@opengeni/artifact-tool"] !== "^1.0.0") {
+// The peer follows the lockstep major: a Version PR may legitimately cut a new
+// major, and changesets then moves this range to `^<major>.0.0`.
+const artifactToolMajor = String(readPkg("packages/artifact-tool").version ?? "").split(".")[0];
+if (reactPeerDependencies["@opengeni/artifact-tool"] !== `^${artifactToolMajor}.0.0`) {
   failures.push(
-    `@opengeni/react must expose the lockstep @opengeni/artifact-tool 1.x line as a compatible peer.`,
+    `@opengeni/react must expose the lockstep @opengeni/artifact-tool ${artifactToolMajor}.x line as a compatible peer.`,
   );
 }
 const reactPeerMetadata = (
@@ -433,6 +436,36 @@ function compiledTarget(sourceTarget: string, kind: "runtime" | "types"): string
   return `./dist/${stem}${kind === "types" ? ".d.ts" : ".js"}`;
 }
 
+/**
+ * A subpath pattern export ("./ui/*" -> "./src/ui/*.tsx") publishes every
+ * matching source module (tests and fixtures excluded). Return the concrete
+ * package-relative source targets so each one's compiled output is checked.
+ */
+function expandSourcePattern(pkgDir: string, sourceTarget: string): string[] {
+  const [prefix, suffix = ""] = sourceTarget.split("*") as [string, string?];
+  const root = join(repoRoot, pkgDir, dirname(`${prefix}x`));
+  const matches: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      const relative = `./${path
+        .slice(join(repoRoot, pkgDir).length + 1)
+        .split("\\")
+        .join("/")}`;
+      if (!relative.startsWith(prefix) || !relative.endsWith(suffix)) continue;
+      const match = relative.slice(prefix.length, relative.length - suffix.length);
+      if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;
+      matches.push(relative);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return matches.sort();
+}
+
 function assertBuiltExportTargets(pkg: WorkspacePackage): void {
   const exports = (pkg.packageJson as PackageJson & { exports?: Record<string, unknown> }).exports;
   if (!exports || typeof exports !== "object") return;
@@ -453,12 +486,20 @@ function assertBuiltExportTargets(pkg: WorkspacePackage): void {
     }
 
     for (const target of targets) {
-      const compiled = compiledTarget(target.source, target.kind);
-      if (!compiled) continue;
-      if (!existsSync(join(repoRoot, pkg.dir, compiled))) {
-        failures.push(
-          `${pkg.name} export ${subpath} compiles from ${target.source} but is missing ${compiled}.`,
-        );
+      const sources = target.source.includes("*")
+        ? expandSourcePattern(pkg.dir, target.source)
+        : [target.source];
+      if (target.source.includes("*") && sources.length === 0) {
+        failures.push(`${pkg.name} export ${subpath} matches no source module.`);
+      }
+      for (const source of sources) {
+        const compiled = compiledTarget(source, target.kind);
+        if (!compiled) continue;
+        if (!existsSync(join(repoRoot, pkg.dir, compiled))) {
+          failures.push(
+            `${pkg.name} export ${subpath} compiles from ${source} but is missing ${compiled}.`,
+          );
+        }
       }
     }
   }
@@ -777,6 +818,7 @@ if (existsSync(sdkDistDir)) {
     "realtime.js",
     "codex-realtime-controller.js",
     "gateway-realtime-transport.js",
+    "realtime-websocket-transport.js",
   ].map((entry) => join(sdkDistDir, entry));
   const { externalImports, files } = await builtRuntimeClosure(nonArtifactSdkEntries);
   for (const [imported, sourcePath] of externalImports) {

@@ -24,6 +24,14 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
   {
+    pattern: /^\/v1\/site-auth\//,
+    reason: "signing a person in to a published Site, from their own signed-in browser",
+  },
+  {
+    pattern: /^\/v1\/site-runtime(\/|$)/,
+    reason: "published Site gateway calls, signed by the gateway",
+  },
+  {
     pattern: /^\/v1\/native-app\//,
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
@@ -38,13 +46,12 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
+  {
+    pattern: /^\/v1\/office\/workbook-tickets$/,
+    reason: "the Office add-in connecting its own workbook socket",
+  },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
-  {
-    pattern: /^\/v1\/workspaces\/:workspaceId\/machines\/:enrollmentId\/audience(\/preview)?$/,
-    reason:
-      "who can use a connected machine is decided by a person on the Machines page or through the API; agents are refused",
-  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {
@@ -100,6 +107,15 @@ export type RegisteredRoute = { method: string; path: string };
  */
 export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
   {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vault-providers\/connections$/,
+    request: "InstallVaultProviderRequest",
+  },
+  {
+    pattern:
+      /^PUT \/v1\/workspaces\/:workspaceId\/vault-providers\/connections\/:connectionId\/credentials$/,
+    request: "ReplaceVaultProviderCredentialsRequest",
+  },
+  {
     pattern:
       /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
     request: "ModelConnectionAccessPolicy",
@@ -144,6 +160,24 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   {
     pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
     request: "SessionControlRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
+    request: "UpsertSitePublicationRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
+    request: "SitePublishWarningFix",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
+    request: "SiteTakedownRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
+    request: "SiteLimitProfile",
   },
 ];
 

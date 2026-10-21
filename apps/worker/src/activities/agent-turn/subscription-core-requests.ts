@@ -2,8 +2,9 @@
  * Request custody for a chat turn on the shared subscription core, for any
  * provider (generalized from the M3 Codex custody; Codex binds it in
  * `codex-core-requests.ts` under the names it shipped). A physical request
- * is reserved before network I/O and settled once; an unknown outcome is
- * never replayed automatically.
+ * is reserved before network I/O and settled once. An unknown outcome is
+ * never replayed within the attempt; failure settlement recovers the turn
+ * only when the unknown request is this attempt's own and settled.
  */
 import { SubscriptionCoreError } from "@opengeni/db";
 
@@ -236,7 +237,8 @@ type CoreLanes = {
 /**
  * The terminal unknown-outcome failure of a core turn, or null: an earlier or
  * own request whose outcome is unknown (the error chain carries the core's
- * code, or the main lane observed one) is never replayed automatically.
+ * code, or the main lane observed one). Settlement consults this only after
+ * this attempt's own interrupted request was not recoverable.
  * Tool-less title requests never enter history and do not fence main recovery.
  */
 export function coreRequestOutcomeUnknownFailure(

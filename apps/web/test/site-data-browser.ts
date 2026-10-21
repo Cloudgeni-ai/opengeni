@@ -5,7 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 import { freePort, startProcess } from "@opengeni/testing";
 
-const port = await freePort();
+const port = Number(process.env.OPENGENI_SITE_DATA_PORT) || (await freePort());
 const baseUrl = `http://127.0.0.1:${port}`;
 const output = process.env.OPENGENI_SITE_DATA_SCREENSHOTS ?? "/workspace/.agent/site-data";
 await mkdir(output, { recursive: true });
@@ -52,6 +52,7 @@ try {
     await tab.click();
     const contacts = page.getByRole("button", { name: /contacts/ });
     await contacts.first().waitFor();
+    await page.getByRole("switch", { name: "SQL database" }).waitFor();
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     assert.equal(await overflow(), false, "overview has no horizontal overflow");
     await page.screenshot({ path: `${output}/data-overview-${width}.png`, animations: "disabled" });

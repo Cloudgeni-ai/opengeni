@@ -26,6 +26,10 @@ import {
 import { type ModelProviderApi, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
+import {
+  isContextCompactionInterruption,
+  settleContextCompactionInterruption,
+} from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
   TurnActivityServices as ActivityServices,
@@ -439,20 +443,22 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       attemptId: input.attemptId,
     });
     if (!pending) return null;
-    if (
-      !(await eventing.settle({
-        events: [
-          {
-            type: "turn.superseded",
-            payload: { reason: "steer", deferredUntilCompaction: true },
-          },
-          { type: "session.status.changed", payload: { status: "queued" } },
-        ],
-        turnStatus: "superseded",
-        sessionStatus: "queued",
-        activeTurnId: null,
-      }))
-    ) {
+    const settled = await eventing.settle({
+      events: [
+        {
+          type: "turn.superseded",
+          payload: { reason: "steer", deferredUntilCompaction: true },
+        },
+        { type: "session.status.changed", payload: { status: "queued" } },
+      ],
+      turnStatus: "superseded",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      requirePendingSteer: true,
+    });
+    // Withdrawn between the read and the locked settlement: keep working.
+    if (settled === "pending_steer_withdrawn") return null;
+    if (!settled) {
       return claimedResult({ status: "cancelled" });
     }
     // Metrics currently group user-directed supersession with cancellation;
@@ -509,6 +515,24 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         // `compaction.started` may already be live — settle skipped before
         // failing the turn so the timeline cannot stick on Compacting…
         const landmark = await settleFailedContextCompactionLandmark(
@@ -692,6 +716,24 @@ export async function runPostAgentCompaction(
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         const landmark = await settleFailedContextCompactionLandmark(
           db,
           {
@@ -863,6 +905,21 @@ export async function runPostAgentCompaction(
     } catch (compactError) {
       if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
       if (compactError instanceof TurnAttemptFencedError) throw compactError;
+      if (isContextCompactionInterruption(compactError, cancellationSignal)) {
+        await settleContextCompactionInterruption(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: input.attemptId,
+          },
+          { publishLiveEvents: publishCompactionLiveEvents, observability },
+        );
+        throw compactError;
+      }
       const landmark = await settleFailedContextCompactionLandmark(
         db,
         {
@@ -883,6 +940,7 @@ export async function runPostAgentCompaction(
       const deferredSteer = await settleDeferredSteerAfterCompaction();
       if (deferredSteer) return { exit: deferredSteer };
       observability.error("context compaction failed", {
+        error: compactError,
         sessionId: input.sessionId,
         turnId: attempt.turnId,
         ...safeErrorDiagnostic(compactError),

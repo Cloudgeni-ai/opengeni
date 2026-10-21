@@ -6,6 +6,7 @@ import postcss, {
   parse,
   type AcceptedPlugin,
   type AtRule,
+  type ChildNode,
   type Declaration,
   type Rule,
 } from "postcss";
@@ -344,6 +345,42 @@ function tailwindInitializerRule(declarations: readonly Declaration[]): string {
   return `${selectors} {\n${body}\n}`;
 }
 
+/**
+ * Removes cascade layers without changing which rule wins. In the browser,
+ * layers apply in their declared order and every unlayered rule beats every
+ * layered one, so a plain flattening in source order would let a base reset
+ * that comes later override an unlayered component rule of equal
+ * specificity. Top-level layered rules therefore go first, in layer order,
+ * and the unlayered rules keep their own order after them.
+ */
+export function flattenLayers(root: ReturnType<typeof parse>): void {
+  const order: string[] = [];
+  const add = (name: string) => {
+    if (!order.includes(name)) order.push(name);
+  };
+  root.each((node) => {
+    if (node.type !== "atrule" || node.name !== "layer") return;
+    for (const name of node.params.split(",")) add(name.trim());
+  });
+  const layered = new Map<string, ChildNode[]>();
+  root.each((node) => {
+    if (node.type !== "atrule" || node.name !== "layer") return;
+    const name = node.params.trim();
+    if (node.nodes && !name.includes(",")) {
+      const nodes = layered.get(name) ?? [];
+      nodes.push(...node.nodes.map((child) => child.clone()));
+      layered.set(name, nodes);
+    }
+    node.remove();
+  });
+  root.prepend(...order.flatMap((name) => layered.get(name) ?? []));
+  // Layers nested in other at-rules (rare) stay in place.
+  root.walkAtRules("layer", (atRule) => {
+    if (atRule.nodes) atRule.replaceWith(...atRule.nodes);
+    else atRule.remove();
+  });
+}
+
 function removeEmptyContainers(root: ReturnType<typeof parse>): void {
   let removed = true;
   while (removed) {
@@ -397,10 +434,7 @@ export function scopeSelectors(css: string): string {
     for (const selector of unique.values()) parsed.append(selector);
     rule.selector = parsed.toString();
   });
-  root.walkAtRules("layer", (atRule) => {
-    if (atRule.nodes) atRule.replaceWith(...atRule.nodes);
-    else atRule.remove();
-  });
+  flattenLayers(root);
   removeEmptyContainers(root);
   root.prepend(
     ...parse(

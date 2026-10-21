@@ -62,12 +62,12 @@
       "kind": "startup-phase",
       "id": "aaaaaaaa-0000-4000-8000-000000000008-queue",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
-      "occurredAt": "2026-01-02T13:00:08.000Z",
+      "occurredAt": "2026-01-02T13:00:14.000Z",
       "phase": "queue",
       "status": "complete",
-      "startedAt": "2026-01-02T13:00:08.000Z",
+      "startedAt": "2026-01-02T13:00:14.000Z",
       "completedAt": "2026-01-02T13:00:15.000Z",
-      "durationMs": 7000,
+      "durationMs": 1000,
       "outcome": null
     },
     {
@@ -112,12 +112,12 @@
       "kind": "startup-phase",
       "id": "aaaaaaaa-0000-4000-8000-000000000007-queue",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
-      "occurredAt": "2026-01-02T13:00:06.000Z",
+      "occurredAt": "2026-01-02T13:00:18.000Z",
       "phase": "queue",
       "status": "complete",
-      "startedAt": "2026-01-02T13:00:06.000Z",
+      "startedAt": "2026-01-02T13:00:18.000Z",
       "completedAt": "2026-01-02T13:00:19.000Z",
-      "durationMs": 13000,
+      "durationMs": 1000,
       "outcome": null
     },
     {
@@ -221,7 +221,7 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000008",
       "outcome": "complete",
-      "startedAt": "2026-01-02T13:00:08.000Z",
+      "startedAt": "2026-01-02T13:00:14.000Z",
       "endedAt": "2026-01-02T13:00:18.000Z",
       "groupCount": 1,
       "groups": [
@@ -239,12 +239,12 @@
               "kind": "startup-phase",
               "id": "aaaaaaaa-0000-4000-8000-000000000008-queue",
               "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
-              "occurredAt": "2026-01-02T13:00:08.000Z",
+              "occurredAt": "2026-01-02T13:00:14.000Z",
               "phase": "queue",
               "status": "complete",
-              "startedAt": "2026-01-02T13:00:08.000Z",
+              "startedAt": "2026-01-02T13:00:14.000Z",
               "completedAt": "2026-01-02T13:00:15.000Z",
-              "durationMs": 7000,
+              "durationMs": 1000,
               "outcome": null
             },
             {
@@ -300,12 +300,12 @@
           "kind": "startup-phase",
           "id": "aaaaaaaa-0000-4000-8000-000000000007-queue",
           "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
-          "occurredAt": "2026-01-02T13:00:06.000Z",
+          "occurredAt": "2026-01-02T13:00:18.000Z",
           "phase": "queue",
           "status": "complete",
-          "startedAt": "2026-01-02T13:00:06.000Z",
+          "startedAt": "2026-01-02T13:00:18.000Z",
           "completedAt": "2026-01-02T13:00:19.000Z",
-          "durationMs": 13000,
+          "durationMs": 1000,
           "outcome": null
         },
         {

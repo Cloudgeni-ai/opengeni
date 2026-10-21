@@ -113,13 +113,16 @@ describe("scheduled existing-session authorization", () => {
   });
 
   test("accepts only a revivable matching target and fails closed otherwise", async () => {
-    spyOn(db, "getSlackInteractionSessionAccessForSession").mockResolvedValue(null);
-    spyOn(db, "getSessionAuthorityProjection").mockResolvedValue({
-      sessionId: targetSessionId,
-      rootSessionId: targetSessionId,
-      visibility: "workspace_shared",
-      ownerSubjectId: null,
-    });
+    spyOn(db, "getSessionAuthorizationFacts").mockResolvedValue({
+      target: {
+        sessionId: targetSessionId,
+        rootSessionId: targetSessionId,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
+        slackAccess: null,
+      },
+      caller: null,
+    } as unknown as db.SessionAuthorizationFacts);
     const lookup = spyOn(db, "getSession").mockResolvedValue(baseSession);
     await expect(
       validateScheduledTaskTarget({

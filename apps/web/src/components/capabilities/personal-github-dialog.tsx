@@ -1,7 +1,7 @@
 import { CheckIcon, LockIcon, SearchIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -9,9 +9,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
 import type {
   PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositoryCatalogItem,

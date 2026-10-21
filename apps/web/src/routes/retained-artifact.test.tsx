@@ -24,9 +24,24 @@ let loadError: Error | null = new OpenGeniApiError(
   { correlationId: "corr-test-404" },
 );
 
+let fileAsset: Record<string, unknown> | null = null;
+const updateFileVisibility = mock(
+  async (_workspaceId: string, _fileId: string, request: { visibility: string }) => ({
+    file: { ...fileAsset, scope: request.visibility === "private" ? "personal" : "workspace" },
+  }),
+);
+
 const context = {
   accessKeyVersion: 0,
+  workspaces: [{ id: workspaceId, accountId: "acct-1", kind: "shared", name: "Design" }],
+  managedSelfContext: null,
+  accessContext: {
+    subjectId: "user-owner",
+    workspaceGrants: [{ workspaceId, permissions: ["files:read", "files:upload"] }],
+  },
   client: {
+    updateFileVisibility,
+    getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
     createVideoArtifactPlaybackSource: playback,
     createRetainedArtifactDownloadUrl: async () => ({
       url: "https://media.example/image.png",
@@ -53,7 +68,7 @@ const context = {
         },
       };
     },
-    getFile: async () => null,
+    getFile: async () => fileAsset,
   },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
@@ -66,7 +81,7 @@ beforeAll(() => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-async function renderRoute(embedded = false) {
+async function renderRoute(embedded = false, initialEntry = "/") {
   const { RetainedArtifactRoute } = await import("./retained-artifact");
   const route = createRootRoute({
     component: () => (
@@ -79,7 +94,7 @@ async function renderRoute(embedded = false) {
   });
   const router = createRouter({
     routeTree: route,
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
   const container = document.createElement("div");
   document.body.append(container);
@@ -94,6 +109,7 @@ async function renderRoute(embedded = false) {
   });
   return {
     container,
+    router,
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -167,7 +183,7 @@ test("generated video opens the browser player without generic byte download", a
   HTMLAnchorElement.prototype.click = function () {
     opened.push(this.href);
   };
-  const rendered = await renderRoute();
+  const rendered = await renderRoute(false, "/?browse=true");
   try {
     const button = [...rendered.container.querySelectorAll("button")].find(
       (item) => item.textContent === "Open video",
@@ -180,6 +196,32 @@ test("generated video opens the browser player without generic byte download", a
     await rendered.unmount();
     HTMLAnchorElement.prototype.click = originalClick;
     artifactKind = "generated_image";
+  }
+});
+
+test("a link opens a previewable file full screen; Back shows its page", async () => {
+  artifactId = missingUuid;
+  artifactKind = "generated_image";
+  loadError = null;
+  const rendered = await renderRoute();
+  const fullView = () => document.body.querySelector("[data-artifact-fullscreen]");
+  const button = (root: ParentNode, label: string) =>
+    [...root.querySelectorAll("button")].find((item) => item.textContent?.trim() === label);
+  try {
+    expect(fullView()).not.toBeNull();
+    expect(fullView()!.querySelector("img")?.getAttribute("src")).toBe(
+      "https://media.example/image.png",
+    );
+    expect(button(fullView()!, "Download")).toBeDefined();
+    await act(async () => button(fullView()!, "Back")!.click());
+    expect(fullView()).toBeNull();
+    expect(rendered.router.state.location.search).toEqual({ browse: true });
+    expect(rendered.container.textContent).toContain("Artifacts");
+    await act(async () => button(rendered.container, "Full screen")!.click());
+    expect(fullView()).not.toBeNull();
+    expect(rendered.router.state.location.search).toEqual({});
+  } finally {
+    await rendered.unmount();
   }
 });
 
@@ -228,5 +270,94 @@ test("transient retained-file failures keep retry without raw API prefix", async
     expect(rendered.container.textContent).not.toContain("Opengeni API");
   } finally {
     await rendered.unmount();
+  }
+});
+
+test("someone else's private file explains it is private without naming it", async () => {
+  artifactId = missingUuid;
+  loadError = new OpenGeniApiError(
+    403,
+    JSON.stringify({ artifactId: missingUuid, available: false, reason: "private" }),
+    { correlationId: "corr-private" },
+  );
+  const rendered = await renderRoute();
+  try {
+    expect(rendered.container.textContent).toContain("This file is private");
+    expect(rendered.container.textContent).toContain("Ask them to share it with the workspace.");
+    expect(rendered.container.textContent).not.toContain("Artifact unavailable");
+    expect(rendered.container.textContent).not.toContain("Retry");
+    expect(rendered.container.textContent).toContain("Artifacts");
+  } finally {
+    await rendered.unmount();
+    loadError = null;
+  }
+});
+
+test("a file's owner sees Only me and can share it with the workspace", async () => {
+  artifactId = missingUuid;
+  artifactKind = "file";
+  loadError = null;
+  fileAsset = {
+    id: missingUuid,
+    workspaceId,
+    filename: "report.pdf",
+    scope: "personal",
+    ownerSubjectId: "user-owner",
+  };
+  updateFileVisibility.mockClear();
+  const rendered = await renderRoute(false, "/?browse=true");
+  const button = (label: string) =>
+    [...document.body.querySelectorAll("button")].find((item) =>
+      item.textContent?.trim().endsWith(label),
+    );
+  try {
+    expect(rendered.container.textContent).toContain("report.pdf");
+    expect(rendered.container.textContent).toContain("Only me");
+    await act(async () => button("Share with workspace")!.click());
+    expect(document.body.textContent).toContain("Share “report.pdf” with Design?");
+    const confirm = [
+      ...document.body.querySelectorAll<HTMLButtonElement>(
+        "[role=alertdialog] button, [role=dialog] button",
+      ),
+    ].find((item) => item.textContent?.trim() === "Share with workspace");
+    await act(async () => {
+      confirm!.click();
+      await Promise.resolve();
+    });
+    expect(updateFileVisibility).toHaveBeenCalledWith(workspaceId, missingUuid, {
+      visibility: "workspace",
+    });
+    expect(rendered.container.textContent).toContain("Workspace");
+  } finally {
+    await rendered.unmount();
+    fileAsset = null;
+    artifactKind = "generated_image";
+  }
+});
+
+test("someone else's shared file shows Workspace without a share control", async () => {
+  artifactId = missingUuid;
+  artifactKind = "file";
+  loadError = null;
+  fileAsset = {
+    id: missingUuid,
+    workspaceId,
+    filename: "notes.txt",
+    scope: "workspace",
+    ownerSubjectId: "someone-else",
+  };
+  const rendered = await renderRoute(false, "/?browse=true");
+  try {
+    expect(rendered.container.textContent).toContain("Workspace");
+    expect(rendered.container.textContent).not.toContain("Share with workspace");
+    expect(
+      rendered.container.querySelector(
+        "[aria-label^='Who can open this file: Workspace. Everyone in Design']",
+      ),
+    ).not.toBeNull();
+  } finally {
+    await rendered.unmount();
+    fileAsset = null;
+    artifactKind = "generated_image";
   }
 });

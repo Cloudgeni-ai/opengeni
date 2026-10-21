@@ -285,6 +285,8 @@ export async function resolveDefaultSessionModelForSelections(
     selections: readonly WorkspaceModelSelection[];
     /** Already-read organization defaults; read here when omitted. */
     organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
+    /** Request-local ledger snapshot, shared with the catalog's funding projection. */
+    creditBalance?: BillingBalance;
   },
 ): Promise<DefaultModelSelection> {
   const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
@@ -308,7 +310,7 @@ export async function resolveDefaultSessionModelForSelections(
   ) {
     return withoutCredits;
   }
-  const creditBalance = await getBillingBalance(db, input.accountId);
+  const creditBalance = input.creditBalance ?? (await getBillingBalance(db, input.accountId));
   return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
@@ -573,6 +575,17 @@ export async function resolveCallerWorkspaceModelSelections(
       observeAvailability: options.observeAvailability === true,
     }),
   );
+}
+
+/**
+ * Catalog membership only: true while the workspace still lists the model,
+ * selectable or not. Retired and removed models are not listed.
+ */
+export function workspaceCatalogListsModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): boolean {
+  return findSelection(selections, modelId) !== undefined;
 }
 
 /** Transient selectability for existing consumers; not fresh-create admission. */

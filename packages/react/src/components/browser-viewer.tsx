@@ -81,6 +81,7 @@ import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./b
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { BrowserSelectControl } from "./browser-select-control";
 import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** Auto-ending a lost attached-device browser: bounded retries for transient failures only. */
 const STALE_BROWSER_END_MAX_ATTEMPTS = 3;
@@ -183,6 +184,7 @@ export function BrowserViewer({
   browserExtensionSetupUrl,
   ...override
 }: BrowserViewerProps) {
+  const t = useOpenGeniText();
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled });
   const onlineAttachedBridges = useMemo(
@@ -344,7 +346,9 @@ export function BrowserViewer({
         const response = await resumeSession(session.id, operationId);
         if (response.operation.state !== "completed") {
           throw Object.assign(
-            new Error(response.operation.error?.message ?? "Browser could not reopen."),
+            new Error(
+              response.operation.error?.message ?? t("browserViewer.browserCouldNotReopen2"),
+            ),
             { terminal: true },
           );
         }
@@ -363,10 +367,10 @@ export function BrowserViewer({
         };
         resumeAttemptsRef.current.set(session.id, failed);
         setResumeAttempt({ sessionId: session.id, attempt: failed });
-        notifyError(error, "Could not reopen this browser.");
+        notifyError(error, t("browserViewer.couldNotReopenThisBrowser"));
       }
     },
-    [notifyError, resumeSession],
+    [notifyError, resumeSession, t],
   );
 
   useEffect(() => {
@@ -406,10 +410,10 @@ export function BrowserViewer({
       seenInterventionIdsRef.current.add(intervention.id);
       onNotify?.({
         kind: "info",
-        message: `${interventionTitle(intervention)}: ${intervention.reason}`,
+        message: `${interventionTitle(t, intervention)}: ${intervention.reason}`,
       });
     }
-  }, [interventions.interventions, onNotify]);
+  }, [interventions.interventions, onNotify, t]);
 
   const resolveIntervention = useCallback(
     (intervention: InteractionIntervention, outcome: "completed" | "dismissed") => {
@@ -422,12 +426,14 @@ export function BrowserViewer({
           onNotify?.({
             kind: "info",
             message:
-              outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
+              outcome === "completed"
+                ? t("browserViewer.agentNotifiedContinuingWork")
+                : t("browserViewer.requestCancelled"),
           });
         })
-        .catch((cause) => notifyError(cause, "Could not update the browser request."));
+        .catch((cause) => notifyError(cause, t("browserViewer.couldNotUpdateTheBrowser")));
     },
-    [interventions, notifyError, onNotify],
+    [interventions, notifyError, onNotify, t],
   );
   const frames = useBrowserFrameStream({
     ...override,
@@ -558,11 +564,14 @@ export function BrowserViewer({
       const response = await downloads.saveToWorkspace(downloadId, destinationPath, { overwrite });
       onNotify?.({
         kind: "info",
-        message: `${response.download.filename} saved to ${response.destinationPath}.`,
+        message: t("browserViewer.filenameSavedToDestinationpath", {
+          filename: response.download.filename,
+          destinationPath: response.destinationPath,
+        }),
       });
       return response;
     },
-    [downloads, onNotify],
+    [downloads, onNotify, t],
   );
 
   useEffect(() => {
@@ -611,13 +620,15 @@ export function BrowserViewer({
       if (choice.kind === "profile" && (!identity || identity.status !== "active")) {
         onNotify?.({
           kind: "error",
-          message: "This browser profile is no longer available. Refresh and choose another.",
+          message: t("browserViewer.thisBrowserProfileIsNo"),
         });
         return;
       }
       const device = choice.kind === "attached" ? choice.device : null;
       const browserName =
-        device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
+        device?.profileLabel ??
+        device?.name ??
+        (identity ? `${identity.name} browser` : t("browserViewer.browser"));
       setCreating(true);
       void (async () => {
         let linkedComputer: Pick<ComputerSession, "id" | "placement"> | null = null;
@@ -671,11 +682,11 @@ export function BrowserViewer({
         if (computerViewUnavailable) {
           onNotify?.({
             kind: "info",
-            message: "Browser opened. Desktop view is unavailable on this placement.",
+            message: t("browserViewer.browserOpenedDesktopViewIs"),
           });
         }
       })()
-        .catch((cause) => notifyError(cause, "Could not open a browser."))
+        .catch((cause) => notifyError(cause, t("browserViewer.couldNotOpenABrowser")))
         .finally(() => setCreating(false));
     },
     [
@@ -687,6 +698,7 @@ export function BrowserViewer({
       selectBrowserSession,
       profiles.identities,
       sessionId,
+      t,
     ],
   );
 
@@ -734,18 +746,24 @@ export function BrowserViewer({
           kind: "info",
           message:
             response.outcome === "saved_as_default"
-              ? `${response.identity.name} version ${response.revision.ordinal} saved for future browsers.`
-              : `${response.identity.name} version ${response.revision.ordinal} saved. Another version remains the default.`,
+              ? t("browserViewer.nameVersionOrdinalSavedFor", {
+                  name: response.identity.name,
+                  ordinal: response.revision.ordinal,
+                })
+              : t("browserViewer.nameVersionOrdinalSavedAnother", {
+                  name: response.identity.name,
+                  ordinal: response.revision.ordinal,
+                }),
         });
         return true;
       } catch (cause) {
-        notifyError(cause, "Could not save this browser profile.");
+        notifyError(cause, t("browserViewer.couldNotSaveThisBrowser"));
         return false;
       } finally {
         setSavingProfile(false);
       }
     },
-    [browser, notifyError, onNotify, profiles, registry, savingProfile, selectedProfile],
+    [browser, notifyError, onNotify, profiles, registry, savingProfile, selectedProfile, t],
   );
 
   const updateProfile = useCallback(
@@ -766,26 +784,31 @@ export function BrowserViewer({
           )?.ordinal;
           onNotify?.({
             kind: "info",
-            message: `${response.identity.name}${ordinal ? ` version ${ordinal}` : ""} will open by default in future browsers.`,
+            message: ordinal
+              ? t("browserViewer.nameVersionOpensByDefault", {
+                  name: response.identity.name,
+                  ordinal,
+                })
+              : t("browserViewer.nameOpensByDefault", { name: response.identity.name }),
           });
         } else if (update.status === "archived") {
           onNotify?.({
             kind: "info",
-            message: `${response.identity.name} hidden from new browsers. Existing browsers are unchanged.`,
+            message: t("browserViewer.nameHiddenFromNewBrowsers", { name: response.identity.name }),
           });
         } else if (update.status === "active") {
           onNotify?.({ kind: "info", message: `${response.identity.name} restored.` });
         }
         return true;
       } catch (cause) {
-        notifyError(cause, "Could not update this browser profile.");
+        notifyError(cause, t("browserViewer.couldNotUpdateThisBrowser"));
         await profiles.refresh().catch(() => undefined);
         return false;
       } finally {
         setSavingProfile(false);
       }
     },
-    [notifyError, onNotify, profileHistory?.revisions, profiles, savingProfile],
+    [notifyError, onNotify, profileHistory?.revisions, profiles, savingProfile, t],
   );
 
   if (!enabled) return null;
@@ -793,7 +816,7 @@ export function BrowserViewer({
     return (
       <BrowserNotice
         icon={<LoaderCircleIcon className="animate-spin" />}
-        text="Finding browsers…"
+        text={t("browserViewer.findingBrowsers")}
         {...(className ? { className } : {})}
       />
     );
@@ -815,13 +838,13 @@ export function BrowserViewer({
             <>
               <p className="mt-3 text-og-menu font-medium text-og-fg">
                 {attachedGenerationLoss
-                  ? "Chrome reconnected—open a fresh browser/desktop."
-                  : "No browser open"}
+                  ? t("browserViewer.chromeReconnectedOpenAFresh")
+                  : t("browserViewer.noBrowserOpen")}
               </p>
               <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
                 {attachedGenerationLoss
-                  ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
-                  : "A browser appears here when this agent—or another agent in the workspace—opens one."}
+                  ? t("browserViewer.thisChromeProfileIsLive")
+                  : t("browserViewer.aBrowserAppearsHereWhen")}
               </p>
             </>
           )}
@@ -886,7 +909,7 @@ export function BrowserViewer({
         onOpen={(intervention) =>
           void browser
             .selectTarget(intervention.targetId)
-            .catch((cause) => notifyError(cause, "Could not open the requested browser tab."))
+            .catch((cause) => notifyError(cause, t("browserViewer.couldNotOpenTheRequested")))
         }
         onResolve={resolveIntervention}
       />
@@ -915,17 +938,17 @@ export function BrowserViewer({
             onSelect={(targetId) =>
               void browser
                 .selectTarget(targetId)
-                .catch((cause) => notifyError(cause, "Could not switch tabs."))
+                .catch((cause) => notifyError(cause, t("browserViewer.couldNotSwitchTabs")))
             }
             onClose={(targetId) =>
               void browser
                 .closeTarget(targetId)
-                .catch((cause) => notifyError(cause, "Could not close the tab."))
+                .catch((cause) => notifyError(cause, t("browserViewer.couldNotCloseTheTab")))
             }
             onOpen={() =>
               void browser
                 .openTarget(HUMAN_BROWSER_HOME_URL)
-                .catch((cause) => notifyError(cause, "Could not open a tab."))
+                .catch((cause) => notifyError(cause, t("browserViewer.couldNotOpenATab")))
             }
           />
           <BrowserAddressBar
@@ -934,7 +957,7 @@ export function BrowserViewer({
             onNavigate={(url) =>
               void browser
                 .act({ type: "navigate", url })
-                .catch((cause) => notifyError(cause, "Could not navigate."))
+                .catch((cause) => notifyError(cause, t("browserViewer.couldNotNavigate")))
             }
             onHistory={async (direction) => {
               try {
@@ -948,7 +971,9 @@ export function BrowserViewer({
               } catch (cause) {
                 notifyError(
                   cause,
-                  direction === "back" ? "Could not go back." : "Could not go forward.",
+                  direction === "back"
+                    ? t("browserViewer.couldNotGoBack")
+                    : t("browserViewer.couldNotGoForward"),
                 );
               }
             }}
@@ -957,24 +982,25 @@ export function BrowserViewer({
               if (url)
                 void browser
                   .act({ type: "navigate", url })
-                  .catch((cause) => notifyError(cause, "Could not reload."));
+                  .catch((cause) => notifyError(cause, t("browserViewer.couldNotReload")));
             }}
           />
           {browser.inputFailure ? (
             <div
               role="alert"
-              aria-label="Browser input status"
+              aria-label={t("browserViewer.browserInputStatus")}
               className="flex shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-3 py-2 text-og-xs"
             >
               <CircleAlertIcon className="size-4 shrink-0 text-og-status-failed" />
               <div className="min-w-0 flex-1">
                 <span className="font-medium">
                   {browser.inputFailure.state === "failed"
-                    ? "Browser input failed"
-                    : "Input result unknown"}
+                    ? t("browserViewer.browserInputFailed")
+                    : t("browserViewer.inputResultUnknown")}
                 </span>
                 <p className="text-og-fg-subtle">
-                  {browser.inputFailure.error?.message ?? "Inspect the page before continuing."}
+                  {browser.inputFailure.error?.message ??
+                    t("browserViewer.inspectThePageBeforeContinuing")}
                 </p>
               </div>
               <button
@@ -982,7 +1008,7 @@ export function BrowserViewer({
                 onClick={() => void browser.refresh()}
                 className="shrink-0 rounded border border-og-border px-2 py-1 transition hover:bg-og-surface-2"
               >
-                Check browser
+                {t("browserViewer.checkBrowser")}
               </button>
             </div>
           ) : null}
@@ -1009,7 +1035,7 @@ export function BrowserViewer({
               controlUnavailable={controlUnavailable}
               observation={browser.observation}
               mutating={browser.mutating || savingProfile}
-              activityLabel={savingProfile ? "Saving browser version…" : undefined}
+              activityLabel={savingProfile ? t("browserViewer.savingBrowserVersion") : undefined}
               clipboardEnabled={browser.session?.capabilities.clipboard === true}
               inputBatchAttachment={frames.attachment}
               onAction={async (action, frame) => {
@@ -1032,7 +1058,9 @@ export function BrowserViewer({
                     )
                   : await browser.act(action);
                 if (receipt.state !== "completed") {
-                  throw new Error(receipt.error?.message ?? "Browser input did not complete.");
+                  throw new Error(
+                    receipt.error?.message ?? t("browserViewer.browserInputDidNotComplete"),
+                  );
                 }
                 return receipt;
               }}
@@ -1053,15 +1081,15 @@ export function BrowserViewer({
               }
               reconnectLabel={
                 selectedChromeGenerationLoss && replacementChromeDevice
-                  ? "Open a fresh Connected Chrome"
+                  ? t("browserViewer.openAFreshConnectedChrome")
                   : undefined
               }
               reconnectMessage={
                 selectedChromeGenerationLoss
-                  ? "Chrome reconnected—open a fresh browser/desktop."
+                  ? t("browserViewer.chromeReconnectedOpenAFresh")
                   : undefined
               }
-              onError={(cause) => notifyError(cause, "Browser input failed.")}
+              onError={(cause) => notifyError(cause, t("browserViewer.browserInputFailed2"))}
             />
             {diagnosticsView ? (
               <BrowserDiagnosticsDrawer
@@ -1114,21 +1142,22 @@ function BrowserLifecyclePanel(props: {
   attempt: BrowserResumeAttempt | null;
   onResume: () => void;
 }) {
+  const t = useOpenGeniText();
   const failed = props.attempt?.error ?? null;
   const label = failed
-    ? "Browser could not reopen"
+    ? t("browserViewer.browserCouldNotReopen")
     : props.session.lifecycle === "suspending"
-      ? "Saving browser state…"
+      ? t("browserViewer.savingBrowserState")
       : props.session.lifecycle === "restoring" || props.attempt?.running
-        ? "Opening browser…"
+        ? t("browserViewer.openingBrowser")
         : props.session.lifecycle === "starting"
-          ? "Starting browser…"
-          : "Browser is sleeping";
+          ? t("browserViewer.startingBrowser")
+          : t("browserViewer.browserIsSleeping");
   const detail = failed
     ? failed.message
     : props.session.lifecycle === "suspended"
-      ? "Its private state is saved. Opening it creates a fresh, isolated browser process."
-      : "The browser will reconnect here when it is ready.";
+      ? t("browserViewer.itsPrivateStateIsSaved")
+      : t("browserViewer.theBrowserWillReconnectHere");
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
@@ -1147,7 +1176,7 @@ function BrowserLifecyclePanel(props: {
             onClick={props.onResume}
             className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover"
           >
-            Open browser
+            {t("browserViewer.openBrowser")}
           </button>
         ) : null}
       </div>
@@ -1182,6 +1211,7 @@ function BrowserToolbar(props: {
   onRefresh: () => void;
   setupUrl?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
@@ -1195,7 +1225,9 @@ function BrowserToolbar(props: {
       <details ref={detailsRef} className="min-w-0">
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <Globe2Icon className="size-3.5 shrink-0 text-og-fg-muted" />
-          <span className="truncate font-medium">{selected?.name ?? "Browser"}</span>
+          <span className="truncate font-medium">
+            {selected?.name ?? t("browserViewer.browser")}
+          </span>
           {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
             <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
           ) : null}
@@ -1204,7 +1236,7 @@ function BrowserToolbar(props: {
         <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
           <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
             <BrowserSessionGroup
-              label="Current agent"
+              label={t("browserViewer.currentAgent")}
               sessions={current}
               identities={props.identities}
               selectedId={props.selectedSessionId}
@@ -1212,7 +1244,7 @@ function BrowserToolbar(props: {
               onSelect={choose}
             />
             <BrowserSessionGroup
-              label="Workspace browsers"
+              label={t("browserViewer.workspaceBrowsers")}
               sessions={others}
               identities={props.identities}
               selectedId={props.selectedSessionId}
@@ -1222,16 +1254,16 @@ function BrowserToolbar(props: {
           </div>
           <div className="mt-1 flex shrink-0 gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
-              <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
+              <MenuButton onClick={props.onFollow}>{t("browserViewer.followAgent")}</MenuButton>
             ) : null}
             <MenuButton onClick={() => props.onCreate()} disabled={props.creating}>
-              <PlusIcon className="size-3.5" /> New browser
+              <PlusIcon className="size-3.5" /> {t("browserViewer.newBrowser")}
             </MenuButton>
           </div>
         </div>
       </details>
       <span className="min-w-0 flex-1 truncate text-og-xs text-og-fg-subtle">
-        {placementLabel(selected)}
+        {placementLabel(t, selected)}
       </span>
       <BrowserProfileMenu
         session={selected ?? null}
@@ -1248,7 +1280,7 @@ function BrowserToolbar(props: {
         type="button"
         onClick={props.onRefresh}
         className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
-        aria-label="Refresh browsers"
+        aria-label={t("browserViewer.refreshBrowsers")}
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
       </button>
@@ -1272,6 +1304,7 @@ function BrowserUnselectedPanel(props: {
   creating: boolean;
   onCreate: () => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
@@ -1281,12 +1314,16 @@ function BrowserUnselectedPanel(props: {
         {props.unavailableBrowser ? (
           <BrowserUnavailableNotice session={props.unavailableBrowser} />
         ) : (
-          <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+          <p className="mt-3 text-og-menu font-medium text-og-fg">
+            {t("browserViewer.noBrowserForThisAgent")}
+          </p>
         )}
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {props.peerCount === 1
-            ? "One workspace browser is available from the browser menu."
-            : `${props.peerCount} workspace browsers are available from the browser menu.`}
+            ? t("browserViewer.oneWorkspaceBrowserIsAvailable")
+            : t("browserViewer.peercountWorkspaceBrowsersAreAvailable", {
+                peerCount: props.peerCount,
+              })}
         </p>
         <button
           type="button"
@@ -1295,7 +1332,7 @@ function BrowserUnselectedPanel(props: {
           className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <PlusIcon className="size-3.5" />
-          {props.creating ? "Opening…" : "New browser"}
+          {props.creating ? t("browserViewer.opening") : t("browserViewer.newBrowser")}
         </button>
       </div>
     </div>
@@ -1303,21 +1340,24 @@ function BrowserUnselectedPanel(props: {
 }
 
 function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
+  const t = useOpenGeniText();
   const reason =
     session.failureCode === "provider_deadline_rotation"
-      ? "The computer running it reached its time limit."
+      ? t("browserViewer.theComputerRunningItReached")
       : session.failureCode === "source_placement_changed"
-        ? "This chat moved to another computer."
+        ? t("browserViewer.thisChatMovedToAnother")
         : session.failureCode === "idle_released"
-          ? "It stopped after it went unused."
+          ? t("browserViewer.itStoppedAfterItWent")
           : session.lifecycle === "failed"
-            ? "It stopped unexpectedly."
-            : "The connection to it was lost.";
+            ? t("browserViewer.itStoppedUnexpectedly")
+            : t("browserViewer.theConnectionToItWas");
   return (
     <div role="status">
-      <p className="mt-3 text-og-menu font-medium text-og-fg">Browser unavailable</p>
+      <p className="mt-3 text-og-menu font-medium text-og-fg">
+        {t("browserViewer.browserUnavailable")}
+      </p>
       <p className="mt-1 break-words text-og-control leading-5 text-og-fg-muted">
-        {session.name}. {reason} Open a new browser to continue.
+        {t("browserViewer.nameReasonOpenANew", { name: session.name, reason })}
       </p>
     </div>
   );
@@ -1331,6 +1371,7 @@ function BrowserSessionGroup(props: {
   interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
 }) {
+  const t = useOpenGeniText();
   if (props.sessions.length === 0) return null;
   return (
     <div className="py-1">
@@ -1344,7 +1385,7 @@ function BrowserSessionGroup(props: {
           <button
             key={session.id}
             type="button"
-            aria-label={`${session.name}${identity ? ` · ${identity.name}` : ""} · ${placementLabel(session)}`}
+            aria-label={`${session.name}${identity ? ` · ${identity.name}` : ""} · ${placementLabel(t, session)}`}
             aria-pressed={session.id === props.selectedId}
             onClick={() => props.onSelect(session.id)}
             className={cn(
@@ -1362,7 +1403,7 @@ function BrowserSessionGroup(props: {
               <span className="block truncate text-og-control text-og-fg">{session.name}</span>
               <span className="block truncate text-og-xs text-og-fg-subtle">
                 {identity ? `${identity.name} · ` : ""}
-                {placementLabel(session)}
+                {placementLabel(t, session)}
               </span>
             </span>
             {interventionCount > 0 ? (
@@ -1388,6 +1429,7 @@ function BrowserLaunchMenu(props: {
   setupUrl?: string | undefined;
   prominent?: boolean;
 }) {
+  const t = useOpenGeniText();
   const detailsRef = useViewerMenuDismiss();
   const choose = (choice?: BrowserLaunchChoice) => {
     detailsRef.current?.removeAttribute("open");
@@ -1412,14 +1454,14 @@ function BrowserLaunchMenu(props: {
             : "grid size-7 place-items-center rounded-og-sm",
           busy && "pointer-events-none opacity-50",
         )}
-        aria-label="New browser"
+        aria-label={t("browserViewer.newBrowser")}
       >
         {busy ? (
           <LoaderCircleIcon className="size-3.5 animate-spin" />
         ) : (
           <PlusIcon className="size-3.5" />
         )}
-        {props.prominent ? "New browser" : null}
+        {props.prominent ? t("browserViewer.newBrowser") : null}
         {props.prominent ? <ChevronDownIcon className="size-3" /> : null}
       </summary>
       <div
@@ -1431,7 +1473,7 @@ function BrowserLaunchMenu(props: {
         {props.attachedDevices.length > 0 || props.attachedBridges.length > 0 ? (
           <div className="pb-1">
             <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
-              Connected Chrome
+              {t("browserViewer.connectedChrome")}
             </p>
             {props.attachedDevices.map((device) => (
               <button
@@ -1446,8 +1488,10 @@ function BrowserLaunchMenu(props: {
                     {device.profileLabel ?? device.name}
                   </span>
                   <span className="block truncate text-og-xs text-og-fg-subtle">
-                    {device.browserName} · {device.tabCount} open{" "}
-                    {device.tabCount === 1 ? "tab" : "tabs"}
+                    {t("browserViewer.openTabs", {
+                      browserName: device.browserName,
+                      count: device.tabCount,
+                    })}
                   </span>
                 </span>
                 <span className="size-1.5 shrink-0 rounded-full bg-og-status-running" />
@@ -1466,11 +1510,11 @@ function BrowserLaunchMenu(props: {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-og-control text-og-fg">
                       {props.attachedDevices.length > 0
-                        ? "Connect another Chrome profile"
-                        : "Connect this Chrome profile"}
+                        ? t("browserViewer.connectAnotherChromeProfile")
+                        : t("browserViewer.connectThisChromeProfile")}
                     </span>
                     <span className="block truncate text-og-xs text-og-fg-subtle">
-                      Machine connected · Chrome extension missing
+                      {t("browserViewer.machineConnectedChromeExtensionMissing")}
                     </span>
                   </span>
                 </a>
@@ -1479,10 +1523,10 @@ function BrowserLaunchMenu(props: {
                   <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-og-control text-og-fg">
-                      Chrome connection ready
+                      {t("browserViewer.chromeConnectionReady")}
                     </span>
                     <span className="block text-og-xs leading-4 text-og-fg-subtle">
-                      Install the Opengeni Browser extension in the profile you want to use.
+                      {t("browserViewer.installTheOpengeniBrowserExtension")}
                     </span>
                   </span>
                 </div>
@@ -1497,7 +1541,7 @@ function BrowserLaunchMenu(props: {
               "border-t border-og-border",
           )}
         >
-          Open isolated browser
+          {t("browserViewer.openIsolatedBrowser")}
         </p>
         <button
           type="button"
@@ -1506,9 +1550,11 @@ function BrowserLaunchMenu(props: {
         >
           <Globe2Icon className="size-3.5 text-og-fg-muted" />
           <span>
-            <span className="block text-og-control text-og-fg">Fresh browser</span>
+            <span className="block text-og-control text-og-fg">
+              {t("browserViewer.freshBrowser")}
+            </span>
             <span className="block text-og-xs text-og-fg-subtle">
-              Visual browser · no saved state
+              {t("browserViewer.visualBrowserNoSavedState")}
             </span>
           </span>
         </button>
@@ -1526,8 +1572,8 @@ function BrowserLaunchMenu(props: {
                   <span className="block truncate text-og-control text-og-fg">{identity.name}</span>
                   <span className="block text-og-xs text-og-fg-subtle">
                     {identity.defaultRevisionId
-                      ? `${identity.revisionCount} saved version${identity.revisionCount === 1 ? "" : "s"}`
-                      : "Ready for first sign-in"}
+                      ? t("browserViewer.savedVersions", { count: identity.revisionCount })
+                      : t("browserViewer.readyForFirstSignIn")}
                   </span>
                 </span>
               </button>
@@ -1537,7 +1583,8 @@ function BrowserLaunchMenu(props: {
         {archivedIdentities.length > 0 ? (
           <details className="mt-1 border-t border-og-border pt-1">
             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 py-1.5 text-og-xs text-og-fg-subtle transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
-              <ArchiveIcon className="size-3" /> Hidden profiles · {archivedIdentities.length}
+              <ArchiveIcon className="size-3" />{" "}
+              {t("browserViewer.hiddenProfilesLength", { length: archivedIdentities.length })}
               <ChevronDownIcon className="ml-auto size-3" />
             </summary>
             {archivedIdentities.map((identity) => (
@@ -1550,7 +1597,7 @@ function BrowserLaunchMenu(props: {
               >
                 <RotateCcwIcon className="size-3.5 text-og-fg-muted" />
                 <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
-                  Restore {identity.name}
+                  {t("browserViewer.restoreName", { name: identity.name })}
                 </span>
               </button>
             ))}
@@ -1575,6 +1622,7 @@ function BrowserProfileMenu(props: {
   ) => Promise<boolean>;
   onOpenVersion: (identityId: string, baseRevisionId: string) => void;
 }) {
+  const t = useOpenGeniText();
   const detailsRef = useViewerMenuDismiss();
   const nameInputId = useId();
   const [name, setName] = useState("");
@@ -1616,7 +1664,7 @@ function BrowserProfileMenu(props: {
           <UserRoundIcon className="size-3" />
         )}
         <span className="truncate">
-          {attached ? props.session?.name : (props.identity?.name ?? "Temporary")}
+          {attached ? props.session?.name : (props.identity?.name ?? t("browserViewer.temporary"))}
         </span>
         {attached || props.identity ? (
           <span className="shrink-0 text-og-fg-subtle">· {versionLabel}</span>
@@ -1634,31 +1682,35 @@ function BrowserProfileMenu(props: {
           </span>
           <div className="min-w-0">
             <p className="truncate text-og-control font-medium text-og-fg">
-              {attached ? props.session?.name : (props.identity?.name ?? "Temporary browser")}
+              {attached
+                ? props.session?.name
+                : (props.identity?.name ?? t("browserViewer.temporaryBrowser"))}
             </p>
             <p className="mt-0.5 text-og-xs leading-4 text-og-fg-subtle">
               {attached
-                ? "This session drives the existing Chrome profile and its current login state."
+                ? t("browserViewer.thisSessionDrivesTheExisting")
                 : props.identity?.status === "archived"
-                  ? "Hidden from new browsers. This already-open browser is unchanged."
+                  ? t("browserViewer.hiddenFromNewBrowsersThis")
                   : props.identity
                     ? props.baseRevisionOrdinal
-                      ? `Started from version ${props.baseRevisionOrdinal}.`
-                      : "Not saved yet."
-                    : "This browser is not reusable yet."}
+                      ? t("browserViewer.startedFromVersionBaserevisionordinal", {
+                          baseRevisionOrdinal: props.baseRevisionOrdinal,
+                        })
+                      : t("browserViewer.notSavedYet")
+                    : t("browserViewer.thisBrowserIsNotReusable")}
             </p>
           </div>
         </div>
         {props.identity && revisions.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-2">
             <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
-              Saved versions
+              {t("browserViewer.savedVersions2")}
             </p>
             <div className="mt-1 max-h-40 overflow-y-auto">
               {revisions.map((revision) => {
                 const isDefault = revision.id === props.identity?.defaultRevisionId;
                 const isCurrent = revision.ordinal === props.baseRevisionOrdinal;
-                const materialization = revisionMaterializationSummary(revision);
+                const materialization = revisionMaterializationSummary(t, revision);
                 return (
                   <div
                     key={revision.id}
@@ -1667,7 +1719,10 @@ function BrowserProfileMenu(props: {
                     <button
                       type="button"
                       disabled={props.saving || props.identity?.status === "archived"}
-                      aria-label={`Open ${props.identity!.name} version ${revision.ordinal}`}
+                      aria-label={t("browserViewer.openNameVersionOrdinal", {
+                        name: props.identity!.name,
+                        ordinal: revision.ordinal,
+                      })}
                       onClick={() => openVersion(props.identity!.id, revision.id)}
                       className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-50"
                     >
@@ -1676,14 +1731,16 @@ function BrowserProfileMenu(props: {
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block text-og-control text-og-fg">
-                          Version {revision.ordinal}
+                          {t("browserViewer.versionOrdinal", { ordinal: revision.ordinal })}
                         </span>
                         <span className="block truncate text-[10px] text-og-fg-subtle">
                           {materialization.label}
                         </span>
                       </span>
                       {isCurrent ? (
-                        <span className="text-[10px] text-og-fg-subtle">Current</span>
+                        <span className="text-[10px] text-og-fg-subtle">
+                          {t("browserViewer.current")}
+                        </span>
                       ) : null}
                     </button>
                     <button
@@ -1691,41 +1748,51 @@ function BrowserProfileMenu(props: {
                       disabled={isDefault || props.saving || props.identity?.status === "archived"}
                       aria-label={
                         isDefault
-                          ? `${props.identity!.name} version ${revision.ordinal} is the default`
-                          : `Use ${props.identity!.name} version ${revision.ordinal} by default`
+                          ? t("browserViewer.nameVersionOrdinalIsThe", {
+                              name: props.identity!.name,
+                              ordinal: revision.ordinal,
+                            })
+                          : t("browserViewer.useNameVersionOrdinalBy", {
+                              name: props.identity!.name,
+                              ordinal: revision.ordinal,
+                            })
                       }
-                      title={isDefault ? "Default version" : "Use by default"}
+                      title={
+                        isDefault
+                          ? t("browserViewer.defaultVersion")
+                          : t("browserViewer.useByDefault")
+                      }
                       onClick={() =>
                         void props.onUpdate(props.identity!, { defaultRevisionId: revision.id })
                       }
                       className="mr-1 shrink-0 rounded-og-sm px-2 py-1 text-[10px] text-og-fg-subtle transition hover:bg-og-surface-3 hover:text-og-fg disabled:cursor-default disabled:opacity-70"
                     >
-                      {isDefault ? "Default" : "Make default"}
+                      {isDefault ? t("browserViewer.default") : t("browserViewer.makeDefault")}
                     </button>
                   </div>
                 );
               })}
             </div>
             <p className="mt-1 px-2 text-[10px] leading-4 text-og-fg-subtle">
-              Changing the default affects only browsers opened later. Saved browser data can be
-              copied; a website may still expire or re-verify its own session.
+              {t("browserViewer.changingTheDefaultAffectsOnly")}
             </p>
           </div>
         ) : props.identity &&
           props.history?.identityId === props.identity.id &&
           props.history.loading ? (
           <p className="mt-3 flex items-center gap-1.5 border-t border-og-border px-2 pt-2 text-og-xs text-og-fg-subtle">
-            <LoaderCircleIcon className="size-3 animate-spin" /> Loading saved versions…
+            <LoaderCircleIcon className="size-3 animate-spin" />{" "}
+            {t("browserViewer.loadingSavedVersions")}
           </p>
         ) : null}
         {props.identity && props.authConnections.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-2">
             <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
-              Login health
+              {t("browserViewer.loginHealth")}
             </p>
             <div className="mt-1 space-y-1">
               {props.authConnections.map((connection) => {
-                const health = siteAuthHealth(connection);
+                const health = siteAuthHealth(t, connection);
                 return (
                   <div
                     key={connection.id}
@@ -1759,7 +1826,9 @@ function BrowserProfileMenu(props: {
               ) : (
                 <SaveIcon className="size-3.5" />
               )}
-              {props.saving ? "Saving browser version…" : "Save new version"}
+              {props.saving
+                ? t("browserViewer.savingBrowserVersion")
+                : t("browserViewer.saveNewVersion")}
             </button>
           ) : (
             <form
@@ -1770,7 +1839,7 @@ function BrowserProfileMenu(props: {
               }}
             >
               <label className="text-og-xs font-medium text-og-fg-muted" htmlFor={nameInputId}>
-                Profile name
+                {t("browserViewer.profileName")}
               </label>
               <div className="mt-1 flex gap-1.5">
                 <input
@@ -1778,7 +1847,7 @@ function BrowserProfileMenu(props: {
                   value={name}
                   onInput={(event) => setName(event.currentTarget.value)}
                   maxLength={200}
-                  placeholder="Work"
+                  placeholder={t("browserViewer.work")}
                   className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-fg-subtle focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 />
                 <button
@@ -1791,7 +1860,7 @@ function BrowserProfileMenu(props: {
                   ) : (
                     <SaveIcon className="size-3.5" />
                   )}
-                  Save
+                  {t("browserViewer.save")}
                 </button>
               </div>
             </form>
@@ -1799,10 +1868,10 @@ function BrowserProfileMenu(props: {
         ) : (
           <p className="mt-3 rounded-og-sm bg-og-surface-2 px-2.5 py-2 text-og-xs text-og-fg-subtle">
             {attached
-              ? "Chrome keeps this profile's state directly; Opengeni does not copy it automatically."
+              ? t("browserViewer.chromeKeepsThisProfileS")
               : props.identity?.status === "archived"
-                ? "Restore this profile before saving another version."
-                : "This browser cannot save reusable profile state."}
+                ? t("browserViewer.restoreThisProfileBeforeSaving")
+                : t("browserViewer.thisBrowserCannotSaveReusable")}
           </p>
         )}
         {!attached && props.identity ? (
@@ -1821,13 +1890,14 @@ function BrowserProfileMenu(props: {
             ) : (
               <RotateCcwIcon className="size-3.5" />
             )}
-            {props.identity.status === "active" ? "Hide from new browsers" : "Restore profile"}
+            {props.identity.status === "active"
+              ? t("browserViewer.hideFromNewBrowsers")
+              : t("browserViewer.restoreProfile")}
           </button>
         ) : null}
         {canSave ? (
           <p className="mt-2 text-[10px] leading-4 text-og-fg-subtle">
-            Saving restarts this browser. Save unfinished work on its pages first; unsaved form
-            entries may be lost. Other open browsers are unchanged.
+            {t("browserViewer.savingRestartsThisBrowserSave")}
           </p>
         ) : null}
       </div>
@@ -1835,7 +1905,10 @@ function BrowserProfileMenu(props: {
   );
 }
 
-function revisionMaterializationSummary(revision: BrowserRevision): { label: string } {
+function revisionMaterializationSummary(
+  t: OpenGeniText,
+  revision: BrowserRevision,
+): { label: string } {
   const materializations = revision.components.map((component) => component.materialization);
   const placementBound = materializations.find(
     (materialization) => materialization.portability === "placement_bound",
@@ -1843,8 +1916,8 @@ function revisionMaterializationSummary(revision: BrowserRevision): { label: str
   if (placementBound) {
     return {
       label: placementBound.reason
-        ? `This machine only · ${placementBound.reason}`
-        : "This machine only",
+        ? t("browserViewer.thisMachineOnlyReason", { reason: placementBound.reason })
+        : t("browserViewer.thisMachineOnly"),
     };
   }
   const providerBound = materializations.find(
@@ -1852,25 +1925,30 @@ function revisionMaterializationSummary(revision: BrowserRevision): { label: str
   );
   if (providerBound) {
     return {
-      label: providerBound.reason ? `Provider-bound · ${providerBound.reason}` : "Provider-bound",
+      label: providerBound.reason
+        ? t("browserViewer.providerBoundReason", { reason: providerBound.reason })
+        : t("browserViewer.providerBound"),
     };
   }
-  return { label: "Portable browser data" };
+  return { label: t("browserViewer.portableBrowserData") };
 }
 
-function siteAuthHealth(connection: SiteAuthConnection): {
+function siteAuthHealth(
+  t: OpenGeniText,
+  connection: SiteAuthConnection,
+): {
   label: string;
   dotClass: string;
 } {
   switch (connection.verificationState) {
     case "verified":
-      return { label: "Verified", dotClass: "bg-og-status-running" };
+      return { label: t("browserViewer.verified"), dotClass: "bg-og-status-running" };
     case "needs_repair":
-      return { label: "Sign-in needs attention", dotClass: "bg-og-status-waiting" };
+      return { label: t("browserViewer.signInNeedsAttention"), dotClass: "bg-og-status-waiting" };
     case "failed":
-      return { label: "Verification failed", dotClass: "bg-og-status-error" };
+      return { label: t("browserViewer.verificationFailed"), dotClass: "bg-og-status-error" };
     case "unknown":
-      return { label: "Not checked yet", dotClass: "bg-og-muted" };
+      return { label: t("browserViewer.notCheckedYet"), dotClass: "bg-og-muted" };
   }
 }
 
@@ -1896,6 +1974,7 @@ function BrowserTabs(props: {
   onClose: (id: string) => void;
   onOpen: () => void;
 }) {
+  const t = useOpenGeniText();
   const pages = props.targets.filter((target) => target.kind === "page" || target.kind === "popup");
   return (
     <div className="flex h-9 shrink-0 items-end gap-px overflow-x-auto border-b border-og-border bg-og-surface-1 px-1 pt-1">
@@ -1922,7 +2001,7 @@ function BrowserTabs(props: {
               onClick={() => props.onClose(target.id)}
               disabled={props.mutating}
               className="ml-1 grid size-4 shrink-0 place-items-center rounded opacity-0 transition hover:bg-og-surface-3 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30"
-              aria-label={`Close ${target.title || "tab"}`}
+              aria-label={t("browserViewer.closeTitle", { title: target.title || "tab" })}
             >
               <XIcon className="size-3" />
             </button>
@@ -1935,7 +2014,7 @@ function BrowserTabs(props: {
           onClick={props.onOpen}
           disabled={props.mutating}
           className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-          aria-label="New tab"
+          aria-label={t("browserViewer.newTab")}
         >
           <PlusIcon className="size-3.5" />
         </button>
@@ -1951,6 +2030,7 @@ function BrowserAddressBar(props: {
   onHistory: (direction: "back" | "forward") => Promise<void>;
   onReload: () => void;
 }) {
+  const t = useOpenGeniText();
   const [draft, setDraft] = useState(props.target?.url ?? "");
   const focusedRef = useRef(false);
   const historyPendingRef = useRef(false);
@@ -1992,8 +2072,8 @@ function BrowserAddressBar(props: {
             "grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-35",
             historyPending && "opacity-50",
           )}
-          aria-label={direction === "back" ? "Back" : "Forward"}
-          title={direction === "back" ? "Back" : "Forward"}
+          aria-label={direction === "back" ? t("browserViewer.back") : t("browserViewer.forward")}
+          title={direction === "back" ? t("browserViewer.back") : t("browserViewer.forward")}
         >
           {direction === "back" ? (
             <ArrowLeftIcon className="size-3.5" />
@@ -2007,7 +2087,7 @@ function BrowserAddressBar(props: {
         onClick={props.onReload}
         disabled={!props.target || props.loading || historyPending}
         className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-35"
-        aria-label="Reload"
+        aria-label={t("browserViewer.reload")}
       >
         <RefreshCwIcon
           className={cn("size-3.5", (props.loading || historyPending) && "animate-spin")}
@@ -2033,9 +2113,9 @@ function BrowserAddressBar(props: {
           }}
           disabled={!props.target}
           className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-fg-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
-          aria-label="Address"
+          aria-label={t("browserViewer.address")}
           spellCheck={false}
-          placeholder="Search or enter address"
+          placeholder={t("browserViewer.searchOrEnterAddress")}
         />
       </div>
     </form>
@@ -2077,6 +2157,7 @@ function BrowserViewport(props: {
   reconnectMessage?: string | undefined;
   onError: (cause: unknown) => void;
 }) {
+  const t = useOpenGeniText();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [selectPopup, setSelectPopup] = useState<{
@@ -2518,9 +2599,9 @@ function BrowserViewport(props: {
     if (!mountedRef.current) return;
     if (clipboard.text.length === 0) return;
     if (!(await copyTextToClipboard(clipboard.text))) {
-      throw new Error("Browser text could not be copied to the local clipboard");
+      throw new Error(t("browserViewer.browserTextCouldNotBe"));
     }
-  }, []);
+  }, [t]);
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
@@ -2598,7 +2679,7 @@ function BrowserViewport(props: {
         }}
         onContextMenu={contextMenu}
         onWheel={wheel}
-        aria-label="Interactive browser page"
+        aria-label={t("browserViewer.interactiveBrowserPage")}
       />
       <textarea
         ref={inputRef}
@@ -2613,7 +2694,7 @@ function BrowserViewport(props: {
         onCopy={copy}
         onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
-        aria-label="Browser keyboard input"
+        aria-label={t("browserViewer.browserKeyboardInput")}
         aria-keyshortcuts="Alt+ArrowDown"
         autoCapitalize="off"
         autoCorrect="off"
@@ -2641,7 +2722,7 @@ function BrowserViewport(props: {
             flushPendingText();
             flushPendingWheel();
             await actionTailRef.current;
-            if (!mountedRef.current) throw new Error("The browser page changed.");
+            if (!mountedRef.current) throw new Error(t("browserViewer.theBrowserPageChanged"));
             return await props.onObserveForInput();
           }}
           act={props.onSelectFromObservation}
@@ -2649,7 +2730,8 @@ function BrowserViewport(props: {
       ) : null}
       {props.mutating ? (
         <div className="pointer-events-none absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/65 px-2.5 py-1 text-[11px] text-white/80 backdrop-blur">
-          <LoaderCircleIcon className="size-3 animate-spin" /> {props.activityLabel ?? "Acting"}
+          <LoaderCircleIcon className="size-3 animate-spin" />{" "}
+          {props.activityLabel ?? t("browserViewer.acting")}
         </div>
       ) : null}
     </div>
@@ -2667,6 +2749,7 @@ function SemanticBrowserFallback(props: {
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const controlFailure = interactionControlFailureFromError(props.error);
   const { controlUnavailable } = props;
   const generationLoss = Boolean(props.reconnectMessage);
@@ -2687,16 +2770,16 @@ function SemanticBrowserFallback(props: {
           )}
           <p className="text-og-menu font-medium text-og-fg">
             {generationLoss
-              ? "Chrome reconnected—open a fresh browser/desktop."
+              ? t("browserViewer.chromeReconnectedOpenAFresh")
               : controlUnavailable
-                ? "Browser controls unavailable"
+                ? t("browserViewer.browserControlsUnavailable")
                 : props.error
                   ? props.supportsLiveFrames
-                    ? "Live view disconnected"
-                    : "Browser unavailable"
+                    ? t("browserViewer.liveViewDisconnected")
+                    : t("browserViewer.browserUnavailable")
                   : props.connectionState === "semantic"
-                    ? "Semantic browser"
-                    : browserConnectionLabel(props.connectionState)}
+                    ? t("browserViewer.semanticBrowser")
+                    : browserConnectionLabel(t, props.connectionState)}
           </p>
         </div>
         {props.error || props.reconnectMessage ? (
@@ -2708,8 +2791,8 @@ function SemanticBrowserFallback(props: {
           <div className="mt-3 border-t border-og-border pt-3">
             <p className="mb-2 text-og-xs text-og-fg-subtle">
               {props.supportsLiveFrames
-                ? "Page controls remain available"
-                : "Available page controls"}
+                ? t("browserViewer.pageControlsRemainAvailable")
+                : t("browserViewer.availablePageControls")}
             </p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
@@ -2737,7 +2820,9 @@ function SemanticBrowserFallback(props: {
             className="mt-3 text-og-control font-medium og-link"
           >
             {props.reconnectLabel ??
-              (controlFailure?.retryable === false ? "Try again" : "Reconnect")}
+              (controlFailure?.retryable === false
+                ? t("browserViewer.tryAgain")
+                : t("browserViewer.reconnect"))}
           </button>
         ) : null}
       </div>
@@ -2757,6 +2842,7 @@ function BrowserStatusBar(props: {
   onOpenComputer?: (() => void) | undefined;
   onDiagnostics: () => void;
 }) {
+  const t = useOpenGeniText();
   const errors =
     (props.observation?.diagnostics.consoleErrorCount ?? 0) +
     (props.observation?.diagnostics.pageErrorCount ?? 0);
@@ -2773,17 +2859,19 @@ function BrowserStatusBar(props: {
       />
       <span>
         {props.connectionState === "live"
-          ? "Live"
+          ? t("browserViewer.live")
           : props.connectionState === "semantic"
-            ? "Semantic"
-            : browserConnectionLabel(props.connectionState)}
+            ? t("browserViewer.semantic")
+            : browserConnectionLabel(t, props.connectionState)}
       </span>
       {props.inputFailure ? (
         <span className="text-og-status-failed">
-          {props.inputFailure.state === "failed" ? "Input failed" : "Input result unknown"}
+          {props.inputFailure.state === "failed"
+            ? t("browserViewer.inputFailed")
+            : t("browserViewer.inputResultUnknown")}
         </span>
       ) : null}
-      <span>{props.profile?.name ?? "Temporary browser"}</span>
+      <span>{props.profile?.name ?? t("browserViewer.temporaryBrowser")}</span>
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
       {props.onOpenComputer ? (
@@ -2791,10 +2879,10 @@ function BrowserStatusBar(props: {
           type="button"
           onClick={props.onOpenComputer}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg"
-          aria-label="Open this browser window in Desktop"
+          aria-label={t("browserViewer.openThisBrowserWindowIn")}
         >
           <MonitorIcon className="size-3" />
-          Desktop
+          {t("browserViewer.desktop")}
         </button>
       ) : null}
       <button
@@ -2808,7 +2896,7 @@ function BrowserStatusBar(props: {
         )}
       >
         <BugIcon className="size-3" />
-        {errors + failed > 0 ? errors + failed : "Debug"}
+        {errors + failed > 0 ? errors + failed : t("browserViewer.debug")}
       </button>
     </div>
   );
@@ -2836,26 +2924,31 @@ function BrowserDiagnosticsDrawer(props: {
   onRefresh: () => void;
   onClose: () => void;
 }) {
+  const t = useOpenGeniText();
   const session = props.session;
   const diagnostics = props.observation?.diagnostics;
   const semanticMode = props.observation?.semantic
-    ? "Semantic page structure available"
+    ? t("browserViewer.semanticPageStructureAvailable")
     : props.observation?.screenshot
-      ? "Visual fallback in use"
-      : "Waiting for page observation";
+      ? t("browserViewer.visualFallbackInUse")
+      : t("browserViewer.waitingForPageObservation");
   return (
     <aside
       id="browser-diagnostics-drawer"
       role="region"
-      aria-label="Browser diagnostics"
+      aria-label={t("browserViewer.browserDiagnostics")}
       className="absolute inset-y-0 right-0 z-40 flex min-h-0 w-full max-w-md flex-col border-l border-og-border bg-og-surface-1 shadow-2xl"
     >
       <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-og-border px-3 py-2">
         <BugIcon className="size-4 shrink-0 text-og-fg-muted" />
         <div className="min-w-0 flex-1">
-          <p className="text-og-control font-semibold text-og-fg">Browser diagnostics</p>
+          <p className="text-og-control font-semibold text-og-fg">
+            {t("browserViewer.browserDiagnostics")}
+          </p>
           <p className="truncate text-og-xs text-og-fg-subtle">
-            {props.target?.title || shortUrl(props.target?.url ?? "") || "Current tab"}
+            {props.target?.title ||
+              shortUrl(props.target?.url ?? "") ||
+              t("browserViewer.currentTab")}
           </p>
         </div>
         <button
@@ -2863,7 +2956,7 @@ function BrowserDiagnosticsDrawer(props: {
           onClick={props.onRefresh}
           disabled={props.state.loading}
           className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-          aria-label="Refresh browser diagnostics"
+          aria-label={t("browserViewer.refreshBrowserDiagnostics")}
         >
           <RefreshCwIcon className={cn("size-3.5", props.state.loading && "animate-spin")} />
         </button>
@@ -2871,7 +2964,7 @@ function BrowserDiagnosticsDrawer(props: {
           type="button"
           onClick={props.onClose}
           className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
-          aria-label="Close browser diagnostics"
+          aria-label={t("browserViewer.closeBrowserDiagnostics")}
         >
           <XIcon className="size-3.5" />
         </button>
@@ -2883,29 +2976,42 @@ function BrowserDiagnosticsDrawer(props: {
             id="browser-runtime-title"
             className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
           >
-            Runtime
+            {t("browserViewer.runtime")}
           </h3>
           <dl className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-og-xs">
-            <DiagnosticFact label="Engine" value={browserEngineLabel(session)} />
-            <DiagnosticFact label="Driver" value={session?.driverId ?? "Unavailable"} />
-            <DiagnosticFact label="Placement" value={placementLabel(session ?? undefined)} />
             <DiagnosticFact
-              label="Profile"
+              label={t("browserViewer.engine")}
+              value={browserEngineLabel(t, session)}
+            />
+            <DiagnosticFact
+              label={t("browserViewer.driver")}
+              value={session?.driverId ?? t("browserViewer.unavailable")}
+            />
+            <DiagnosticFact
+              label={t("browserViewer.placement")}
+              value={placementLabel(t, session ?? undefined)}
+            />
+            <DiagnosticFact
+              label={t("browserViewer.profile")}
               value={
                 props.profile
                   ? `${props.profile.name}${props.baseRevisionOrdinal ? ` · v${props.baseRevisionOrdinal}` : ""}`
-                  : "Temporary"
+                  : t("browserViewer.temporary")
               }
             />
             <DiagnosticFact
-              label="Controller"
-              value={shortGeneration(session?.controller?.controllerGeneration)}
+              label={t("browserViewer.controller")}
+              value={shortGeneration(t, session?.controller?.controllerGeneration)}
             />
             <DiagnosticFact
-              label="Network"
-              value={session?.networkRouteId ? "Custom route" : "Placement default"}
+              label={t("browserViewer.network")}
+              value={
+                session?.networkRouteId
+                  ? t("browserViewer.customRoute")
+                  : t("browserViewer.placementDefault")
+              }
             />
-            <DiagnosticFact label="Observation" value={semanticMode} />
+            <DiagnosticFact label={t("browserViewer.observation")} value={semanticMode} />
           </dl>
         </section>
 
@@ -2914,18 +3020,32 @@ function BrowserDiagnosticsDrawer(props: {
             id="browser-page-title"
             className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
           >
-            Tab diagnostics
+            {t("browserViewer.tabDiagnostics")}
           </h3>
-          <p className="mt-1 text-og-xs text-og-fg-subtle">Includes earlier pages in this tab.</p>
+          <p className="mt-1 text-og-xs text-og-fg-subtle">
+            {t("browserViewer.includesEarlierPagesInThis")}
+          </p>
           <dl className="mt-2 grid grid-cols-2 gap-2">
-            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount} />
-            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount} />
-            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount} />
-            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount} />
+            <DiagnosticCount
+              label={t("browserViewer.consoleErrors")}
+              value={diagnostics?.consoleErrorCount}
+            />
+            <DiagnosticCount
+              label={t("browserViewer.pageErrors")}
+              value={diagnostics?.pageErrorCount}
+            />
+            <DiagnosticCount
+              label={t("browserViewer.failedRequests")}
+              value={diagnostics?.failedRequestCount}
+            />
+            <DiagnosticCount
+              label={t("browserViewer.downloads")}
+              value={diagnostics?.downloadCount}
+            />
           </dl>
           {session?.failureCode ? (
             <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-danger">
-              Browser state: {session.failureCode}
+              {t("browserViewer.browserStateFailurecode", { failureCode: session.failureCode })}
             </p>
           ) : null}
         </section>
@@ -2948,15 +3068,16 @@ function BrowserDiagnosticsDrawer(props: {
               id="browser-events-title"
               className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
             >
-              Recent events
+              {t("browserViewer.recentEvents")}
             </h3>
             {props.state.batch?.truncated ? (
-              <span className="text-[10px] text-og-fg-subtle">Newest 100</span>
+              <span className="text-[10px] text-og-fg-subtle">{t("browserViewer.newest100")}</span>
             ) : null}
           </div>
           {props.state.loading && !props.state.batch ? (
             <div className="flex items-center gap-2 py-6 text-og-control text-og-fg-muted">
-              <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading diagnostics…
+              <LoaderCircleIcon className="size-3.5 animate-spin" />{" "}
+              {t("browserViewer.loadingDiagnostics")}
             </div>
           ) : props.state.error ? (
             <div className="py-5">
@@ -2966,7 +3087,7 @@ function BrowserDiagnosticsDrawer(props: {
                 onClick={props.onRefresh}
                 className="mt-2 text-og-control font-medium og-link"
               >
-                Try again
+                {t("browserViewer.tryAgain")}
               </button>
             </div>
           ) : props.state.batch?.entries.length ? (
@@ -2983,9 +3104,9 @@ function BrowserDiagnosticsDrawer(props: {
                         diagnosticTone(entry.level),
                       )}
                     >
-                      {diagnosticKindLabel(entry.kind)}
+                      {diagnosticKindLabel(t, entry.kind)}
                     </span>
-                    <span className="ml-auto">{formatDiagnosticTime(entry.occurredAt)}</span>
+                    <span className="ml-auto">{formatDiagnosticTime(t, entry.occurredAt)}</span>
                   </div>
                   <p className="mt-1 whitespace-pre-wrap break-words text-og-xs leading-5 text-og-fg">
                     {entry.message}
@@ -3001,7 +3122,9 @@ function BrowserDiagnosticsDrawer(props: {
               ))}
             </ol>
           ) : (
-            <p className="py-6 text-og-control text-og-fg-muted">No diagnostics for this tab.</p>
+            <p className="py-6 text-og-control text-og-fg-muted">
+              {t("browserViewer.noDiagnosticsForThisTab")}
+            </p>
           )}
         </section>
       </div>
@@ -3022,6 +3145,7 @@ function BrowserDownloadsPanel(props: {
   ) => Promise<BrowserDownloadSaveResponse>;
   onRefresh: () => void;
 }) {
+  const t = useOpenGeniText();
   const [paths, setPaths] = useState<Record<string, string>>({});
   const [overwrite, setOverwrite] = useState<Record<string, boolean>>({});
   const [savedPaths, setSavedPaths] = useState<Record<string, string>>({});
@@ -3040,7 +3164,8 @@ function BrowserDownloadsPanel(props: {
       .catch((cause) => {
         setErrors((current) => ({
           ...current,
-          [download.id]: cause instanceof Error ? cause.message : "Could not save this download.",
+          [download.id]:
+            cause instanceof Error ? cause.message : t("browserViewer.couldNotSaveThisDownload"),
         }));
       });
   };
@@ -3053,7 +3178,7 @@ function BrowserDownloadsPanel(props: {
           id="browser-downloads-title"
           className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
         >
-          Downloads
+          {t("browserViewer.downloads")}
         </h3>
         {props.refreshing ? (
           <LoaderCircleIcon className="ml-auto size-3 animate-spin text-og-fg-muted" />
@@ -3062,7 +3187,8 @@ function BrowserDownloadsPanel(props: {
 
       {props.loading ? (
         <div className="flex items-center gap-2 py-5 text-og-control text-og-fg-muted">
-          <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading downloads…
+          <LoaderCircleIcon className="size-3.5 animate-spin" />{" "}
+          {t("browserViewer.loadingDownloads")}
         </div>
       ) : props.error ? (
         <div className="py-4">
@@ -3072,11 +3198,13 @@ function BrowserDownloadsPanel(props: {
             onClick={props.onRefresh}
             className="mt-2 text-og-control font-medium og-link"
           >
-            Try again
+            {t("browserViewer.tryAgain")}
           </button>
         </div>
       ) : props.downloads.length === 0 ? (
-        <p className="py-4 text-og-control text-og-fg-muted">No files downloaded yet.</p>
+        <p className="py-4 text-og-control text-og-fg-muted">
+          {t("browserViewer.noFilesDownloadedYet")}
+        </p>
       ) : (
         <ol className="mt-2 space-y-2">
           {props.downloads.map((download) => {
@@ -3104,7 +3232,7 @@ function BrowserDownloadsPanel(props: {
                       {download.filename}
                     </p>
                     <p className="mt-0.5 text-[10px] text-og-fg-subtle">
-                      {downloadStatusLabel(download)}
+                      {downloadStatusLabel(t, download)}
                     </p>
                   </div>
                 </div>
@@ -3124,7 +3252,9 @@ function BrowserDownloadsPanel(props: {
                           if (event.key === "Enter") save(download);
                         }}
                         disabled={isSaving}
-                        aria-label={`Workspace path for ${download.filename}`}
+                        aria-label={t("browserViewer.workspacePathForFilename", {
+                          filename: download.filename,
+                        })}
                         className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-og-mono text-[10px] text-og-fg transition focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
                       />
                       <button
@@ -3143,12 +3273,12 @@ function BrowserDownloadsPanel(props: {
                           <SaveIcon className="size-3" />
                         )}
                         {isSaving
-                          ? "Saving"
+                          ? t("browserViewer.saving")
                           : isSaved
-                            ? "Saved"
+                            ? t("browserViewer.saved")
                             : overwrite[download.id]
-                              ? "Replace"
-                              : "Save"}
+                              ? t("browserViewer.replace")
+                              : t("browserViewer.save")}
                       </button>
                     </div>
                     <label className="mt-1.5 flex w-fit items-center gap-1.5 text-[10px] text-og-fg-subtle">
@@ -3165,7 +3295,7 @@ function BrowserDownloadsPanel(props: {
                         disabled={isSaving}
                         className="size-3 accent-og-accent"
                       />
-                      Replace an existing workspace file
+                      {t("browserViewer.replaceAnExistingWorkspaceFile")}
                     </label>
                     {errors[download.id] ? (
                       <p className="mt-1.5 break-words text-[10px] text-og-danger">
@@ -3183,17 +3313,20 @@ function BrowserDownloadsPanel(props: {
   );
 }
 
-function downloadStatusLabel(download: BrowserDownload): string {
+function downloadStatusLabel(t: OpenGeniText, download: BrowserDownload): string {
   if (download.status === "completed") return formatBytes(download.receivedBytes);
   if (download.status === "in_progress") {
     const received = formatBytes(download.receivedBytes);
     return download.totalBytes === null
-      ? `Downloading · ${received}`
-      : `Downloading · ${received} of ${formatBytes(download.totalBytes)}`;
+      ? t("browserViewer.downloadingReceived", { received })
+      : t("browserViewer.downloadingReceivedOfBytes", {
+          received,
+          bytes: formatBytes(download.totalBytes),
+        });
   }
-  if (download.status === "cancelled") return "Cancelled";
-  if (download.status === "unavailable") return "No longer available";
-  return "Download failed";
+  if (download.status === "cancelled") return t("browserViewer.cancelled");
+  if (download.status === "unavailable") return t("browserViewer.noLongerAvailable");
+  return t("browserViewer.downloadFailed");
 }
 
 function defaultDownloadDestination(download: BrowserDownload): string {
@@ -3220,6 +3353,7 @@ function DiagnosticFact(props: { label: string; value: string }) {
 }
 
 function DiagnosticCount(props: { label: string; value: number | undefined }) {
+  const t = useOpenGeniText();
   return (
     <div className="rounded-og-sm border border-og-border bg-og-bg px-2.5 py-2">
       <dt className="text-[10px] text-og-fg-subtle">{props.label}</dt>
@@ -3229,33 +3363,36 @@ function DiagnosticCount(props: { label: string; value: number | undefined }) {
           props.value ? "text-og-fg" : "text-og-fg-muted",
         )}
       >
-        {props.value ?? "Unavailable"}
+        {props.value ?? t("browserViewer.unavailable")}
       </dd>
     </div>
   );
 }
 
-function browserEngineLabel(session: BrowserSession | null): string {
-  if (!session) return "Unavailable";
+function browserEngineLabel(t: OpenGeniText, session: BrowserSession | null): string {
+  if (!session) return t("browserViewer.unavailable");
   const version = session.engineVersion ? ` ${session.engineVersion}` : "";
   return `${session.engine}${version} · ${session.headless ? "headless" : "headed"}`;
 }
 
-function shortGeneration(value: string | null | undefined): string {
-  if (!value) return "Unavailable";
+function shortGeneration(t: OpenGeniText, value: string | null | undefined): string {
+  if (!value) return t("browserViewer.unavailable");
   return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
 }
 
-function diagnosticKindLabel(kind: BrowserDiagnosticBatch["entries"][number]["kind"]): string {
+function diagnosticKindLabel(
+  t: OpenGeniText,
+  kind: BrowserDiagnosticBatch["entries"][number]["kind"],
+): string {
   switch (kind) {
     case "console":
-      return "Console";
+      return t("browserViewer.console");
     case "page_error":
-      return "Page error";
+      return t("browserViewer.pageError");
     case "failed_request":
-      return "Request";
+      return t("browserViewer.request");
     case "download":
-      return "Download";
+      return t("browserViewer.download");
   }
 }
 
@@ -3265,11 +3402,11 @@ function diagnosticTone(level: BrowserDiagnosticBatch["entries"][number]["level"
   return "text-og-fg-muted";
 }
 
-function formatDiagnosticTime(value: string): string {
+function formatDiagnosticTime(t: OpenGeniText, value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? ""
-    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    : date.toLocaleTimeString(t.locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function BrowserNotice(props: { icon: ReactNode; text: string; className?: string }) {
@@ -3411,48 +3548,48 @@ function countInterventions(
   return counts;
 }
 
-function interventionTitle(intervention: InteractionIntervention): string {
+function interventionTitle(t: OpenGeniText, intervention: InteractionIntervention): string {
   switch (intervention.kind) {
     case "manual_login":
-      return "Sign in needed";
+      return t("browserViewer.signInNeeded");
     case "mfa":
-      return "Verification needed";
+      return t("browserViewer.verificationNeeded");
     case "external_action":
     case "confirmation":
-      return "Action needed";
+      return t("browserViewer.actionNeeded");
     case "other":
-      return "Browser needs your help";
+      return t("browserViewer.browserNeedsYourHelp");
   }
 }
 
-function placementLabel(session: BrowserSession | undefined): string {
+function placementLabel(t: OpenGeniText, session: BrowserSession | undefined): string {
   if (!session) return "";
   switch (session.placement.kind) {
     case "sandbox_group":
-      return "Agent sandbox";
+      return t("browserViewer.agentSandbox");
     case "connected_machine":
-      return "Connected machine";
+      return t("browserViewer.connectedMachine");
     case "attached_device":
-      return "Your browser";
+      return t("browserViewer.yourBrowser");
     case "external_provider":
-      return "Cloud browser";
+      return t("browserViewer.cloudBrowser");
   }
 }
 
-function browserConnectionLabel(state: string): string {
+function browserConnectionLabel(t: OpenGeniText, state: string): string {
   switch (state) {
     case "attaching":
-      return "Opening browser…";
+      return t("browserViewer.openingBrowser");
     case "connecting":
-      return "Connecting…";
+      return t("browserViewer.connecting");
     case "reconnecting":
-      return "Reconnecting…";
+      return t("browserViewer.reconnecting");
     case "error":
-      return "Disconnected";
+      return t("browserViewer.disconnected");
     case "semantic":
-      return "Semantic";
+      return t("browserViewer.semantic");
     default:
-      return "Waiting for browser…";
+      return t("browserViewer.waitingForBrowser");
   }
 }
 

@@ -1,4 +1,11 @@
-import { useCallback, useLayoutEffect, useReducer, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
@@ -127,6 +134,7 @@ type Scope = {
    * and must still hear about the entry that replaces an evicted one.
    */
   listeners: Map<string, Set<() => void>>;
+  activityListeners: Set<() => void>;
   /** Bumped by every clear; writers from an earlier epoch are refused. */
   epoch: number;
   /** Active retentions; unmounted entries are kept only while positive. */
@@ -164,6 +172,7 @@ function scopeState(scope: object): Scope {
     state = {
       entries: new Map(),
       listeners: new Map(),
+      activityListeners: new Set(),
       epoch: 0,
       retainers: 0,
       releaseTimer: null,
@@ -175,8 +184,8 @@ function scopeState(scope: object): Scope {
 
 function notify(state: Scope, key: string): void {
   const listeners = state.listeners.get(key);
-  if (!listeners) return;
-  for (const listener of [...listeners]) listener();
+  for (const listener of [...(listeners ?? [])]) listener();
+  for (const listener of [...state.activityListeners]) listener();
 }
 
 function setSnapshot(entry: Entry, next: SharedQuerySnapshot<unknown>): void {
@@ -431,11 +440,13 @@ function registerSubscriber(scope: object, entry: Entry, subscriber: Subscriber)
   }
   entry.releasedBy = null;
   entry.subscribers.add(subscriber);
+  for (const listener of [...state.activityListeners]) listener();
   return foreign;
 }
 
 function unsubscribe(scope: object, entry: Entry, subscriber: Subscriber, retainMs: number): void {
   entry.subscribers.delete(subscriber);
+  for (const listener of [...entry.home.activityListeners]) listener();
   if (entry.subscribers.size > 0) {
     reconcile(entry);
     return;
@@ -592,6 +603,22 @@ export function retainSharedQueries(scope: object): () => void {
 }
 
 /**
+ * Keep reads made through `client` after the components that made them
+ * unmount, for as long as the calling component stays mounted: returning to a
+ * screen (for example a conversation opened a moment ago) then draws its last
+ * rows at once and re-reads in the background. Use it only when every
+ * signed-in person gets their own client object; changing `client` or
+ * unmounting drops everything kept. `OpenGeniProvider retainReadsAcrossMounts`
+ * does the same for the provider's client.
+ */
+export function useRetainedReads(client: object | null | undefined, enabled = true): void {
+  useEffect(() => {
+    if (!client || !enabled) return;
+    return retainSharedQueries(client);
+  }, [client, enabled]);
+}
+
+/**
  * Subscribe to one shared read. `scope` is the client object that performs
  * the read; `parts` must name every input the loader depends on.
  */
@@ -718,4 +745,39 @@ export function useSharedQueryValue<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, key]);
   return snapshot;
+}
+
+/** Display-only freshness of mounted reads. Never exposes another entry's data. */
+export function useSharedQueryActivity(scope: object, prefixes: readonly string[]) {
+  const filter = JSON.stringify(prefixes);
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const listeners = scopeState(scope).activityListeners;
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    [scope],
+  );
+  const getSnapshot = useCallback(() => {
+    const names = JSON.parse(filter) as string[];
+    let updatedAt: number | null = null;
+    let fetching = false;
+    let failed = false;
+    for (const entry of scopes.get(scope)?.entries.values() ?? []) {
+      if (!names.includes(String(entry.parts[0])) || readers(entry).length === 0) continue;
+      fetching ||= entry.snapshot.fetching;
+      failed ||= Boolean(entry.snapshot.error);
+      const time = entry.snapshot.updatedAt;
+      if (time !== null) updatedAt = updatedAt === null ? time : Math.min(updatedAt, time);
+    }
+    // A primitive snapshot stays referentially stable between meaningful changes.
+    return JSON.stringify({ updatedAt, fetching, failed });
+  }, [scope, filter]);
+  return JSON.parse(useSyncExternalStore(subscribe, getSnapshot, getSnapshot)) as {
+    updatedAt: number | null;
+    fetching: boolean;
+    failed: boolean;
+  };
 }

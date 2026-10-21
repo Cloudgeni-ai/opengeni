@@ -96,21 +96,25 @@ export async function attachManualRepository(input: {
   attach: (repository: RepoDraft) => void;
   remove: (id: number) => void;
 }): Promise<ManualRepositoryAttachResult> {
-  const target = classifyManualRepository(input);
+  // Attaching re-classifies the row from its URL. A GitHub identity retained
+  // from a restored draft never survives an edited URL, and the attached row
+  // is no longer mid-edit.
+  const { github: _retainedIdentity, editing: _editing, ...repository } = input.repository;
+  const target = classifyManualRepository({ ...input, repository });
   if (target.kind === "workspace_github") {
     await input.selectWorkspaceRepository(target.repository, target.ref);
-    input.remove(input.repository.id);
+    input.remove(repository.id);
     return;
   }
   if (target.kind === "personal_github") {
     await input.selectPersonalRepository(target.repository, target.ref);
-    input.remove(input.repository.id);
+    input.remove(repository.id);
     return;
   }
   if (target.kind === "public_github") {
     const verified = await input.verifyPublicGitHubRepository(target.request);
     input.attach({
-      ...input.repository,
+      ...repository,
       url: verified.cloneUrl,
       ref: verified.ref,
       expectedCommitSha: verified.commitSha,
@@ -119,7 +123,7 @@ export async function attachManualRepository(input: {
     return;
   }
   input.attach({
-    ...input.repository,
+    ...repository,
     url: target.url,
     ref: target.ref,
     expectedCommitSha: undefined,

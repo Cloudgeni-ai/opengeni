@@ -8,8 +8,8 @@ import {
   type AttachedBrowserDeviceListResponse as AttachedBrowserDeviceListResponseValue,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventorySnapshotValue,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { type Database, withRlsContext } from "./database";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
   readWorkspaceInteractionRevision,
@@ -71,6 +71,67 @@ export type ReconcileAttachedBrowserInventoryResult = {
 function safeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is outside safe range`);
   return value;
+}
+
+/** Who is looking at a workspace's attached browsers. Personal (Only me)
+ *  machines show their browsers only to their owner, exactly like the machines
+ *  themselves; for an agent this is the person its turn acts for. */
+export type AttachedBrowserViewer = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+};
+
+type EnrollmentVisibility = {
+  active: Set<string>;
+  /** Revoked machines the viewer may still see, with when they were revoked. */
+  revoked: Map<string, Date | null>;
+};
+
+/** The machines this viewer may see here, through the same owner-aware
+ *  machine listing used everywhere else (`list_scoped_enrollments`). */
+async function visibleEnrollments(
+  db: Database,
+  viewer: AttachedBrowserViewer,
+): Promise<EnrollmentVisibility> {
+  return await withRlsContext(db, viewer, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, viewer.subjectId);
+    const rows = await rawRows<{ id: string; status: string; revokedAt: string | null }>(
+      scopedDb,
+      sql`select value->>'id' as id, value->>'status' as status, value->>'revokedAt' as "revokedAt"
+        from list_scoped_enrollments(
+          ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'active') value
+        union all
+        select value->>'id', value->>'status', value->>'revokedAt'
+        from list_scoped_enrollments(
+          ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value`,
+    );
+    const visibility: EnrollmentVisibility = { active: new Set(), revoked: new Map() };
+    for (const row of rows) {
+      if (row.status === "active") visibility.active.add(row.id);
+      else visibility.revoked.set(row.id, row.revokedAt ? new Date(row.revokedAt) : null);
+    }
+    return visibility;
+  });
+}
+
+/** A device as this viewer may see it: null when its machine is hidden from
+ *  them; disconnected whenever its machine is no longer enrolled. */
+function visibleDevice(
+  row: DeviceRow,
+  visibility: EnrollmentVisibility,
+  observedAt: Date | null = null,
+): AttachedBrowserDeviceValue | null {
+  // A full accepted snapshot observes every still-connected profile. Keep that
+  // liveness once per enrollment, not as a repeated write to every device row.
+  // Disconnected rows freeze their last observation when they transition.
+  if (row.disconnectedAt === null && observedAt && observedAt > row.lastSeenAt) {
+    row = { ...row, lastSeenAt: observedAt };
+  }
+  if (visibility.active.has(row.enrollmentId)) return deviceFromRow(row);
+  if (!visibility.revoked.has(row.enrollmentId)) return null;
+  const revokedAt = visibility.revoked.get(row.enrollmentId) ?? row.updatedAt;
+  return deviceFromRow({ ...row, disconnectedAt: row.disconnectedAt ?? revokedAt });
 }
 
 function deviceFromRow(row: DeviceRow): AttachedBrowserDeviceValue {
@@ -181,11 +242,46 @@ export async function reconcileAttachedBrowserInventory(
         }
 
         const now = new Date();
-        const rows = await tx
-          .select()
-          .from(schema.attachedBrowserDevices)
-          .where(eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId))
-          .for("update");
+        // The enrollment lock serializes its snapshots and excludes revocation /
+        // cross-enrollment reclaim. An unchanged snapshot needs no device locks:
+        // those create WAL and contend with controller operations even without
+        // an UPDATE. Re-read under the existing device locks before changing any
+        // material state, including reclaim, generation changes and disconnects.
+        const announcedIds = snapshot.devices.map((device) => device.id);
+        const ownedOrAnnounced =
+          announcedIds.length > 0
+            ? or(
+                eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId),
+                inArray(schema.attachedBrowserDevices.id, announcedIds),
+              )
+            : eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId);
+        const readRows = () =>
+          tx
+            .select()
+            .from(schema.attachedBrowserDevices)
+            .where(
+              and(
+                eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
+                ownedOrAnnounced,
+              ),
+            );
+        let rows = await readRows();
+        const observed = new Map(rows.map((row) => [row.id, row]));
+        const announced = new Set(announcedIds);
+        const materialChange =
+          snapshot.devices.some((device) => {
+            const row = observed.get(device.id);
+            return (
+              !row || row.enrollmentId !== input.enrollmentId || !sameAnnouncement(row, device)
+            );
+          }) ||
+          rows.some(
+            (row) =>
+              row.enrollmentId === input.enrollmentId &&
+              row.disconnectedAt === null &&
+              !announced.has(row.id),
+          );
+        if (materialChange) rows = await readRows().for("update");
         const byId = new Map(rows.map((row) => [row.id, row]));
         const generationChangedDeviceIds = new Set<string>();
         const insertedDeviceIds = new Set<string>();
@@ -243,31 +339,38 @@ export async function reconcileAttachedBrowserInventory(
           }
           const materialChanged =
             reclaimingRevokedEnrollment || !sameAnnouncement(existing, device);
-          await tx
-            .update(schema.attachedBrowserDevices)
-            .set({
-              enrollmentId: input.enrollmentId,
-              name: device.name,
-              profileLabel: device.profileLabel,
-              browserName: device.browserName,
-              browserVersion: device.browserVersion,
-              extensionVersion: device.extensionVersion,
-              platform: device.platform,
-              architecture: device.architecture,
-              connectionGeneration: device.connectionGeneration,
-              inventoryRevision: device.inventoryRevision,
-              tabCount: device.tabCount,
-              capabilities: device.capabilities,
-              lastSeenAt: now,
-              disconnectedAt: null,
-              updatedAt: materialChanged ? now : existing.updatedAt,
-            })
-            .where(
-              and(
-                eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
-                eq(schema.attachedBrowserDevices.id, device.id),
-              ),
-            );
+          if (materialChanged)
+            await tx
+              .update(schema.attachedBrowserDevices)
+              .set({
+                enrollmentId: input.enrollmentId,
+                name: device.name,
+                profileLabel: device.profileLabel,
+                browserName: device.browserName,
+                browserVersion: device.browserVersion,
+                extensionVersion: device.extensionVersion,
+                platform: device.platform,
+                architecture: device.architecture,
+                connectionGeneration: device.connectionGeneration,
+                inventoryRevision: device.inventoryRevision,
+                tabCount: device.tabCount,
+                capabilities: device.capabilities,
+                lastSeenAt: new Date(
+                  Math.max(
+                    now.getTime(),
+                    existing.lastSeenAt.getTime(),
+                    cursor?.observedAt.getTime() ?? 0,
+                  ),
+                ),
+                disconnectedAt: null,
+                updatedAt: new Date(Math.max(now.getTime(), existing.updatedAt.getTime())),
+              })
+              .where(
+                and(
+                  eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
+                  eq(schema.attachedBrowserDevices.id, device.id),
+                ),
+              );
           changed ||= materialChanged;
         }
 
@@ -280,7 +383,6 @@ export async function reconcileAttachedBrowserInventory(
           changed = true;
         }
 
-        const announced = new Set(snapshot.devices.map((device) => device.id));
         const disconnectedIds = rows
           .filter(
             (row) =>
@@ -292,7 +394,13 @@ export async function reconcileAttachedBrowserInventory(
         if (disconnectedIds.length > 0) {
           await tx
             .update(schema.attachedBrowserDevices)
-            .set({ disconnectedAt: now, updatedAt: now })
+            .set({
+              disconnectedAt: now,
+              updatedAt: sql`greatest(${schema.attachedBrowserDevices.updatedAt}, ${now.toISOString()}::timestamptz)`,
+              lastSeenAt: cursor
+                ? sql`greatest(${schema.attachedBrowserDevices.lastSeenAt}, ${cursor.observedAt.toISOString()}::timestamptz)`
+                : schema.attachedBrowserDevices.lastSeenAt,
+            })
             .where(
               and(
                 eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -320,10 +428,15 @@ export async function reconcileAttachedBrowserInventory(
           await tx
             .update(schema.attachedBrowserInventories)
             .set({
-              bridgeGeneration: snapshot.bridgeGeneration,
-              revision: snapshot.revision,
-              observedAt: now,
-              updatedAt: now,
+              observedAt: sql`greatest(${schema.attachedBrowserInventories.observedAt}, ${now.toISOString()}::timestamptz)`,
+              ...(cursor.bridgeGeneration !== snapshot.bridgeGeneration ||
+              cursor.revision !== snapshot.revision
+                ? {
+                    bridgeGeneration: snapshot.bridgeGeneration,
+                    revision: snapshot.revision,
+                    updatedAt: sql`greatest(${schema.attachedBrowserInventories.updatedAt}, ${now.toISOString()}::timestamptz)`,
+                  }
+                : {}),
             })
             .where(
               and(
@@ -588,10 +701,32 @@ export async function disconnectAttachedBrowserDevices(
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        // Serialize the disconnect with accepted snapshots so their shared
+        // observation is frozen at the same boundary as connection state.
+        await tx
+          .select({ id: schema.enrollments.id })
+          .from(schema.enrollments)
+          .where(
+            and(
+              eq(schema.enrollments.id, input.enrollmentId),
+              eq(schema.enrollments.accountId, input.accountId),
+              eq(schema.enrollments.workspaceId, input.workspaceId),
+            ),
+          )
+          .for("update");
         const now = new Date();
         const rows = await tx
           .update(schema.attachedBrowserDevices)
-          .set({ disconnectedAt: now, updatedAt: now })
+          .set({
+            disconnectedAt: now,
+            updatedAt: sql`greatest(${schema.attachedBrowserDevices.updatedAt}, ${now.toISOString()}::timestamptz)`,
+            lastSeenAt: sql`greatest(${schema.attachedBrowserDevices.lastSeenAt}, (
+              select ${schema.attachedBrowserInventories.observedAt}
+              from ${schema.attachedBrowserInventories}
+              where ${schema.attachedBrowserInventories.workspaceId} = ${schema.attachedBrowserDevices.workspaceId}
+                and ${schema.attachedBrowserInventories.enrollmentId} = ${schema.attachedBrowserDevices.enrollmentId}
+            ))`,
+          })
           .where(
             and(
               eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -610,12 +745,9 @@ export async function disconnectAttachedBrowserDevices(
 
 export async function listAttachedBrowserDevices(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    includeDisconnected?: boolean;
-  },
+  input: AttachedBrowserViewer & { includeDisconnected?: boolean },
 ): Promise<AttachedBrowserDeviceListResponseValue> {
+  const visibility = await visibleEnrollments(db, input);
   return await withRlsContext(
     db,
     input,
@@ -660,31 +792,46 @@ export async function listAttachedBrowserDevices(
           desc(schema.attachedBrowserInventories.observedAt),
           asc(schema.attachedBrowserInventories.enrollmentId),
         );
+      const observations = new Map(
+        inventories.map((inventory) => [inventory.enrollmentId, inventory.observedAt]),
+      );
+      const devices = rows
+        .map((row) => visibleDevice(row, visibility, observations.get(row.enrollmentId) ?? null))
+        .filter(
+          (device): device is AttachedBrowserDeviceValue =>
+            device !== null && (input.includeDisconnected === true || device.state === "connected"),
+        );
       const connectedProfilesByEnrollment = new Map<string, number>();
-      for (const row of rows) {
-        if (row.disconnectedAt !== null) continue;
+      for (const device of devices) {
+        if (device.state !== "connected") continue;
         connectedProfilesByEnrollment.set(
-          row.enrollmentId,
-          (connectedProfilesByEnrollment.get(row.enrollmentId) ?? 0) + 1,
+          device.enrollmentId,
+          (connectedProfilesByEnrollment.get(device.enrollmentId) ?? 0) + 1,
         );
       }
       return AttachedBrowserDeviceListResponse.parse({
         revision: await readWorkspaceInteractionRevision(scopedDb, input.workspaceId),
-        bridges: inventories.map((inventory) => ({
-          enrollmentId: inventory.enrollmentId,
-          state:
-            inventory.enrollmentStatus === "active" &&
-            inventory.wentOfflineAt === null &&
-            inventory.connectionLeaseExpiresAt !== null &&
-            inventory.connectionLeaseExpiresAt.getTime() > Date.now()
-              ? "online"
-              : "offline",
-          bridgeGeneration: inventory.bridgeGeneration,
-          inventoryRevision: inventory.revision,
-          connectedProfileCount: connectedProfilesByEnrollment.get(inventory.enrollmentId) ?? 0,
-          lastSeenAt: inventory.observedAt.toISOString(),
-        })),
-        devices: rows.map(deviceFromRow),
+        bridges: inventories
+          .filter(
+            (inventory) =>
+              visibility.active.has(inventory.enrollmentId) ||
+              visibility.revoked.has(inventory.enrollmentId),
+          )
+          .map((inventory) => ({
+            enrollmentId: inventory.enrollmentId,
+            state:
+              inventory.enrollmentStatus === "active" &&
+              inventory.wentOfflineAt === null &&
+              inventory.connectionLeaseExpiresAt !== null &&
+              inventory.connectionLeaseExpiresAt.getTime() > Date.now()
+                ? "online"
+                : "offline",
+            bridgeGeneration: inventory.bridgeGeneration,
+            inventoryRevision: inventory.revision,
+            connectedProfileCount: connectedProfilesByEnrollment.get(inventory.enrollmentId) ?? 0,
+            lastSeenAt: inventory.observedAt.toISOString(),
+          })),
+        devices,
       });
     },
     CONSISTENT_READ,
@@ -693,15 +840,32 @@ export async function listAttachedBrowserDevices(
 
 export async function getAttachedBrowserDevice(
   db: Database,
-  input: { accountId: string; workspaceId: string; deviceId: string },
+  input: AttachedBrowserViewer & { deviceId: string },
 ): Promise<AttachedBrowserDeviceValue> {
+  const visibility = await visibleEnrollments(db, input);
   return await withRlsContext(
     db,
     input,
     async (scopedDb) => {
       const [row] = await scopedDb
-        .select()
+        .select({
+          device: schema.attachedBrowserDevices,
+          observedAt: schema.attachedBrowserInventories.observedAt,
+        })
         .from(schema.attachedBrowserDevices)
+        .leftJoin(
+          schema.attachedBrowserInventories,
+          and(
+            eq(
+              schema.attachedBrowserInventories.workspaceId,
+              schema.attachedBrowserDevices.workspaceId,
+            ),
+            eq(
+              schema.attachedBrowserInventories.enrollmentId,
+              schema.attachedBrowserDevices.enrollmentId,
+            ),
+          ),
+        )
         .where(
           and(
             eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -709,9 +873,61 @@ export async function getAttachedBrowserDevice(
           ),
         )
         .limit(1);
-      if (!row) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
-      return deviceFromRow(row);
+      const device = row ? visibleDevice(row.device, visibility, row.observedAt) : null;
+      if (!device) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
+      return device;
     },
     CONSISTENT_READ,
   );
+}
+
+/** Where a browser or computer's controller runs, as far as ending it needs. */
+export type InteractionControllerPlacement =
+  | { kind: "connected_machine"; sandboxId: string }
+  | { kind: "attached_device"; deviceId: string }
+  | { kind: string };
+
+/** True when a browser or computer's controller can never be reached again,
+ * so ending it completes in the control plane:
+ *  - on a Connected Machine that was removed (revoked); that machine can no
+ *    longer run or keep it;
+ *  - in a person's own Chrome whose device is disconnected, or whose machine
+ *    was removed. Such a session holds no Opengeni process or profile; the
+ *    tabs it opened stay with the person as ordinary tabs.
+ * A machine that is only offline still holds its sessions' processes and
+ * private profiles, so it is not gone. Both checks go through the viewer's
+ * own owner-aware machine listing: a machine hidden from them is never gone. */
+export async function interactionControllerGone(
+  db: Database,
+  viewer: AttachedBrowserViewer,
+  placement: InteractionControllerPlacement | null,
+): Promise<boolean> {
+  if (placement && "sandboxId" in placement && placement.kind === "connected_machine") {
+    const sandboxId = placement.sandboxId;
+    return await withRlsContext(db, viewer, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, viewer.subjectId);
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`select value->>'id' as id
+          from list_scoped_enrollments(
+            ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value
+          where value->>'sandboxId' = ${sandboxId}
+          limit 1`,
+      );
+      return rows.length > 0;
+    });
+  }
+  if (placement && "deviceId" in placement && placement.kind === "attached_device") {
+    try {
+      const device = await getAttachedBrowserDevice(db, {
+        ...viewer,
+        deviceId: placement.deviceId,
+      });
+      return device.state !== "connected";
+    } catch (error) {
+      if (error instanceof AttachedBrowserDeviceNotFoundError) return false;
+      throw error;
+    }
+  }
+  return false;
 }

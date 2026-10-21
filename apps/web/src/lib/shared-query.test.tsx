@@ -10,6 +10,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 const {
   invalidateSubscriptionAccountQueries,
+  invalidateModelSettingsQueries,
   MODEL_CONNECTIONS_CHANGED,
   peekSharedQuery,
   retainSharedQueries,
@@ -18,6 +19,26 @@ const {
   useSharedQuery,
 } = await import("./shared-query");
 type SharedQueryKey = import("./shared-query").SharedQueryKey;
+
+test("Models Refresh evicts retained access, overview and provider reads along with account lists", async () => {
+  const client = {};
+  const release = retainSharedQueries(client);
+  const keys: SharedQueryKey[] = [
+    ["model-settings", "access", "org"],
+    ["model-settings", "codex-overview", "workspace"],
+    ["model-settings", "provider", "org"],
+    ["codex-accounts", "workspace"],
+    ["subscription-pool", "Claude", "workspace"],
+  ];
+  try {
+    const write = sharedQueryWriter(client);
+    for (const key of keys) write(key, { fixture: true });
+    await invalidateModelSettingsQueries(client);
+    for (const key of keys) expect(peekSharedQuery(client, key)).toBeNull();
+  } finally {
+    release();
+  }
+});
 
 test("an access change drops every retained subscription account list, and only those", async () => {
   const client = {};

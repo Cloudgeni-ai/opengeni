@@ -36,8 +36,11 @@ import {
   KnowledgeMemorySearchRequest,
   KnowledgeSearchResponse,
   mergeToolRefs,
+  SessionMcpServerInput,
+  ToolRef,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
+  SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
   SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
@@ -356,7 +359,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "Opengeni is temporarily unavailable — retry.",
+          message: "The workspace is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -366,7 +369,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",
@@ -380,7 +383,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient Opengeni credits",
+          message: "insufficient workspace credits",
           retryable: false,
         },
       }),
@@ -388,7 +391,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient Opengeni credits",
+        message: "insufficient workspace credits",
         retryable: false,
       },
     });
@@ -1774,6 +1777,11 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
+    // A blocked occurrence tells the owner once under the schedule's notice key and
+    // pauses the schedule when no later occurrence can succeed.
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE);
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("schedule-<scheduled task ID>");
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("pause this schedule");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
     expect(scheduled.content).not.toContain("Unavailable in this occurrence");
@@ -2589,6 +2597,32 @@ describe("contracts", () => {
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
   });
 
+  test("accepts any number of annotations within the total size bound", () => {
+    const annotation = (index: number) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      source: {
+        kind: "user_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000212",
+        eventType: "user.message" as const,
+        sequence: 1,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 2,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "hi",
+      note: `note ${index}`,
+    });
+    const many = Array.from({ length: 200 }, (_, index) => annotation(index + 1));
+    expect(SubmittedTimelineAnnotations.safeParse(many).success).toBe(true);
+    const oversized = Array.from({ length: 80 }, (_, index) => ({
+      ...annotation(index + 1),
+      quote: "q".repeat(16 * 1024),
+    }));
+    expect(SubmittedTimelineAnnotations.safeParse(oversized).success).toBe(false);
+  });
+
   test("accepts null skill review for ordinary questions without accepting malformed review references", () => {
     const question = {
       id: "choice",
@@ -2994,6 +3028,46 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
+  });
+
+  test("mergeToolRefs: eager tool lists unite in first-seen order and true wins", () => {
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search", "get"] }],
+        [{ kind: "mcp", id: "app", eager: ["get", "list"] }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search", "get", "list"] }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", eager: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: true }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search"] }]);
+    expect(
+      mergeToolRefs([{ kind: "mcp", id: "app", eager: [] }], [{ kind: "mcp", id: "app" }]),
+    ).toEqual([{ kind: "mcp", id: "app" }]);
+  });
+
+  test("ToolRef and session MCP attachments accept an exact eager tool list", () => {
+    expect(
+      ToolRef.parse({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] }),
+    ).toEqual({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] });
+    expect(ToolRef.parse({ kind: "mcp", id: "app", eager: true }).eager).toBe(true);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: [""] }).success).toBe(false);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: "search" }).success).toBe(false);
+    expect(
+      SessionMcpServerInput.parse({
+        id: "app",
+        url: "https://app.example.test/mcp",
+        eager: ["search_records"],
+      }).eager,
+    ).toEqual(["search_records"]);
   });
 });
 

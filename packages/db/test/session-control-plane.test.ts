@@ -87,6 +87,8 @@ import {
   updateSessionTitle,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
+  steerQueuedTurnInTransaction,
+  resolveWaitingSteer,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -149,7 +151,7 @@ async function readSessionActivityRevision(
   sessionId: string,
 ): Promise<string> {
   const [row] = await shared.admin<Array<{ revision: string }>>`
-    select activity_revision::text as revision
+    select activity_xid::text as revision
     from sessions
     where workspace_id = ${workspaceId} and id = ${sessionId}`;
   if (!row) throw new Error(`Session activity revision missing: ${sessionId}`);
@@ -160,9 +162,13 @@ async function send(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   text: string,
-  delivery: "send" | "steer" = "send",
+  requested: "send" | "steer" | "steer_now" = "send",
   model?: string,
 ) {
+  // "steer_now" is the explicit "Send now": queue the prompt, then Steer its
+  // row with `interrupt` so the live attempt is interrupted immediately
+  // instead of at its next model step.
+  const delivery = requested === "steer_now" ? "send" : requested;
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
     grant.workspaceId,
@@ -185,6 +191,24 @@ async function send(
         }),
       ),
   );
+  if (requested === "steer_now") {
+    const queued = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
+    if (!queued) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId: queued.id,
+          expectedTurnVersion: queued.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `steer-now-${text}-${crypto.randomUUID()}`,
+          interrupt: true,
+        }),
+      ),
+    );
+  }
   const turn = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
   if (!turn) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
   return { ...accepted, turn };
@@ -261,6 +285,76 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("history and event appends survive transient connection acquisition failures", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "persist despite connection pressure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const position = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    for (const [offset, code] of ["53300", "57P03", "ECONNREFUSED", "ECONNRESET"].entries()) {
+      let admissions = 0;
+      const interrupted = new Proxy(client.db, {
+        get(target, property, receiver) {
+          if (property !== "transaction") return Reflect.get(target, property, receiver);
+          return (...args: Parameters<typeof target.transaction>) => {
+            admissions += 1;
+            if (admissions === 1)
+              return Promise.reject(
+                Object.assign(new Error("injected connection failure"), { code }),
+              );
+            return target.transaction(...args);
+          };
+        },
+      });
+      expect(
+        await appendSessionHistoryItems(interrupted, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          expectedExecutionGeneration: turn!.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [
+            {
+              position: position + offset,
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: `saved-${code}` }],
+              },
+            },
+          ],
+        }),
+      ).toBe(true);
+      expect(admissions).toBe(2);
+      admissions = 0;
+      const result = await appendSessionEventsForTurnAttempt(
+        interrupted,
+        grant.workspaceId!,
+        session.id,
+        turn!.id,
+        turn!.executionGeneration,
+        attemptId,
+        [{ type: "agent.reasoning.delta", payload: { delta: `saved-${code}` } }],
+      );
+      expect(result.accepted).toBe(true);
+      expect(admissions).toBe(2);
+    }
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(history.filter((row) => row.position >= position)).toHaveLength(4);
+    const events =
+      await shared.admin`select id from session_events where session_id = ${session.id} and type = 'agent.reasoning.delta'`;
+    expect(events).toHaveLength(4);
+  });
+
   describe("exact-attempt connector policy replay", () => {
     async function policyAttempt() {
       const { grant, session } = await fixture();
@@ -1142,7 +1236,7 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "use this direction", "steer");
+    const replacement = await send(grant, session.id, "use this direction", "steer_now");
 
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -1762,7 +1856,8 @@ describe("clean session control plane", () => {
       }
       changedCursor = page.nextCursor ?? undefined;
     } while (changedCursor);
-    expect(changedIds).toEqual([newcomer.id, movedId]);
+    expect(changedIds).toContain(newcomer.id);
+    expect(changedIds).toContain(movedId);
     expect(new Set([...oldTraversalIds, ...changedIds])).toEqual(
       new Set([...expectedEqualOrder, newcomer.id]),
     );
@@ -1902,8 +1997,8 @@ describe("clean session control plane", () => {
     expect(new Set(allSeen)).toEqual(
       new Set([newest.id, second.id, third.id, moved.id, inserted.id]),
     );
-    expect(allSeen).toHaveLength(new Set(allSeen).size);
-    expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
+    // xmin polling is at least once; earlier visible sessions may replay.
+    for (const id of [third.id, moved.id, inserted.id]) expect(changedIds).toContain(id);
   });
 
   test("the first-page revision fence is a nonblocking MVCC snapshot", async () => {
@@ -1913,9 +2008,7 @@ describe("clean session control plane", () => {
     await reader.unsafe("begin");
     try {
       const [fence] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
       expect(fence).toBeDefined();
 
       // Keeping the reader transaction open must not delay either raw progress
@@ -1928,10 +2021,8 @@ describe("clean session control plane", () => {
       ]);
 
       const [advanced] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
-      expect(BigInt(advanced!.revision)).toBeGreaterThan(BigInt(fence!.revision));
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
+      expect(BigInt(advanced!.revision)).toBeGreaterThanOrEqual(BigInt(fence!.revision));
 
       await reader.unsafe("commit");
       readerTransactionOpen = false;
@@ -1985,7 +2076,7 @@ describe("clean session control plane", () => {
       Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
     >`
       select id, created_at as "createdAt", updated_at as "updatedAt",
-        activity_revision::text as "activityRevision"
+        activity_xid::text as "activityRevision"
       from sessions where workspace_id = ${grant.workspaceId!}
       order by created_at desc, id desc offset 2500 limit 1`;
     expect(cursor).toBeDefined();
@@ -2006,24 +2097,25 @@ describe("clean session control plane", () => {
         explain (format json, costs off)
         select id from sessions
         where workspace_id = ${grant.workspaceId!}
-          and activity_revision > 0
-          and activity_revision <= 1000000
+          and activity_xid > '0'::xid8
           and (
-            activity_revision < ${cursor!.activityRevision}::text::bigint
+            activity_xid < ${cursor!.activityRevision}::text::xid8
             or (
-              activity_revision = ${cursor!.activityRevision}::text::bigint
+              activity_xid = ${cursor!.activityRevision}::text::xid8
               and (
                 updated_at < ${cursor!.updatedAt}
                 or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
               )
             )
           )
-        order by activity_revision desc, updated_at desc, id desc limit 20`;
+        order by activity_xid desc, updated_at desc, id desc limit 20`;
       return { created, updated };
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
-    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
-  });
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_xid_idx");
+    // Seeding and analyzing the planner fixture takes about 25s on a 4-core CI
+    // runner, so the 30s default leaves no headroom.
+  }, 90_000);
 
   test("raw delta writers advance sequence without advancing monitoring activity", async () => {
     const baseline = "2020-01-02T03:04:05.123000Z";
@@ -2048,7 +2140,7 @@ describe("clean session control plane", () => {
       >`
         select last_sequence as "lastSequence",
           to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
-          activity_revision::text as "activityRevision"
+          activity_xid::text as "activityRevision"
         from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
       return row!;
     };
@@ -3242,6 +3334,70 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
+  test.each([0, 3])(
+    "internal MCP waits preserve the provider budget and clear on model progress (%s)",
+    async (count) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "survive the internal API outage");
+      const firstAttemptId = crypto.randomUUID();
+      const first = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: firstAttemptId },
+      );
+      if (!first) throw new Error("turn was not claimed");
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        await db.execute(
+          sql`update session_turns set metadata = metadata || ${JSON.stringify({
+            providerRecoveryCount: count,
+            ...(count > 0
+              ? {
+                  providerRecoveryReason: "provider_overloaded",
+                  providerRecoveryStartedAt: new Date(Date.now() - 60_000).toISOString(),
+                }
+              : {}),
+          })}::jsonb where id = ${first.id}::uuid`,
+        );
+      });
+      const recovered = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "first_party_mcp_setup_unavailable",
+      });
+      expect(recovered.action).toBe("recovering");
+      const waiting = await getSessionTurn(client.db, grant.workspaceId!, first.id);
+      expect(waiting?.metadata.providerRecoveryCount).toBe(count);
+      expect(typeof waiting?.metadata.internalMcpSetupWaitStartedAt).toBe("string");
+      const nextAttemptId = crypto.randomUUID();
+      const next = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: nextAttemptId },
+      );
+      if (!next) throw new Error("turn was not reclaimed");
+      expect(next.id).toBe(first.id);
+      const completed = await appendSessionEventsForTurnAttempt(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        next.id,
+        next.executionGeneration,
+        nextAttemptId,
+        [{ type: "agent.model.request", payload: { phase: "completed" } }],
+      );
+      expect(completed.accepted).toBe(true);
+      const metadata = (await getSessionTurn(client.db, grant.workspaceId!, first.id))?.metadata;
+      expect(metadata).not.toHaveProperty("providerRecoveryCount");
+      expect(metadata).not.toHaveProperty("internalMcpSetupWaitStartedAt");
+    },
+  );
+
   test("a completed current model request resets only the consecutive provider recovery budget", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "continue through intermittent provider overloads");
@@ -3547,6 +3703,93 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
       ),
     ).toEqual([{ callId: "old-unresolved" }]);
+  });
+
+  test("clearing proves call/result pairs across many history pages and ignores out-of-order results", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run many tools");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const callItem = (callId: string) => ({
+      type: "function_call",
+      name: "exec_command",
+      callId,
+      arguments: "{}",
+    });
+    const resultItem = (callId: string) => ({
+      type: "function_call_result",
+      callId,
+      output: { type: "text", text: `done ${callId}` },
+    });
+    const calls = ["early", "late", "unanswered", "reversed"];
+    for (const callId of calls) {
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callId,
+        callType: "function_call",
+        callItem: callItem(callId),
+      });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          ...identity,
+          callId,
+          resultItem: resultItem(callId),
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+    }
+    const filler = Array.from({ length: 90 }, (_, index) => [
+      { position: 102 + index * 2, item: callItem(`filler-${index}`) },
+      { position: 103 + index * 2, item: resultItem(`filler-${index}`) },
+    ]).flat();
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: 100, item: callItem("early") },
+          { position: 101, item: resultItem("early") },
+          ...filler,
+          { position: 400, item: callItem("unanswered") },
+          { position: 401, item: resultItem("reversed") },
+          { position: 402, item: callItem("reversed") },
+          { position: 403, item: callItem("late") },
+          { position: 404, item: resultItem("late") },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await clearDurablePendingSessionToolCalls(client.db, { ...identity, callIds: calls }),
+    ).toEqual({ accepted: true, cleared: 2 });
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ callId: schema.sessionPendingToolCalls.callId })
+            .from(schema.sessionPendingToolCalls)
+            .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+        )
+      )
+        .map(({ callId }) => callId)
+        .sort(),
+    ).toEqual(["reversed", "unanswered"]);
   });
 
   test("recovery consumes compacted completed pairs without reactivating or re-emitting them", async () => {
@@ -4124,6 +4367,104 @@ describe("clean session control plane", () => {
       callId: "pause-approval-call",
     });
     expect(steeredResult).not.toHaveProperty("status");
+  });
+
+  test("a Steer waiting for the next model step replaces an approval wait that came first", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "ask before running");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    // Accepted while the step still runs: it waits for the next model step.
+    const steered = await send(grant, session.id, "do this instead", "steer");
+    expect(steered.turn.metadata).toMatchObject({ deferredUntilModelStep: true });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "running",
+    });
+    // The step ends in an approval instead of another model request.
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "waiting-steer-approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "approval_tool",
+        callId: "waiting-steer-approval-call",
+        arguments: "{}",
+      },
+    });
+    await attachOpenSuffixToPendingToolCalls(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      members: [
+        { callId: "waiting-steer-approval-call", interruptionKind: "approval", reasoningItems: [] },
+      ],
+    });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn!.id,
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "waiting-steer-approval-call" },
+        },
+      ],
+    });
+
+    const resolved = await resolveWaitingSteer(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+    });
+    expect(resolved).not.toBeNull();
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "superseded",
+      cancelReason: "steer",
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).slice(-1)[0]
+        ?.item,
+    ).toMatchObject({ type: "function_call_result", callId: "waiting-steer-approval-call" });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.some(
+        (item) => item.metadata.delivery === "steer",
+      ),
+    ).toBe(false);
+    expect(
+      await resolveWaitingSteer(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+      }),
+    ).toBeNull();
+    const next = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(next?.id).toBe(steered.turn.id);
   });
 
   test("accepted Send and Steer stay out of the waiting queue", async () => {
@@ -5475,7 +5816,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace it", "steer");
+    const steered = await send(grant, session.id, "replace it", "steer_now");
 
     await expect(
       markSessionAttemptQuiesced(client.db, {
@@ -5549,7 +5890,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace the vanished worker", "steer");
+    const steered = await send(grant, session.id, "replace the vanished worker", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     expect(
       await markSessionWorkflowWakeDelivered(client.db, {
@@ -5966,7 +6307,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "replace it", "steer");
+    const replacement = await send(grant, session.id, "replace it", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     // Temporarily open admission without manufacturing the receipt event that
     // the historical race never wrote. This lets a newer attempt exist before
@@ -7509,6 +7850,21 @@ describe("clean session control plane", () => {
         },
       ],
     });
+
+    // The idempotency key is a trigger-filled plain column, so the lookup is
+    // index-served under row-level security instead of reading the whole turn.
+    const keyed = await shared.admin<Array<{ id: string; usageSourceKey: string | null }>>`
+      select id, usage_source_key as "usageSourceKey" from session_events
+      where workspace_id = ${grant.workspaceId!} and turn_id = ${turn.id}
+        and type = 'agent.model.usage'
+      order by sequence`;
+    expect(keyed.map((row) => row.usageSourceKey)).toEqual([sourceKey, sourceKey, sourceKey]);
+    const [unrelated] = await shared.admin<Array<{ keyed: number; total: number }>>`
+      select count(usage_source_key)::int as keyed, count(*)::int as total from session_events
+      where workspace_id = ${grant.workspaceId!} and session_id = ${session.id}
+        and type <> 'agent.model.usage'`;
+    expect(unrelated!.total).toBeGreaterThan(0);
+    expect(unrelated!.keyed).toBe(0);
   });
 
   test("a completed model call keeps usage truth when its attempt is replaced before signals", async () => {

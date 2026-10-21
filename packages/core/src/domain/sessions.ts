@@ -26,7 +26,13 @@ import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
-import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  currentSiteSessionOrigin,
+  sessionCreationMetadata,
+  SITE_ORIGIN_METADATA_KEY,
+} from "../site-session-origin";
+
+import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
@@ -87,6 +93,7 @@ import {
   evaluateWorkspaceModelPolicy,
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
+  resolveWorkspaceDefaultExecutionTarget,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -275,6 +282,7 @@ import {
   assertToolRefsSubset,
   availableToolRefs,
   mergeToolRefs,
+  mergeToolRefEager,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
@@ -989,7 +997,7 @@ export async function createAndStartSessionWithOutcome(input: {
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
   /** Session default Fast/standard; mirrored into metadata when set. */
-  latencyMode?: "standard" | "priority" | "fast";
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1659,10 +1667,11 @@ async function finishStartSession(
     }),
   );
   // Initialization committed the initial turn, events and wake outbox together.
-  // Live fanout is not workflow authority: signal from the durable revision
-  // without waiting for NATS, but retain and fully join both notifications.
+  // Notifications and the response read depend on that commit, not on one
+  // another. Read authoritative state while the immediate delivery attempts run;
+  // retain and fully join all work before returning (including on failure).
   const wakeRevision = started.workflowWakeRevision;
-  const [fanout, wake] = await Promise.allSettled([
+  const [fanout, wake, response] = await Promise.allSettled([
     measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
       publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
     ),
@@ -1677,22 +1686,26 @@ async function finishStartSession(
             wakeRevision,
           }),
         ),
+    (async () => {
+      const persisted = await measureSessionStartPhase(
+        input.startupObservability,
+        "session_reload",
+        () => requireSession(input.db, session.workspaceId, session.id),
+      );
+      const initialTurnId =
+        started.turn?.id ??
+        (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+        null;
+      return { ...persisted, initialTurnId };
+    })(),
   ]);
   // Keep the prior serial error priority without detaching attempt work. Normal
   // transport failure remains best-effort inside publishDurableSessionEvents.
   if (fanout.status === "rejected") throw fanout.reason;
   if (wake.status === "rejected") throw wake.reason;
-  const persisted = await measureSessionStartPhase(
-    input.startupObservability,
-    "session_reload",
-    () => requireSession(input.db, session.workspaceId, session.id),
-  );
-  const initialTurnId =
-    started.turn?.id ??
-    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
-    null;
+  if (response.status === "rejected") throw response.reason;
   return {
-    session: { ...persisted, initialTurnId },
+    session: response.value,
     changed: started.changed,
   };
 }
@@ -1846,7 +1859,7 @@ export async function assertWorkspaceModelPolicyAllows(
     throw new HTTPException(422, {
       message:
         verdict.reason === "credits"
-          ? `model "${canonicalModel}" uses Opengeni credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on`
+          ? `model "${canonicalModel}" uses credits, which are turned off in this workspace. Choose a model paid by a subscription or API key, or ask a workspace admin to turn credits back on`
           : verdict.reason === "provider"
             ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
             : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
@@ -1905,7 +1918,7 @@ type PostUserMessageTurnInput = {
   composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
-  latencyMode?: "standard" | "priority" | "fast" | null;
+  latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -2049,6 +2062,8 @@ export async function postUserMessageTurn(
   const { db, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // A message sent from a Site page records which Site (and version) on its turn.
+  const siteOrigin = currentSiteSessionOrigin();
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
@@ -2125,6 +2140,7 @@ export async function postUserMessageTurn(
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
               connectionAccountIntent: input.connectionAccountIntent ?? null,
+              ...(siteOrigin ? { turnMetadata: { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } } : {}),
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -2536,6 +2552,7 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
   if (payload.firstPartyMcpTools) {
@@ -2619,6 +2636,25 @@ async function createSessionForRequestInFileScope(
     payload.usageLimitMicros !== null &&
     !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)
   ) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // The trusted server in this process (published Site runtime) may attach a
+  // limit to a root session it creates as its own service principal, so the
+  // limit is in place before the first model call. Requests cannot set it.
+  const hostUsageLimit = currentHostSessionUsageLimit();
+  const hostInitialUsageLimit =
+    payload.usageLimitMicros === undefined &&
+    !parentSessionId &&
+    hostUsageLimit !== undefined &&
+    hostUsageLimit.subjectId === grant.subjectId
+      ? hostUsageLimit
+      : null;
+  if (hostInitialUsageLimit && !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)) {
     recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
     throw new SessionUsageLimitHttpError(
       422,
@@ -2750,6 +2786,7 @@ async function createSessionForRequestInFileScope(
       : null;
   let retainedKeyedShellModel: string | null = null;
   let retainedKeyedShellReasoningEffort: Session["reasoningEffort"] | null = null;
+  let retainedKeyedShellExecution: Session | null = null;
   if (
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
@@ -2790,6 +2827,7 @@ async function createSessionForRequestInFileScope(
         if (initializedReplay.outcome === "pending") {
           retainedKeyedShellModel = initializedReplay.session.model;
           retainedKeyedShellReasoningEffort = initializedReplay.session.reasoningEffort;
+          retainedKeyedShellExecution = initializedReplay.session;
         } else {
           if (initializedReplay.workflowWakeRevision !== null) {
             await unresolvedDeps.workflowClient.wakeSessionWorkflow({
@@ -2825,6 +2863,63 @@ async function createSessionForRequestInFileScope(
         throw new HTTPException(409, { message: error.message, cause: error });
       }
       throw error;
+    }
+  }
+  // A workspace default applies only to a new root's own box. Explicit targets,
+  // explicit backends, children, and shared groups retain their chosen placement.
+  // A keyed shell already froze its route in the insert transaction: recovery
+  // must keep that route even when the workspace default has since changed.
+  if (
+    !parentSession &&
+    !payload.targetSandboxId &&
+    payload.sandboxBackend === undefined &&
+    (payload.sandbox === undefined || payload.sandbox === "new")
+  ) {
+    if (retainedKeyedShellExecution) {
+      payload.sandboxBackend = retainedKeyedShellExecution.sandboxBackend;
+      if (retainedKeyedShellExecution.activeSandboxId) {
+        payload.targetSandboxId = retainedKeyedShellExecution.activeSandboxId;
+        if (retainedKeyedShellExecution.workingDir) {
+          payload.workingDir = retainedKeyedShellExecution.workingDir;
+        }
+      }
+    } else {
+      let target: ReturnType<typeof resolveWorkspaceDefaultExecutionTarget>;
+      try {
+        target = resolveWorkspaceDefaultExecutionTarget(workspace.settings);
+      } catch {
+        throw new HTTPException(422, {
+          message:
+            "The workspace default machine setting is invalid. Choose it again in workspace settings.",
+        });
+      }
+      if (target?.kind === "machine") {
+        const machine = await getSandbox(db, grant, target.targetSandboxId);
+        if (
+          !unresolvedDeps.settings.sandboxOwnershipEnabled ||
+          !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
+          !machine ||
+          machine.kind !== "selfhosted" ||
+          machine.scope === "user"
+        ) {
+          throw new HTTPException(422, {
+            message:
+              "Workspace default machine is unavailable. Choose another machine in workspace settings.",
+          });
+        }
+        payload.targetSandboxId = target.targetSandboxId;
+        // A machine brings its own environment. Do not also bind the implicit
+        // managed-sandbox image/rig when the workspace chooses a machine.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else if (target?.kind === "managed") {
+        if (["selfhosted", "none"].includes(unresolvedDeps.settings.sandboxBackend)) {
+          throw new HTTPException(422, {
+            message:
+              "The workspace default requires a managed sandbox, which this deployment does not provide.",
+          });
+        }
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
+      }
     }
   }
   let settings = await measureSessionStartPhase(
@@ -3112,7 +3207,10 @@ async function createSessionForRequestInFileScope(
   if (!parentSession) {
     selectedTools = withSameRequestSessionMcpServerTools(
       selectedTools,
-      sessionMcpServers.runtimeServers,
+      sessionMcpServers.runtimeServers.map((server) => ({
+        id: server.id,
+        eager: payload.mcpServers.find((input) => input.id === server.id)?.eager,
+      })),
     );
   }
   if (payload.excludedMcpServerIds !== undefined) {
@@ -3246,7 +3344,7 @@ async function createSessionForRequestInFileScope(
   // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
-  // onto the OpenGeni-credits billing path. Legacy session-bound grants without
+  // onto the Opengeni-credits billing path. Legacy session-bound grants without
   // exact attempt claims fall back to the parent session's persisted defaults.
   const model = canonicalConfiguredModel(settings, effectiveModelId);
   if (model === null || model === undefined) {
@@ -3466,10 +3564,16 @@ async function createSessionForRequestInFileScope(
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
-    // Slack computes its own baseline selection; only a caller's own explicit
-    // list is checked strictly against the capabilities.
+    // Only an agent's own explicit list is checked strictly against the
+    // capabilities: it reads the live tool catalog, so a conflict is its
+    // mistake. An API or SDK client was built against a capability map that
+    // grows (a tool can move under a capability it turns off), so its list is
+    // narrowed to the capabilities like the default selection, never refused.
+    // Slack computes its own baseline selection.
     explicitFirstPartyMcpTools:
-      agentConfigCreator === "slack" ? undefined : payload.firstPartyMcpTools,
+      agentConfigCreator === "slack" || grant.principalKind !== "agent_attempt"
+        ? undefined
+        : payload.firstPartyMcpTools,
     tools: [],
     toolPolicy,
     productServerIds: [],
@@ -3829,7 +3933,12 @@ async function createSessionForRequestInFileScope(
   const initialUsageLimit =
     initialUsageLimitActor && payload.usageLimitMicros != null
       ? { actor: initialUsageLimitActor, limitMicros: payload.usageLimitMicros }
-      : null;
+      : hostInitialUsageLimit
+        ? {
+            actor: { type: "host" as const, subjectId: hostInitialUsageLimit.subjectId },
+            limitMicros: hostInitialUsageLimit.limitMicros,
+          }
+        : null;
   const applyInitialUsageLimit = initialUsageLimit
     ? async (tx: Database, sessionId: string) =>
         await applyInitialSessionUsageLimit(tx, {
@@ -4115,7 +4224,7 @@ function sessionPromptBoundaryRequestHash(input: {
   composerDraftResources?: ResourceRef[];
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
-  latencyMode: "standard" | "priority" | "fast" | null;
+  latencyMode: "standard" | "priority" | "fast" | "ultrafast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
   connectionAccounts?: McpConnectionAccountSelection[];
@@ -4172,7 +4281,7 @@ async function acceptSessionUserMessageInFileScope(
     composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
-    latencyMode?: "standard" | "priority" | "fast" | null;
+    latencyMode?: "standard" | "priority" | "fast" | "ultrafast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
@@ -5147,7 +5256,7 @@ export async function updateSessionToolPolicy(
           );
           if (widenedFirstPartyTool) {
             throw new HTTPException(403, {
-              message: `session Opengeni tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
+              message: `session first-party tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
             });
           }
           nextFirstPartyMcpTools = explicitRequestedFirstPartyTools!;
@@ -5284,7 +5393,7 @@ export async function updateSessionToolPolicy(
         );
         if (widenedFirstPartyTool) {
           throw new HTTPException(403, {
-            message: `an agent may only narrow its session Opengeni tools: ${widenedFirstPartyTool}`,
+            message: `an agent may only narrow its session first-party tools: ${widenedFirstPartyTool}`,
           });
         }
       }
@@ -5736,13 +5845,31 @@ export async function readSessionLineage(
  */
 export function withSameRequestSessionMcpServerTools(
   tools: ToolRef[],
-  attachedServers: ReadonlyArray<{ id: string }>,
+  attachedServers: ReadonlyArray<{ id: string; eager?: ToolRef["eager"] }>,
 ): ToolRef[] {
-  const selectedIds = new Set(tools.map((tool) => tool.id));
+  const attachedEager = new Map(
+    attachedServers.flatMap((server) => {
+      const eager = mergeToolRefEager(server.eager, undefined);
+      return eager === undefined ? [] : [[server.id, eager] as const];
+    }),
+  );
+  // An attachment's eager marker joins an explicit ref's own marker; every
+  // other explicit marker (optional, allowedTools) is kept exactly.
+  const selected = attachedEager.size
+    ? tools.map((tool) => {
+        const eager = attachedEager.get(tool.id);
+        if (eager === undefined) return tool;
+        return { ...tool, eager: mergeToolRefEager(tool.eager, eager)! };
+      })
+    : tools;
+  const selectedIds = new Set(selected.map((tool) => tool.id));
   const missing = attachedServers
     .filter((server) => !selectedIds.has(server.id))
-    .map((server) => ({ kind: "mcp" as const, id: server.id }));
-  return missing.length === 0 ? tools : mergeToolRefs(tools, missing);
+    .map((server) => {
+      const eager = attachedEager.get(server.id);
+      return { kind: "mcp" as const, id: server.id, ...(eager !== undefined ? { eager } : {}) };
+    });
+  return missing.length === 0 ? selected : mergeToolRefs(selected, missing);
 }
 
 function withFirstPartyTools(

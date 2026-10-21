@@ -17,6 +17,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -32,7 +33,12 @@ beforeAll(async () => {
   database = await acquireOwnerMigratedTestDatabase("site-audience-migration");
   if (!database) throw new Error("Real PostgreSQL is required");
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    // Current session writers need the real additive xid trigger, independently
+    // of the Site migration whose historical behavior this fixture exercises.
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, {
     max: 1,
@@ -45,6 +51,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
     });

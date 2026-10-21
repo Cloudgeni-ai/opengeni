@@ -2,15 +2,15 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrainCircuitIcon, PlusIcon } from "lucide-react";
 import { LibraryTab, initialLibraryView } from "../src/components/knowledge/knowledge-library";
-import { Button } from "../src/components/ui/button";
-import { ContentPage } from "../src/components/ui/content-layout";
-import { PageHeader } from "../src/components/ui/page-header";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "../src/components/ui/line-tabs";
+} from "@opengeni/react/ui/line-tabs";
 import "../src/styles.css";
 
 function Preview() {

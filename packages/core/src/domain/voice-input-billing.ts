@@ -137,7 +137,7 @@ export function createVoiceInputBilling(deps: {
           code: "policy_blocked",
           status: 403,
           fallbackSafe: true,
-          message: "Opengeni credits are turned off in this workspace.",
+          message: "Credits are turned off in this workspace.",
         });
       }
       // Debits whose receipt committed but whose ledger write failed are
@@ -201,7 +201,11 @@ export function createVoiceInputBilling(deps: {
         usage: input.usage,
         trustedDurationSeconds: input.billing.trustedDurationSeconds,
       });
-      const cost = calculateVoiceInputCost(input.pricing, usage);
+      const cost = calculateVoiceInputCost(
+        input.pricing,
+        usage,
+        deps.settings.creditMarginBpsOverride,
+      );
       return await settleVoiceInputUsage(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,

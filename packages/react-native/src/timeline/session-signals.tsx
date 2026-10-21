@@ -1,6 +1,7 @@
 import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@opengeni/sdk";
 import type { UseGoalResult } from "@opengeni/react/session";
 import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
@@ -37,11 +38,12 @@ export function SessionSignals(props: {
   readOnly?: boolean | undefined;
 }) {
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   // Beside the queue the row is shared: chips keep only their icon, count and dot.
   const compact = useContext(CompactSignalsContext);
   const [open, setOpen] = useState<"goal" | "agents" | "commands" | null>(null);
   const goal = props.goal?.goal ?? null;
-  const agents = sessionAgentsSignal(props.agents);
+  const agents = sessionAgentsSignal(t, props.agents);
   if (!goal && !agents && props.commandsCount === 0) return null;
   const close = () => setOpen(null);
   return (
@@ -56,7 +58,7 @@ export function SessionSignals(props: {
           <Chip
             icon="target"
             label={m.goal}
-            detail={sessionGoalStateLabel(goal)}
+            detail={sessionGoalStateLabel(t, goal)}
             tone={goal.status === "active" ? "running" : "neutral"}
             compact={compact}
             onPress={() => setOpen("goal")}
@@ -65,7 +67,7 @@ export function SessionSignals(props: {
         {agents ? (
           <Chip
             icon="bot"
-            label={`${agents.count} agent${agents.count === 1 ? "" : "s"}`}
+            label={t("counts.agents", { count: agents.count })}
             count={agents.count}
             detail={agents.detail}
             tone={agents.tone}
@@ -76,7 +78,7 @@ export function SessionSignals(props: {
         {props.commandsCount > 0 ? (
           <Chip
             icon="terminal"
-            label={`${props.commandsCount} command${props.commandsCount === 1 ? "" : "s"}`}
+            label={t("counts.commands", { count: props.commandsCount })}
             count={props.commandsCount}
             detail={m.running}
             tone="running"
@@ -190,6 +192,7 @@ function SheetTitle({ children }: { children: string }) {
 function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean | undefined }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const c = theme.colors;
   const record = goal.goal!;
   const body = { ...fontStyle(theme, 400), fontSize: 15, lineHeight: 22, color: c.fg };
@@ -199,18 +202,18 @@ function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={{ ...fontStyle(theme, 600), fontSize: 17, color: c.fg }}>{m.goal}</Text>
         <Text style={{ ...fontStyle(theme, 500), fontSize: 13, color: c["fg-muted"] }}>
-          {sessionGoalStateLabel(record)}
+          {sessionGoalStateLabel(t, record)}
         </Text>
       </View>
       <View style={{ gap: 4 }}>
-        <Text style={label}>OBJECTIVE</Text>
+        <Text style={label}>{t("native.timeline.sessionSignals.objective")}</Text>
         <Text style={body} selectable>
           {record.text}
         </Text>
       </View>
       {record.successCriteria ? (
         <View style={{ gap: 4 }}>
-          <Text style={label}>DONE WHEN</Text>
+          <Text style={label}>{t("native.timeline.sessionSignals.doneWhen")}</Text>
           <Text style={body} selectable>
             {record.successCriteria}
           </Text>
@@ -218,13 +221,13 @@ function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean
       ) : null}
       {record.status === "paused" && record.rationale ? (
         <View style={{ gap: 4 }}>
-          <Text style={label}>WHY IT PAUSED</Text>
+          <Text style={label}>{t("native.timeline.sessionSignals.whyItPaused")}</Text>
           <Text style={body}>{record.rationale}</Text>
         </View>
       ) : null}
       {record.status === "completed" && record.evidence ? (
         <View style={{ gap: 4 }}>
-          <Text style={label}>EVIDENCE</Text>
+          <Text style={label}>{t("native.timeline.sessionSignals.evidence")}</Text>
           <Text style={body}>{record.evidence}</Text>
         </View>
       ) : null}
@@ -263,6 +266,7 @@ export function SessionCommandsList({
   commands: SessionCommandsSource;
   readOnly?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -272,7 +276,7 @@ export function SessionCommandsList({
   if (commands.commands.length === 0) {
     return (
       <Text style={{ ...fontStyle(theme, 400), color: c["fg-muted"], padding: 20 }}>
-        No commands are running.
+        {t("native.timeline.sessionSignals.noCommandsAreRunning")}
       </Text>
     );
   }

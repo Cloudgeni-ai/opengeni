@@ -15,7 +15,7 @@ import {
   type CadenceFrequency,
   type CadenceScheduleSpec,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 import {
   agentConfigFromFormState,
   newScheduledTaskFormState,
@@ -611,7 +611,7 @@ export function scheduleErrorReference(error: unknown): string | undefined {
 /**
  * The first message of a "Create with Opengeni" chat. The person says what
  * should happen and how often. Setup guidance belongs in the bundled
- * opengeni-schedules Skill, which the agent reads when this request is relevant.
+ * schedules Skill, which the agent reads when this request is relevant.
  */
 export function scheduleAgentOpeningMessage(request: string, timeZone: string): string {
   return [

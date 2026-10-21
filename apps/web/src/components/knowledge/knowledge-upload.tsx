@@ -3,11 +3,11 @@ import { FileTextIcon, UploadIcon, XIcon } from "lucide-react";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Field } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Button } from "@opengeni/react/ui/button";
+import { Field } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";

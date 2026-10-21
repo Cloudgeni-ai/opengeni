@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import {
   beginSocialLoginAnalytics,
@@ -5,7 +6,7 @@ import {
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "@/lib/shared-query";
@@ -14,6 +15,7 @@ import { useConsoleSharedQueries } from "@/lib/shared-query";
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import {
+  DESKTOP_APP_RETURN_PATH,
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
@@ -62,13 +64,14 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
@@ -127,6 +130,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
+import { useManualRepositoryCatalogReconciliation } from "@/lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -802,6 +806,7 @@ export function RootRouteComponent() {
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
+    pathname === DESKTOP_APP_RETURN_PATH ||
     isPublicDevHarness;
   useEffect(() => {
     if (!browserAccountsConfigured) configureManagedActorEpoch(null);
@@ -1291,6 +1296,19 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (!repositoryBuild.error) lastValidResources.current = repositoryBuild.resources;
   }, [repositoryBuild]);
+  useManualRepositoryCatalogReconciliation({
+    manualRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    repositories: githubRepos,
+    catalogReady: githubCatalogReady,
+    personalRepositories: personalGitHubRepositories,
+    selectedPersonalRepoIds: selectedPersonalGitHubRepoIds,
+    selectedPersonalRepoRefs: selectedPersonalGitHubRepoRefs,
+    setManualRepos,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+  });
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
@@ -2128,7 +2146,7 @@ export function RootRouteComponent() {
           });
         } else if (handled !== true) {
           toast.error("Failed to start session", {
-            description: composerSubmissionErrorMessage(problem),
+            description: composerSubmissionErrorMessage(t, problem),
           });
         }
       }
@@ -2914,48 +2932,51 @@ export function RootRouteComponent() {
   ) : managedAuthRequired && authSession === undefined ? (
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
-    <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
-        {browserAccountsEnabled ? (
-          <BrowserAccountsSignedOutPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            emptySetRegistrationPanel={
-              clientConfig?.managedAuthSessionSetMode === "broker" ||
-              clientConfig?.managedAuthSessionSetMode === "dual" ? (
-                <ManagedAuthPanel
-                  initialMode="signup"
-                  allowedModes={["signup"]}
-                  presentation="embedded"
-                  onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
-                  emailVerificationRequired={managedEmailVerificationRequired}
-                  newSignupsEnabled={managedNewSignupsEnabled}
-                />
-              ) : undefined
-            }
-          />
-        ) : (
-          <ManagedAuthPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            onDismissInvitation={clearOrganizationInvitationContinuation}
-            onSubmit={handleManagedAuth}
-            emailVerificationRequired={managedEmailVerificationRequired}
-            newSignupsEnabled={managedNewSignupsEnabled}
-            socialProviders={managedSocialProviders}
-            onSocialSubmit={handleManagedSocialAuth}
-          />
-        )}
-      </SignedOutPage>
-    </Suspense>
-  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+    <DesktopSignedOutRecovery>
+      <Suspense fallback={<LoadingPanel />}>
+        <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
+          {browserAccountsEnabled ? (
+            <BrowserAccountsSignedOutPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              emptySetRegistrationPanel={
+                clientConfig?.managedAuthSessionSetMode === "broker" ||
+                clientConfig?.managedAuthSessionSetMode === "dual" ? (
+                  <ManagedAuthPanel
+                    initialMode="signup"
+                    allowedModes={["signup"]}
+                    presentation="embedded"
+                    onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
+                    emailVerificationRequired={managedEmailVerificationRequired}
+                    newSignupsEnabled={managedNewSignupsEnabled}
+                  />
+                ) : undefined
+              }
+            />
+          ) : (
+            <ManagedAuthPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              onDismissInvitation={clearOrganizationInvitationContinuation}
+              onSubmit={handleManagedAuth}
+              emailVerificationRequired={managedEmailVerificationRequired}
+              newSignupsEnabled={managedNewSignupsEnabled}
+              socialProviders={managedSocialProviders}
+              onSocialSubmit={handleManagedSocialAuth}
+            />
+          )}
+        </SignedOutPage>
+      </Suspense>
+    </DesktopSignedOutRecovery>
+  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // A phone app is signed in by the person, not by a workspace grant, so
-    // approval renders before the access and onboarding gates.
+    // A phone app, and a published Site's viewer, are signed in by the person,
+    // not by a workspace grant (an invited viewer may belong to no
+    // organization), so approval renders before the access and onboarding gates.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
     ) : (

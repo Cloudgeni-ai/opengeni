@@ -1,9 +1,9 @@
-import { DownloadIcon, FileJsonIcon, ImageIcon } from "lucide-react";
+import { AppWindowIcon, DownloadIcon, FileJsonIcon, ImageIcon } from "lucide-react";
 import { useLightboxOptional } from "@opengeni/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
 import type { FileAsset, ResourceRef } from "@/types";
 import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";
@@ -175,6 +175,12 @@ function MessageImagePreview({
     );
   }
 
+  // An app-shot names the window it shows rather than the screenshot's file.
+  const appShot = asset.appShot;
+  const appShotCaption = appShot
+    ? [appShot.app, appShot.title.trim()].filter(Boolean).join(" · ")
+    : "";
+
   const openFull = () => {
     if (!url) {
       return;
@@ -225,10 +231,22 @@ function MessageImagePreview({
         )}
       </button>
       <figcaption className="mt-1 flex items-center gap-1.5 px-0.5 text-2xs text-fg-subtle">
-        <ImageIcon className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate" title={asset.filename}>
-          {asset.filename}
-        </span>
+        {appShot ? (
+          <>
+            <AppWindowIcon className="size-3 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1 truncate" title={appShotCaption}>
+              <span className="sr-only">App-shot: </span>
+              {appShotCaption}
+            </span>
+          </>
+        ) : (
+          <>
+            <ImageIcon className="size-3 shrink-0" />
+            <span className="min-w-0 flex-1 truncate" title={asset.filename}>
+              {asset.filename}
+            </span>
+          </>
+        )}
         <button
           type="button"
           onClick={() => void download()}

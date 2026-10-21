@@ -1,8 +1,9 @@
+import { t } from "@/lib/console-text";
 import { useEffect, useId, useRef, useState } from "react";
 import { MessageSquareIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import type { CreateFeedbackRequest, FeedbackSentiment } from "@opengeni/sdk";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -10,10 +11,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/dialog";
+import { Label } from "@opengeni/react/ui/label";
+import { Textarea } from "@opengeni/react/ui/textarea";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   feedbackDialogCopy,
   feedbackSentimentLabel,
@@ -38,7 +39,7 @@ export function FeedbackDialog(props: {
   const pending = useRef<CreateFeedbackRequest | null>(null);
   const submitting = useRef(false);
   const fieldId = useId();
-  const copy = feedbackDialogCopy(props);
+  const copy = feedbackDialogCopy(t, props);
   async function submit() {
     if (submitting.current) return;
     pending.current = feedbackSubmission(
@@ -80,7 +81,7 @@ export function FeedbackDialog(props: {
           <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
         {props.sentiment ? (
-          <p className="text-sm">{feedbackSentimentLabel(props.sentiment)}</p>
+          <p className="text-sm">{feedbackSentimentLabel(t, props.sentiment)}</p>
         ) : null}
         <div className="grid gap-2">
           <Label htmlFor={fieldId}>

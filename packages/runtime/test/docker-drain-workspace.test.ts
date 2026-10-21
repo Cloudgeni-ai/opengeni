@@ -181,6 +181,43 @@ test("protected receipt captures preserved workspace after exact container disap
   expect(nativeCalls.some((x) => ["run", "exec", "network", "rm"].includes(x[0]!))).toBe(false);
 });
 
+test("ownership of a container live across an image upgrade is proved against its own image", async () => {
+  // Like the SDK, the reuse check falls back to the client's configured image
+  // and ports, which the upgrade changed.
+  const proofs: unknown[] = [];
+  const upgraded = {
+    async canReusePreservedOwnedSession(
+      candidate: { image: string; configuredExposedPorts?: number[] },
+      options?: { clientOptions?: { image?: string; exposedPorts?: number[] } },
+    ) {
+      proofs.push(options?.clientOptions);
+      return (
+        (options?.clientOptions?.image ?? "upgraded-image") === candidate.image &&
+        JSON.stringify(options?.clientOptions?.exposedPorts ?? [8080]) ===
+          JSON.stringify(candidate.configuredExposedPorts ?? [])
+      );
+    },
+  };
+  const live = state();
+  rememberOwnedDockerSdkState(live as never);
+  expect(await serializeDockerOwnership(upgraded as never, live as never, probe)).toHaveProperty(
+    "opengeniDockerWorkspaceOwnership",
+  );
+  const legacy = state();
+  const handle = await attachDockerWorkspaceForDrain(
+    upgraded as never,
+    legacy as never,
+    captureFence,
+    probe,
+  );
+  expect(handle.state.workspaceRootPath).toBe(root);
+  expect(proofs).toEqual([
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+  ]);
+});
+
 test.each(["daemon", "foreign", "inode", "mode", "symlink"])(
   "protected receipt rejects %s drift before content capture",
   async (kind) => {
@@ -450,7 +487,10 @@ test("actual reaper two EDQUOT captures create zero siblings and retain lease/da
     ).rejects.toThrow("EDQUOT");
   expect(capture).toHaveBeenCalledTimes(2);
   expect(published).toBe(0);
-  expect(stopped).toBe(0);
+  // Each attempt records the stop before it reads: a drain capture runs on a
+  // stopped container. The container is already gone here, so nothing is
+  // removed, and the workspace and lease survive both failures.
+  expect(stopped).toBe(2);
   expect(lease.instanceId).toBe(cid);
   expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
   expect(nativeCalls.some((x) => ["run", "exec", "network", "rm"].includes(x[0]!))).toBe(false);
@@ -612,13 +652,16 @@ test.each(["success", "cas_miss", "published", "released_retry"])(
     );
     expect(result.terminated).toBe(mode !== "cas_miss");
     expect(publications).toBe(alreadyPublished ? 0 : 1);
-    expect(stops).toBe(mode === "cas_miss" ? 0 : 1);
+    // A fresh capture first stops the exact container (recorded as the stop),
+    // then reads the workspace; teardown records the same idempotent stop.
+    expect(stops).toBe(mode === "success" ? 2 : 1);
     expect(capture).toHaveBeenCalledTimes(alreadyPublished ? 0 : 1);
-    const removals = mode === "success" || mode === "published" ? 1 : 0;
+    const removals = mode === "released_retry" ? 0 : 1;
     expect(nativeCalls.filter((x) => x[0] === "rm")).toHaveLength(removals);
     expect(nativeCalls.some((x) => ["run", "exec", "network"].includes(x[0]!))).toBe(false);
     if (mode === "cas_miss") {
-      // A successor owns the box: its workspace is untouched.
+      // A successor owns the drain: the container was already stopped for
+      // the capture, but its workspace is untouched for that successor.
       expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
       expect(counters).toEqual([]);
     } else {
@@ -825,4 +868,94 @@ test("Docker adapter forwards the exact accepted archive override to its restric
   } finally {
     attached.mockRestore();
   }
+});
+
+test("a drain stops the exact container before reading, and a retry reads the stopped workspace", async () => {
+  const { original, restored, serialized } = await recordedState();
+  const handle = await attachDockerWorkspaceForDrain(
+    client as never,
+    restored as never,
+    captureFence,
+    probe,
+  );
+  await handle.stopForCapture();
+  expect(nativeCalls.filter((x) => x[0] === "rm")).toEqual([["rm", "-f", cid]]);
+  expect(present).toBe(false);
+  // The capture fails after the stop. The next drain attempt deserializes the
+  // same durable envelope and re-attaches to the host workspace.
+  const retried = { ...original };
+  rememberSerializedDockerOwnership(retried as never, { ...original, ...serialized });
+  nativeCalls.length = 0;
+  const again = await attachDockerWorkspaceForDrain(
+    client as never,
+    retried as never,
+    captureFence,
+    probe,
+  );
+  await again.stopForCapture();
+  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
+  const archive = await captureWorkspaceArchiveForStorage(
+    again,
+    Date.now(),
+    { requestId: uuid },
+    true,
+  );
+  try {
+    if (archive.kind !== "host_spool") throw new Error("wrong archive transport");
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of archive.spool.open()) chunks.push(chunk);
+    expect(JSON.parse(Buffer.concat(chunks).toString()).files).toEqual([
+      { path: "preserved.txt", data: Buffer.from("actual retained bytes").toString("base64") },
+    ]);
+  } finally {
+    await disposeWorkspaceArchive(archive);
+  }
+});
+
+test("only a durable ownership receipt lets a drain stop the container before reading", async () => {
+  const original = state();
+  rememberOwnedDockerSdkState(original as never);
+  // Minted in this process only: a retry after the stop could not re-attach.
+  const handle = await attachDockerWorkspaceForDrain(
+    client as never,
+    original as never,
+    captureFence,
+    probe,
+  );
+  await expect(handle.stopForCapture()).rejects.toThrow("durable ownership receipt");
+  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
+  expect(present).toBe(true);
+});
+
+test("drain capture is point-in-time for Modal snapshots and receipt-bearing Docker envelopes", async () => {
+  const { providerDrainCaptureIsPointInTime, providerWorkspaceCaptureIsPointInTime } =
+    await import("../src/sandbox/providers");
+  const { original, serialized } = await recordedState();
+  const docker = (providerState: Record<string, unknown>) => ({
+    backendId: "docker",
+    sessionState: { providerState },
+  });
+  expect(providerDrainCaptureIsPointInTime("docker", docker({ ...original, ...serialized }))).toBe(
+    true,
+  );
+  // A legacy envelope without the receipt keeps a running-box capture.
+  expect(providerDrainCaptureIsPointInTime("docker", docker({ ...original }))).toBe(false);
+  // Warm captures keep the container running, so they stay non-point-in-time.
+  expect(
+    providerWorkspaceCaptureIsPointInTime("docker", docker({ ...original, ...serialized })),
+  ).toBe(false);
+  const modal = (workspacePersistence?: string) => ({
+    backendId: "modal",
+    sessionState: {
+      providerState: {
+        sandboxId: "sb-1",
+        ...(workspacePersistence ? { workspacePersistence } : {}),
+      },
+    },
+  });
+  expect(providerDrainCaptureIsPointInTime("modal", modal("snapshot_directory"))).toBe(true);
+  expect(providerDrainCaptureIsPointInTime("modal", modal())).toBe(false);
+  expect(providerDrainCaptureIsPointInTime("e2b", docker({ ...original, ...serialized }))).toBe(
+    false,
+  );
 });

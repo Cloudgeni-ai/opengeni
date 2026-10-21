@@ -5,6 +5,8 @@ FROM scratch AS workspace-manifests
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
+COPY apps/site-gateway/package.json apps/site-gateway/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
@@ -12,6 +14,7 @@ COPY examples/northstar-support/package.json examples/northstar-support/package.
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -27,6 +30,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
@@ -44,7 +48,10 @@ COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
 COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
+COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
@@ -296,4 +303,6 @@ COPY --from=web-build --chown=bun:bun /app/web-server/server.ts ./apps/web/src/s
 COPY --from=web-build --chown=bun:bun /workspace /workspace
 USER bun
 EXPOSE 3000
-CMD ["bun", "run", "--cwd", "apps/web", "start"]
+# Run the server as PID 1 directly, like the API and worker images. A
+# `bun run` wrapper as PID 1 crashed with SIGSEGV on every SIGTERM at rollout.
+CMD ["bun", "apps/web/src/server.ts"]

@@ -14,6 +14,7 @@ import {
   type SessionUsageLimitLabels,
   type SessionUsageLimitSummary,
 } from "../usage/session-usage-limit";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type SessionUsageLimitNoticeProps = {
   /** The task's usage-limit projection (`GET .../usage-limit` or `session.usageLimit`). */
@@ -75,11 +76,12 @@ export function SessionUsageLimitNotice({
   labels: overrides,
   className,
 }: SessionUsageLimitNoticeProps) {
-  const labels = sessionUsageLimitLabels(overrides);
-  const fromUsage = summarizeSessionUsageLimit(usage, overrides, { stale });
+  const t = useOpenGeniText();
+  const labels = sessionUsageLimitLabels(t, overrides);
+  const fromUsage = summarizeSessionUsageLimit(t, usage, overrides, { stale });
   const summary: SessionUsageLimitSummary =
     refusal && fromUsage.state !== "reached"
-      ? summarizeSessionUsageLimitRefusal(refusal, overrides)
+      ? summarizeSessionUsageLimitRefusal(t, refusal, overrides)
       : fromUsage;
   const near = summary.state === "near";
   const key =

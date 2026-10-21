@@ -166,13 +166,17 @@ async function fixture(
       );
     throw new Error(`Unexpected synthetic Slack OAuth destination: ${url}`);
   });
-  async function begin(ownership: "personal" | "workspace" = "personal") {
+  async function begin(
+    ownership: "personal" | "workspace" = "personal",
+    reconnectAccountId?: string,
+  ) {
     const response = await app.request(base, {
       method: "POST",
       headers,
       body: JSON.stringify({
         providerId: "slack-personal",
         ownership,
+        ...(reconnectAccountId ? { reconnectAccountId } : {}),
         returnUrl,
         idempotencyKey: randomUUID(),
       }),
@@ -207,12 +211,101 @@ async function fixture(
     begin,
     callback,
     read,
+    remove: (id: string) =>
+      app.request(`/v1/workspaces/${identity.personalWorkspaceId}/connections/${id}`, {
+        method: "DELETE",
+        headers,
+      }),
     authenticatedMcpRequests: () => authenticatedMcpRequests,
     restore: () => transport.mockRestore(),
   };
 }
 
 describe("Slack API-backed personal OAuth", () => {
+  test("Add account keeps two Slack workspaces separate and reconnect cannot replace an identity", async () => {
+    const identity = {
+      ok: true,
+      team_id: "T_INTERNAL",
+      user_id: "U_MEMBER",
+      team: "Internal",
+      user: "member",
+    };
+    const provider = await fixture({ identity });
+    try {
+      const first = await provider.begin();
+      await provider.callback(first.state);
+      const firstAccount = (await provider.read(first.attempt.id)).account;
+      identity.team_id = "T_COMMUNITY";
+      identity.team = "Community";
+      const second = await provider.begin();
+      await provider.callback(second.state);
+      const secondAccount = (await provider.read(second.attempt.id)).account;
+      expect(secondAccount.id).not.toBe(firstAccount.id);
+      const accounts = await listConnectionsMetadata(
+        client.db,
+        provider.identity.personalWorkspaceId,
+        provider.identity.subjectId,
+      );
+      expect(
+        accounts
+          .filter((account) => account.providerDomain === "slack.com")
+          .map((account) => account.metadata.slackTeamId)
+          .sort(),
+      ).toEqual(["T_COMMUNITY", "T_INTERNAL"]);
+      const reconnect = await provider.begin("personal", firstAccount.id);
+      await provider.callback(reconnect.state);
+      expect(await provider.read(reconnect.attempt.id)).toMatchObject({
+        state: "failed",
+        error: { code: "account_mismatch" },
+      });
+      const unchanged = await getConnectionMetadata(
+        client.db,
+        provider.identity.personalWorkspaceId,
+        firstAccount.id,
+        provider.identity.subjectId,
+      );
+      expect(unchanged?.metadata.slackTeamId).toBe("T_INTERNAL");
+      expect(unchanged?.version).toBe(firstAccount.version);
+      expect((await provider.remove(firstAccount.id)).status).toBe(200);
+      expect((await provider.remove(secondAccount.id)).status).toBe(200);
+      identity.team_id = "T_INTERNAL";
+      identity.team = "Internal";
+      const replacement = await provider.begin();
+      await provider.callback(replacement.state);
+      const replaced = await provider.read(replacement.attempt.id);
+      expect(replaced.state).toBe("complete");
+      expect(replaced.account.id).not.toBe(firstAccount.id);
+      expect(replaced.account.id).not.toBe(secondAccount.id);
+    } finally {
+      provider.restore();
+    }
+  });
+
+  test("concurrent Add callbacks create one exact Slack identity and settle the duplicate", async () => {
+    const provider = await fixture();
+    try {
+      const first = await provider.begin();
+      const second = await provider.begin();
+      await Promise.all([provider.callback(first.state), provider.callback(second.state)]);
+      const results = await Promise.all([
+        provider.read(first.attempt.id),
+        provider.read(second.attempt.id),
+      ]);
+      expect(results.map((result) => result.state).sort()).toEqual(["complete", "failed"]);
+      expect(results.find((result) => result.state === "failed")?.error.code).toBe(
+        "account_already_connected",
+      );
+      const accounts = await listConnectionsMetadata(
+        client.db,
+        provider.identity.personalWorkspaceId,
+        provider.identity.subjectId,
+      );
+      expect(accounts.filter((account) => account.providerDomain === "slack.com")).toHaveLength(1);
+    } finally {
+      provider.restore();
+    }
+  });
+
   test.each(["personal", "workspace"] as const)(
     "%s account callback verifies the Web API and saves the reviewed tools without an installed bot",
     async (ownership) => {
@@ -258,7 +351,7 @@ describe("Slack API-backed personal OAuth", () => {
           slackUserId: "U_EXTERNAL",
           slackTeamName: "Example Community",
           slackUserName: "member",
-          mcpToolsVerification: { status: "ok", toolCount: 9 },
+          mcpToolsVerification: { status: "ok", toolCount: SLACK_REST_MCP_TOOLS.length },
         });
         expect(
           (saved!.metadata.mcpTools as Array<{ name: string }>).map((tool) => tool.name),
@@ -360,7 +453,9 @@ describe("Slack API-backed personal OAuth", () => {
     const provider = await fixture({ omitScope: true });
     try {
       const begun = await provider.begin();
-      expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")).toHaveLength(11);
+      expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
+        ...OPENGENI_SLACK_REST_USER_SCOPES,
+      ]);
       await provider.callback(begun.state);
       const completed = await provider.read(begun.attempt.id);
       const saved = await getConnectionMetadata(
@@ -470,7 +565,7 @@ test("reviewed Slack scopes cannot be widened by caller or hosted metadata and n
     authorizationServerScopesSupported: ["offline_access", "search:read.public"],
   });
   expect(requested).toEqual([...OPENGENI_SLACK_REST_USER_SCOPES]);
-  expect(requested).toHaveLength(11);
+  expect(requested).toHaveLength(12);
   expect(requested.some((scope) => scope.startsWith("search:"))).toBe(false);
   expect(profile.normalizeGrantedScopes?.(["users:read,chat:write", " users:read "])).toEqual([
     "chat:write",

@@ -12,7 +12,7 @@ import {
   nextRuns,
   normalizeCadenceRule,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 
 import {
   KIT_NOW,

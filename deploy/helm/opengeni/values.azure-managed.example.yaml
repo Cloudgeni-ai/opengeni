@@ -110,6 +110,9 @@ postgres:
   # provide the restricted opengeni_app OPENGENI_DATABASE_URL through
   # secret.existingSecret. Put the owner/admin URL and opengeni_app provisioning
   # credentials only in migrations.secret.existingSecret.
+  # A URL on port 6432 (the built-in PgBouncer) turns prepared statements off
+  # automatically; any other transaction pooler needs
+  # OPENGENI_DATABASE_PREPARED_STATEMENTS=false in the same secret.
 
 temporal:
   # Production should use Temporal Cloud, an existing endpoint, or the official
@@ -234,6 +237,9 @@ ingress:
           service: api
         - path: /opengeni-agent-minisign.pub
           pathType: Exact
+          service: api
+        - path: /desktop
+          pathType: Prefix
           service: api
     # The bring-your-own-compute stream relay — wss long-lived sockets. The
     # global proxy-read/send-timeout:3600 + proxy-buffering:off annotations above

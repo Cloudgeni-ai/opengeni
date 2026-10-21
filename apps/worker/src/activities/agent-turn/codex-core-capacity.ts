@@ -22,6 +22,7 @@ import {
 import type { Settings } from "@opengeni/config";
 import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { measureTurnStartupPhase } from "../../observability-metrics";
 import {
   CODEX_CORE_WAIT_BINDING,
   recoverCoreCodexHealthAndWake,
@@ -49,6 +50,32 @@ export function isCoreCodexSourceDisconnectedError(error: unknown): boolean {
   return false;
 }
 
+/** Read-only hint after atomic claim. Renewal stays at live placement. */
+export function prepareCoreCodexTurnEntitlements(
+  deps: Pick<CapacityPhaseDeps, "db" | "settings" | "input" | "turn" | "observability">,
+): Promise<number> {
+  return measureTurnStartupPhase(
+    deps.observability,
+    {
+      phase: "credential_entitlement_refresh",
+      provider: "codex-subscription",
+      backend: deps.turn.sandboxBackend,
+    },
+    () =>
+      refreshCoreCodexModelEntitlements(
+        deps.db,
+        deps.settings,
+        {
+          accountId: deps.input.accountId,
+          workspaceId: deps.input.workspaceId,
+          subjectId: deps.turn.initiatingHumanSubjectId,
+        },
+        undefined,
+        { refreshCredentials: false },
+      ),
+  );
+}
+
 /** Codex's chat placement on the shared core. */
 export const CODEX_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   id: "codex",
@@ -61,12 +88,29 @@ export const CODEX_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   recoverHealth: async ({ db, signalCodexCapacityWorkflow }, identity) => {
     await recoverCoreCodexHealthAndWake({ db, signalCodexCapacityWorkflow }, identity);
   },
-  beforePlacement: (deps, identity) =>
-    refreshCoreCodexModelEntitlements(deps.db, deps.settings, {
-      accountId: deps.input.accountId,
-      workspaceId: deps.input.workspaceId,
-      subjectId: identity.initiatingHumanSubjectId,
-    }),
+  beforePlacement: async (deps, identity) => {
+    await measureTurnStartupPhase(
+      deps.observability,
+      {
+        phase: "credential_entitlements",
+        provider: "codex-subscription",
+        backend: deps.turn.sandboxBackend,
+      },
+      async () => {
+        if (deps.codexEntitlementPreparation) {
+          await Promise.allSettled([deps.codexEntitlementPreparation]);
+        }
+        // Keep the original live check: it consumes the persisted fact only
+        // while scope, credential generation and expiry still match. Tokens
+        // skipped by the hint renew here, never before run admission.
+        await refreshCoreCodexModelEntitlements(deps.db, deps.settings, {
+          accountId: deps.input.accountId,
+          workspaceId: deps.input.workspaceId,
+          subjectId: identity.initiatingHumanSubjectId,
+        });
+      },
+    );
+  },
   adopt: ({ providerTurn, turnExecutionPolicy }, core, placement) => {
     providerTurn.codexSubscriptionCore = core;
     providerTurn.effectiveCodexCredentialId = placement.connectionId;

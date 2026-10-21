@@ -67,12 +67,13 @@ export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
 
 /**
  * First-party tools the harness itself relies on: goal lifecycle, background
- * command polling, and the session-level wait. The prompt requires them on
- * ordinary work, so hiding them behind search spends model round trips to
- * rediscover the same schemas. This is an exact per-tool exception, never the
- * whole `opengeni` catalog, and it never widens authority: only a tool the
- * attempt's prepared server actually listed (selection and permissions already
- * applied) can be visible.
+ * command polling, and the session-level wait, plus excel_run, the only way to
+ * reach a workbook the person has open in Excel. Hiding any of them behind
+ * search spends a model round trip to rediscover the same schema (for Excel,
+ * one of every four requests in a typical add-in chat). This is an exact
+ * per-tool exception, never the whole `opengeni` catalog, and it never widens
+ * authority: only a tool the attempt's prepared server actually listed
+ * (selection and permissions already applied) can be visible.
  */
 export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
   "goal_set",
@@ -83,6 +84,7 @@ export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
   "command_read",
   "command_wait",
   "wait_for_input",
+  "excel_run",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const HARNESS_CONTROL_MODEL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -96,6 +98,96 @@ export function isHarnessControlMcpToolName(registryId: string, modelName: strin
   return (
     registryId === HARNESS_CONTROL_MCP_SERVER_ID && HARNESS_CONTROL_MODEL_TOOL_NAMES.has(modelName)
   );
+}
+
+/**
+ * First-party interaction tools that are only useful together. Disclosing one
+ * member through search discloses the whole working set, so an agent that asks
+ * for "a browser" gets open, observe, act, screenshot and tab control in one
+ * search instead of rediscovering each schema in its own model round trip.
+ * Members are matched by their name after the server separator and only ever
+ * drawn from the already-authorized searchable pool.
+ */
+const INTERACTION_MCP_SERVER_ID = "interaction";
+const INTERACTION_TOOL_FAMILIES: readonly (readonly string[])[] = [
+  ["browser_open", "browser_observe", "browser_act", "browser_screenshot", "browser_tabs"],
+  ["computer_open", "computer_observe", "computer_act"],
+];
+
+/** The interaction tool's name after its server prefix, or null for any other tool. */
+function interactionToolName(name: string): string | null {
+  const prefix = `${INTERACTION_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}`;
+  return name.startsWith(prefix) ? name.slice(prefix.length) : null;
+}
+
+/** The other members of every family a disclosed tool belongs to, in family order. */
+function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
+  const disclosedShort = new Set(
+    disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
+  );
+  const wanted = INTERACTION_TOOL_FAMILIES.filter((family) =>
+    family.some((member) => disclosedShort.has(member)),
+  ).flat();
+  const companions: T[] = [];
+  for (const member of wanted) {
+    if (disclosedShort.has(member)) continue;
+    const tool = pool.find((candidate) => interactionToolName(candidate.name) === member);
+    if (tool && !companions.includes(tool)) companions.push(tool);
+  }
+  return companions;
+}
+
+/**
+ * The tool that starts each interaction family. It stays in the first request,
+ * so a browser or computer task begins with its first real call instead of a
+ * search round trip, and opening discloses the rest of the family right after
+ * the open result (see the lazy-tool transport). Only a tool the attempt
+ * actually prepared can be visible: a first-party interaction tool, or one the
+ * `interaction` server listed, never a same-named tool from another server.
+ */
+const INTERACTION_ENTRY_TOOLS: ReadonlySet<string> = new Set(["browser_open", "computer_open"]);
+
+/** True when a prepared function tool is an interaction family's entry tool. */
+export function isInteractionEntryFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
+): boolean {
+  if (!tool || typeof tool !== "object" || (tool as { type?: unknown }).type !== "function") {
+    return false;
+  }
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string" || !isInteractionEntryToolName(name)) return false;
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
+  return serverId === null || serverId === INTERACTION_MCP_SERVER_ID;
+}
+
+/** True when a model tool name is an interaction family's entry tool. */
+export function isInteractionEntryToolName(name: string): boolean {
+  const short = interactionToolName(name);
+  return short !== null && INTERACTION_ENTRY_TOOLS.has(short);
+}
+
+/**
+ * The companions an entry tool discloses once it is called: the rest of its
+ * family that is still searchable, within the same byte budgets as a search.
+ */
+export function interactionEntryCompanions(entryName: string, searchable: Tool[]): Tool[] {
+  if (!isInteractionEntryToolName(entryName)) return [];
+  const pool = searchable.filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
+  const disclosed: Tool[] = [];
+  let disclosedBytes = 0;
+  for (const tool of familyCompanions([{ name: entryName } as Tool & { name: string }], pool)) {
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) continue;
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+    disclosedBytes += toolBytes;
+    disclosed.push(tool);
+  }
+  return disclosed;
 }
 
 /**
@@ -352,6 +444,17 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
     disclosedBytes += toolBytes;
     bounded.push(tool);
     if (bounded.length >= limit) break;
+  }
+  // Complete any interaction family a result belongs to. Companions come after
+  // the ranked results, so they never displace them, and they still respect the
+  // per-tool and total disclosure byte budgets (but not the result count limit).
+  for (const tool of familyCompanions(bounded as (Tool & { name: string })[], searchable)) {
+    if (bounded.includes(tool)) continue;
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) continue;
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+    disclosedBytes += toolBytes;
+    bounded.push(tool);
   }
   return bounded;
 }

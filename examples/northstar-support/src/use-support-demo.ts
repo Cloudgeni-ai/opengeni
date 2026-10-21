@@ -62,8 +62,37 @@ export function useSupportDemo(): SupportDemoResult {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const events = new EventSource(`${PRODUCT_API_ORIGIN}/api/demo/events`);
+    let disposed = false;
+    let events: EventSource | null = null;
+    let reconnect: number | undefined;
+    const onDomainEvent = (event: MessageEvent<string>) => {
+      try {
+        const parsed = JSON.parse(event.data) as SupportDomainEvent;
+        setLastEvent(parsed);
+        void refresh();
+      } catch {
+        // Keep the last valid state if a non-domain SSE frame arrives.
+      }
+    };
+    // The update stream carries only this browser's own changes and needs the
+    // visitor cookie that the first state read sets, so it opens after it.
+    const connect = () => {
+      if (disposed) return;
+      const stream = new EventSource(`${PRODUCT_API_ORIGIN}/api/demo/events`);
+      events = stream;
+      for (const type of ["ticket.updated", "ticket.note_added", "ticket.replied", "demo.reset"]) {
+        stream.addEventListener(type, onDomainEvent as EventListener);
+      }
+      stream.onerror = () => {
+        setError(new Error("Product update stream disconnected."));
+        // The browser retries a dropped stream itself but not a refused one
+        // (for example after a server restart replaced the visitor cookie).
+        if (stream.readyState === EventSource.CLOSED && !disposed) {
+          reconnect = window.setTimeout(() => void refresh().then(connect), 5_000);
+        }
+      };
+    };
+    void refresh().then(connect);
     const reconcile = window.setInterval(() => {
       void fetchJson<SupportWorkspaceState>("/api/demo/state")
         .then((nextState) => {
@@ -74,32 +103,25 @@ export function useSupportDemo(): SupportDemoResult {
           setError(cause instanceof Error ? cause : new Error(String(cause)));
         });
     }, 15_000);
-    const onDomainEvent = (event: MessageEvent<string>) => {
-      try {
-        const parsed = JSON.parse(event.data) as SupportDomainEvent;
-        setLastEvent(parsed);
-        void refresh();
-      } catch {
-        // Keep the last valid state if a non-domain SSE frame arrives.
-      }
-    };
-    events.addEventListener("ticket.updated", onDomainEvent as EventListener);
-    events.addEventListener("ticket.note_added", onDomainEvent as EventListener);
-    events.addEventListener("ticket.replied", onDomainEvent as EventListener);
-    events.addEventListener("demo.reset", onDomainEvent as EventListener);
-    events.onerror = () => setError(new Error("Product update stream disconnected."));
     return () => {
+      disposed = true;
       window.clearInterval(reconcile);
-      events.close();
+      window.clearTimeout(reconnect);
+      events?.close();
     };
   }, [refresh]);
 
   const reset = useCallback(async () => {
-    const next = await fetchJson<SupportWorkspaceState>("/api/demo/reset", {
-      method: "POST",
-    });
-    setState(next);
-    setLastEvent(null);
+    try {
+      const next = await fetchJson<SupportWorkspaceState>("/api/demo/reset", {
+        method: "POST",
+      });
+      setState(next);
+      setLastEvent(null);
+    } catch (cause) {
+      // For example a rate-limited reset: keep the current data.
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    }
   }, []);
 
   const updateTicket = useCallback(

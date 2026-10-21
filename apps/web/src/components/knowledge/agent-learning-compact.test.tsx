@@ -38,7 +38,7 @@ const context = {
 mock.module("@/context", () => ({ useAppContext: () => context }));
 const { AgentLearningSettingsEditor, AgentLearningDraftEditor } =
   await import("./agent-learning-settings");
-const { apiErrorAdvice } = await import("@/lib/api-error");
+const { apiErrorAdvice } = await import("@opengeni/react/ui/api-error");
 let container: HTMLDivElement;
 let root: Root;
 beforeAll(() => {

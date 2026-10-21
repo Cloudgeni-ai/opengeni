@@ -1,21 +1,33 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
-capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
-transport; the source-built executable performs desktop operations. The narrow
-Windows experiment still uses the published SDK in process. CUA is the default
-on macOS and for explicitly selected isolated Linux desktops. Linux host desktops
-and Windows retain the native default.
+`ffae8ecee2999a7c650c6b3fb7398b40919a8eb9`: upstream `cua-driver-rs-v0.37.0`
+(`2d2f9922`, including its non-invalidating preview capture and cursor support)
+plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
+cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
+step reports that keep the windows each step opened, and a `run_steps` option
+(`refind_stale:false`) that stops a batch at a stale element token instead of
+acting on a lookalike found again by role and label, or re-sending a refused
+menu-bar token click as `invoke_menu`, and a macOS launch of an app that is
+already running that sends a reopen (`aevt/rapp`) instead of a second open
+event, so a running document app with no window shows its window or Open panel
+again, in the background. `@trycua/cua-driver` 0.37.0
+supplies the private-worker transport; the source-built executable performs
+desktop operations. Windows uses the published SDK's native runtime in process.
+A `computer_act` batch runs as one `run_steps` call only where the worker offers
+`refind_stale`, so every step stays bound to the observation the batch was
+checked against; on Windows a batch's actions are sent one at a time. CUA is the
+default on macOS, on Windows and for explicitly selected isolated Linux
+desktops. Linux host desktops retain the native default.
 
 `ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
-continues to handle OpenGeni sessions, operation receipts and frame streaming.
+continues to handle Opengeni sessions, operation receipts and frame streaming.
 There is no second authorization system or operation journal. Structured browser
 control, attached Chrome and browser profiles are unchanged.
 
 ## Runtime and packaging
 
-macOS configuration selects CUA with the existing desktop. Linux configuration
+macOS and Windows configuration select CUA with the existing desktop. Linux configuration
 retains the existing native desktop unless
 `OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux` is explicitly selected;
 that mode defaults to CUA and requires the Linux desktop dependencies listed below.
@@ -85,11 +97,17 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
-- Windows has not completed adoption acceptance. Windows requires an
-  unlocked interactive session on `WinSta0/Default`; Session 0 is refused.
-  Only Windows semantic actions and window capture are admitted. Edit values
-  and labels copied from those values are redacted when password metadata is absent.
-- Release staging includes macOS and Linux. Runtime defaults take effect only in
+- Windows requires an unlocked interactive session on `WinSta0/Default`;
+  Session 0 is refused. Window capture, semantic UIA actions, pointer input
+  (click, scroll, drag) and keyboard input (typing and key chords with
+  ctrl/alt/shift/win) are admitted. Semantic actions run in the background;
+  pointer and keyboard input use foreground delivery, which briefly fronts
+  the window and restores the previous foreground, because background
+  PostMessage input is dropped by Chromium, Electron and WinUI surfaces. Raw
+  native CUA tool calls are not offered on Windows yet. Edit values and labels
+  copied from those values are redacted when password metadata is absent.
+  `cua-windows.e2e.test.ts` drives a real window on a hosted Windows runner.
+- Release staging includes macOS, Linux and Windows x64. Runtime defaults take effect only in
   an installed release containing this change; server deployment alone does not
   update a connected machine's installed helpers. macOS still requires OS consent.
 
@@ -100,19 +118,24 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Upstream source](https://github.com/trycua/cua/tree/35e376ed509cb8eee49624279256a81da83df8cc/libs/cua-driver).
-The pin includes the focused X11 coordinate correction proposed in
-[CUA #4890](https://github.com/trycua/cua/pull/4890), on upstream `48cc491`.
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ffae8ecee2999a7c650c6b3fb7398b40919a8eb9/libs/cua-driver).
+The two commits on top of upstream carry the X11 coordinate corrections proposed in
+[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
+Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
+decorations rebuild element bounds from Window coordinates. Upstream 0.37 does
+not include them; without them GTK4 controls are misplaced after a window move,
+which the isolated Linux end-to-end tests catch.
 
 ## Native agent interface
 
 The release catalog comes from the bundled worker's `listToolsJson()` via
 `bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
 workflow tools; lifecycle, escalation, configuration, updates and browser tools
-stay outside this interface. macOS and Linux each have a generated catalog;
-agent schemas preserve the union of their native variants, and the selected
-runtime checks its exact platform schema. Other platforms must supply their own
-qualified schemas before native admission.
+stay outside this interface. macOS, Linux and Windows each have a generated
+catalog, produced by running the script on that platform after every CUA pin
+change; macOS defines the admitted set, and a platform whose driver lacks a tool
+omits it. Agent schemas preserve the union of the native
+variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 
 Agents use `interaction__cua_<upstream_name>` or Code Mode
@@ -122,8 +145,18 @@ Agents use `interaction__cua_<upstream_name>` or Code Mode
 are required, including for read-like tools that can write screenshot files.
 No tool-enable UI or separate permission system is added.
 
-`run_actions` retains upstream batching and optional final observation;
+`run_steps` retains upstream batching, per-step waits and checks, and optional
+final observation diff; `run_script` runs upstream's sandboxed script engine, whose
+only API is the same CUA session, with no filesystem, network or process access;
 `get_window_state` retains compact Markdown, query limits and diff reads.
+
+A `computer_act` batch (semantic and keyboard actions on one window) is one
+operation on CUA: the adapter checks every action against the observation the
+batch names, sends them as one `run_steps` call, which paces all but the last
+step for a batch, and observes the window once at the end, or the window CUA
+reports the last action opened. A batch CUA stops part way records how many
+actions completed in its receipt's error details. A keyboard action after the
+first carries no element token, since earlier actions may have moved the focus.
 MCP content, structured results and images survive the journal. Responses larger
 than 12 MiB carry an explicit bounded projection, retained operation status and
 no-replay guidance; the original stays in the controller journal. Failed

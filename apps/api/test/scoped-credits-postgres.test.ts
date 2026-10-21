@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import assert from "node:assert/strict";
 import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import * as database from "@opengeni/db";
 import {
   createDb,
   bootstrapWorkspace,
@@ -52,6 +53,12 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
     );
     restores.push(
       spyOn(Object.getPrototypeOf(fakeStripe.customers), "create").mockImplementation(async () => ({
+        id: "cus_review",
+        email: null,
+      })),
+    );
+    restores.push(
+      spyOn(Object.getPrototypeOf(fakeStripe.customers), "update").mockImplementation(async () => ({
         id: "cus_review",
         email: null,
       })),
@@ -160,7 +167,14 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
       return parsed;
     }
     const base = `/v1/workspaces/${grant.workspaceId}`;
+    const readBalance = database.getBillingBalance;
+    const catalogBalanceReads = spyOn(database, "getBillingBalance").mockImplementation(
+      readBalance,
+    );
+    restores.push(catalogBalanceReads);
     const zero = await json(`${base}/model-catalog`);
+    assert.equal(catalogBalanceReads.mock.calls.length, 1, "one request-local funding snapshot");
+    catalogBalanceReads.mockClear();
     assert.equal(zero.defaultSelection.model, DEFAULT_OPENROUTER_MODEL_ID);
     assert.deepEqual(zero.creditsSelection, {
       model: "gpt-6-luna",
@@ -207,7 +221,9 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
     }
     assert.equal((await getBillingBalance(client.db, grant.accountId)).balanceMicros, 100_000_000);
 
+    catalogBalanceReads.mockClear();
     const scope = await json(`${base}/model-catalog`);
+    assert.equal(catalogBalanceReads.mock.calls.length, 1, "default and funding share one read");
     assert.equal(scope.defaultSelection.model, "gpt-6-sol");
     assert.equal(scope.models.find((m: any) => m.id === "gpt-6-sol").creditFunding, "promotional");
     assert.equal(
@@ -288,7 +304,7 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
         countsTowardTokenCap: true,
         initiatingHumanSubjectId: null,
       }),
-      /insufficient Opengeni credits/,
+      /insufficient workspace credits/,
     );
     const usage = { inputTokens: 100, outputTokens: 10, totalTokens: 110 };
     const common = {

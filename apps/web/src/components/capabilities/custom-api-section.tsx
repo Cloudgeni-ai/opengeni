@@ -8,8 +8,8 @@ import {
   Trash2Icon,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@opengeni/react/ui/badge";
+import { Button } from "@opengeni/react/ui/button";
 import {
   customApiConnectionLabel,
   connectionOwnership,

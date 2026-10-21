@@ -501,6 +501,9 @@ async function measure(provider: Provider, run: () => Promise<Response>) {
   const body = await response.text();
   const all = [...statements];
   const first = provider.arrivals[0]?.statementsBefore ?? all.length;
+  const initialize = provider.arrivals.find(
+    (arrival) => arrival.request === "POST initialize",
+  )?.statementsBefore;
   const timing = response.headers.get("server-timing") ?? "";
   return {
     status: response.status,
@@ -511,6 +514,8 @@ async function measure(provider: Provider, run: () => Promise<Response>) {
     beforeFirstRequest: first,
     /** Every later boundary and application step: independent of interleaving. */
     afterFirstRequest: all.length - first,
+    /** Compare the same legacy request suffix with/without cached era discovery. */
+    afterInitialize: initialize === undefined ? undefined : all.length - initialize,
     transactions: all.filter((query) => /^\s*begin\b/i.test(query)).length,
     fenceEvaluations: Number(/gw-fence;dur=[\d.]+;desc="(\d+)"/.exec(timing)?.[1] ?? Number.NaN),
   };
@@ -534,8 +539,12 @@ describe("targeted tool fence on PostgreSQL", () => {
       for (const unrelated of [0, 10, 50]) {
         const fixture = await serviceFixture(provider, unrelated);
         const replica = fixture.app();
+        // Make the first request due for last-use telemetry deterministically.
+        await shared.admin`update api_keys set last_used_at = null where id = ${fixture.keyId}::uuid`;
         const cold = await measure(provider, () => fixture.invoke(replica));
         const warm = await measure(provider, () => fixture.invoke(replica));
+        expect(apiKeyWrites(cold.statements)).toBe(1);
+        expect(apiKeyWrites(warm.statements)).toBe(0);
         for (const result of [cold, warm]) {
           expect(result.status).toBe(200);
           expect(result.physicalRequests).toContain("POST tools/call");
@@ -544,20 +553,32 @@ describe("targeted tool fence on PostgreSQL", () => {
           // fences; each reads the key once, in one lock-free statement.
           expect(keyReads(result.statements)).toBe(result.fenceEvaluations);
           expect(result.fenceEvaluations).toBe(2 * result.physicalRequests.length + 3);
-          // Admission records use once; no fence locks or writes the key.
-          expect(apiKeyWrites(result.statements)).toBe(1);
+          // Last-use telemetry is coalesced per minute, outside authentication;
+          // no physical-request authorization fence locks or writes the key.
           expect(apiKeyLocks(result.statements)).toBeLessThanOrEqual(1);
           // Budget: main paid 634 to 1411 statements per boundary.
           expect(result.afterFirstRequest / result.physicalRequests.length).toBeLessThan(150);
         }
-        // A cold replica pays exactly what a warm one does after admission.
-        expect(cold.afterFirstRequest).toBe(warm.afterFirstRequest);
+        // The first connection probes the protocol era; later connections to
+        // this endpoint remember its legacy verdict. Every physical request
+        // (including that probe) is fenced and budgeted above. Compare the exact
+        // same initialize-and-later work, not totals for different requests.
+        expect(
+          cold.physicalRequests.filter((request) => request === "POST server/discover"),
+        ).toHaveLength(unrelated === 0 ? 1 : 0);
+        expect(warm.physicalRequests).not.toContain("POST server/discover");
+        expect(
+          cold.physicalRequests.filter((request) => request !== "POST server/discover").sort(),
+        ).toEqual([...warm.physicalRequests].sort());
+        expect(cold.afterInitialize).toBeDefined();
+        expect(cold.afterInitialize).toBe(warm.afterInitialize);
+        expect(warm.afterInitialize).toBe(warm.afterFirstRequest);
         // Resolve: the same boundaries, then one fence before disclosure.
         const resolved = await measure(provider, () => fixture.resolve(replica));
         expect(resolved.status).toBe(200);
         expect(keyReads(resolved.statements)).toBe(resolved.fenceEvaluations);
         expect(resolved.fenceEvaluations).toBe(2 * resolved.physicalRequests.length + 2);
-        expect(apiKeyWrites(resolved.statements)).toBe(1);
+        expect(apiKeyWrites(resolved.statements)).toBe(0);
         expect(resolved.afterFirstRequest / resolved.physicalRequests.length).toBeLessThan(150);
         profiles.push(warm);
       }

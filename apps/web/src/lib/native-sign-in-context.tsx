@@ -20,6 +20,19 @@ export type NativeSignInSearch = {
   platform?: NativeAppPlatform;
   device_name?: string;
 };
+
+const NATIVE_APP_PLATFORM_NAMES: ReadonlySet<unknown> = new Set<NativeAppPlatform>([
+  "ios",
+  "android",
+  "macos",
+  "windows",
+  "linux",
+  "office",
+]);
+
+export function isNativeAppPlatform(value: unknown): value is NativeAppPlatform {
+  return NATIVE_APP_PLATFORM_NAMES.has(value);
+}
 const NativeSignInContext = createContext<NativeSignInContextValue | null>(null);
 export function NativeSignInProvider({
   value,

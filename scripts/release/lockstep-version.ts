@@ -29,19 +29,82 @@ import { publishableWorkspacePackages, repoRoot } from "../publishable-workspace
 export const LOCKSTEP_RESET_VERSION = "1.0.0";
 
 /**
- * Stable versions >= 1.0.0 published by the retired per-package line. Pre-reset
- * prereleases (`1.0.0-canary.0`, ...) are not listed: stable releases never
- * collide with them and canary sequences start far above them.
+ * Stable versions >= 1.0.0 published by the retired per-package line, as listed
+ * by the npm registry. Versions at or below the lockstep version that the line
+ * has already passed (2.x) are omitted; every retired version above it is
+ * listed, because the lockstep line will reach them. Pre-reset prereleases
+ * (`1.0.0-canary.0`, ...) are not listed: stable releases never collide with
+ * them and canary sequences start far above them.
  */
 export const RETIRED_PRE_RESET_VERSIONS: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
-    "@opengeni/config": ["1.0.4", "1.1.1", "1.2.2"],
-    "@opengeni/contracts": ["1.0.1"],
-    "@opengeni/core": ["1.0.1"],
-    "@opengeni/db": ["1.0.1"],
-    "@opengeni/react": ["1.0.1"],
-    "@opengeni/runtime": ["1.0.1", "1.4.2"],
-    "@opengeni/sdk": ["1.0.1"],
+    "@opengeni/api-router": ["3.0.1", "4.0.0", "4.1.0", "4.1.2", "5.2.0", "5.3.0", "5.4.1"],
+    "@opengeni/config": ["1.0.4", "1.1.1", "1.2.2", "3.1.1", "3.2.0", "3.2.1"],
+    "@opengeni/contracts": [
+      "1.0.1",
+      "3.0.1",
+      "4.1.0",
+      "5.0.0",
+      "5.1.0",
+      "5.1.1",
+      "5.4.0",
+      "5.5.0",
+      "5.6.0",
+    ],
+    "@opengeni/core": ["1.0.1", "3.0.1", "4.0.0", "4.0.1", "4.0.3", "5.0.0", "5.0.1", "5.1.1"],
+    "@opengeni/db": [
+      "1.0.1",
+      "3.6.0",
+      "3.7.4",
+      "4.2.2",
+      "4.3.2",
+      "5.0.1",
+      "6.0.0",
+      "6.0.1",
+      "6.0.3",
+      "6.2.0",
+      "6.3.0",
+      "6.5.0",
+    ],
+    "@opengeni/react": [
+      "1.0.1",
+      "3.1.0",
+      "3.3.2",
+      "4.0.2",
+      "5.0.4",
+      "6.1.0",
+      "7.0.0",
+      "7.1.0",
+      "7.1.2",
+      "7.4.0",
+      "7.5.0",
+      "7.6.1",
+    ],
+    "@opengeni/runtime": [
+      "1.0.1",
+      "1.4.2",
+      "3.0.1",
+      "4.0.0",
+      "4.0.1",
+      "4.0.3",
+      "4.3.0",
+      "4.4.0",
+      "4.6.0",
+    ],
+    "@opengeni/sdk": [
+      "1.0.1",
+      "3.1.0",
+      "3.3.2",
+      "4.0.2",
+      "5.0.3",
+      "6.1.0",
+      "7.0.0",
+      "7.1.0",
+      "7.1.1",
+      "7.4.0",
+      "7.5.0",
+      "7.6.1",
+    ],
     "@opengeni/worker-bundle": ["1.0.1"],
   });
 

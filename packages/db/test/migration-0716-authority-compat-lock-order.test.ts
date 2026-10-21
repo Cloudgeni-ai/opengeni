@@ -39,6 +39,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 const COMPAT = "0716_subscription_authority_compat.sql";
@@ -315,8 +316,12 @@ beforeAll(async () => {
   migrationText = await readFile(join(import.meta.dir, "../drizzle", COMPAT), "utf8");
   // A provisioned database without 0716, as a deployment is before it: 0716
   // and every later migration (which may require 0716) are held back.
+  // Current session writers need the real additive activity xid column and
+  // trigger, which are independent of this fixture's historical lock topology.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= COMPAT)
+    .filter(
+      (file) => file.endsWith(".sql") && file >= COMPAT && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -325,6 +330,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

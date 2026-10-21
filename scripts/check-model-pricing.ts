@@ -6,7 +6,7 @@
  * (`packages/config/src/index.ts`). llm-prices is an external ground-truth
  * canary for Standard short/long-context rates — never a generator or runtime
  * source. New comparison metadata stays separate in reviewedModelListPricing.
- * Fast multipliers, Fireworks, and marginBps are OpenGeni-owned and
+ * Fast multipliers, Fireworks, and marginBps are Opengeni-owned and
  * are not asserted here.
  *
  * Usage:
@@ -85,7 +85,7 @@ const AUDIT_MODELS: Array<{
 const NON_LLM_PRICES_MODELS = [
   {
     id: "accounts/fireworks/models/glm-5p2",
-    reason: "OpenGeni-only; not in llm-prices",
+    reason: "Opengeni-only; not in llm-prices",
   },
   {
     id: "deepseek-v4-flash-0731",
@@ -204,7 +204,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
     lines.push(`skip ${entry.id} (${entry.reason})`);
   }
 
-  lines.push("note Fast/priority multipliers and marginBps are OpenGeni-owned — not audited here");
+  lines.push("note Fast/priority multipliers and marginBps are Opengeni-owned — not audited here");
 
   return { ok: errors.length === 0, lines, errors };
 }

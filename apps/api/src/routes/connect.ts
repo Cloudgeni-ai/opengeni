@@ -13,6 +13,8 @@ import {
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
+  OPENGENI_DESKTOP_APP_HEADER,
+  desktopAppReturnUrl,
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
@@ -213,7 +215,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Slack workspace bot",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
@@ -1109,7 +1111,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
-                ...(attempt.account ? { connectionId: attempt.account.id } : {}),
+                ...(attempt.account
+                  ? { connectionId: attempt.account.id }
+                  : { newAccount: true as const }),
               },
             });
             const authorizationUrl = started.authorizationUrl;
@@ -1293,7 +1297,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ? "github:manage"
                   : attempt.providerId === "github-lens"
                     ? "workspace:admin"
-                    : "connections:write";
+                    : attempt.providerId === "slack-bot"
+                      ? "capabilities:manage"
+                      : "connections:write";
           if (
             !hasPermission(authorization.grant.permissions, permission) ||
             (attempt.providerId === "github-lens" &&
@@ -1319,7 +1325,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const input = await parseRequestJson(c, BeginConnectRequest);
+    const requested = await parseRequestJson(c, BeginConnectRequest);
+    // A sign-in started in the desktop app finishes in the person's browser;
+    // return that browser to the console's hand-back page, which reopens the
+    // app. The browser's Origin names the console that made this request.
+    const input = c.req.header(OPENGENI_DESKTOP_APP_HEADER)
+      ? {
+          ...requested,
+          returnUrl: desktopAppReturnUrl(requested.returnUrl, c.req.header("origin") ?? null),
+        }
+      : requested;
     const setupPermission =
       input.providerId === "mcp-install"
         ? "capabilities:manage"
@@ -1331,7 +1346,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             ? "github:manage"
             : input.providerId === "github-lens"
               ? "workspace:admin"
-              : "connections:write";
+              : // The workspace Slack bot configures the whole workspace, so installing it is
+                // integration administration even though Members hold connections:write.
+                input.providerId === "slack-bot"
+                ? "capabilities:manage"
+                : "connections:write";
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,

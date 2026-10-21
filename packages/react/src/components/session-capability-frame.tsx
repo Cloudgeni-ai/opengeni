@@ -2,6 +2,7 @@ import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type SessionCapabilityFrameProps = {
   name: string;
@@ -76,6 +77,7 @@ export function SessionCapabilityFrame({
   details,
   inlineSetup,
 }: SessionCapabilityFrameProps) {
+  const t = useOpenGeniText();
   const localOpener = useRef<HTMLButtonElement>(null);
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
@@ -98,7 +100,7 @@ export function SessionCapabilityFrame({
         style={dialogOnly ? { display: "none" } : undefined}
         ref={sectionRef}
         tabIndex={-1}
-        aria-label={`${name} setup`}
+        aria-label={t("sessionCapabilityFrame.nameSetup", { name })}
         data-state={complete ? "complete" : expanded ? "setup" : "suggested"}
         className="og-session-capability-shell"
       >
@@ -109,7 +111,9 @@ export function SessionCapabilityFrame({
         {complete ? (
           <p role="status" className="og-session-capability-copy">
             {completeLabel ??
-              (skill ? "Installed · Workspace" : "Connected · Available in this conversation")}
+              (skill
+                ? t("sessionCapabilityFrame.installedWorkspace")
+                : t("sessionCapabilityFrame.connectedAvailableInThisConversation"))}
           </p>
         ) : (
           <>
@@ -127,7 +131,9 @@ export function SessionCapabilityFrame({
               <div className="og-session-capability-actions">
                 <span>
                   <ShieldCheckIcon size={13} aria-hidden />
-                  {skill ? "Guidance only · no account access" : "You choose what to authorize"}
+                  {skill
+                    ? t("sessionCapabilityFrame.guidanceOnlyNoAccountAccess")
+                    : t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
                 </span>
                 <button
                   ref={buttonRef}
@@ -183,7 +189,7 @@ export function SessionCapabilityFrame({
                 </Dialog.Description>
               </div>
               {!busy ? (
-                <Dialog.Close aria-label="Close connection setup">
+                <Dialog.Close aria-label={t("sessionCapabilityFrame.closeConnectionSetup")}>
                   <XIcon size={18} />
                 </Dialog.Close>
               ) : null}

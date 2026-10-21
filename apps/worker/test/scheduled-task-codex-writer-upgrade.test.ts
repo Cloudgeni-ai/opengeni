@@ -48,10 +48,14 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const compat = "0716_subscription_authority_compat.sql";
   // 0717 requires 0716's routines; it follows 0716.
   const fences = "0717_subscription_authority_fences.sql";
+  // 0843 patches routines 0716 creates; withheld with it and replayed after it.
+  const indexedLineage = "0843_indexed_inbox_lineage.sql";
   // 0726 patches the acceptance writers 0688 and 0707 define; it follows them.
   const acceptanceReads = "0726_subscription_personal_acceptance_reads.sql";
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
+  // Patches the owner reader 0730 derives from; it follows 0730.
+  const personalQuarantineExpiry = "0884_subscription_core_personal_quarantine_expiry.sql";
   const xaiCutover = "0747_subscription_core_xai_cutover.sql";
   const claudeCutover = "0748_subscription_core_claude_cutover.sql";
   // The drained retirement requires both cutovers; held back with them.
@@ -59,6 +63,11 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0759 compiles against the session_system_updates row type, including the
   // subscription_authority column the deferred writers add; replay it with them.
   const pendingUpdateTenancy = "0759_tenancy_quiescence_carries_owner_pending_updates.sql";
+  // 0777 adds policies and a routine over the 0645 table and the 0707 owner helper.
+  const workspaceAdminConnections = "0777_workspace_admin_subscription_connections.sql";
+  // 0871 installs usage-history routines in the subscription schema; 0872 seeds them.
+  const usageHistory = "0871_subscription_usage_history.sql";
+  const usageHistorySeed = "0872_subscription_usage_call_history_seed.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -69,7 +78,11 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
-      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy})`;
+      (${acceptanceReads}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections}), (${indexedLineage})`;
+    await database.admin`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
+    // Usage history routines live in the subscription schema the deferred
+    // writers create; the seed reads them. Defer both and replay after them.
+    await database.admin`insert into schema_migrations(name) values (${usageHistory}), (${usageHistorySeed})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -123,7 +136,9 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${pendingUpdateTenancy})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${personalQuarantineExpiry}, ${pendingUpdateTenancy}, ${workspaceAdminConnections}, ${indexedLineage})`;
+    await database.admin`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
+    await database.admin`delete from schema_migrations where name in (${usageHistory}, ${usageHistorySeed})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());

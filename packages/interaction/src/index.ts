@@ -425,6 +425,12 @@ export class ComputerInteractionController {
             );
           }
         },
+        assertActionObservationAuthority(observation, command) {
+          // An action that opened a window (a launch, a new document, a
+          // dialog) returns that window, which is not the window the command
+          // named, so any target of this controller.
+          this.assertObservationAuthority(observation, observation.target?.id ?? command.targetId);
+        },
         outcome(observation) {
           return observation.target === null
             ? { state: observation.outcome, error: observation.error }

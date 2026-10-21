@@ -55,6 +55,8 @@ export type {
   TimelineItem,
   TimelineAnnotationSourceDescriptor,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
   UserMessageItem,
   WorkerCompletionItem,
@@ -131,6 +133,8 @@ export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids
 // session compute label (host-supplied active machine / cloud sandbox name)
 export { TimelineComputeLabelProvider, useTimelineComputeLabel } from "./compute-label";
 
+// host words for generic tool rows (language, product tool names)
+
 // turn-collapse summary chip
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
 export type {
@@ -166,4 +170,9 @@ export {
 export type { ApplyPatchOperation } from "./parsers";
 
 export { KnowledgeActivityProvider } from "./knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./learning-refusal-row";
+export type { LearningRefusalPlace } from "./learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./knowledge-receipt";

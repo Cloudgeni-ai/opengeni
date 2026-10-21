@@ -1,6 +1,3 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -10,6 +7,11 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
+import {
+  connectMcpStreamableHttpClient,
+  legacyMcpClientError,
+  type McpStreamableHttpClient,
+} from "./mcp-streamable-http-client";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -43,6 +45,7 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
+  isTransactionHandle,
   readCodexCutoverDisposition,
   resolveSubscriptionCoreCodexAppsDesignation,
   rlsContextForWorkspace,
@@ -93,6 +96,28 @@ export async function buildCapabilityCatalog(input: {
   /** The workspace's organization, when the caller knows it (skips a lookup). */
   accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
+  // Scoped readers use savepoints and transaction-local actor settings. They
+  // must not overlap on a caller's transaction: one reader can otherwise
+  // restore another reader's subject instead of the enclosing caller's.
+  // Independent pool reads keep their existing parallel execution.
+  const serial = isTransactionHandle(input.db);
+  const reads = [
+    () => listCapabilityCatalogItems(input.db, input.workspaceId),
+    () => listCapabilityInstallations(input.db, input.workspaceId),
+    () => listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    () => listConnectionsMetadata(input.db, input.workspaceId, null),
+    () => discoverCuratedSkillLibraryItems(),
+    () => listInstalledSkills(input.db, input.workspaceId),
+    () =>
+      input.settings.codexConnectedAppsEnabled
+        ? resolveCodexAppsDesignationForRun(
+            input.db,
+            input.workspaceId,
+            input.accountId ? { accountId: input.accountId } : {},
+          )
+        : Promise.resolve(null),
+    () => listEnabledMcpCapabilityServers(input.db, input.workspaceId),
+  ] as const;
   const [
     persistedItems,
     capabilityInstallations,
@@ -102,22 +127,27 @@ export async function buildCapabilityCatalog(input: {
     installedSkills,
     codexAppsDesignation,
     runnableMcpServers,
-  ] = await Promise.all([
-    listCapabilityCatalogItems(input.db, input.workspaceId),
-    listCapabilityInstallations(input.db, input.workspaceId),
-    listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    listConnectionsMetadata(input.db, input.workspaceId, null),
-    discoverCuratedSkillLibraryItems(),
-    listInstalledSkills(input.db, input.workspaceId),
-    input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsDesignationForRun(
-          input.db,
-          input.workspaceId,
-          input.accountId ? { accountId: input.accountId } : {},
-        )
-      : Promise.resolve(null),
-    listEnabledMcpCapabilityServers(input.db, input.workspaceId),
-  ]);
+  ] = serial
+    ? ([
+        await reads[0](),
+        await reads[1](),
+        await reads[2](),
+        await reads[3](),
+        await reads[4](),
+        await reads[5](),
+        await reads[6](),
+        await reads[7](),
+      ] as const)
+    : await Promise.all([
+        reads[0](),
+        reads[1](),
+        reads[2](),
+        reads[3](),
+        reads[4](),
+        reads[5](),
+        reads[6](),
+        reads[7](),
+      ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
   const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
@@ -840,12 +870,13 @@ async function probeStreamableHttpMcpServer(
   if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  const client = new Client(
-    { name: "opengeni-capability-probe", version: "0.1.0" },
-    { capabilities: {} },
-  );
+  let client: McpStreamableHttpClient | undefined;
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(input.url), {
+    client = await connectMcpStreamableHttpClient({
+      url: input.url,
+      clientName: "opengeni-capability-probe",
+      clientVersion: "0.1.0",
+      timeoutMs: input.timeoutMs,
       requestInit: {
         signal: controller.signal,
         ...(input.headers ? { headers: input.headers } : {}),
@@ -856,18 +887,18 @@ async function probeStreamableHttpMcpServer(
           requireHttpsOutsideLocalTest: true,
         }),
     });
-    await client.connect(transport as unknown as Transport, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
-    const tools = await client.listTools(undefined, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
+    const tools = await client
+      .listTools(undefined, {
+        timeout: input.timeoutMs,
+        maxTotalTimeout: input.timeoutMs,
+      })
+      .catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      });
     return { toolCount: tools.tools.length };
   } finally {
     clearTimeout(timeout);
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
   }
 }
 
@@ -880,9 +911,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
       normalized,
     )
   ) {
-    return `Opengeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
+    return `the workspace could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `Opengeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+  return `the workspace could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
 }
 
 function safeEndpointLabel(endpointUrl: string): string {
@@ -1732,7 +1763,7 @@ export function nativeConnectionCapabilityRecommendations(
         source: "built_in",
         name: "Connected Machine",
         description:
-          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the OpenGeni Browser extension.",
+          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the browser extension.",
         category: "compute",
         tags: [
           "machine",
@@ -1760,7 +1791,7 @@ export function nativeConnectionCapabilityRecommendations(
         tools: [{ kind: "mcp", id: "opengeni" }],
         runtime: {
           available: true,
-          notes: `The person runs a one-line connect command on their machine from the chat card. The OpenGeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
         },
         lifecycle: {
           status: "available",

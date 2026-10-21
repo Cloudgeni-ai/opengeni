@@ -19,11 +19,10 @@ const emptySeries = async (): Promise<MetricSample[]> => [];
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
   const { accessContext } = useAppContext();
-  const canRead = hasWorkspacePermission(
-    accessContext,
-    options.workspaceId ?? workspaceId,
-    "enrollments:read",
-  );
+  const canRead =
+    (!options.sessionId ||
+      hasWorkspacePermission(accessContext, options.workspaceId ?? workspaceId, "sessions:read")) &&
+    hasWorkspacePermission(accessContext, options.workspaceId ?? workspaceId, "enrollments:read");
   const canManage =
     canRead &&
     hasWorkspacePermission(accessContext, options.workspaceId ?? workspaceId, "enrollments:manage");
@@ -47,6 +46,7 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     mutationError: canRead ? fleet.mutationError : null,
     machines: canRead ? fleet.machines : EMPTY_MACHINES,
     activeSandboxId: canRead ? fleet.activeSandboxId : null,
+    sessionMachineAccess: canRead ? fleet.sessionMachineAccess : null,
     loading: canRead && fleet.loading,
     error: canRead ? fleet.error : null,
     refresh: canRead ? fleet.refresh : ignoreRefresh,

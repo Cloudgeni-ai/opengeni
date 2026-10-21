@@ -11,9 +11,11 @@ import * as db from "@opengeni/db";
 import type { SessionCommandActor } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { requireAccessGrantAuthorization, type AccessGrantAuthorization } from "../src/access";
 import {
   frozenScheduledTaskCreatorPolicy,
+  SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE,
   triggerScheduledTaskForGrant,
 } from "../src/domain/scheduled-tasks";
 import type { SessionWorkflowClient } from "../src/dependencies";
@@ -136,6 +138,7 @@ function origin(restricted: "turn" | "session" | "neither") {
     metadata: metadata(restricted === "session"),
   };
   track(spyOn(db, "getSession").mockResolvedValue(session as never));
+
   // The frozen policy resolves first-party tool defaults from workspace settings.
   track(
     spyOn(db, "requireWorkspace").mockResolvedValue({
@@ -155,6 +158,20 @@ function origin(restricted: "turn" | "session" | "neither") {
 }
 
 describe("scheduled task frozen setup restriction", () => {
+  test("default-following creators do not freeze today's tool names or widen permissions", async () => {
+    const { session } = origin("neither");
+    session.toolPolicy.firstPartyMode = "workspace_default";
+    const policy = await frozen(undefined, actor);
+    expect(policy?.firstPartyMcpTools).toBeNull();
+    expect(policy?.firstPartyMcpPermissions).toEqual(["sessions:read", "scheduled_tasks:manage"]);
+  });
+
+  test("an explicitly empty selection stays empty", async () => {
+    const { session } = origin("neither");
+    session.firstPartyMcpTools = [];
+    expect((await frozen(undefined, actor))?.firstPartyMcpTools).toEqual([]);
+  });
+
   test.each(["raw", "service", "asUser"] as const)(
     "%s setup creates capture restriction without agent defaults",
     async (lane) => {
@@ -169,7 +186,7 @@ describe("scheduled task frozen setup restriction", () => {
         } as ApiKey & { credentialKind: "organization" }),
       );
       track(
-        spyOn(db, "requireWorkspace").mockResolvedValue({
+        spyOn(db, "getWorkspace").mockResolvedValue({
           id: workspaceId,
           accountId,
           kind: "shared",
@@ -390,5 +407,35 @@ describe("scheduled task frozen setup restriction", () => {
     expect(
       (await manuallyTrigger({ ...grant, principalKind: "service" }, true))?.credentialRestriction,
     ).toBeUndefined();
+  });
+
+  test("a paused schedule is refused visibly instead of being triggered into a silent no-op", async () => {
+    track(spyOn(db, "scheduledTaskMutationOwnerMatches").mockResolvedValue(true));
+    const database = { transaction: async (run: (tx: never) => Promise<void>) => run({} as never) };
+    let started = 0;
+    const workflowClient = {
+      triggerScheduledTask: async () => {
+        started += 1;
+      },
+    } as unknown as SessionWorkflowClient;
+    const trigger = (status: "active" | "paused") =>
+      triggerScheduledTaskForGrant(database as never, grant, workflowClient, {
+        task: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status } as never,
+        agentRunUsageIdempotencyKey: `manual-${status}`,
+        triggerWorkflowId: `manual-${status}`,
+        initiator: { kind: "subject", subjectId: grant.subjectId },
+      });
+
+    const refusal = await trigger("paused").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(HTTPException);
+    expect((refusal as HTTPException).status).toBe(409);
+    expect((refusal as HTTPException).message).toBe(SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE);
+    expect(started).toBe(0);
+
+    await trigger("active");
+    expect(started).toBe(1);
   });
 });

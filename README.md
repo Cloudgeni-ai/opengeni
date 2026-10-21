@@ -67,6 +67,20 @@ Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
 `bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, and starts the API, workers, and web app. By default the agent runs commands directly on your machine (the `local` sandbox), not in an isolated container, so the API and web app listen only on 127.0.0.1. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead. See [Local development](docs/local-development.md) for manual startup, configuration, network exposure, and the native (no Docker) path.
 
+## Desktop app
+
+Opengeni for macOS, Windows and Linux: your sessions, chat and inbox in a native window, with notifications and one click to let agents use the computer you're on.
+
+```bash
+# macOS
+brew install --cask cloudgeni-ai/tap/opengeni
+
+# macOS or Linux (deb, rpm or AppImage, picked for your system)
+curl -fsSL https://<your-opengeni-server>/desktop/install.sh | sh
+```
+
+On Windows, download `Opengeni-<version>-windows.exe` from the newest [`desktop-v` release](https://github.com/Cloudgeni-ai/opengeni/releases?q=desktop-v&expanded=true). The web app's account menu has the same downloads under **Desktop app**. Every way of installing updates itself afterwards.
+
 ## Use it from your code and product
 
 **Let your coding agent do it.** Install the Opengeni plugin, then ask your agent to add Opengeni to your product:

@@ -13,6 +13,9 @@ import {
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -227,7 +230,7 @@ describe("ModelPolicyPicker", () => {
   );
 
   test("neutral defaults preserve external identities and caller-provided row labels", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       { ...MODELS[0]!, id: "deployment/model", source: "opengeni", cost: "credits" },
       { ...MODELS[0]!, id: "external/model", source: "opengeni", provider: "custom" },
       MODELS[1]!,
@@ -277,7 +280,7 @@ describe("ModelPolicyPicker", () => {
   });
 
   test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       {
         ...MODELS[0]!,
         id: "host/example",
@@ -417,7 +420,7 @@ describe("ModelPolicyPicker", () => {
   test.each([false, true])(
     "renders usable Codex first without mutating selection (codexOnly=%s)",
     async (codexOnly) => {
-      const rows = projectClientModelRows([
+      const rows = projectClientModelRows(englishText, [
         { ...MODELS[0]!, id: "free", label: "Free", source: "opengeni", cost: "free" },
         { ...MODELS[0]!, id: "paid", label: "Paid", source: "opengeni", cost: "credits" },
         ...MODELS,
@@ -795,7 +798,7 @@ describe("ModelPolicyPicker", () => {
     async (triggerStyle) => {
       const render = (fundingHint: string) => {
         const props: ModelPolicyPickerProps = {
-          rows: projectClientModelRows(MODELS).map((row) => ({
+          rows: projectClientModelRows(englishText, MODELS).map((row) => ({
             ...row,
             fundingHint,
             catalog: {
@@ -1088,7 +1091,7 @@ describe("ModelPolicyPicker", () => {
           thinkingEffort: "Tenkenivå",
           selected: "Valgt",
           billingHints: {
-            ...defaultModelPolicyPickerMessages.billingHints,
+            ...defaultModelPolicyPickerMessages(englishText).billingHints,
             codex_subscription: "Codex-abonnement",
           },
         }}
@@ -1397,6 +1400,97 @@ describe("ModelPolicyPicker", () => {
       container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
         ?.textContent,
     ).not.toContain("Opengeni credits");
+  });
+});
+
+describe("Ultrafast speed choice", () => {
+  const sol = MODELS[0]!;
+  const withUltrafast = (runnable: boolean, billingMultiplierBps?: number): ClientModel => ({
+    ...sol,
+    capabilities: {
+      ...sol.capabilities!,
+      latencyModes: [
+        ...sol.capabilities!.latencyModes,
+        {
+          id: "ultrafast",
+          upstream: "supported",
+          runnable,
+          ...(billingMultiplierBps ? { billingMultiplierBps } : {}),
+        },
+      ],
+    },
+  });
+
+  async function menu(model: ClientModel, latencyMode: "standard" | "fast" | "ultrafast") {
+    const changes: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode={latencyMode}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={(mode) => changes.push(mode)}
+      />,
+    );
+    return { container, changes };
+  }
+
+  test("a model offering Ultrafast replaces the Fast toggle with a Speed choice", async () => {
+    const { container, changes } = await menu(withUltrafast(true, 60_000), "ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+    const group = container.querySelector('[role="radiogroup"][aria-label="Speed"]')!;
+    expect(group).toBeTruthy();
+    const options = [...group.querySelectorAll('[role="radio"]')];
+    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast", "Ultrafast"]);
+    expect(options.map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+      "true",
+    ]);
+    // The plan counts Ultrafast against its usage limits.
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "8× usage",
+    );
+    await act(async () => (options[1] as HTMLButtonElement).click());
+    expect(changes).toEqual(["fast"]);
+  });
+
+  test("metered routes show the rate multiple", async () => {
+    const { container } = await menu(
+      { ...withUltrafast(true, 60_000), id: "gpt-6.1-sol", provider: "openai", source: "opengeni" },
+      "ultrafast",
+    );
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "6× rate",
+    );
+  });
+
+  test("without a runnable Ultrafast the Fast toggle stays", async () => {
+    const { container } = await menu(withUltrafast(false), "standard");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="model-picker-speed"]')).toBeNull();
+  });
+
+  test("the composer trigger marks Ultrafast", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[withUltrafast(true)]}
+        model={sol.id}
+        effort="medium"
+        latencyMode="ultrafast"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="model-picker-ultrafast-icon"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeNull();
   });
 });
 

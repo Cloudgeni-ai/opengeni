@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mock, spyOn } from "bun:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client as StreamableHttpClient } from "@modelcontextprotocol/client";
 import type { AccessGrant, ConnectionMetadata, ToolGatewayCatalog } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
@@ -816,7 +816,9 @@ describe("portable known-tool calls", () => {
           controller.abort();
         },
       });
-      const close = spyOn(Client.prototype, "close");
+      // Remote connectors connect through the spec 2026-07-28 streamable HTTP
+      // client; the in-process gateway still uses the v1 SDK client.
+      const close = spyOn(StreamableHttpClient.prototype, "close");
       let admitted = false;
       if (phase === "preflight")
         f.state.onPhysical = async () => {
@@ -1039,9 +1041,28 @@ describe("target-only workspace tool calls", () => {
       expect(
         f.state.resolved.some((input) => input.connectionRef.connectionId === f.personal.id),
       ).toBe(false);
-      // The still-active shared account remains callable through its own route.
+      // Revocation leaves only one visible account, so its description loses
+      // the account-disambiguation line. That is definition drift too: the old
+      // catalog must fail closed until the caller refreshes it.
+      await expectHttpStatus(
+        call(f, attestations, {
+          catalogDigest: catalog.digest,
+          identity: f.identity(f.shared),
+          arguments: {},
+        }),
+        409,
+        "catalog_stale",
+      );
+      expect(f.grafana.calls).toHaveLength(before);
+      const refreshed = await attestedCatalog(f, attestations);
+      expect(refreshed.digest).not.toBe(catalog.digest);
+      expect(refreshed.entries.map((entry) => entry.identity)).not.toContainEqual(
+        f.identity(f.personal),
+      );
+      // The still-active shared account remains callable through its own route
+      // with the current definition, never as a substitute for the revoked one.
       const shared = await call(f, attestations, {
-        catalogDigest: catalog.digest,
+        catalogDigest: refreshed.digest,
         identity: f.identity(f.shared),
         arguments: {},
       });

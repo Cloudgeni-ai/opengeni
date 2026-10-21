@@ -488,7 +488,7 @@ describe("migration 0291 resource classification assertion", () => {
 
   test("a non-superuser owner cannot see FORCE-RLS rows without the capability", async () => {
     // This pins the structural reason 0291 is a definer seam instead of a
-    // migration-time UPDATE. OpenGeni's documented deployment posture is a
+    // migration-time UPDATE. Opengeni's documented deployment posture is a
     // NON-superuser migration principal without BYPASSRLS, and FORCE ROW LEVEL
     // SECURITY applies to the table owner. A plain `UPDATE ... WHERE ...` in a
     // migration body therefore matches ZERO rows on such a deployment while

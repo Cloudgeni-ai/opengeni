@@ -92,6 +92,7 @@ import {
 import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
+import { createOpenGeniText } from "../../packages/react/src/messages/runtime";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
 async function setSessionStatus(
@@ -350,7 +351,9 @@ describe("API component integration", () => {
     ]);
     // Admission accepted the initial prompt directly. It belongs in chat even
     // while the physical turn row waits for a worker claim.
-    expect(buildTimeline(events).map((item) => item.kind)).toEqual(["user-message"]);
+    expect(buildTimeline(createOpenGeniText(), events).map((item) => item.kind)).toEqual([
+      "user-message",
+    ]);
     expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
       routing: "accepted_for_execution",
     });
@@ -4119,6 +4122,28 @@ describe("API component integration", () => {
       eventType: "agent_run.created",
       since: startOfUtcMonth(),
     });
+    // A paused schedule never runs, so triggering it is refused without
+    // dispatching a workflow or charging a run.
+    const refused = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
+      { method: "POST" },
+    );
+    expect(refused.status).toBe(409);
+    expect(workflow.triggers).toHaveLength(0);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(agentRunsBefore);
+
+    const resumed = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/resume`),
+      { method: "POST" },
+    );
+    expect(resumed.status).toBe(200);
+
     const triggered = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
       { method: "POST" },
@@ -6674,7 +6699,9 @@ describe("API component integration", () => {
     expect(agentSteer).toMatchObject({
       outcome: "updated",
       resource: { type: "session_system_update" },
-      facts: { interruptionCount: 1, stoppingPreviousAttempt: true },
+      // An Agent Steer never interrupts the child's live attempt: it is read
+      // at that attempt's next model step.
+      facts: { interruptionCount: 0, stoppingPreviousAttempt: false },
     });
     expect(JSON.stringify(agentSteer)).not.toContain(
       "Inspect the new control-plane evidence first",

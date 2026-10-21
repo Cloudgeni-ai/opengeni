@@ -18,20 +18,20 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { toast } from "sonner";
 
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { Disclosure } from "@/components/ui/disclosure";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import {
   CheckboxField,
   Field,
@@ -39,16 +39,16 @@ import {
   TextArea,
   TextInput,
   useField,
-} from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+} from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@/context";
 import {
   API_KEY_EXPIRY_CHOICES,
@@ -68,11 +68,15 @@ import {
   type ApiKeyPresetId,
   type ApiKeyStatus,
 } from "@/lib/api-key-presets";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
 import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
 import type { ApiKey } from "@/types";
-import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
 const DOCS_URL = "https://docs.opengeni.ai/reference/authentication";

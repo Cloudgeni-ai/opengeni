@@ -1,3 +1,8 @@
+import { t } from "@/lib/console-text";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { AccountGroupHeading } from "./subscription-account-ui";
+import { ModelsRefreshControl } from "./models-refresh-control";
+import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -10,6 +15,8 @@ import {
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
+import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
   ModelAccountSettingValues,
   OrganizationModelProviderKind,
@@ -57,7 +64,7 @@ import {
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import { ModelCompactionPage } from "./model-compaction-page";
-import { SettingNavRow } from "@/components/ui/setting-row";
+import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import {
   ConnectAudienceFields,
   EVERYONE,
@@ -110,15 +117,15 @@ import {
 import { useOrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout } from "@/components/ui/usage-meter";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { useAppContext } from "@/context";
 import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
@@ -331,11 +338,14 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
+  // A shared workspace's provider key decides what every session runs on: a
+  // setting. Members connect their own accounts instead.
+  const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
   const workspaceGateway = (id: GatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
-    canManageConnection: canManageConnections,
+    canManageConnection: canManageWorkspaceKeys,
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
     enabled,
@@ -563,7 +573,7 @@ export function WorkspaceModelsPageBody({
       );
     }
     return (GATEWAYS as readonly string[]).includes(provider)
-      ? gateways[provider as GatewayId].connected
+      ? canManageWorkspaceKeys && gateways[provider as GatewayId].connected
       : false;
   };
   const providerLoading = (provider: string): boolean =>
@@ -582,11 +592,15 @@ export function WorkspaceModelsPageBody({
   const reconnectAllowed = Boolean(workspaceStep && reconnectStep.current === view);
   // Anyone who can manage connections here may connect their own account on a
   // workspace's page: in their Personal workspace, or as "Only me" in a shared
-  // one. Workspace admins may also add a key for the whole workspace.
-  // Accounts for everyone in the organization stay with its owners and admins.
+  // one. A shared workspace's admins connect subscriptions and keys for
+  // everyone in that workspace: the workspace's own accounts, which the
+  // organization still owns and its owners and admins see. Accounts for
+  // everyone in the organization stay with its owners and admins.
   const memberConnects = !organizationAdmin && workspacePage && canManageConnections;
   // A member who isn't a workspace admin connects for themselves only.
   const onlyMe = memberConnects && !personal && !canManageSettings;
+  // A shared workspace's admin who isn't an organization owner or admin.
+  const workspaceAdminConnects = memberConnects && !personal && !onlyMe;
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -695,9 +709,9 @@ export function WorkspaceModelsPageBody({
             ? "It pays for models in your Personal workspace, so only you use it."
             : onlyMe
               ? `Only work you start in ${workspaceName} uses it. Nobody else here can.`
-              : `Connect your own subscription, or a key for everyone in ${workspaceName}.`
+              : `Connect a subscription or an API key for everyone in ${workspaceName}.`
         }
-        codexAvailable={personal}
+        codexAvailable={personal || workspaceAdminConnects}
         // A Personal workspace can't hold its own SuperGrok account.
         grok={grok.unavailable || personal ? "hidden" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
@@ -895,6 +909,10 @@ export function WorkspaceModelsPageBody({
     ) : onlyMe ? (
       <p className="m-0 text-sm leading-5 text-fg-muted">
         {`Only work you start in ${workspaceName} uses it. Nobody else here can.`}
+      </p>
+    ) : workspaceAdminConnects ? (
+      <p className="m-0 text-sm leading-5 text-fg-muted">
+        {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
     page =
@@ -1100,6 +1118,7 @@ export function WorkspaceModelsPageBody({
         {scopePicker}
         <OrganizationModelsList
           client={client}
+          organizationId={organizationId}
           organizationDefaults={organizationAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
@@ -1154,6 +1173,8 @@ export function WorkspaceModelsPageBody({
       listedOrgGateways.length,
       readyOrgKeys.length,
     ];
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1209,11 +1230,14 @@ export function WorkspaceModelsPageBody({
             }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
-                <OpenGeniCreditsRow
-                  credits={credits}
-                  workspaceId={anchorWorkspaceId}
-                  workspaceName={workspaceName}
-                  scope={labels.everyone}
+                {subscriptionsListed > 0 ? (
+                  <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+                ) : null}
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
                 />
                 <CodexAccountRows
                   codex={codex}
@@ -1221,7 +1245,14 @@ export function WorkspaceModelsPageBody({
                   organization={codexPool}
                   onKeptForPeople={reportKeptForPeople}
                 />
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
                 {claudeEnabled ? (
                   <ClaudeAccountRows
                     claude={claude}
@@ -1229,6 +1260,16 @@ export function WorkspaceModelsPageBody({
                     organization={claudePool}
                   />
                 ) : null}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {payAsYouGoListed > 0 ? (
+                  <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+                ) : null}
+                <OpenGeniCreditsRow
+                  credits={credits}
+                  workspaceId={anchorWorkspaceId}
+                  workspaceName={workspaceName}
+                  scope={labels.everyone}
+                />
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -1272,6 +1313,24 @@ export function WorkspaceModelsPageBody({
                       workspaceId={workspaceId}
                       canManage={canManageConnections && organizationAdmin}
                       onConnectionChange={connectionChanged}
+                    />
+                  </Section>
+                ) : null}
+                {workspacePage ? (
+                  <Section
+                    title="Voice"
+                    description="Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens in this workspace."
+                  >
+                    <ElevenLabsVoiceConnection
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageWorkspaceKeys}
+                      onConnectionChange={connectionChanged}
+                    />
+                    <RealtimeVoiceSettingsRows
+                      key={`voice-settings:${workspaceId}`}
+                      workspaceId={workspaceId}
+                      canManage={canManageSettings}
                     />
                   </Section>
                 ) : null}
@@ -1325,6 +1384,17 @@ export function WorkspaceModelsPageBody({
   return (
     <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
+        {!key && !view ? <ModelsRefreshControl client={client} /> : null}
+        {organizationAdmin
+          ? orgCodex.accounts.map((candidate) => (
+              <OrganizationCodexDetailPrefetch
+                key={candidate.id}
+                client={client}
+                organizationId={orgId}
+                account={candidate}
+              />
+            ))
+          : null}
         {page}
       </div>
     </ModelsListLabelProvider>
@@ -1338,9 +1408,14 @@ function codexUsageReadout(
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const weekly = codexUsageReadings(live.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live.usage, codex.now);
+  const weekly = readings[0]!;
   return weekly.percent === null ? null : (
-    <UsageReadout percent={weekly.percent} window="this week" resetsLabel={weekly.resetsLabel} />
+    <UsageReadout
+      percent={weekly.percent}
+      window="this week"
+      resets={usageResets(readings, weekly.label)}
+    />
   );
 }
 
@@ -1444,7 +1519,7 @@ export function payerPhrase(
     case "organization_byok":
       return `billed to ${organization} ${model.providerLabel} key`;
     default:
-      return `paid by ${payerSummaryForModel(model).toLocaleLowerCase()}`;
+      return `paid by ${payerSummaryForModel(t, model).toLocaleLowerCase()}`;
   }
 }
 

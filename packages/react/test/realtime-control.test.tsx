@@ -11,12 +11,18 @@ import {
   RealtimeModelPickerMenu,
   SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,
+  prestartSessionRealtime,
+  realtimeConversationLanguage,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
 import type { SessionRealtimeController } from "@opengeni/sdk/realtime";
+import { createOpenGeniText, OpenGeniMessagesProvider } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -132,7 +138,7 @@ describe("ordinary session Codex realtime control", () => {
   test("admits non-cancelled work states when control and Codex are ready", () => {
     for (const sessionStatus of ["idle", "queued", "running", "requires_action"] as const) {
       expect(
-        codexRealtimeAdmissionAllowed({
+        codexRealtimeAdmissionAllowed(englishText, {
           sessionStatus,
           controlState: "active",
           settlement: null,
@@ -149,7 +155,7 @@ describe("ordinary session Codex realtime control", () => {
       { lifecycleActive: true },
     ]) {
       expect(
-        codexRealtimeAdmissionAllowed({
+        codexRealtimeAdmissionAllowed(englishText, {
           sessionStatus: "idle",
           controlState: "active",
           settlement: null,
@@ -325,6 +331,145 @@ describe("ordinary session Codex realtime control", () => {
     expect(capturedContext?.()).toBe("second");
   });
 
+  test("adopts a call the host started before the view mounted and flushes on turn outcomes", async () => {
+    const calls: string[] = [];
+    let current: SessionRealtimeControllerSnapshot = idle;
+    const listeners = new Set<(snapshot: SessionRealtimeControllerSnapshot) => void>();
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      calls.push(`create:${options.model}`);
+      return {
+        snapshot: () => current,
+        subscribe(listener) {
+          listeners.add(listener);
+          listener(current);
+          return () => listeners.delete(listener);
+        },
+        start: async () => {
+          calls.push("start");
+          current = { ...idle, status: "starting" };
+          for (const listener of listeners) listener(current);
+        },
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => {
+          calls.push("flush");
+        },
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => {
+          calls.push("stop");
+        },
+        close: () => {
+          calls.push("close");
+        },
+      };
+    };
+    const client = { getWorkspaceRealtimeModelCatalog: undefined } as unknown as OpenGeniClient;
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const sessionId = "66666666-6666-4666-8666-666666666666";
+    prestartSessionRealtime({
+      client,
+      workspaceId,
+      sessionId,
+      model: "gpt-live-1-boulder-alpha",
+      controllerFactory: factory,
+    });
+    let consumed = 0;
+    const turnCompleted = {
+      id: "77777777-7777-4777-8777-777777777777",
+      workspaceId,
+      sessionId,
+      sequence: 5,
+      type: "turn.completed",
+      payload: {},
+      occurredAt: "2026-07-29T07:00:05.000Z",
+    } as SessionEvent;
+    const render = (events: SessionEvent[]) =>
+      root.render(
+        <SessionRealtimeControl
+          client={client}
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          sessionStatus="idle"
+          effectiveControl={effectiveControl}
+          events={events}
+          eventsReady={true}
+          codexConnected={true}
+          controllerFactory={factory}
+          realtimeAutostartModel="gpt-live-1-boulder-alpha"
+          onRealtimeAutostartConsumed={() => {
+            consumed += 1;
+          }}
+        />,
+      );
+
+    await act(async () => render([]));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (consumed > 0) break;
+    }
+    // One controller, started once by the host; the view's autostart is consumed.
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start"]);
+    expect(consumed).toBe(1);
+
+    await act(async () => render([turnCompleted]));
+    await act(async () => render([turnCompleted]));
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start", "flush"]);
+
+    await act(async () => root.render(<></>));
+    expect(calls.at(-1)).toBe("close");
+  });
+
+  test("ends an abandoned pre-started call instead of leaving it for a later view", async () => {
+    const calls: string[] = [];
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      calls.push(`create:${options.model}`);
+      return {
+        snapshot: () => idle,
+        subscribe(listener) {
+          listener(idle);
+          return () => undefined;
+        },
+        start: async () => {
+          calls.push("start");
+        },
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => {
+          calls.push("stop");
+        },
+        close: () => {
+          calls.push("close");
+        },
+      };
+    };
+    const input = {
+      client: {} as OpenGeniClient,
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      model: "gpt-live-1-boulder-alpha" as const,
+      controllerFactory: factory,
+    };
+    const abandon = prestartSessionRealtime(input);
+    // A retried handoff for the same model keeps the call that is starting.
+    const abandonRetry = prestartSessionRealtime(input);
+    abandonRetry();
+    abandon();
+    for (let attempt = 0; attempt < 20 && calls.at(-1) !== "close"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start", "stop", "close"]);
+  });
+
   test("renders the compact accessible voice action and switches from start to end", async () => {
     const calls: string[] = [];
     await act(async () => {
@@ -353,9 +498,7 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
     const region = container.querySelector('[role="group"][aria-label="Realtime voice"]');
-    const start = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Start voice with Codex Live"]',
-    );
+    const start = container.querySelector<HTMLButtonElement>('button[aria-label="Start voice"]');
     expect(region).not.toBeNull();
     expect(region?.classList.contains("og-realtime-control")).toBe(true);
     expect(region?.getAttribute("data-model-menu")).toBe("split");
@@ -542,6 +685,15 @@ describe("ordinary session Codex realtime control", () => {
         unavailableReason: null,
         recommended: false,
       },
+      {
+        id: "workspace-elevenlabs/eleven_realtime_v1_max",
+        label: "Eleven Realtime v1 max",
+        provider: "Your ElevenLabs",
+        description: "Reasons before replying",
+        available: true,
+        unavailableReason: null,
+        recommended: false,
+      },
     ];
 
     function Harness() {
@@ -568,12 +720,21 @@ describe("ordinary session Codex realtime control", () => {
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).not.toBeNull();
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+    // Each provider has its own row id, even when two share a billing class.
+    expect(
+      [...container.querySelectorAll<HTMLElement>('[data-testid^="realtime-model-provider-"]')].map(
+        (row) => row.dataset.testid,
+      ),
+    ).toEqual([
+      "realtime-model-provider-opengeni",
+      "realtime-model-provider-codex",
+      "realtime-model-provider-gateway",
+      "realtime-model-provider-elevenlabs",
+    ]);
 
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="realtime-model-provider-opengeni_credits"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="realtime-model-provider-opengeni"]')
         ?.click(),
     );
     expect(container.textContent).toContain("GPT Realtime 2.1");
@@ -584,6 +745,173 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(container.textContent).toContain("Connected Codex");
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+  });
+
+  test("sets the conversation language for models that need one, defaulting to the app language", async () => {
+    localStorage.removeItem("opengeni:realtime-language");
+    const eleven: RealtimeModelOption = {
+      id: "workspace-elevenlabs/eleven_realtime_v1_max",
+      label: "Eleven Realtime v1 max",
+      provider: "Your ElevenLabs",
+      description: "Reasons before replying; best at handing off work",
+      available: true,
+      unavailableReason: null,
+      recommended: false,
+      languages: ["en", "no", "sv"],
+    };
+    const gateway: RealtimeModelOption = {
+      id: "workspace-gateway/openai/gpt-realtime-mini",
+      label: "GPT Realtime Mini",
+      provider: "Your Gateway",
+      description: "Faster, lighter live voice",
+      available: true,
+      unavailableReason: null,
+      recommended: false,
+    };
+    // Models that detect the spoken language themselves are sent none.
+    expect(realtimeConversationLanguage(gateway, "sv", "nb-NO")).toBeUndefined();
+    expect(realtimeConversationLanguage(eleven, null, "nb-NO")).toBe("nb-NO");
+    expect(realtimeConversationLanguage(eleven, "sv", "nb-NO")).toBe("sv");
+
+    function Harness(props: { provider: RealtimeModelOption["provider"] }) {
+      return (
+        <OpenGeniMessagesProvider locale="nb-NO">
+          <RealtimeModelPickerMenu
+            models={[eleven, gateway]}
+            selectedModel={props.provider === eleven.provider ? eleven : gateway}
+            provider={props.provider}
+            direction={1}
+            disabled={false}
+            onProviderChange={() => undefined}
+            onSelect={() => undefined}
+          />
+        </OpenGeniMessagesProvider>
+      );
+    }
+    const languageRow = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-language-row"]');
+
+    await act(async () => root.render(<Harness provider="Your Gateway" />));
+    expect(languageRow()).toBeNull();
+
+    await act(async () => root.render(<Harness provider="Your ElevenLabs" />));
+    expect(languageRow()?.textContent).toContain("Automatic");
+    await act(async () => languageRow()?.click());
+    expect(
+      container.querySelector('[data-testid="realtime-language-choice-automatic"]')?.textContent,
+    ).toContain("norsk bokmål");
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="realtime-language-choice-sv"]')
+        ?.click(),
+    );
+    expect(localStorage.getItem("opengeni:realtime-language")).toBe("sv");
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="model-picker-back"]')?.click(),
+    );
+    expect(languageRow()?.textContent).toContain("svensk");
+
+    await act(async () => languageRow()?.click());
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="realtime-language-choice-automatic"]')
+        ?.click(),
+    );
+    expect(localStorage.getItem("opengeni:realtime-language")).toBeNull();
+
+    // Without a pick of their own, people talk in the workspace's language.
+    const elevenWithWorkspaceLanguage = { ...eleven, workspaceVoiceSettings: { language: "no" } };
+    await act(async () =>
+      root.render(
+        <OpenGeniMessagesProvider locale="en-US">
+          <RealtimeModelPickerMenu
+            models={[elevenWithWorkspaceLanguage, gateway]}
+            selectedModel={elevenWithWorkspaceLanguage}
+            provider="Your ElevenLabs"
+            direction={1}
+            disabled={false}
+            onProviderChange={() => undefined}
+            onSelect={() => undefined}
+          />
+        </OpenGeniMessagesProvider>,
+      ),
+    );
+    expect(languageRow()?.textContent).toContain("Automatic · Norwegian");
+    await act(async () => languageRow()?.click());
+    expect(
+      container.querySelector('[data-testid="realtime-language-choice-automatic"]')?.textContent,
+    ).toContain("Set for this workspace, Norwegian");
+  });
+
+  test("sends the host's voice settings with the language the person picked on top", async () => {
+    localStorage.removeItem("opengeni:realtime-language");
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => ({
+        models: [
+          {
+            id: "workspace-elevenlabs/eleven_realtime_v1_max",
+            label: "Eleven Realtime v1 max",
+            provider: "Your ElevenLabs",
+            description: "Reasons before replying; best at handing off work",
+            available: true,
+            unavailableReason: null,
+            recommended: true,
+            languages: ["en", "no", "sv"],
+            customVoice: true,
+          },
+          {
+            id: "workspace-gateway/openai/gpt-realtime-mini",
+            label: "GPT Realtime Mini",
+            provider: "Your Gateway",
+            description: "Faster, lighter live voice",
+            available: true,
+            unavailableReason: null,
+            recommended: false,
+          },
+        ],
+      }),
+    } as unknown as OpenGeniClient;
+    const hostSettings = { voice: "library-voice-id", language: "no" };
+    let selection: ReturnType<typeof useRealtimeModelSelection> | null = null;
+    let setLanguage: ((language: string | null) => void) | null = null;
+    function Harness() {
+      setLanguage = useRealtimeLanguagePreference().setLanguage;
+      selection = useRealtimeModelSelection({
+        client,
+        workspaceId: "11111111-1111-4111-8111-111111111112",
+        codexConnected: false,
+      });
+      return <output>{selection.models.length}</output>;
+    }
+    await act(async () =>
+      root.render(
+        <OpenGeniMessagesProvider locale="nb-NO">
+          <Harness />
+        </OpenGeniMessagesProvider>,
+      ),
+    );
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (container.textContent === "2") break;
+    }
+    const eleven = "workspace-elevenlabs/eleven_realtime_v1_max" as const;
+    const gateway = "workspace-gateway/openai/gpt-realtime-mini" as const;
+    // The person's own language is the fallback under the host's and workspace's.
+    expect(selection!.languageFor(eleven)).toBe("nb-NO");
+    expect(selection!.languageFor(gateway)).toBeUndefined();
+    expect(selection!.voiceSettingsFor(eleven, hostSettings)).toEqual(hostSettings);
+
+    // The language the person picks in the voice menu wins over the host's.
+    await act(async () => setLanguage!("sv"));
+    expect(selection!.voiceSettingsFor(eleven, hostSettings)).toEqual({
+      voice: "library-voice-id",
+      language: "sv",
+    });
+    expect(selection!.languageFor(eleven)).toBe("nb-NO");
+    // A model that detects the language itself keeps the host's settings as they are.
+    expect(selection!.voiceSettingsFor(gateway, hostSettings)).toEqual(hostSettings);
+    await act(async () => setLanguage!(null));
   });
 
   test("loads and selects a connected SuperGrok realtime model", async () => {
@@ -1019,8 +1347,46 @@ describe("ordinary session Codex realtime control", () => {
     expect(resume?.disabled).toBe(false);
     await act(async () => resume?.click());
     expect(calls).toEqual(["audio"]);
-    expect(container.querySelector('button[aria-label="Start voice with Codex Live"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Start voice"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Resume voice audio"]')).not.toBeNull();
+  });
+
+  test("names the voice action without the model, and a host can name it", async () => {
+    const render = async (messages?: Record<string, string>) =>
+      await act(async () => {
+        root.render(
+          <OpenGeniMessagesProvider messages={messages}>
+            <RealtimeVoiceControl
+              snapshot={idle}
+              canStart={true}
+              modelAvailable={true}
+              audioRef={createRef<HTMLAudioElement>()}
+              onStart={async () => undefined}
+              onStop={async () => undefined}
+              onRetry={async () => undefined}
+              onRetryAudibleOutput={async () => undefined}
+              onSetInputMuted={() => undefined}
+              onSetOutputMuted={() => undefined}
+            />
+          </OpenGeniMessagesProvider>,
+        );
+      });
+    const primary = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]');
+    const status = () => container.querySelector('[role="status"]')?.textContent ?? "";
+
+    await render();
+    expect(primary()?.getAttribute("aria-label")).toBe("Start voice");
+    expect(status()).toContain("Talk live with the agent.");
+    expect(status()).not.toContain("Codex Live");
+
+    await render({
+      "realtime.realtimeControl.startVoice": "Talk to Ava",
+      "realtime.realtimeControl.talkLiveWithTheAgent": "Ava answers out loud.",
+    });
+    expect(primary()?.getAttribute("aria-label")).toBe("Talk to Ava");
+    expect(status()).toContain("Talk to Ava");
+    expect(status()).toContain("Ava answers out loud.");
   });
 
   test("shows why a voice start failed until the user dismisses or retries it", async () => {
@@ -1028,7 +1394,7 @@ describe("ordinary session Codex realtime control", () => {
     const failed: SessionRealtimeControllerSnapshot = {
       ...idle,
       status: "error",
-      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+      error: "Voice is temporarily unavailable. Try another voice model.",
     };
     const render = async (snapshot: SessionRealtimeControllerSnapshot) =>
       await act(async () => {
@@ -1055,12 +1421,12 @@ describe("ordinary session Codex realtime control", () => {
       container.querySelector<HTMLButtonElement>('[data-testid="realtime-failure-reason"]');
     // Visible text, not only a tooltip or the model menu.
     expect(reason()?.textContent).toBe(
-      "Opengeni voice is temporarily unavailable. Try another voice model.",
+      "Voice is temporarily unavailable. Try another voice model.",
     );
     const start = container.querySelector<HTMLButtonElement>(
       '[data-testid="realtime-primary-action"]',
     );
-    expect(start?.getAttribute("aria-label")).toBe("Try voice again with Codex Live");
+    expect(start?.getAttribute("aria-label")).toBe("Try voice again");
     await act(async () => start?.click());
     expect(calls).toEqual(["start"]);
 

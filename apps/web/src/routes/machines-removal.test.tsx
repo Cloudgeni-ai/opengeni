@@ -125,7 +125,7 @@ describe("connected machine removal conflict", () => {
         "workspace-a",
         blocked.dependentSessions,
       ),
-    ).rejects.toThrow("The managed sandbox is still restoring.");
+    ).rejects.toThrow(/^Couldn't move .* off this machine\. Try again\.$/);
   });
 
   test("renders a machine-home blocker without offering a false managed-home action", async () => {

@@ -29,7 +29,11 @@
  */
 import { ClaudeSubscriptionCredential, type ClaudeUsageObservation } from "@opengeni/config";
 import type { z } from "zod";
-import type { SubscriptionCoreAdapter, SubscriptionQuota } from "@opengeni/subscriptions";
+import type {
+  QuotaBlockClaim,
+  SubscriptionCoreAdapter,
+  SubscriptionQuota,
+} from "@opengeni/subscriptions";
 import {
   claudeRefreshedCredential,
   ClaudeSubscriptionReconnectRequired,
@@ -40,6 +44,8 @@ import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {
   decodeSubscriptionCoreClaudeUsage,
   fetchSubscriptionCoreClaudeUsage,
+  subscriptionCoreClaudeUsageConfirmsAvailability,
+  subscriptionCoreClaudeUsageEndsClaimedBlock,
 } from "./subscription-core-claude-usage";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
@@ -189,6 +195,16 @@ export function subscriptionCoreClaudeAdapter(
     decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
     // A usage reading may omit a window that still runs: keep it (design 5.3).
     usageReadingsComplete: false,
+    // The usage endpoint is authoritative for the plan limits it reports:
+    // Anthropic can reset a limit before the reset a refused request
+    // reported. A reading that reports both account windows below the limit
+    // ends, before that stale reset, each stored block whose claimed limits
+    // (`QuotaBlockClaim`) it reports below the limit; an unclaimed block
+    // runs to its own end.
+    usageReadEndsQuotaExhaustion: true,
+    usageReadConfirmsAvailability: (response) =>
+      subscriptionCoreClaudeUsageConfirmsAvailability(response),
+    usageReadEndsClaimedBlock: (response) => subscriptionCoreClaudeUsageEndsClaimedBlock(response),
   };
 }
 
@@ -219,6 +235,27 @@ const FAMILY_WINDOWS: Record<string, RegExp> = {
 };
 const allowed = (status: string | null | undefined) =>
   status === "allowed" || status === "allowed_warning";
+
+/**
+ * The limits a stored Claude block may claim: the plan windows the usage
+ * endpoint reports. Any other representative claim (a newer limit this
+ * build does not know), or none, leaves the block unclaimed (fail closed).
+ */
+export const SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS: ReadonlySet<string> = new Set([
+  ...ACCOUNT_WINDOWS,
+  ...Object.keys(FAMILY_WINDOWS),
+]);
+
+/** Accumulates the claims of one decoded block: null once any part is unclaimed. */
+function addClaim(current: Set<string> | null | undefined, claim: string | null) {
+  if (
+    current === null ||
+    claim === null ||
+    !SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS.has(claim)
+  )
+    return null;
+  return new Set([...(current ?? []), claim]);
+}
 
 /**
  * One Claude usage observation (response headers or the usage endpoint)
@@ -253,6 +290,10 @@ const allowed = (status: string | null | undefined) =>
  *   concerns only some models), an account limit cools the listed models
  *   one by one instead of exhausting the connection, and the window is a
  *   `warning`.
+ * - Each block carries the plan windows it came from (`QuotaBlockClaim`):
+ *   the full window itself, or the representative claim a refusal named.
+ *   A block any part of which names no claim, or a limit this build does
+ *   not recognize, carries none and never ends before its own reset.
  *
  * `upstreamModelIds` must list every Claude model the connection can serve
  * (the organization's catalog when decoded), so a family limit reaches each
@@ -315,22 +356,29 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
   // listed catalog misses it.
   const listed = [...new Set([...input.upstreamModelIds, ...(own ? [own] : [])])];
   const modelCooldowns: Record<string, number> = {};
-  const cool = (upstreamModelId: string, limit: number) => {
+  // Which plan windows each block came from (null: some part unclaimed).
+  const cooldownClaims = new Map<string, Set<string> | null>();
+  let exhaustedClaims: Set<string> | null | undefined;
+  const cool = (upstreamModelId: string, claim: string | null, limit: number) => {
     const end = Math.min(limit, capOf(upstreamModelId));
     if (end <= observedAt || (upstreamModelId === spared && end <= allowanceEnd)) return;
     for (const modelId of subscriptionCoreClaudeProductModelIds(upstreamModelId)) {
       modelCooldowns[modelId] = Math.max(modelCooldowns[modelId] ?? end, end);
+      cooldownClaims.set(modelId, addClaim(cooldownClaims.get(modelId), claim));
     }
   };
   let exhaustedUntil: number | null = null;
   const block = (model: string | null, claim: string | null, limit: number) => {
     const family = claim === null ? undefined : FAMILY_WINDOWS[claim];
-    if (model !== null) cool(model, limit);
+    if (model !== null) cool(model, claim, limit);
     else if (family || perModel) {
-      for (const id of listed) if (!family || family.test(id)) cool(id, limit);
+      for (const id of listed) if (!family || family.test(id)) cool(id, claim, limit);
     } else {
       const end = Math.min(limit, capOf(null));
-      if (end > observedAt) exhaustedUntil = Math.max(exhaustedUntil ?? end, end);
+      if (end > observedAt) {
+        exhaustedUntil = Math.max(exhaustedUntil ?? end, end);
+        exhaustedClaims = addClaim(exhaustedClaims, claim);
+      }
     }
   };
   const windows = observation.windows.map((window) => {
@@ -383,11 +431,21 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     if (!lifted)
       block(item.upstreamModelId, item.representativeClaim, base(item.resetsAt, item.observedAt));
   }
+  const claimOf = (claims: Set<string> | null | undefined, until: number) =>
+    claims && claims.size > 0 ? { until, observedAt, windowIds: [...claims].sort() } : null;
+  const modelCooldownClaims: Record<string, QuotaBlockClaim> = {};
+  for (const [modelId, until] of Object.entries(modelCooldowns)) {
+    const claim = claimOf(cooldownClaims.get(modelId), until);
+    if (claim) modelCooldownClaims[modelId] = claim;
+  }
+  const exhaustedClaim = exhaustedUntil === null ? null : claimOf(exhaustedClaims, exhaustedUntil);
   return {
     windows,
     modelCooldowns,
+    ...(Object.keys(modelCooldownClaims).length > 0 ? { modelCooldownClaims } : {}),
     exhaustedUntil,
     exhaustedKind: exhaustedUntil === null ? null : "quota",
+    ...(exhaustedClaim ? { exhaustedClaim } : {}),
     observedAt,
     observedRefreshGeneration: input.refreshGeneration,
     source: observation.source === "provider" ? "usage_endpoint" : "response_headers",

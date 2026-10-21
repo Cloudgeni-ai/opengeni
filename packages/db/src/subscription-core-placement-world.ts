@@ -179,6 +179,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
         provider: providerId,
         kind: subscriptionCoreConnectionKind(provider),
         now: request.now,
+        health: "stored",
       }),
     ]);
 

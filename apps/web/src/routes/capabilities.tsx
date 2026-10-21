@@ -15,6 +15,7 @@ import {
   CapabilityPageSlotContext,
   type CapabilityPageSlotValue,
 } from "@/components/capabilities/capability-page-slot";
+import { SlackConnectionsPage } from "@/components/capabilities/slack-connections-page";
 import { IntegrationPage } from "@/components/capabilities/integration-page";
 import { ProviderPage, type ProviderMode } from "@/components/capabilities/provider-page";
 import {
@@ -72,8 +73,8 @@ import {
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/line-tabs";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
 import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
@@ -111,18 +112,18 @@ import {
   canManageSlackReactionSummon,
   useSlackIntegration,
 } from "@/components/capabilities/use-slack-integration";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader } from "@/components/ui/page-header";
-import { SECTION_TITLE_CLASS } from "@/components/ui/section";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@/lib/utils";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
-import { Button } from "@/components/ui/button";
-import { DetailPage } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Notice } from "@opengeni/react/ui/notice";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
   capabilityConnectPlan,
@@ -155,7 +156,7 @@ import {
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { request } from "@/api";
 import { LoadErrorState } from "@/components/common";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 // Custom API creation is a fundamentally different "define a new connector
 // from a spec" flow (paste a URL, preview, pick tools, authenticate, create),
@@ -497,10 +498,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     context.accessContext,
     workspaceId,
   );
+  // Skills are shared team procedures that Members may install and manage;
+  // plugins can add connections and MCP servers and stay administrative.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "capabilities:manage",
+    "documents:manage",
   );
 
   // One adapter per integration maps its own data onto the shared view-model.
@@ -1597,20 +1600,32 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   let detailPage: ReactNode = null;
   if (openIntegrationModel) {
     const back = backFrom(openIntegrationModel.id);
-    detailPage = (
-      <IntegrationPage
-        model={openIntegrationModel}
-        onBack={back.onBack}
-        backLabel={back.label}
-        setupLabel={
-          openIntegrationModel.id === "slack"
-            ? slackBotMode
-              ? "Add Opengeni to Slack"
-              : "Connect your Slack"
-            : undefined
-        }
-      />
-    );
+    detailPage =
+      openIntegrationModel.id === "slack" ? (
+        <SlackConnectionsPage
+          key={`${workspaceId}:${context.accessContext?.subjectId ?? ""}`}
+          workspaceId={workspaceId}
+          items={items}
+          connections={connections}
+          bindings={slackInstallationBindings}
+          refresh={refresh}
+          onRuntimeChanged={onRuntimeChanged}
+          onBack={back.onBack}
+        />
+      ) : (
+        <IntegrationPage
+          model={openIntegrationModel}
+          onBack={back.onBack}
+          backLabel={back.label}
+          setupLabel={
+            openIntegrationModel.id === "slack"
+              ? slackBotMode
+                ? "Add Opengeni to Slack"
+                : "Connect your Slack"
+              : undefined
+          }
+        />
+      );
   } else if (selectedItem) {
     const back = backFrom(selectedItem.id);
     detailPage = (
@@ -2124,6 +2139,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       workspaceId={workspaceId}
                       connections={connections}
                       canManage={canManageSkills}
+                      canManagePlugins={canManageApiIntegrationInstances}
                       items={items}
                       logoUrl={logoUrl}
                       busyCatalogId={busyId}

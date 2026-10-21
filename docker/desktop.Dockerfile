@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a638efdef https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_151.0.7922.108-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_155.0.8059.84-1_amd64.deb /google-chrome-stable.deb
 
 FROM rust:1.82-bookworm AS computer-native-build
 
@@ -47,9 +47,10 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
-    cargo build --locked --release -p opengeni-computer-native; \
+    cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
-    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native; \
+    install -m 0755 target/release/opengeni-agent /out/opengeni-agent
 
 RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
@@ -89,6 +90,8 @@ WORKDIR /src
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
+COPY apps/site-gateway/package.json apps/site-gateway/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
@@ -96,6 +99,7 @@ COPY examples/northstar-support/package.json examples/northstar-support/package.
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -111,6 +115,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
@@ -128,7 +133,10 @@ COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
 COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
+COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 # The cache mount only holds Bun's download cache; the exact lock-resolved
@@ -221,6 +229,7 @@ RUN set -eux; \
     } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+COPY --from=computer-native-build /out/opengeni-agent /out/opengeni-agent
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
 COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
 RUN printf '%s  %s\n' \
@@ -232,6 +241,10 @@ RUN printf '%s  %s\n' \
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
+      >> /out/SHA256SUMS
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-agent | awk '{print $1}')" \
+      /usr/local/bin/opengeni-agent \
       >> /out/SHA256SUMS
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
@@ -302,8 +315,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20260809T010020Z
+ARG OPENGENI_CHROMIUM_VERSION=155.0.8059.79-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261015T173155Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive
@@ -620,6 +633,10 @@ COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+# The machine agent an Opengeni compute sandbox runs as its guest agent
+# (`opengeni-agent run --compute --virtual-desktop`). It sits beside
+# opengeni-browserd so its browser controller finds the sidecar.
+COPY --from=browserd-build /out/opengeni-agent /usr/local/bin/opengeni-agent
 COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
 COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
 RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
@@ -639,7 +656,9 @@ RUN set -eux; \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
                /usr/local/bin/opengeni-command-supervisor \
-               /usr/local/lib/opengeni/opengeni-computer-native; \
+               /usr/local/lib/opengeni/opengeni-computer-native \
+               /usr/local/bin/opengeni-agent; \
+    opengeni-agent --version; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \
@@ -670,6 +689,10 @@ ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
 ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+# The image ships opengeni-computer-native as its desktop driver and stages no
+# CUA runtime, so it selects that driver explicitly: an isolated Linux seat
+# otherwise defaults to CUA.
+ENV OPENGENI_BROWSERD_COMPUTER_BACKEND=native
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"

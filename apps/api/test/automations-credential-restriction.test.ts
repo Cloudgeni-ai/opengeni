@@ -307,7 +307,7 @@ function rawSetup() {
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   track(
-    spyOn(db, "requireWorkspace").mockResolvedValue({
+    spyOn(db, "getWorkspace").mockResolvedValue({
       id: workspaceId,
       accountId,
       kind: "shared",
@@ -454,6 +454,7 @@ describe("automation setup credential ceiling", () => {
         metadata: {},
       } as never),
     );
+
     expect((await request(app, await bearer(false, true), template)).status).toBe(403);
     expect(create).not.toHaveBeenCalled();
   });

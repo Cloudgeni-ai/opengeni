@@ -185,7 +185,7 @@ export function createSkillReadAttemptToolDefinition(input: {
     codemodePath: ["opengeni", SKILL_READ_TOOL_NAME],
     title: "Read Skill files",
     description:
-      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths and available revision identity only, with no file bodies. Use an id or name from the Skill index or skill_search. Management tools are lazy; when listed, opengeni-skills explains how to use them.",
+      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths and available revision identity only, with no file bodies. Use an id or name from the Skill index or skill_search. Management tools are lazy; when listed, skill-management explains how to use them.",
     inputSchema: {
       type: "object",
       properties: {

@@ -622,6 +622,21 @@ describe("BrowserInteractionController", () => {
       code: "driver_failed",
     });
   });
+
+  test("an unknown target is named, with where current ones are found", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(targets, async () => observation(targets.get("target-1")!)),
+    });
+
+    await expect(controller.observe("app:guessed")).rejects.toMatchObject({
+      code: "target_not_found",
+      message:
+        'browser target "app:guessed" does not exist; list the current targets and use one of their ids',
+    });
+  });
 });
 
 describe("resolved action targets", () => {
@@ -695,6 +710,38 @@ describe("resolved action targets", () => {
 
     const untraced = tracedController(async () => observation(target()), []);
     expect(await untraced.run(command(1))).not.toHaveProperty("targets");
+  });
+
+  test("returns the page a driver observed after a failure", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("locator_not_found", "fixture stale ref"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+    ]) {
+      failure.observation = observation(target());
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe(
+        failure instanceof InteractionDefiniteDriverError ? "failed" : "outcome_unknown",
+      );
+      expect(receipt.error?.code).toBe(failure.code);
+      expect(receipt.observation?.target.id).toBe("target-1");
+    }
+
+    // An observation of another target, or one that does not parse, is dropped
+    // without changing the failure.
+    for (const invalid of [observation(target("target-2")), { bogus: true }]) {
+      const failure = new InteractionDefiniteDriverError("invalid_action", "fixture refusal");
+      failure.observation = invalid;
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
+      expect(receipt.observation).toBeNull();
+    }
   });
 
   test("bounds recorded targets", async () => {

@@ -121,6 +121,7 @@ export const SECTION_KEYS = [
   "page-connected-agents",
   "page-service-accounts",
   "page-models",
+  "page-models-cache",
   "page-schedules",
   "page-schedule-form",
   "page-knowledge",
@@ -854,8 +855,8 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Pages",
     title: "Connected agents",
     purpose:
-      "Outside agents working in the organization over MCP: whose they are, what they can do and where.",
-    usedOn: "Organization settings > Developer, agent sign-in",
+      "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
+    usedOn: "Organization settings > Connected agents, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
   {
@@ -873,6 +874,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Which models a workspace can use and who pays for them, with the account page.",
     usedOn: "Workspace settings, Organization settings",
     load: () => import("./page-models"),
+  },
+  {
+    key: "page-models-cache",
+    group: "Pages",
+    title: "Models loading and cache",
+    purpose: "Production Models components with an in-memory API fixture.",
+    usedOn: "Settings > Models",
+    load: () => import("./page-models-cache"),
   },
   {
     key: "page-schedules",

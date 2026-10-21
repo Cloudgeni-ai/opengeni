@@ -7,7 +7,7 @@ import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
 import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,

@@ -10,6 +10,9 @@ import {
 } from "../src/hooks/use-slash-commands";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -56,7 +59,7 @@ function setup(options: {
       confirm: async () => options.confirmAnswer ?? true,
     };
     const command = useSlashCommands({
-      commands: options.commands ?? defaultCommands,
+      commands: options.commands ?? defaultCommands(englishText),
       context: options.context,
       handlers,
       value,
@@ -233,7 +236,7 @@ describe("useSlashCommands", () => {
         confirm: async () => true,
       };
       const command = useSlashCommands({
-        commands: defaultCommands,
+        commands: defaultCommands(englishText),
         context: ctx,
         handlers,
         value,
@@ -328,7 +331,7 @@ describe("useSlashCommands", () => {
         confirm: async () => true,
       };
       const command = useSlashCommands({
-        commands: defaultCommands,
+        commands: defaultCommands(englishText),
         context: ctx,
         handlers,
         value,

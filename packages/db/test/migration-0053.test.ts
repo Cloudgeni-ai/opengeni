@@ -150,6 +150,8 @@ describe("migration 0053 (Codex credential leases)", () => {
           ('0715_subscription_core_api_key_connections.sql'),
           -- 0716 builds on 0712 and 0717 on 0716; hold them back too.
           ('0716_subscription_authority_compat.sql'),
+          ('0843_indexed_inbox_lineage.sql'),
+          ('0846_independent_session_titles.sql'),
           ('0717_subscription_authority_fences.sql'),
           -- The SuperGrok cutover requires 0712 through 0717; the retirement
           -- requires both cutovers.

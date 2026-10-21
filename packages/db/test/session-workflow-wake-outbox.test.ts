@@ -6,7 +6,11 @@ import {
   TurnExecutionPolicyV1,
   TURN_EXECUTION_POLICY_METADATA_KEY,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, waitFor, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  waitFor,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";
 import type { PostClaimDatabaseRecoveryDetail } from "../../../apps/worker/src/activities/types";
@@ -50,11 +54,14 @@ import {
 } from "../src/index";
 import * as schema from "../src/schema";
 
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-workflow-wake-outbox");
+  const acquired = await acquireRestrictedRuntimeTestDatabase(
+    "session-workflow-wake-outbox",
+    "public",
+  );
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);
@@ -1029,6 +1036,116 @@ describe("transactional session workflow wake outbox", () => {
         expect(rechecked).toMatchObject({ status: "queued", activeTurnId: null });
       }
     }
+  });
+
+  test("a recovery backoff holds against the session's own wakes and ends on new input", async () => {
+    const ctx = await fixture();
+    await send(ctx, "turn that will need a retry");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const workflowId = `session-${sessionId}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId,
+      dispatchId,
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("Missing active turn");
+    // Every earlier wake is delivered, so the recovery's own wake is the
+    // only pending obligation and must carry the backoff deadline.
+    const prior = await wakeRow(workspaceId, sessionId);
+    if (prior) {
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: workflowId,
+        wakeRevision: prior.wakeRevision,
+      });
+    }
+    const before = Date.now();
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "mcp_transport_unavailable",
+      providerRecoveryCount: 1,
+      retryAfterMs: 60_000,
+    });
+    const delayedWake = await wakeRow(workspaceId, sessionId);
+    expect(delayedWake?.reason).toBe("turn_recovery_requested");
+    expect(delayedWake!.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(before + 55_000);
+
+    // The attempt's own quiescence receipt wakes the workflow immediately.
+    // That wake must not end the backoff: the turn stays parked.
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const parked = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    expect(parked).toMatchObject({ kind: "admission-blocked", reason: "recovery_backoff" });
+    if (parked.kind !== "admission-blocked" || !parked.ref || !("notBefore" in parked.ref)) {
+      throw new Error("Missing recovery backoff deadline");
+    }
+    expect(Date.parse(parked.ref.notBefore)).toBeGreaterThanOrEqual(before + 55_000);
+    expect(Date.parse(parked.ref.notBefore)).toBeLessThanOrEqual(Date.now() + 65_000);
+
+    // A person's new message is real input: the same turn retries now.
+    await send(ctx, "are you still there?");
+    const resumed = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    expect(resumed.kind).toBe("runnable");
+    expect((await getSession(client.db, workspaceId, sessionId))?.activeTurnId).toBe(claim.turn.id);
+  });
+
+  test("an elapsed recovery backoff no longer holds the turn", async () => {
+    const ctx = await fixture();
+    await send(ctx, "turn with a short retry");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const workflowId = `session-${sessionId}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId,
+      dispatchId,
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("Missing active turn");
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "provider_unavailable",
+      providerRecoveryCount: 1,
+      retryAfterMs: 50,
+    });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    await Bun.sleep(100);
+    expect((await peekSessionWork(client.db, workspaceId, sessionId, true)).kind).toBe("runnable");
   });
 
   test("admission fencing uses the event cursor and rejects events appended after the peek", async () => {

@@ -9,6 +9,7 @@ import {
   AgentBrowserJsonRunner,
   BrowserSupervisor,
   type BrowserSupervisorSessionOptions,
+  managedChromiumLaunchExecutable,
 } from "../../src";
 
 /** One managed Chromium controller as the native agent runs it. A recovery test
@@ -22,8 +23,10 @@ export async function openManagedRecoverySupervisor(
     rootDirectory,
     socketRootDirectory,
     createDriver: async (context) => {
-      // Keep the actual executable in ownership receipts while applying
-      // the same container launch flags as the other Chromium CI fixtures.
+      // Launch exactly what the production driver launches, including after
+      // recovery, while applying the same container launch flags as the
+      // other Chromium CI fixtures.
+      const { browserExecutablePath } = await managedChromiumLaunchExecutable(context);
       const runner = await AgentBrowserJsonRunner.create({
         namespace: "og",
         sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
@@ -32,9 +35,7 @@ export async function openManagedRecoverySupervisor(
         downloadDirectory: context.downloadDirectory,
         screenshotDirectory: context.screenshotDirectory,
         headed: context.headed,
-        ...(context.browserExecutablePath
-          ? { browserExecutablePath: context.browserExecutablePath }
-          : {}),
+        ...(browserExecutablePath ? { browserExecutablePath } : {}),
         launchArguments: ["--no-sandbox", "--disable-gpu"],
         ...(context.recoverOwnedProcess
           ? {

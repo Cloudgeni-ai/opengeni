@@ -64,9 +64,10 @@ const legacyBrowserUnusedMethods = [
   "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
-  "pauseGoal",
+  // The organization account page reads usage from the account overview, so
+  // this standalone usage read stays available to SDK callers only.
+  "organizationCodexAccountUsage",
   "rejectGoalRevision",
-  "resumeGoal",
   "revokeUserResourceGrant",
   "rollbackCompanyProfile",
   "rollbackGoalRevision",
@@ -74,7 +75,6 @@ const legacyBrowserUnusedMethods = [
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
-  "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
@@ -92,6 +92,17 @@ const agentInteractionMethods = [
   "getBrowserTargetState",
   "readBrowserDom",
   "openBrowserTargetWithInventory",
+  // Recovering a browser from a copied working directory is an operator or
+  // agent action; the web console has no adoption screen yet.
+  "inspectBrowserSessionWorkingCopy",
+  "adoptBrowserSessionWorkingCopy",
+  "getBrowserSessionWorkingCopyAdoption",
+  "revertBrowserSessionWorkingCopyAdoption",
+  // Recording a browser flow is an agent action (browser_record); the console
+  // plays the saved video as an ordinary artifact.
+  "startBrowserRecording",
+  "getBrowserRecording",
+  "saveBrowserRecording",
 ];
 
 // Server-side integrations replace the Skills a session carries, and hosts that
@@ -110,6 +121,22 @@ const integrationMethods = [
   "importSiteData",
   "listSiteDataFiles",
   "resetSiteDataCollection",
+  // Site SQL management for hosts and scripts; the web Data tab only reads
+  // the database's status and turns it on or off, and agents use tools.
+  "defineSiteSqlQuery",
+  "deleteSiteSqlQuery",
+  "executeSiteSql",
+  "exportSiteSql",
+  "importSiteSql",
+  "inspectSiteSql",
+  "migrateSiteSql",
+  "querySiteSql",
+  "resetSiteSql",
+  "runSiteSqlQuery",
+  // The workspace default limit profile for published Sites, for hosts and
+  // admin scripts; the web console sets limits per Site.
+  "getSiteLimitProfile",
+  "updateSiteLimitProfile",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push

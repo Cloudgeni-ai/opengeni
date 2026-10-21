@@ -4,6 +4,7 @@ import {
   CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
+  CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
   WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
@@ -1578,6 +1579,7 @@ describe("deployment contract", () => {
         "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
         "OPENGENI_MODAL_SANDBOX_CPU",
         "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+        "OPENGENI_MODAL_REGIONS",
         "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
         "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
         "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
@@ -1906,6 +1908,26 @@ describe("deployment contract", () => {
     expect(configured.runtimeEnv).toContain("OPENGENI_WEB_PARALLEL_API_KEY=parallel-key");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes the optional credit margin override through without making it required", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0");
+    expect(configured.summary.runtimeEnvKeys).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE");
+
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

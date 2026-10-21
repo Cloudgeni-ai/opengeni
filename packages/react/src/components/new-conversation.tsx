@@ -14,6 +14,8 @@ import { ChatComposer } from "./chat-composer";
 import { ModelPolicyPicker } from "./model-policy-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyNewVoice = lazy(() => import("../realtime/embedded-new-voice"));
 
@@ -26,15 +28,15 @@ export type NewConversationLabels = {
   pending: string;
   finishingUploads: string;
 };
-const DEFAULT_LABELS: NewConversationLabels = {
-  title: "How can I help?",
-  placeholder: "Ask anything…",
-  send: "Send",
-  unavailable: "New chats are not enabled for this product.",
-  retry: "Retry",
-  pending: "Creation is not confirmed. Retry checks the same request; your newer draft stays here.",
-  finishingUploads: "Chat created. Finish or remove the remaining uploads to open it.",
-};
+const DEFAULT_LABELS = (t: OpenGeniText): NewConversationLabels => ({
+  title: t("newConversation.howCanIHelp"),
+  placeholder: t("newConversation.askAnything"),
+  send: t("newConversation.send"),
+  unavailable: t("newConversation.newChatsAreNotEnabled"),
+  retry: t("newConversation.retry"),
+  pending: t("newConversation.creationIsNotConfirmedRetry"),
+  finishingUploads: t("newConversation.chatCreatedFinishOrRemove"),
+});
 type Presentation = {
   composerProps?: SessionConversationProps["composerProps"] | undefined;
   modelPickerProps?: SessionConversationProps["modelPickerProps"] | undefined;
@@ -52,18 +54,26 @@ export type NewConversationViewProps = Presentation & { creation: NewConversatio
 
 /** Standalone stock new-chat composer. OpenGeniChat uses this same implementation. */
 export function NewConversation({ baseUrl, headers, fetch, ...props }: NewConversationProps) {
-  if (baseUrl === undefined) return <NewConversationRuntime {...props} />;
+  const resetKey = props.workspaceId ?? "";
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <NewConversationRuntime {...props} />
+      </ConversationRenderBoundary>
+    );
   const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope
-      baseUrl={baseUrl}
-      headers={headers}
-      fetch={fetch}
-      client={client}
-      workspaceId={workspaceId}
-    >
-      <NewConversationRuntime {...rest} />
-    </SessionProxyScope>
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        headers={headers}
+        fetch={fetch}
+        client={client}
+        workspaceId={workspaceId}
+      >
+        <NewConversationRuntime {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
   );
 }
 function NewConversationRuntime(props: NewConversationProps) {
@@ -84,7 +94,8 @@ export function NewConversationView({
   height = "100%",
   className,
 }: NewConversationViewProps) {
-  const labels = { ...DEFAULT_LABELS, ...overrides };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...overrides };
   const { composer, config, catalog, files, uploadsEnabled, available, error, pending } = creation;
   const formatError = useErrorMessage();
   const root = useRef<HTMLFormElement>(null);

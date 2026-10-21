@@ -262,7 +262,7 @@ function actualClaimFixture() {
       calls.push("capabilities");
       return (await reads[1]!.promise) as typeof settings;
     }),
-    spyOn(capabilities, "settingsWithCodexCredential").mockImplementation(async () => {
+    spyOn(core, "settingsWithModelProviderCredentials").mockImplementation(async () => {
       calls.push("credential_gate");
       throw stop;
     }),

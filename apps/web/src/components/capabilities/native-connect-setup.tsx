@@ -9,9 +9,9 @@ import {
 } from "@opengeni/connect";
 import { ConnectSetup, ConnectionLogo, isOwnerApprovalPending } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
-import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@opengeni/react/ui/dialog";
 import { CapabilityDialogContent } from "./detail-dialog";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { selectGitHubConnectAccount } from "@/lib/github-connect-account";
 import { recordGitHubInstallRequest } from "@/lib/github-install-request";
 import {

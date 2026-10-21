@@ -6,7 +6,7 @@
 
 Opengeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
 
-Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
+Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero Opengeni-side provider registration. Opengeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
 
 Three layers, kept distinct throughout this doc:
 
@@ -75,14 +75,14 @@ authority. This ownership-value helper and `requireConnectionAuthorityOwner`
 share the core checks: `contextIntegrity`, exact authenticated/grant subject
 identity, `principalKind: "human_session"`, and no service-initiator provenance.
 They are intentionally not identical: this helper additionally rejects every
-OpenGeni-reserved machine-subject namespace as defence-in-depth. Start-time
+Opengeni-reserved machine-subject namespace as defence-in-depth. Start-time
 ownership-value rejection is a 422; the sibling self-owner authority surface
 uses a 403.
 
 A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
 `sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
 against a delegation-secret holder signing a human claim over an
-OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
+Opengeni-minted machine subject. It is deliberately **not** an allow-list of
 human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
 Opengeni" and that hosts must not have the kind inferred from a subject-id
 prefix, so a trusted embedding host legitimately signs `human_session` over a
@@ -238,9 +238,9 @@ STEP-UP    runtime 403 error="insufficient_scope" → tool.auth_needed → re-AU
 
 ### 5.2 Short provider-facing grant state
 
-When enabled, MCP OAuth sends a short signed reference in the provider-facing `state` parameter. The full signed callback context is encrypted under the variable-sets key and stored in `integration_oauth_pending_states` for ten minutes. It includes the actor and ownership decision, PKCE verifier, client registration, resource, exact discovery provenance, scopes, and return destination. The reference carries only its random row id and account/workspace scope, so provider state-length limits do not reject the grant. The callback verifies the reference, loads the pending context under workspace RLS, checks that the two scopes match, and then validates the full signed state. Existing full signed states remain readable for their normal ten-minute lifetime during rolling deployment. Expired pending rows are removed in bounded batches on later starts in the same workspace.
+MCP OAuth always sends a short signed reference in the provider-facing `state` parameter. The full signed callback context is encrypted under the variable-sets key and stored in `integration_oauth_pending_states` for ten minutes. It includes the actor and ownership decision, PKCE verifier, client registration, resource, exact discovery provenance, scopes, and return destination. The reference carries only its random row id and account/workspace scope, so provider state-length limits do not reject the grant. The callback verifies the reference, loads the pending context under workspace RLS, checks that the two scopes match, and then validates the full signed state. Existing full signed states remain readable for their normal ten-minute lifetime during rolling deployment. Expired pending rows are removed in bounded batches on later starts in the same workspace.
 
-Issuance is gated by `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED`, default `false`. Deploy the new callback reader to every API instance with the flag off. After the old instances are drained, set the flag to `true` in a separate configuration rollout. Readers accept both formats regardless of this flag, so mixed flag values in the second rollout are safe. Resend and other providers with short state limits require the flag enabled.
+Providers limit `state` length (Stripe rejects more than 1024 characters; Resend has its own limit) and the full context exceeds those limits, so there is no full-state issuance mode. The former rollout switch `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` is retired: the API ignores it with a one-time startup warning.
 
 The PKCE verifier remains encrypted inside the full signed context, which is encrypted again at rest in the pending row. Single-use is still enforced by inserting the context nonce into `integration_oauth_state_nonces`; its primary key makes replay fail across API instances. `integrationsStateSecret` and the variable-sets encryption key must be shared across API instances.
 

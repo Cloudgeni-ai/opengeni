@@ -1,5 +1,5 @@
 import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
@@ -176,7 +176,7 @@ export function capabilityErrorToast(
   }
   const serverMessage = cleanApiErrorMessage(apiErrorFacts(error).serverMessage ?? "");
   const probe =
-    /^MCP capability ".+" could not be enabled because (?:OpenGeni|Opengeni) could not initialize (\S+?)\.?(?:\s|$)/u.exec(
+    /^MCP capability ".+" could not be enabled because (?:OpenGeni|Opengeni|the workspace) could not initialize (\S+?)\.?(?:\s|$)/u.exec(
       serverMessage,
     );
   if (probe) {

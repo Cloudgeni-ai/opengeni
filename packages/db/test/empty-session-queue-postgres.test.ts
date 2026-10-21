@@ -226,7 +226,7 @@ test("pending input serializes concurrent skip-overlap admissions", async () => 
 test("a paused empty shell does not admit a schedule", async () => {
   const input = await fixture();
   await pause(input);
-  expect((await occurrence(input)).reason).toBe("session_not_idle");
+  expect((await occurrence(input)).reason).toBe("session_paused");
 });
 
 test("manifest validates total size, duplicate scope and explicit operation", async () => {

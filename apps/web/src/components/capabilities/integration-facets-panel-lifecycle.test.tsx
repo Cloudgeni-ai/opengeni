@@ -27,7 +27,7 @@ mock.module("sonner", () => ({
   },
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,

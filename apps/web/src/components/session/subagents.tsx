@@ -14,6 +14,7 @@
 //
 // Copy doctrine: human language only. Internal status slugs (requires_action,
 // active, …) never leak into a rendered string.
+import { t } from "@/lib/console-text";
 import { formatRelativeTime } from "@opengeni/react";
 import {
   sessionAdmissionBlocked,
@@ -25,7 +26,7 @@ import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { STATUS_META, StatusDot, type StatusTone } from "@opengeni/react/ui/status-dot";
 import { formatWaitingSince } from "@/lib/format";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -33,7 +34,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { sessionControlPaused } from "@/lib/session-rail";
 
@@ -156,7 +157,7 @@ function SubagentRow({
   // they don't hide behind a color dot in a long list.
   const attention = subagentAttentionHint(node.session, paused);
   const attentionWord = attention?.word ?? null;
-  const hint = attentionWord ?? formatRelativeTime(node.session.updatedAt);
+  const hint = attentionWord ?? formatRelativeTime(t, node.session.updatedAt);
   const hintClass = attentionWord ? cn(STATUS_META[tone].text, "font-medium") : "text-fg-subtle";
   const hintTitle = attention?.title;
   const waitingFor = attention?.waitingFor ?? "";

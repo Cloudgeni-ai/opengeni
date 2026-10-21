@@ -1,0 +1,27 @@
+{
+  "name": "@opengeni/desktop-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opengeni for macOS, Windows and Linux.",
+  "homepage": "https://opengeni.ai",
+  "license": "Apache-2.0",
+  "author": "Opengeni",
+  "type": "module",
+  "main": "dist/main.mjs",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "start": "bun scripts/build.ts && electron .",
+    "dist:mac": "bun scripts/build.ts --production && electron-builder --mac --publish never",
+    "dist:linux": "bun scripts/build.ts --production && electron-builder --linux --publish never",
+    "dist:win": "bun scripts/build.ts --production && electron-builder --win --publish never",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@opengeni/desktop": "workspace:*",
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3",
+    "electron-updater": "6.8.9"
+  },
+  "productName": "Opengeni"
+}

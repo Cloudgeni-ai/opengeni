@@ -1,16 +1,8 @@
 // Pure turn-summary model shared by the web and native renderers: facet definitions,
 // the summary context, status types and duration formatting. No DOM, no styling.
 import type { ReactNode } from "react";
-import {
-  applyPatchOpsFromToolItem,
-  isApplyPatch,
-  mediaPreviewFact,
-  retainedScreenshotMetadata,
-  screenshotDataUrl,
-} from "./parsers";
-import { rawTypeOf } from "./registry";
-import { mcpToolLeaf } from "./tool-display-name";
 import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
+import type { OpenGeniText } from "../messages/runtime";
 
 export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
   "steps",
@@ -42,6 +34,8 @@ export type TurnSummaryContext = Readonly<{
    * primary UI; this is a secondary chip signal only.
    */
   contextCompactionCount: number;
+  /** Text in the host's language, for facets that show words. */
+  t: OpenGeniText;
 }>;
 
 export type TurnSummaryFacetResult = Readonly<{
@@ -93,6 +87,10 @@ export type TurnSummaryStatus = Readonly<{
   kind: "working" | "waiting" | "worked";
   /** Replaces the default "Working" / "Waiting" wording. */
   label?: string | undefined;
+  /** Who the wait is on: `you` when it needs the reader. */
+  waitingOn?: "you" | undefined;
+  /** For a `worked` row folding quiet cycles: how many updates it spans. */
+  updates?: number | undefined;
   /** Live clock start for `working` and `waiting`. */
   since?: string | undefined;
   /** Settled span for `worked`. */
@@ -107,21 +105,45 @@ export type TurnSummaryStatus = Readonly<{
 }>;
 
 /** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
-export function formatElapsed(durationMs: number): string {
+/**
+ * The label of a turn row with no status line and no facets. Steps are not
+ * counted, so the row still names what opening it reveals: "Preparation" when
+ * it holds only startup phases (and no unloaded steps), else "Steps".
+ */
+export function turnSummaryFallbackLabel(
+  t: OpenGeniText,
+  items: readonly ActivityItem[],
+  unloadedSteps = false,
+): string {
+  // Progress notes narrate steps; they are not steps themselves.
+  const preparationOnly =
+    !unloadedSteps &&
+    items.some((item) => item.kind === "startup-phase") &&
+    items.every((item) => item.kind === "startup-phase" || item.kind === "agent-message");
+  return preparationOnly ? t("timeline.turnSummary.preparation") : t("timeline.turnSummary.steps");
+}
+
+export function formatElapsed(t: OpenGeniText, durationMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
   if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
+    return t("timeline.turnSummaryModel.seconds", { count: totalSeconds });
   }
   const totalMinutes = Math.floor(totalSeconds / 60);
   if (totalMinutes < 60) {
     const seconds = totalSeconds % 60;
-    return seconds ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+    return seconds
+      ? t("timeline.turnSummaryModel.minutesSeconds", { minutes: totalMinutes, seconds })
+      : t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
   }
   const hours = Math.floor(totalMinutes / 60);
-  return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
+  return t("timeline.turnSummaryModel.hoursMinutes", {
+    hours,
+    minutes: String(totalMinutes % 60).padStart(2, "0"),
+  });
 }
 
 export function createTurnSummaryContext(
+  t: OpenGeniText,
   items: ActivityItem[],
   outcome: TurnOutcome | undefined,
   failureText: string | undefined,
@@ -147,6 +169,7 @@ export function createTurnSummaryContext(
     return true;
   });
   return Object.freeze({
+    t,
     items: itemSnapshot,
     toolCalls,
     outcome,
@@ -157,72 +180,13 @@ export function createTurnSummaryContext(
   });
 }
 
+// Step, file, command and screenshot counts are not shown: conversation-first
+// history does not load a turn's steps until the turn is opened, so a count
+// would cost a read on every open. Their ids remain accepted by `remove`.
 export const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
   {
-    id: "steps",
-    summarize: ({ items }) => {
-      // Progress notes narrate steps; they are not steps themselves.
-      const count = items.filter(
-        (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
-      ).length;
-      return count
-        ? { content: `${count} ${count === 1 ? "step" : "steps"}` }
-        : items.some((item) => item.kind === "startup-phase")
-          ? { content: "Preparation" }
-          : null;
-    },
-  },
-  {
-    id: "files",
-    summarize: ({ toolCalls }) => {
-      let files = 0;
-      for (const item of toolCalls) {
-        if (isApplyPatch(item)) {
-          files += applyPatchOpsFromToolItem(item).length;
-        }
-      }
-      return files ? { content: `${files} ${files === 1 ? "file" : "files"} edited` } : null;
-    },
-  },
-  {
-    id: "commands",
-    summarize: ({ toolCalls }) => {
-      const commands = toolCalls.filter((item) => item.name === "exec_command").length;
-      return commands
-        ? { content: `${commands} ${commands === 1 ? "command" : "commands"}` }
-        : null;
-    },
-  },
-  {
-    id: "screenshots",
-    summarize: ({ toolCalls }) => {
-      let screenshots = 0;
-      for (const item of toolCalls) {
-        const leaf = mcpToolLeaf(item.name);
-        if (
-          (rawTypeOf(item) === "computer_call" ||
-            item.name === "computer_call" ||
-            item.name === "computer_screenshot" ||
-            leaf === "browser_screenshot" ||
-            leaf === "browser_observe" ||
-            leaf === "browser_act") &&
-          (retainedScreenshotMetadata(item.output) !== null ||
-            screenshotDataUrl(item.output) !== null ||
-            mediaPreviewFact(item.output) !== null)
-        ) {
-          screenshots += 1;
-        }
-      }
-      return screenshots
-        ? {
-            content: `${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`,
-          }
-        : null;
-    },
-  },
-  {
     id: "memories",
-    summarize: ({ items }) => {
+    summarize: ({ items, t }) => {
       let saved = 0;
       let updated = 0;
       for (const item of items) {
@@ -237,32 +201,30 @@ export const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.
       }
       const parts: string[] = [];
       if (saved) {
-        parts.push(`${saved} ${saved === 1 ? "memory" : "memories"} saved`);
+        parts.push(t("timeline.turnSummaryModel.memoriesSaved", { count: saved }));
       }
       if (updated) {
-        parts.push(`${updated} ${updated === 1 ? "memory" : "memories"} updated`);
+        parts.push(t("timeline.turnSummaryModel.memoriesUpdated", { count: updated }));
       }
       return parts.length > 0 ? { content: parts.join(" · ") } : null;
     },
   },
   {
     id: "compacted",
-    summarize: ({ contextCompactionCount }) =>
+    summarize: ({ contextCompactionCount, t }) =>
       contextCompactionCount > 0
         ? {
-            content:
-              contextCompactionCount === 1 ? "compacted" : `${contextCompactionCount} compacts`,
-            ariaLabel:
-              contextCompactionCount === 1
-                ? "Conversation history compacted"
-                : `${contextCompactionCount} conversation history compactions`,
+            content: t("timeline.turnSummaryModel.compacts", { count: contextCompactionCount }),
+            ariaLabel: t("timeline.turnSummaryModel.compactions", {
+              count: contextCompactionCount,
+            }),
           }
         : null,
   },
   {
     id: "duration",
-    summarize: ({ durationMs }) => {
-      const duration = formatDurationFacet(durationMs);
+    summarize: ({ durationMs, t }) => {
+      const duration = formatDurationFacet(t, durationMs);
       return duration ? { content: duration } : null;
     },
   },
@@ -287,21 +249,27 @@ export function resolveTurnSummaryFacets(
   });
 }
 
-export function formatDurationFacet(durationMs: number | undefined): string | null {
+export function formatDurationFacet(
+  t: OpenGeniText,
+  durationMs: number | undefined,
+): string | null {
   if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 1000) {
     return null;
   }
   const totalSeconds = Math.floor(durationMs / 1000);
   if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
+    return t("timeline.turnSummaryModel.seconds", { count: totalSeconds });
   }
   const totalMinutes = Math.floor(totalSeconds / 60);
   if (totalMinutes < 60) {
-    return `${totalMinutes}m`;
+    return t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
   }
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  return t("timeline.turnSummaryModel.hoursMinutes", {
+    hours,
+    minutes: String(minutes).padStart(2, "0"),
+  });
 }
 
 function hasFacetContent(content: ReactNode): boolean {
@@ -310,9 +278,8 @@ function hasFacetContent(content: ReactNode): boolean {
 
 /**
  * The facets a turn header shows. With a readable status line, duration lives in
- * the status, preparation-only turns drop the step count, and a live or waiting
- * status keeps only the step count among the built-ins. A failing custom facet is
- * skipped rather than breaking the header.
+ * the status, and a live or waiting status shows no built-in facets. A failing
+ * custom facet is skipped rather than breaking the header.
  */
 export function selectTurnSummaryFacets(
   definitions: readonly TurnSummaryFacet[],
@@ -323,12 +290,7 @@ export function selectTurnSummaryFacets(
     if (
       statusKind &&
       (facet.id === "duration" ||
-        (facet === BUILT_IN_TURN_SUMMARY_FACETS[0] &&
-          context.items.every(
-            (item) => item.kind === "startup-phase" || item.kind === "agent-message",
-          )) ||
         (statusKind !== "worked" &&
-          facet.id !== "steps" &&
           BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))
     ) {
       return [];

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
-import { composerTrailingMode, nativeLoadingPhrases } from "../src/timeline/composer-state";
+import { createOpenGeniText } from "@opengeni/react/messages";
+import {
+  composerAlternateSend,
+  composerTrailingMode,
+  nativeLoadingPhrases,
+} from "../src/timeline/composer-state";
+
+const t = createOpenGeniText();
 
 const idle = {
   value: "",
@@ -33,15 +40,35 @@ describe("composer trailing action", () => {
   });
 });
 
+describe("composer alternate send", () => {
+  const working = { trailing: "send" as const, available: true };
+
+  test("a phone can always queue or steer while the agent works", () => {
+    expect(composerAlternateSend({ ...working, alternateSend: "queue" })).toBe("queue");
+    expect(composerAlternateSend({ ...working, alternateSend: "steer" })).toBe("steer");
+  });
+
+  test("only beside Send, while Send takes its busy path, and when the host offers it", () => {
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", trailing: "pause" }),
+    ).toBeNull();
+    expect(composerAlternateSend({ ...working, alternateSend: null })).toBeNull();
+    expect(composerAlternateSend({ ...working })).toBeNull();
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", available: false }),
+    ).toBeNull();
+  });
+});
+
 describe("native loading phrases", () => {
   test("built-in copy per phase by default", () => {
-    expect(nativeLoadingPhrases([], "preparing")).toBe(GENIE_PREPARING_PHRASES);
-    expect(nativeLoadingPhrases([], "waiting")).toBe(GENIE_WAITING_PHRASES);
+    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(GENIE_PREPARING_PHRASES(t));
+    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(GENIE_WAITING_PHRASES(t));
   });
 
   test("a host's phrases replace both phases, as on web", () => {
     const own = ["Looking into it…", "One moment…"];
-    expect(nativeLoadingPhrases(own, "preparing")).toBe(own);
-    expect(nativeLoadingPhrases(own, "waiting")).toBe(own);
+    expect(nativeLoadingPhrases(t, own, "preparing")).toBe(own);
+    expect(nativeLoadingPhrases(t, own, "waiting")).toBe(own);
   });
 });

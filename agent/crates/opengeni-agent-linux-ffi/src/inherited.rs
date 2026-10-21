@@ -45,10 +45,25 @@ mod tests {
 
     use super::*;
 
+    /// A pipe without `std::io::pipe`, which is newer than this crate's
+    /// minimum supported Rust version.
+    fn pipe() -> (std::fs::File, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` has room for the two descriptors `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors were just created and have no other owner.
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                OwnedFd::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
     #[test]
     fn a_claimed_descriptor_is_owned_and_close_on_exec() {
-        let (mut reader, writer) = std::io::pipe().unwrap();
-        let raw = OwnedFd::from(writer).into_raw_fd();
+        let (mut reader, writer) = pipe();
+        let raw = writer.into_raw_fd();
         let owned = claim_inherited_fd(raw).unwrap();
         // SAFETY: test-only flag read on a descriptor this test owns.
         let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
@@ -63,8 +78,8 @@ mod tests {
 
     #[test]
     fn a_closed_descriptor_is_refused() {
-        let (reader, writer) = std::io::pipe().unwrap();
-        let raw = OwnedFd::from(writer).into_raw_fd();
+        let (reader, writer) = pipe();
+        let raw = writer.into_raw_fd();
         drop(claim_inherited_fd(raw).unwrap());
         assert!(claim_inherited_fd(raw).is_err());
         assert!(claim_inherited_fd(-1).is_err());

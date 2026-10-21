@@ -413,7 +413,7 @@ function testServiceImages(options: {
   objectStorage?: boolean;
 }): Record<string, string> {
   return {
-    postgres: "pgvector/pgvector:pg17",
+    postgres: "pgvector/pgvector:pg18-bookworm",
     nats: "nats:2-alpine",
     ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
     ...((options.objectStorage ?? false) ? { garage: GARAGE_FIXTURE_IMAGE } : {}),
@@ -619,7 +619,7 @@ function composeYaml(
 ): string {
   return `services:
   postgres:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg18-bookworm
     pull_policy: never
     environment:
       POSTGRES_DB: opengeni

@@ -16,8 +16,11 @@ import { isDeepStrictEqual } from "node:util";
 // request/reply connection.
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
+export { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
+  getRetainedProviderCommand,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
@@ -26,6 +29,7 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   retainedProviderCommandPersistence,
   advanceWorkspaceGeneration,
+  findRunningSessionBackgroundProcess,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -34,6 +38,7 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getSandboxForAttempt,
   getLiveEnrollmentConnection,
   markWarmLeaseInstanceLost,
   readLease,
@@ -46,12 +51,8 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import {
-  observeSessionBackgroundCommandCompletion,
-  recordConnectedCommandOutputConsumption,
-} from "@opengeni/db/session-background-commands";
+import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
-import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
@@ -60,6 +61,7 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -84,6 +86,7 @@ import {
   type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
+  type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
   type SelfhostedConnectionBinding,
@@ -157,12 +160,12 @@ export type RoutingWiringIds = {
   sessionId: string;
   resourceAccountId?: string;
   resourceSubjectId?: string;
-  /** Frozen initiating-human authority for personal Connected Machine use.
+  /** Exact accepted attempt, including turns without an initiating human.
    * Every routed operation reasserts this exact accepted attempt before the
    * control-plane connection is resolved. */
   personalMachineAttempt?: {
     accountId: string;
-    subjectId: string;
+    subjectId: string | null;
     turnId: string;
     attemptId: string;
     executionGeneration: number;
@@ -551,6 +554,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          inSandboxSupervisor: isInSandboxSupervisedProcess(
+            backend.session,
+            retainedProcess.providerSessionId,
+          ),
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -715,26 +722,6 @@ function afterRetainedProcessMutation(
         throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
       }
       throw error;
-    }
-  };
-}
-
-export function captureConnectedCommandOutput(
-  db: Database,
-  ids: { accountId: string; workspaceId: string; sessionId: string },
-  bus?: EventBus,
-) {
-  return async (commandId: string, frames: OpStreamOutputFrame[]) => {
-    for (const frame of frames) {
-      const events = await appendSessionCommandOutput(db, {
-        ...ids,
-        commandId,
-        chunkId: `op-frame:${frame.sequence}`,
-        stream: frame.stream,
-        chunk: frame.chunk,
-      });
-      if (events.length && bus)
-        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
     }
   };
 }
@@ -941,6 +928,49 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
   };
 }
 
+/** A later turn reaches a background command an earlier turn of this session
+ * started by the handle the model was given. The lookup is only a locator: the
+ * routing session binds the result to its exact home backend or refuses it. */
+function findSessionProcessForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  sdkBackendId: string,
+  home?: { leaseEpoch: number; instanceId: string },
+): ((providerSessionId: number) => Promise<RoutingRetainedProcessAdoption | null>) | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  const providerBackend = sandboxBackendForSdkBackendId(sdkBackendId) ?? sdkBackendId;
+  return async (providerSessionId) => {
+    const process = await findRunningSessionBackgroundProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      providerSessionId,
+      providerBackend,
+      ...(home ? { leaseEpoch: home.leaseEpoch, providerInstanceId: home.instanceId } : {}),
+    });
+    if (!process) return null;
+    const providerCommand = await getRetainedProviderCommand(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    return {
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: process.leaseEpoch,
+        providerInstanceId: process.providerInstanceId,
+        activeEpoch: process.routeEpoch,
+      },
+    };
+  };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -984,22 +1014,35 @@ export function wrapTurnBoxWithRouting(
     services,
     ids,
   );
+  const findSessionProcess = ids.homeLease
+    ? findSessionProcessForTurn(services, ids, established.backendId, ids.homeLease)
+    : undefined;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1038,6 +1081,7 @@ export function wrapTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -1054,6 +1098,7 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1184,6 +1229,7 @@ export function wrapTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -1274,6 +1320,11 @@ export function wrapLazyTurnBoxWithRouting(
     ids,
   );
   const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
+  // The lazily provisioned home's epoch and instance are known only after
+  // provisioning; the routing session binds the lookup to that exact backend.
+  const findSessionProcess = args.homeLeaseIdentity
+    ? findSessionProcessForTurn(services, ids, args.backendId)
+    : undefined;
   const defaultSupportsPty = defaultBackend
     ? selectBackend(defaultBackend).capabilities.Terminal.pty
     : false;
@@ -1290,17 +1341,27 @@ export function wrapLazyTurnBoxWithRouting(
     defaultBackend: syntheticSession,
     defaultKind: "unprovisioned",
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1337,6 +1398,7 @@ export function wrapLazyTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -1353,6 +1415,7 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1452,6 +1515,7 @@ export function wrapLazyTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({
@@ -1542,6 +1606,9 @@ export type SelfhostedTurnSessionArgs = {
   operationCpuQuotaSupported: boolean;
   /** Feature advertisement only; refreshed by exact live admission for each operation. */
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  browserControlHttpSupported?: boolean;
+  runAsSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1590,6 +1657,8 @@ export type SelfhostedTurnSessionArgs = {
 function opStreamDepsFor(
   services: RoutingWiringServices,
   machineAdvertisesOpStream: boolean,
+  outputReleaseSupported = false,
+  connectionGeneration?: number,
 ): SelfhostedOpStreamDeps | undefined {
   const { settings, bus, opJournal } = services;
   if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
@@ -1598,6 +1667,10 @@ function opStreamDepsFor(
   return {
     transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
     ...(opJournal !== undefined ? { journal: opJournal } : {}),
+    ...(outputReleaseSupported ? { outputReleaseSupported: true } : {}),
+    ...(connectionGeneration !== undefined
+      ? { connectionGeneration: String(connectionGeneration) }
+      : {}),
   };
 }
 
@@ -1608,7 +1681,12 @@ export function connectionBindingFor(
   enrollment: EnrollmentRecord | null,
 ): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
-  const opStream = opStreamDepsFor(services, enrollment.opStream === true);
+  const opStream = opStreamDepsFor(
+    services,
+    enrollment.opStream === true,
+    enrollment.agentCapabilities.opRelease === true,
+    enrollment.connectionGeneration,
+  );
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
@@ -1618,6 +1696,10 @@ export function connectionBindingFor(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
 }
 
@@ -1693,6 +1775,9 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: args.transactionalFsWriteMachineSupported === true,
+    browserControlHttpSupported: args.browserControlHttpSupported === true,
+    runAsSupported: args.runAsSupported === true,
     resolveOperationAdmission: async () => {
       // The machine's audience can change in place during a turn. Read the
       // current scope on every admitted operation: a machine that is Only me now
@@ -1731,71 +1816,14 @@ export async function establishSelfhostedTurnSession(
         workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
       };
     },
-    ...(args.backgroundCommandAttempt
-      ? {
-          adoptBackgroundCommand: async (command) => {
-            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
-              accountId: args.accountId,
-              workspaceId: args.workspaceId,
-              sessionId: args.sessionId,
-              turnId: args.backgroundCommandAttempt!.turnId,
-              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
-              attemptId: args.backgroundCommandAttempt!.attemptId,
-              commandId: crypto.randomUUID(),
-              controlWorkspaceId: command.controlWorkspaceId,
-              enrollmentId: command.enrollmentId,
-              connectionInstanceId: command.connectionInstanceId,
-              opId: command.opId,
-              command: command.command,
-            });
-            return { commandId: adopted.id };
-          },
-        }
-      : {}),
-    captureBackgroundCommandOutput: captureConnectedCommandOutput(
-      db,
-      {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-      },
-      bus,
-    ),
-    settleBackgroundCommand: async (command) => {
-      const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-        commandId: command.commandId,
-        controlWorkspaceId: command.controlWorkspaceId,
-        enrollmentId: command.enrollmentId,
-        connectionInstanceId: command.connectionInstanceId,
-        opId: command.opId,
-        outcome: command.outcome,
-        exitCode: command.exitCode,
-        reason: command.reason,
-        ...(command.failure ? { failure: command.failure } : {}),
-      });
-      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
-        await recordConnectedCommandOutputConsumption(db, {
-          accountId: args.accountId,
-          workspaceId: args.workspaceId,
-          sessionId: args.sessionId,
-          commandId: command.commandId,
-          controlWorkspaceId: command.controlWorkspaceId,
-          enrollmentId: command.enrollmentId,
-          connectionInstanceId: command.connectionInstanceId,
-          opId: command.opId,
-          receipt: command.outputReceipt,
-          exitCode: command.exitCode,
-        });
-      }
-      if (settlement && bus) {
-        await bus
-          .publish(args.workspaceId, args.sessionId, settlement.events)
-          .catch(() => undefined);
-      }
-    },
+    ...agentBackgroundCommandDeps(db, bus, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      sessionId: args.sessionId,
+      ...(args.backgroundCommandAttempt
+        ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
+        : {}),
+    }),
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the

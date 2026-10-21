@@ -1,5 +1,7 @@
+import { t } from "@/lib/console-text";
 import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
+import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
 
 /**
  * Known provider failure classes. Presentation only: the stored event keeps the
@@ -144,8 +146,9 @@ export function classifyProviderFailure(
     "Claude credentials expired or were revoked. Replace the key or setup token in Models."
   )
     return CREDENTIALS;
-  // Opengeni's own credit exhaustion has a dedicated billing remedy upstream.
-  if (text.includes("opengeni credits")) return null;
+  // Platform credit exhaustion ("workspace credits"; older history says
+  // "Opengeni credits") has a dedicated billing remedy upstream.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
@@ -195,6 +198,8 @@ export function failedSessionCopy(
   creditExhausted = false,
   modelChanged = false,
   canChooseModel = false,
+  /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
+  freeCreditGap: FreeCreditGap | null = null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -243,7 +248,7 @@ export function failedSessionCopy(
     !failure.safetyRefusal &&
     !failure.quotaScope
   ) {
-    const subject = providerRecoverySubject(recovery);
+    const subject = providerRecoverySubject(t, recovery);
     return {
       reason: modelChanged
         ? `${subject}. Retry to continue with the selected model.`
@@ -299,7 +304,7 @@ export function failedSessionCopy(
     !failure.structuralSandboxFailure &&
     !unavailableModel &&
     (!code || code === "pre_claim_failure") &&
-    !/opengeni credits/i.test(recorded ?? "")
+    !/(?:workspace|opengeni) credits/i.test(recorded ?? "")
   ) {
     const detail = diagnostic;
     return {
@@ -329,7 +334,9 @@ export function failedSessionCopy(
     };
   }
   const reason = creditExhausted
-    ? "This workspace is out of Opengeni credits."
+    ? freeCreditGap
+      ? freeCreditGapReason(freeCreditGap)
+      : "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
       : unavailableModel

@@ -4,7 +4,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   GOOGLE_DRIVE_ACCESS_DISCLOSURE,
   GOOGLE_DRIVE_APP_DESCRIPTION,

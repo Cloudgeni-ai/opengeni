@@ -54,6 +54,7 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
 
 import {
@@ -653,6 +654,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         sessionId: input.sessionId,
       })
     : false;
+  // Managed boxes fetch the release's Codemode client in one setup command.
+  const codemodeClientDownload =
+    activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
+      ? await managedCodemodeClientDownload({
+          settings: eventing.modelRunSettings,
+          objectStorage,
+          activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+        })
+      : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -755,6 +765,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? {
               codemodeTokenSeed: sandboxCodemodeToken,
               codemodeTokenSessionId: input.sessionId,
+              ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
@@ -790,7 +801,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...videoGenerationOption,
         lazyToolTransport,
         ...(eventing.toolPreparationReady
-          ? { toolPreparationReady: eventing.toolPreparationReady }
+          ? {
+              toolPreparationReady: eventing.toolPreparationReady,
+              ...(eventing.preparedTools?.startDeferredPreparation
+                ? { startToolPreparation: eventing.preparedTools.startDeferredPreparation }
+                : {}),
+            }
           : {}),
         preparationIndependentToolNames,
         supportsImageInput,

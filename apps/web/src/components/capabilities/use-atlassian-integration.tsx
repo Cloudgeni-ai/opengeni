@@ -5,10 +5,10 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/atlassian-native-retirement";
 import { request as apiRequest } from "@/api";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { IntegrationChip, IntegrationViewModel } from "./integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
   ATLASSIAN_APP_DESCRIPTION,

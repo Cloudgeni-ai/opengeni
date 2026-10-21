@@ -1,7 +1,7 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import { ClaudeSignInPage } from "@/components/models/claude-signin";
 import { CLAUDE_MODEL_CHOICES, claudeModelLabel } from "@/components/models/claude-setup";
-import { Disclosure } from "@/components/ui/disclosure";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   ClaudeUsage,
   ClaudeUsageReadout,
@@ -34,16 +34,16 @@ import {
   useConnectionAccess,
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import {
   ModelsFormPage,
   NOT_IN_USE,
   ProviderTile,
   useModelsListLabel,
 } from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   DetailAside,
@@ -51,24 +51,32 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton } from "@/components/ui/list-row";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton } from "@opengeni/react/ui/list-row";
 import { SecretInput } from "@/components/ui/secret-field";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import type { AnalyticsAction } from "@/lib/analytics-actions";
-import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import type { AnalyticsAction } from "@opengeni/react/ui/analytics-actions";
+import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  invalidateSharedQueries,
+  peekSharedQuery,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@/lib/shared-query";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter, Opper) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
 // row, the provider's own page, the Replace credential prompt and the Connect page.
 
 type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
+const EMPTY_CONNECTIONS: ConnectionMetadata[] = [];
+const EMPTY_CUSTOM_MODELS: WorkspaceProviderCustomModel[] = [];
 
 type CustomModelCreateRequest = {
   operationId: string;
@@ -420,13 +428,59 @@ export function useProviderConnection(
   const config = props.config;
   const enabled = props.enabled !== false;
   const hasCatalogConnection = Boolean(props.catalogConnection);
-  const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
-  const [readOnlyConnected, setReadOnlyConnected] = useState(false);
-  const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [customModelsLoaded, setCustomModelsLoaded] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-  const [customModelsError, setCustomModelsError] = useState<Error | null>(null);
+  // A saved credential is an authoritative replacement for this provider,
+  // not a complete workspace connection list when its initial read is pending.
+  const connectionsKey = useMemo(
+    () => ["model-settings", "workspace-provider-connections", props.workspaceId, config.id],
+    [props.workspaceId, config.id],
+  );
+  const catalogKey = useMemo(
+    () => ["model-settings", "workspace-catalog", props.workspaceId],
+    [props.workspaceId],
+  );
+  const customModelsKey = useMemo(
+    () => ["model-settings", "workspace-custom-models", props.workspaceId, config.id],
+    [props.workspaceId, config.id],
+  );
+  const connectionQuery = useSharedQuery(
+    client,
+    connectionsKey,
+    async () =>
+      (await client.listConnections(props.workspaceId)).filter((candidate) =>
+        isProviderConnection(candidate, config),
+      ),
+    {
+      enabled: enabled && !hasCatalogConnection && props.canManageConnection,
+      staleTimeMs: 300_000,
+    },
+  );
+  const catalogQuery = useSharedQuery(
+    client,
+    catalogKey,
+    (signal) => client.getWorkspaceModelCatalog(props.workspaceId, { signal }),
+    {
+      enabled: enabled && !hasCatalogConnection && !props.canManageConnection,
+      staleTimeMs: 300_000,
+    },
+  );
+  const customModelsQuery = useSharedQuery(
+    client,
+    customModelsKey,
+    async () => (await config.listCustomModels(client, props.workspaceId)).models,
+    { enabled, staleTimeMs: 300_000 },
+  );
+  const connections = connectionQuery.data ?? EMPTY_CONNECTIONS;
+  const customModels = customModelsQuery.data ?? EMPTY_CUSTOM_MODELS;
+  const readOnlyConnected =
+    catalogQuery.data?.models.some(
+      (model) =>
+        model.provider === config.readinessProvider && model.credentialReadiness.status === "ready",
+    ) ?? false;
+  const loaded =
+    enabled && !(props.canManageConnection ? connectionQuery.loading : catalogQuery.loading);
+  const customModelsLoaded = enabled && !customModelsQuery.loading;
+  const error = props.canManageConnection ? connectionQuery.error : catalogQuery.error;
+  const customModelsError = customModelsQuery.error;
   const [busy, setBusy] = useState(false);
   const [modelSlug, setModelSlug] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
@@ -434,8 +488,7 @@ export function useProviderConnection(
   const [modelPendingRemoval, setModelPendingRemoval] =
     useState<WorkspaceProviderCustomModel | null>(null);
   const activeRef = useRef(true);
-  const connectionRequestGenerationRef = useRef(0);
-  const customModelsRequestGenerationRef = useRef(0);
+  const contextGeneration = useRef(0);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const addWorkflowRef = useRef<HTMLDivElement | null>(null);
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -450,10 +503,27 @@ export function useProviderConnection(
 
   useEffect(() => {
     activeRef.current = true;
+    contextGeneration.current += 1;
+    setBusy(false);
+    setModelBusy(false);
+    setRemovingModelId(null);
+    setModelPendingRemoval(null);
+    setModelSlug("");
+    pendingModelCreateRef.current = null;
+    pendingModelDeleteOperationsRef.current.clear();
     return () => {
       activeRef.current = false;
+      contextGeneration.current += 1;
     };
-  }, []);
+  }, [
+    client,
+    props.workspaceId,
+    config.id,
+    enabled,
+    props.canManageConnection,
+    props.canManageCustomModels,
+    hasCatalogConnection,
+  ]);
 
   const connection = useMemo(() => {
     const providerConnections = connections.filter((candidate) =>
@@ -486,69 +556,45 @@ export function useProviderConnection(
     WorkspaceProviderCustomModel[] | null
   > => {
     if (!enabled) return null;
-    const requestGeneration = ++customModelsRequestGenerationRef.current;
-    try {
-      const result = await config.listCustomModels(client, props.workspaceId);
-      if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
-        return null;
-      }
-      setCustomModels(result.models);
-      setCustomModelsError(null);
-      setCustomModelsLoaded(true);
-      return result.models;
-    } catch (caught) {
-      if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
-        return null;
-      }
-      setCustomModelsError(caught instanceof Error ? caught : new Error(String(caught)));
-      setCustomModelsLoaded(true);
-      return null;
-    }
-  }, [client, config, props.workspaceId, enabled]);
+    await invalidateSharedQueries(client, customModelsKey);
+    const result = peekSharedQuery<WorkspaceProviderCustomModel[]>(client, customModelsKey);
+    return result?.error ? null : (result?.data ?? null);
+  }, [client, customModelsKey, enabled]);
+
+  // Mutation receipts update the provider's own rows, but catalogs, access
+  // choices and organization summaries also depend on them. Invalidate these
+  // even after navigation; the old page's callback no longer owns any UI.
+  // Keep unrelated live provider usage and the authoritative saved rows intact.
+  const invalidateDependentReads = useCallback(
+    () =>
+      Promise.all([
+        invalidateSharedQueries(client, catalogKey),
+        invalidateSharedQueries(client, [
+          "model-settings",
+          "access",
+          "workspaces",
+          props.workspaceId,
+        ]),
+        invalidateSharedQueries(client, ["model-settings", "workspace-snapshots"]),
+      ]),
+    [client, catalogKey, props.workspaceId],
+  );
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
     if (!enabled || hasCatalogConnection) return null;
-    const requestGeneration = ++connectionRequestGenerationRef.current;
-    try {
-      if (props.canManageConnection) {
-        const result = await client.listConnections(props.workspaceId);
-        if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
-          return null;
-        }
-        setConnections(result);
-        setError(null);
-        setLoaded(true);
-        return result;
-      }
-      const result = await client.getWorkspaceModelCatalog(props.workspaceId);
-      if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
-        return null;
-      }
-      setReadOnlyConnected(
-        result.models.some(
-          (model) =>
-            model.provider === config.readinessProvider &&
-            model.credentialReadiness.status === "ready",
-        ),
-      );
-      setError(null);
-      setLoaded(true);
-      return [];
-    } catch (caught) {
-      if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
-        return null;
-      }
-      if (props.canManageConnection) setConnections([]);
-      setReadOnlyConnected(false);
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-      setLoaded(true);
-      return null;
+    if (props.canManageConnection) {
+      await invalidateSharedQueries(client, connectionsKey);
+      const result = peekSharedQuery<ConnectionMetadata[]>(client, connectionsKey);
+      return result?.error ? null : (result?.data ?? null);
     }
+    await invalidateSharedQueries(client, catalogKey);
+    const result = peekSharedQuery(client, catalogKey);
+    return result?.data && !result.error ? [] : null;
   }, [
     client,
-    config.readinessProvider,
+    connectionsKey,
+    catalogKey,
     props.canManageConnection,
-    props.workspaceId,
     enabled,
     hasCatalogConnection,
   ]);
@@ -564,14 +610,6 @@ export function useProviderConnection(
     canManage: props.canManageConnection,
     onCredentialChanged: refreshConnection,
   });
-
-  const refresh = useCallback(async () => {
-    await Promise.all([refreshConnection(), refreshCustomModels()]);
-  }, [refreshConnection, refreshCustomModels]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   useEffect(() => {
     if (modelBusy || !restoreModelInputFocusRef.current) return;
@@ -596,6 +634,8 @@ export function useProviderConnection(
 
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
   async function saveKey(apiKey: string): Promise<boolean> {
+    const context = contextGeneration.current;
+    const isCurrent = () => activeRef.current && context === contextGeneration.current;
     const token = apiKey.trim();
     if (!token || !enabled || props.catalogConnection || !props.canManageConnection || busy)
       return false;
@@ -608,7 +648,7 @@ export function useProviderConnection(
           )
         : beginModelConnectJourney(config.id, "api_key");
     const operationId = crypto.randomUUID();
-    connectionRequestGenerationRef.current += 1;
+    const write = sharedQueryWriter(client);
     setBusy(true);
     const metadata = {
       credentialRole: config.credentialRole,
@@ -634,59 +674,63 @@ export function useProviderConnection(
           });
     const commitSavedConnection = (saved: ConnectionMetadata) => {
       recordOutcome("connected");
-      connectionRequestGenerationRef.current += 1;
-      setConnections((current) => [
+      const current = peekSharedQuery<ConnectionMetadata[]>(client, connectionsKey)?.data ?? [];
+      write(connectionsKey, [
         saved,
         ...current.filter((item) => !isProviderConnection(item, config)),
       ]);
-      setError(null);
-      setLoaded(true);
+      void invalidateDependentReads();
+      if (!isCurrent()) return;
       props.onConnectionChange?.();
       toast.success(`${config.credentialLabel} connected`);
     };
     try {
       const saved = await saveConnection();
-      if (!activeRef.current) return false;
       commitSavedConnection(saved);
-      return true;
+      return isCurrent();
     } catch (caught) {
-      if (!activeRef.current) return false;
+      if (!isCurrent()) {
+        void invalidateSharedQueries(client, connectionsKey);
+        void invalidateDependentReads();
+        return false;
+      }
       let finalError = caught;
       const outcomeUnknown =
         caught instanceof OpenGeniApiError ? caught.outcomeUnknown : caught instanceof Error;
       if (outcomeUnknown) {
         try {
           const replayed = await saveConnection();
-          if (!activeRef.current) return false;
           commitSavedConnection(replayed);
-          return true;
+          return isCurrent();
         } catch (retryError) {
           finalError = retryError;
         }
       }
+      void invalidateDependentReads();
       await refreshConnection();
-      if (!activeRef.current) return false;
+      if (!isCurrent()) return false;
       recordOutcome("outcome_unknown");
       toast.error(`Couldn't save ${config.credentialLabel} key`, {
         description: userErrorText(finalError),
       });
       return false;
     } finally {
-      if (activeRef.current) setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
 
   /** Resolves true once no active key remains; toasts either way. */
   async function disconnect(): Promise<boolean> {
+    const context = contextGeneration.current;
+    const isCurrent = () => activeRef.current && context === contextGeneration.current;
     if (!enabled || props.catalogConnection || !props.canManageConnection || busy) return false;
     if (!connection) return false;
-    connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
       await client.deleteConnection(props.workspaceId, connection.id);
-      if (!activeRef.current) return false;
+      void invalidateDependentReads();
       const reconciled = await refreshConnection();
-      if (!activeRef.current) return false;
+      if (!isCurrent()) return false;
       const committed =
         reconciled !== null &&
         !reconciled.some(
@@ -705,9 +749,9 @@ export function useProviderConnection(
       toast.success(`${config.credentialLabel} disconnected`);
       return true;
     } catch (caught) {
-      if (!activeRef.current) return false;
+      void invalidateDependentReads();
       const reconciled = await refreshConnection();
-      if (!activeRef.current) return false;
+      if (!isCurrent()) return false;
       const committed =
         reconciled !== null &&
         !reconciled.some(
@@ -723,11 +767,13 @@ export function useProviderConnection(
       });
       return false;
     } finally {
-      if (activeRef.current) setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
 
   async function addCustomModel(upstreamModelId?: string) {
+    const context = contextGeneration.current;
+    const isCurrent = () => activeRef.current && context === contextGeneration.current;
     if (!enabled || !props.canManageCustomModels || modelBusy) return;
     const submittedSlug = upstreamModelId ?? modelSlug;
     if (
@@ -744,21 +790,23 @@ export function useProviderConnection(
       upstreamModelId: submittedSlug,
       operationId,
     };
-    customModelsRequestGenerationRef.current += 1;
+    const write = sharedQueryWriter(client);
     restoreModelInputFocusRef.current = true;
     setModelBusy(true);
     const confirmAdded = (saved: WorkspaceProviderCustomModel) => {
-      pendingModelCreateRef.current = null;
-      setCustomModels((current) => [
+      const current =
+        peekSharedQuery<WorkspaceProviderCustomModel[]>(client, customModelsKey)?.data ?? [];
+      write(customModelsKey, [
         ...current.filter(
           (candidate) =>
             candidate.id !== saved.id && candidate.upstreamModelId !== saved.upstreamModelId,
         ),
         saved,
       ]);
-      setCustomModelsError(null);
-      setCustomModelsLoaded(true);
-      setModelSlug((current) => (current === submittedSlug ? "" : current));
+      void invalidateDependentReads();
+      if (!isCurrent()) return;
+      pendingModelCreateRef.current = null;
+      setModelSlug((draft) => (draft === submittedSlug ? "" : draft));
       props.onConnectionChange?.();
       toast.success(`${config.modelToastName} added`, {
         description: connected
@@ -782,12 +830,11 @@ export function useProviderConnection(
       } catch {
         saved = await create();
       }
-      if (!activeRef.current) return;
       confirmAdded(saved);
     } catch (caught) {
-      if (!activeRef.current) return;
+      void invalidateDependentReads();
       const reconciled = await refreshCustomModels();
-      if (!activeRef.current) return;
+      if (!isCurrent()) return;
       const committed = reconciled?.find(
         (candidate) => candidate.upstreamModelId === submittedSlug,
       );
@@ -799,11 +846,13 @@ export function useProviderConnection(
         description: userErrorText(caught),
       });
     } finally {
-      if (activeRef.current) setModelBusy(false);
+      if (isCurrent()) setModelBusy(false);
     }
   }
 
   async function removeCustomModel(model: WorkspaceProviderCustomModel): Promise<boolean> {
+    const context = contextGeneration.current;
+    const isCurrent = () => activeRef.current && context === contextGeneration.current;
     if (!enabled || !props.canManageCustomModels) return false;
     const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
     const focusModelId =
@@ -812,12 +861,17 @@ export function useProviderConnection(
     const operationId =
       pendingModelDeleteOperationsRef.current.get(model.id) ?? crypto.randomUUID();
     pendingModelDeleteOperationsRef.current.set(model.id, operationId);
-    customModelsRequestGenerationRef.current += 1;
+    const write = sharedQueryWriter(client);
     const confirmRemoved = () => {
+      const current =
+        peekSharedQuery<WorkspaceProviderCustomModel[]>(client, customModelsKey)?.data ?? [];
+      write(
+        customModelsKey,
+        current.filter((candidate) => candidate.id !== model.id),
+      );
+      void invalidateDependentReads();
+      if (!isCurrent()) return;
       pendingModelDeleteOperationsRef.current.delete(model.id);
-      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
-      setCustomModelsError(null);
-      setCustomModelsLoaded(true);
       removeFocusTargetRef.current = focusModelId
         ? (removeButtonRefs.current.get(focusModelId) ?? modelInputRef.current)
         : modelInputRef.current;
@@ -835,13 +889,12 @@ export function useProviderConnection(
       } catch {
         await remove();
       }
-      if (!activeRef.current) return true;
       confirmRemoved();
       return true;
     } catch (caught) {
-      if (!activeRef.current) return false;
+      void invalidateDependentReads();
       const reconciled = await refreshCustomModels();
-      if (!activeRef.current) return false;
+      if (!isCurrent()) return false;
       if (reconciled !== null) {
         const originalStillPresent = reconciled.some((candidate) => candidate.id === model.id);
         if (!originalStillPresent) {
@@ -861,7 +914,7 @@ export function useProviderConnection(
       });
       return false;
     } finally {
-      if (activeRef.current) setRemovingModelId(null);
+      if (isCurrent()) setRemovingModelId(null);
     }
   }
 
@@ -973,7 +1026,7 @@ export function ProviderConnectionRow({
   /** Opens the provider's page; omitted for a read-only row. */
   onOpen?: (() => void) | undefined;
   /** Who the key is for: "Everyone in Acme", "This workspace only". */
-  scope?: string | undefined;
+  scope?: ReactNode;
   /** Why new work here doesn't use this key; the row then reads "Not in use". */
   setAside?: string | null | undefined;
 }) {
@@ -1374,7 +1427,7 @@ export function ProviderConnectionPage({
 }: {
   state: ProviderConnection;
   /** The workspace's or organization's name. */
-  scopeName?: string | undefined;
+  scopeName?: ReactNode;
   /** A last quiet section, such as where else a key can be connected. */
   footnote?: ReactNode;
   onBack?: (() => void) | undefined;

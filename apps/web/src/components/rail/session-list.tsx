@@ -3,6 +3,7 @@
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
+import { t } from "@/lib/console-text";
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
@@ -57,8 +58,8 @@ import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-deta
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { sessionHoverDescription, sessionHoverFacts } from "@/lib/session-hover-facts";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -66,7 +67,7 @@ import {
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
-} from "@/components/ui/context-menu";
+} from "@opengeni/react/ui/context-menu";
 import {
   DropdownMenu,
   DropdownMenuCheck,
@@ -75,10 +76,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+} from "@opengeni/react/ui/dropdown-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@opengeni/react/ui/hover-card";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
@@ -114,7 +115,7 @@ import {
   writeSessionGroupWindows,
 } from "@/lib/session-group-window-memory";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { countNeedsYou, filterNeedsYou } from "@/lib/needs-you";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -368,6 +369,7 @@ export function SessionList() {
     groupBy: browseGroupBy,
     sortBy: browseSortBy,
     status: browseStatusPreference,
+    mineOnly,
     showEmptyGroups,
   } = browsePreferences;
   // Attention filtering belongs before pagination, including project windows.
@@ -417,6 +419,7 @@ export function SessionList() {
     includePinned: needsYouOnly || !hierarchyMode,
     includeTotals: hierarchyMode && browseStatus !== "archived",
     needsYouOnly,
+    mineOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archiveStatus: browseStatus,
@@ -2370,6 +2373,7 @@ export function SessionList() {
           limit,
           includePinned: false,
           ...(needsYouOnly && group.kind !== "archived" ? { needsYouOnly: true } : {}),
+          ...(mineOnly ? { mineOnly: true } : {}),
           ...(pageCursor ? { cursor: pageCursor } : {}),
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
@@ -2574,6 +2578,7 @@ export function SessionList() {
       pageGeneration,
       paginationBrowseFilter,
       needsYouOnly,
+      mineOnly,
       rail.workspaceId,
       search,
       browseSortBy,
@@ -2782,7 +2787,7 @@ export function SessionList() {
                     : group === "previous7"
                       ? "Created in previous 7 days"
                       : "Created earlier"
-                : SESSION_GROUP_LABELS[group],
+                : SESSION_GROUP_LABELS(t)[group],
             sessions: [],
           };
           return showEmptyGroups ? [bucket] : [];
@@ -3180,6 +3185,8 @@ export function SessionList() {
               status={browseStatusPreference}
               needsYouCount={needsYouCount}
               onStatusChange={(status) => updateBrowsePreferences({ status })}
+              mineOnly={mineOnly}
+              onMineOnlyChange={(next) => updateBrowsePreferences({ mineOnly: next })}
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
@@ -4270,7 +4277,7 @@ function SessionRow(props: {
   const descendantLabel = sessionDescendantLabel(props.session);
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
-  const relativeTime = relativeTimeLabel(props.session.updatedAt);
+  const relativeTime = relativeTimeLabel(t, props.session.updatedAt);
   // Indent nested rows without changing the root title column. Parents and
   // leaves reserve the same compact disclosure slot, so the chevron does not
   // push a parent title away from the leaf titles beside it.
@@ -4861,7 +4868,7 @@ export function CollapsedSessionsButton() {
     limit: 50,
     pollIntervalMs: 15_000,
   });
-  const runningCount = useMemo(() => groupSessionsForRail(sessions).running.length, [sessions]);
+  const runningCount = useMemo(() => groupSessionsForRail(t, sessions).running.length, [sessions]);
   // The collapsed rail can't render the expanded list's loading/error copy, so
   // it mirrors those states: a failed load shows a failed-tone marker + tooltip
   // (expanding reveals the retry), a first load shows a gentle pulse.

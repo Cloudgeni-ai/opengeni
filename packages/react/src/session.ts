@@ -30,7 +30,14 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {
   NewConversationController,
@@ -59,6 +66,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
   InitialComposerDraft,
@@ -139,6 +147,8 @@ export type {
   TurnOutcome,
   ToolCallItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,

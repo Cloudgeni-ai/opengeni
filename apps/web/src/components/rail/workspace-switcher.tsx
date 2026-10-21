@@ -1,10 +1,11 @@
+import { t } from "@/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
   DropdownMenuCheck,
@@ -14,8 +15,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
   organizationLandingWorkspaceId,
@@ -204,7 +205,7 @@ export function WorkspaceSwitcherMenu(props: {
     context.workspaces.find((workspace) => workspace.id === props.workspaceId) ?? null;
   const activeAccountId =
     activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
-  const orgs = organizationsForSubject(context.accessContext, context.workspaces);
+  const orgs = organizationsForSubject(t, context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const administers = useCanCreateWorkspaceIn(activeAccountId);

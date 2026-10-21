@@ -19,8 +19,10 @@ export const ArtifactCatalogItem = /* @__PURE__ */ defineSchema(() =>
       status: z.enum(["active", "archived"]),
       /** Shared workspace metadata, not content-access authority. */
       pinned: z.boolean().optional(),
-      /** Sites only: "private" when only its owner (the viewer) can see it. */
+      /** Sites and files: "private" when only its owner (the viewer) can see it. */
       visibility: z.enum(["private", "workspace"]).optional(),
+      /** Files only: the viewer owns the file, so they can share or limit it. */
+      ownedByViewer: z.boolean().optional(),
       sourceSessionId: z.string().uuid().optional(),
       versionId: z.string().min(1).max(128).optional(),
       file: RetainedArtifactReferenceSchema.optional(),

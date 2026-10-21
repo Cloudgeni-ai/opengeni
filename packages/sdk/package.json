@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "1.4.4",
+  "version": "4.2.0",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -26,6 +26,18 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
+    "./app-links": {
+      "types": "./src/app-links.ts",
+      "default": "./src/app-links.ts"
+    },
+    "./this-computer": {
+      "types": "./src/this-computer.ts",
+      "default": "./src/this-computer.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -45,6 +57,10 @@
     "./site": {
       "types": "./src/site.ts",
       "default": "./src/site.ts"
+    },
+    "./site-bridge-host": {
+      "types": "./src/site-bridge-host.ts",
+      "default": "./src/site-bridge-host.ts"
     },
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
@@ -69,6 +85,10 @@
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
+    },
+    "./external-vault-receiver": {
+      "types": "./src/external-vault-receiver.ts",
+      "default": "./src/external-vault-receiver.ts"
     },
     "./session-history-import": {
       "types": "./src/session-history-import.ts",
@@ -133,6 +153,10 @@
     "./gateway-realtime-transport": {
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
+    },
+    "./realtime-websocket-transport": {
+      "types": "./src/realtime-websocket-transport.ts",
+      "default": "./src/realtime-websocket-transport.ts"
     },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",

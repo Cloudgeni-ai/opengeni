@@ -1,0 +1,1655 @@
+//! The host agent binary against real Firecracker, jailed and networked.
+//!
+//! Runs only when `COMPUTE_TEST_LAB` names a directory prepared by
+//! `lab/host-setup.sh` (`bin/firecracker`, `bin/jailer`, `vmlinux`,
+//! `base.ext4`), as root:
+//!
+//! ```text
+//! CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" COMPUTE_TEST_LAB=/lab \
+//!   cargo test --release -p compute-host --test lab -- --nocapture --test-threads 1
+//! ```
+//!
+//! `COMPUTE_TEST_SANDBOXES` sets how many sandboxes each test uses
+//! (default 12), `COMPUTE_TEST_RESULTS` a directory for JSON results and
+//! `COMPUTE_TEST_PROFILE` the agent's memory profile (when unset, the one
+//! the agent chooses by itself: `nested` under a hypervisor, which needs a
+//! reserved 2 MiB page pool, and `bare-metal` otherwise).
+//! `COMPUTE_TEST_REQUIRE` (`lab` on a gate) makes a test that cannot run
+//! fail.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, TcpListener};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+
+use compute_core::SandboxId;
+use compute_host::client::Client;
+use compute_host::protocol::{
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SandboxStatus, SleepConfig, TemplateState,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinSet;
+use tokio::time::{Instant, sleep, timeout, timeout_at};
+
+mod admission;
+mod cpu;
+mod disk;
+mod memory;
+mod ready;
+#[path = "../support/required.rs"]
+mod required;
+mod spoofing;
+mod squeeze;
+#[path = "../support/state.rs"]
+mod state;
+
+use required::skip;
+
+const PORT: u32 = 52;
+
+fn lab() -> Option<PathBuf> {
+    let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
+    if lab.is_none() {
+        skip("lab", "set COMPUTE_TEST_LAB to run against Firecracker");
+    }
+    lab
+}
+
+fn count() -> usize {
+    std::env::var("COMPUTE_TEST_SANDBOXES")
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(12)
+}
+
+/// The agent's `--memory-profile` arguments, if `COMPUTE_TEST_PROFILE`
+/// names one.
+fn profile() -> Vec<String> {
+    std::env::var("COMPUTE_TEST_PROFILE")
+        .map(|name| vec!["--memory-profile".to_owned(), name])
+        .unwrap_or_default()
+}
+
+fn id(n: usize) -> Id {
+    Id(SandboxId((0x1ab << 64) | n as u128))
+}
+
+/// One run of the agent binary.
+struct Agent {
+    child: Child,
+    client: Client,
+}
+
+struct Host {
+    lab: PathBuf,
+    root: PathBuf,
+    socket: PathBuf,
+    extra: Vec<String>,
+    cgroup: PathBuf,
+    /// The agent's state root.
+    state: PathBuf,
+    /// The image new sandboxes' disks are copied from.
+    base_image: PathBuf,
+}
+
+impl Host {
+    fn new(lab: &Path, name: &str, extra: &[&str]) -> Self {
+        let root = lab.join("t").join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        state::private_dir(&root);
+        Self {
+            lab: lab.to_owned(),
+            socket: root.join("agent.sock"),
+            state: root.join("state"),
+            base_image: lab.join("base.ext4"),
+            root,
+            extra: extra.iter().map(|&arg| arg.to_owned()).collect(),
+            cgroup: PathBuf::from(CGROUP),
+        }
+    }
+
+    /// Puts the agent's VMs under `cgroup` instead of [`CGROUP`].
+    fn with_cgroup(mut self, cgroup: impl Into<PathBuf>) -> Self {
+        self.cgroup = cgroup.into();
+        self
+    }
+
+    /// Keeps the agent's state under `state`, copying new disks from
+    /// `base_image`.
+    fn with_state(mut self, state: impl Into<PathBuf>, base_image: impl Into<PathBuf>) -> Self {
+        self.state = state.into();
+        self.base_image = base_image.into();
+        self
+    }
+
+    async fn start(&self) -> Agent {
+        let _ = std::fs::remove_file(&self.socket);
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.root.join("agent.log"))
+            .unwrap();
+        let lab = &self.lab;
+        let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
+            .arg("--socket")
+            .arg(&self.socket)
+            .arg("serve")
+            .arg("--root")
+            .arg(&self.state)
+            .arg("--firecracker")
+            .arg(lab.join("bin/firecracker"))
+            .arg("--jailer")
+            .arg(lab.join("bin/jailer"))
+            .arg("--kernel")
+            .arg(lab.join("vmlinux"))
+            .arg("--base-image")
+            .arg(&self.base_image)
+            .arg("--cgroup")
+            .arg(&self.cgroup)
+            .args(["--limit", "boot=32", "--limit", "restore=32"])
+            .args(profile())
+            .args(&self.extra)
+            .env(
+                "RUST_LOG",
+                std::env::var("COMPUTE_TEST_LOG").unwrap_or_else(|_| "info".into()),
+            )
+            // The log is a file, read by tests: plain text, not colours.
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let client = Client::new(&self.socket);
+        loop {
+            if self.socket.exists() && client.call(&Request::Status).await.is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the agent never came up");
+            sleep(Duration::from_millis(20)).await;
+        }
+        Agent { child, client }
+    }
+
+    /// Keeps the agent's log with the results, then deletes the host's
+    /// files.
+    fn finish(self, name: &str) {
+        self.keep_log(name);
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+
+    /// Copies the agent's log to the results, as `name`.
+    fn keep_log(&self, name: &str) {
+        if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+            let _ = std::fs::copy(
+                self.root.join("agent.log"),
+                PathBuf::from(dir).join(format!("{name}-agent.log")),
+            );
+        }
+    }
+}
+
+impl Drop for Host {
+    /// A test that fails part way must fail alone: the sandbox records it
+    /// leaves would keep every later agent on the host from taking it over
+    /// from this state root. Its agent, dropped before it, has ended its
+    /// VMs; its log is kept with the results.
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let name = self.root.file_name().map_or_else(
+                || "host".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            self.keep_log(&format!("{name}-failed"));
+            let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.state);
+        }
+    }
+}
+
+/// The parent cgroup of every VM the lab tests start.
+const CGROUP: &str = "/sys/fs/cgroup/compute-test";
+
+impl Drop for Agent {
+    /// A test that fails part way must not leave its agent holding the
+    /// host lock, nor its VMs holding sandbox networks the next test reuses.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if std::thread::panicking()
+            && let Ok(vms) = std::fs::read_dir(CGROUP)
+        {
+            for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
+                let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
+            }
+        }
+    }
+}
+
+impl Agent {
+    /// Ends the agent the hard way: SIGKILL, no chance to clean up.
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+
+    async fn status(&self) -> HostStatus {
+        match self.client.call(&Request::Status).await.unwrap() {
+            Reply::Status(status) => *status,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn create(&self, sandbox: Id, sleep: SleepConfig) {
+        create(&self.client, sandbox, sleep).await;
+    }
+
+    async fn remove_all(&self) {
+        for sandbox in self.status().await.sandboxes {
+            let reply = self
+                .client
+                .call(&Request::Remove {
+                    id: sandbox.id,
+                    generation: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(reply, Reply::Done);
+        }
+    }
+
+    async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            let status = self.status().await;
+            if done(&status) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Creates `sandbox` with sleep settings `sleep`.
+async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
+    let config = SandboxConfig {
+        image: None,
+        vcpus: 1,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep,
+        link: None,
+    };
+    let reply = client
+        .call(&Request::Create {
+            id: sandbox,
+            config,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done, "create {sandbox}");
+}
+
+/// Wakes `sandbox`, runs `script` in its shell and returns the output and
+/// how long the wake took.
+async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) {
+    match try_exec(client, sandbox, script, Duration::from_secs(120)).await {
+        Ok(done) => done,
+        Err(why) => panic!("{sandbox}: {why}"),
+    }
+}
+
+/// Like [`exec`], but an error instead of a panic: a script that has not
+/// ended within `limit`, counted from the request, says what it printed by
+/// then, and a connection that fails or never comes says so.
+async fn try_exec(
+    client: &Client,
+    sandbox: Id,
+    script: &str,
+    limit: Duration,
+) -> Result<(String, Duration), String> {
+    let started = Instant::now();
+    let deadline = started + limit;
+    let late = || format!("no connection after {:?}", started.elapsed());
+    let (reply, mut stream) = timeout_at(
+        deadline,
+        client.connect(sandbox, None, PORT, PriorityName::Interactive),
+    )
+    .await
+    .map_err(|_| late())?
+    .map_err(|error| format!("connect: {error}"))?;
+    let Reply::Connected { waited_us, .. } = reply else {
+        return Err(format!("connect: {reply:?}"));
+    };
+    let input = format!("{script}\necho {DONE}\nexit\n");
+    timeout_at(deadline, stream.get_mut().write_all(input.as_bytes()))
+        .await
+        .map_err(|_| late())?
+        .map_err(|error| format!("send the script: {error}"))?;
+    // The script is done when its marker arrives; the guest's exec agent
+    // lingers before closing the connection, which is not the guest's time.
+    let end = format!("{DONE}\n");
+    let mut output = Vec::new();
+    let read = async {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            output.extend_from_slice(&chunk[..n]);
+            if n == 0 || output.ends_with(end.as_bytes()) {
+                return Ok::<(), std::io::Error>(());
+            }
+        }
+    };
+    let finished = timeout_at(deadline, read).await;
+    let output = String::from_utf8_lossy(&output);
+    // What it printed tells which of its steps never ended.
+    match finished {
+        Err(_) => {
+            return Err(format!(
+                "script timed out after {:?}; its output so far:\n{output}",
+                started.elapsed()
+            ));
+        }
+        Ok(Err(error)) => {
+            return Err(format!("read: {error}; its output so far:\n{output}"));
+        }
+        Ok(Ok(())) => {}
+    }
+    let output = output.strip_suffix(&end).unwrap_or(&output).to_owned();
+    Ok((output, Duration::from_micros(waited_us)))
+}
+
+/// What the guest of `sandbox` and its namespace on the host say about its
+/// network, for a test whose guest could not reach out: the guest's own
+/// view (its link counters, neighbours, TCP state, and whether its timers
+/// and a new connection work) and the namespace's link counters,
+/// the host's connection count and its whole firewall.
+async fn network_report(client: &Client, sandbox: Id) -> String {
+    const GUEST: &str = "timeout 5 cat /proc/uptime
+timeout 5 cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+timeout 5 ip -s link show eth0
+timeout 5 ip neigh
+timeout 5 ip route
+timeout 5 grep -E '^(Ip|Tcp|Udp):' /proc/net/snmp
+timeout 5 cat /proc/net/tcp
+if timeout 5 sleep 1; then echo timers ok; else echo timers-failed; fi
+if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80'; then echo connect ok; else echo connect-failed; fi";
+    let guest = match try_exec(client, sandbox, GUEST, Duration::from_secs(40)).await {
+        Ok((output, _)) => output,
+        Err(why) => why,
+    };
+    let namespace = format!("ogc-{sandbox}");
+    let host = |args: &[&str]| -> String {
+        match Command::new(args[0]).args(&args[1..]).output() {
+            Ok(out) => format!(
+                "$ {}\n{}{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(error) => format!("$ {}\n{error}\n", args.join(" ")),
+        }
+    };
+    let report = [
+        host(&["ip", "netns", "exec", &namespace, "ip", "-s", "link"]),
+        host(&["ip", "netns", "exec", &namespace, "ip", "neigh"]),
+        host(&["cat", "/proc/sys/net/netfilter/nf_conntrack_count"]),
+        host(&["ip", "-s", "-br", "link"]),
+        host(&["nft", "list", "ruleset"]),
+        host(&["sysctl", "net.ipv4.ip_forward"]),
+    ]
+    .concat();
+    format!("the guest says:\n{guest}\nthe host says:\n{report}")
+}
+
+/// The line `exec` appends to a script to see it finish.
+const DONE: &str = "--lab-script-done--";
+
+fn percentile(values: &mut [f64], percent: f64) -> f64 {
+    values.sort_by(f64::total_cmp);
+    if values.is_empty() {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let index = ((values.len() as f64 - 1.0) * percent / 100.0).round() as usize;
+    values[index]
+}
+
+fn summary(values: &[f64]) -> serde_json::Value {
+    let mut values = values.to_vec();
+    serde_json::json!({
+        "n": values.len(),
+        "p50": percentile(&mut values, 50.0),
+        "p90": percentile(&mut values, 90.0),
+        "p99": percentile(&mut values, 99.0),
+        "max": percentile(&mut values, 100.0),
+    })
+}
+
+fn save_results(name: &str, results: &serde_json::Value) {
+    println!("{name}: {}", serde_json::to_string_pretty(results).unwrap());
+    if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_vec_pretty(results).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn firecrackers() -> usize {
+    let output = Command::new("pgrep")
+        .args(["-c", "-x", "firecracker"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// What each sandbox is left doing before the agent is killed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    Running,
+    Paused,
+    /// Paused, with a saved copy on disk.
+    SavedInPlace,
+    Saved,
+}
+
+/// Never sleeps on its own.
+const NEVER: SleepConfig = SleepConfig {
+    pause_after_ms: None,
+    save_after_ms: None,
+    archive_after_ms: None,
+    drop_after_ms: None,
+    evict_after_ms: None,
+    forget_after_ms: None,
+    compress: false,
+    checkpoint_every_ms: None,
+};
+
+/// Pauses, saves and lets go of the VM soon after each use.
+const SAVE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(300),
+    save_after_ms: Some(600),
+    drop_after_ms: Some(900),
+    ..NEVER
+};
+
+impl Kind {
+    fn of(n: usize) -> Self {
+        [Self::Running, Self::Paused, Self::SavedInPlace, Self::Saved][n % 4]
+    }
+
+    fn sleep(self) -> SleepConfig {
+        match self {
+            Self::Running => NEVER,
+            Self::Paused => SleepConfig {
+                pause_after_ms: Some(500),
+                ..NEVER
+            },
+            Self::SavedInPlace => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                ..NEVER
+            },
+            Self::Saved => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                drop_after_ms: Some(1_500),
+                ..NEVER
+            },
+        }
+    }
+
+    /// Whether `sandbox` has settled where this kind goes.
+    fn reached(self, sandbox: &SandboxStatus) -> bool {
+        let (level, durability) = match self {
+            Self::Running => (LevelName::Running, DurabilityName::Volatile),
+            Self::Paused => (LevelName::Paused, DurabilityName::Volatile),
+            Self::SavedInPlace => (LevelName::Paused, DurabilityName::Local),
+            Self::Saved => (LevelName::Saved, DurabilityName::Local),
+        };
+        sandbox.step.is_none() && sandbox.level == level && sandbox.durability == durability
+    }
+}
+
+/// Sandboxes running, paused and saved survive the agent being killed with
+/// SIGKILL and restarted: every one wakes with the processes and in-memory
+/// files its guest had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sandboxes_survive_the_agent_being_killed() {
+    let Some(lab) = lab() else { return };
+    let count = count();
+    let host = Host::new(&lab, "kill", &["--network"]);
+    let agent = host.start().await;
+    let ids: Vec<Id> = (0..count).map(id).collect();
+    let mut creates = JoinSet::new();
+    for (n, sandbox) in ids.iter().copied().enumerate() {
+        let client = agent.client.clone();
+        creates.spawn(async move {
+            create(&client, sandbox, Kind::of(n).sleep()).await;
+            // A background process and a file in memory: both live only in
+            // the guest's RAM.
+            let script = format!(
+                "sleep 1000000 & echo $! > /dev/shm/pid; echo token-{n} > /dev/shm/token; cat /dev/shm/token"
+            );
+            let (output, _) = exec(&client, sandbox, &script).await;
+            assert_eq!(output.trim(), format!("token-{n}"));
+        });
+    }
+    while let Some(done) = creates.join_next().await {
+        done.unwrap();
+    }
+    agent
+        .wait_until("every sandbox to settle", |status| {
+            status
+                .sandboxes
+                .iter()
+                .enumerate()
+                .all(|(n, sandbox)| Kind::of(n).reached(sandbox))
+        })
+        .await;
+    let before = agent.status().await;
+    let live = ids
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| Kind::of(*n) != Kind::Saved)
+        .count();
+    assert_eq!(
+        firecrackers(),
+        live,
+        "one VMM per running or paused sandbox"
+    );
+
+    agent.kill();
+    assert_eq!(firecrackers(), live, "VMMs outlive a killed agent");
+    let restarted = Instant::now();
+    let agent = host.start().await;
+    let recovery = restarted.elapsed();
+    let after = agent.status().await;
+    assert_eq!(after.sandboxes.len(), count);
+    for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
+        assert_eq!(
+            (old.id, old.level, old.durability, old.generation),
+            (new.id, new.level, new.durability, new.generation),
+            "the restart changed a sandbox"
+        );
+    }
+
+    let waits = wake_and_check_state(&agent.client, &ids).await;
+    let status = agent.status().await;
+    let restore = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "restore")
+        .map(|(_, stats)| *stats);
+    save_results(
+        &format!("kill-restart-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "agent_restart_to_serving_ms": recovery.as_secs_f64() * 1e3,
+            "wake_ms_after_restart": waits
+                .iter()
+                .map(|(kind, values)| (format!("{kind:?}").to_lowercase(), summary(values)))
+                .collect::<BTreeMap<_, _>>(),
+            "restore_steps": restore,
+        }),
+    );
+    agent.remove_all().await;
+    assert_eq!(firecrackers(), 0);
+    agent.kill();
+    host.finish(&format!("kill-restart-{count}"));
+}
+
+/// Wakes every sandbox at once and checks its guest kept the background
+/// process and in-memory file it had; returns wake times by kind.
+async fn wake_and_check_state(client: &Client, ids: &[Id]) -> BTreeMap<Kind, Vec<f64>> {
+    let client = Arc::new(client.clone());
+    let mut wakes = JoinSet::new();
+    for (n, sandbox) in ids.iter().copied().enumerate() {
+        let client = Arc::clone(&client);
+        wakes.spawn(async move {
+            let script = "cat /dev/shm/token; kill -0 $(cat /dev/shm/pid) && echo alive";
+            let (output, waited) = exec(&client, sandbox, script).await;
+            (n, output, waited)
+        });
+    }
+    let mut waits: BTreeMap<Kind, Vec<f64>> = BTreeMap::new();
+    while let Some(done) = wakes.join_next().await {
+        let (n, output, waited) = done.unwrap();
+        assert_eq!(
+            output.split_whitespace().collect::<Vec<_>>(),
+            [format!("token-{n}").as_str(), "alive"],
+            "sandbox {n} ({:?}) lost its state",
+            Kind::of(n)
+        );
+        waits
+            .entry(Kind::of(n))
+            .or_default()
+            .push(waited.as_secs_f64() * 1e3);
+    }
+    waits
+}
+
+/// The host's addresses guests must not reach, with a listener on each so a
+/// connection would succeed if the firewall let it through.
+fn host_addresses() -> Vec<IpAddr> {
+    let output = Command::new("hostname").arg("-I").output().unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|address| address.parse().ok())
+        .collect()
+}
+
+/// `address:port`, with an IPv6 address in brackets.
+fn target(address: IpAddr, port: u16) -> String {
+    match address {
+        IpAddr::V4(address) => format!("{address}:{port}"),
+        IpAddr::V6(address) => format!("[{address}]:{port}"),
+    }
+}
+
+/// The link-local address of each sandbox's gateway, which every tap
+/// derives from the MAC they all share.
+const GATEWAY_LINK_LOCAL: &str = "fe80::400:a9ff:fefe:16%eth0";
+
+/// The inner end of the second sandbox's link, inside its namespace.
+const NEIGHBOUR_INNER: &str = "198.18.0.3";
+
+/// A TCP listener inside sandbox `id`'s network namespace, on `address`,
+/// proven reachable from inside that namespace. Ends when dropped.
+struct NamespaceListener(Child);
+
+impl NamespaceListener {
+    fn start(id: Id, address: &str, port: u16) -> Self {
+        let namespace = format!("ogc-{id}");
+        let program = format!(
+            "import socket\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind(('{address}',{port}))\ns.listen(512)\nwhile True: s.accept()[0].close()"
+        );
+        let child = Command::new("ip")
+            .args(["netns", "exec", &namespace, "python3", "-c", &program])
+            .spawn()
+            .unwrap();
+        let listener = Self(child);
+        // The positive control: the same connection succeeds from inside.
+        let probe = format!("exec 3<>/dev/tcp/{address}/{port}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let reached = Command::new("ip")
+                .args(["netns", "exec", &namespace, "bash", "-c", &probe])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if reached {
+                return listener;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listener in {namespace} never answered"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for NamespaceListener {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Every destination a guest must never reach, whatever the host's trust:
+/// the cloud metadata service (also as an IPv4-mapped IPv6 address), each
+/// host address, the host's end of a sandbox link, a listening address
+/// inside another sandbox's namespace, the gateway's IPv6 link-local
+/// address and the IPv6 internet.
+fn forbidden(port: u16) -> Vec<String> {
+    let mut blocked: Vec<String> = vec![
+        "169.254.169.254:80".into(),
+        "[::ffff:169.254.169.254]:80".into(),
+    ];
+    blocked.extend(
+        host_addresses()
+            .into_iter()
+            .map(|address| target(address, port)),
+    );
+    blocked.push(format!("198.18.0.0:{port}"));
+    blocked.push(format!("{NEIGHBOUR_INNER}:{port}"));
+    blocked.push(format!("[{GATEWAY_LINK_LOCAL}]:{port}"));
+    blocked.push("[2606:4700:4700::1111]:80".into());
+    blocked
+}
+
+/// Connects to each target given after the source address (`-` for the
+/// guest's own) and prints `target outcome micros`: `open`, `timeout`, or
+/// the name of the error the attempt failed with.
+const PROBE: &str = r#"
+import errno, socket, sys, time
+source = sys.argv[1]
+for target in sys.argv[2:]:
+    host, port = target.rsplit(":", 1)
+    host = host.strip("[]")
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(family)
+    s.settimeout(3)
+    started = time.monotonic_ns()
+    try:
+        if source != "-":
+            s.bind((source, 0))
+        s.connect(socket.getaddrinfo(host, int(port), family)[0][4])
+        outcome = "open"
+    except socket.timeout:
+        outcome = "timeout"
+    except OSError as error:
+        outcome = errno.errorcode.get(error.errno, str(error.errno))
+    print(target, outcome, (time.monotonic_ns() - started) // 1000, flush=True)
+    s.close()
+"#;
+
+/// A guest command probing each of `targets` from the guest's own address;
+/// see [`PROBE`]. How each attempt ended, unlike its duration, does not
+/// depend on how busy the guest is.
+fn probe_script(targets: &[String]) -> String {
+    probe_from("-", targets)
+}
+
+/// Like [`probe_script`], with connections made from `source`.
+fn probe_from(source: &str, targets: &[String]) -> String {
+    format!("python3 -c '{PROBE}' {source} {}", targets.join(" "))
+}
+
+/// How a blocked IPv4 TCP connection must end: the firewall's reset. Any
+/// other failure (a timeout, an unreachable network) would not show that
+/// the firewall, and not something on the way, stopped it.
+const REFUSED: &str = "ECONNREFUSED";
+
+/// Whether `outcome` is a blocked connection to `target` failing as it
+/// should. IPv4 attempts must meet the firewall's reset; guests have no
+/// IPv6 route beyond their link, so IPv6 attempts may also fail before
+/// leaving the guest or meet the firewall's ICMP refusal. Nothing may be
+/// left to time out, as a dropped packet would be, except a link-local
+/// address: IPv6 is off in the sandbox's namespace, so neighbour discovery
+/// goes unanswered and gives up after about as long as a probe waits.
+fn blocked_as_expected(target: &str, outcome: &str) -> bool {
+    const V6_FAILURES: [&str; 5] = [
+        "ECONNREFUSED",
+        "ENETUNREACH",
+        "EHOSTUNREACH",
+        "EACCES",
+        "EADDRNOTAVAIL",
+    ];
+    let mapped_v4 = target.starts_with("[::ffff:");
+    if target.starts_with("[fe80:") {
+        outcome == "timeout" || V6_FAILURES.contains(&outcome)
+    } else if target.starts_with('[') && !mapped_v4 {
+        V6_FAILURES.contains(&outcome)
+    } else {
+        outcome == REFUSED
+    }
+}
+
+/// Checks that `lines` hold one row per target, in order: those in `open`
+/// connected, every other one failed as [`blocked_as_expected`] says.
+/// Returns the refusal times in milliseconds and how often each outcome
+/// was seen.
+fn check_probes(
+    context: &str,
+    lines: &[&str],
+    targets: &[String],
+    open: &[&str],
+) -> (Vec<f64>, BTreeMap<String, usize>) {
+    assert_eq!(
+        lines.len(),
+        targets.len(),
+        "{context}: missing probe rows: {lines:?}"
+    );
+    let mut refusals = Vec::new();
+    let mut outcomes = BTreeMap::new();
+    for (line, target) in lines.iter().zip(targets) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.first(), Some(&target.as_str()), "{context}: {line}");
+        let outcome = fields.get(1).copied().unwrap_or_default();
+        *outcomes.entry(outcome.to_owned()).or_default() += 1;
+        if open.contains(&target.as_str()) {
+            assert_eq!(outcome, "open", "{context}: {line}");
+            continue;
+        }
+        assert!(
+            blocked_as_expected(target, outcome),
+            "{context}: {target} was not blocked as expected: {line}"
+        );
+        if outcome == "timeout" {
+            continue;
+        }
+        let micros: u64 = fields[2].parse().unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        refusals.push(micros as f64 / 1e3);
+    }
+    (refusals, outcomes)
+}
+
+/// Every restored guest reaches the internet with its very first
+/// connection, and none reaches the cloud metadata service, the host, or
+/// another sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
+    let Some(lab) = lab() else { return };
+    let count = count().max(2);
+    // Something to reach on every host address and on the sandboxes' link
+    // addresses, which are the host's too.
+    let (listener, port) = listen_everywhere();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    let host = Host::new(&lab, "net", &["--network"]);
+    let agent = host.start().await;
+    let ids: Vec<Id> = (0..count).map(id).collect();
+    for sandbox in &ids {
+        agent.create(*sandbox, SAVE_SOON).await;
+    }
+    let mut boots = JoinSet::new();
+    for sandbox in ids.iter().copied() {
+        let client = agent.client.clone();
+        boots.spawn(async move { exec(&client, sandbox, "true").await });
+    }
+    while let Some(done) = boots.join_next().await {
+        done.unwrap();
+    }
+    agent
+        .wait_until("every sandbox to be saved", |status| {
+            status
+                .sandboxes
+                .iter()
+                .all(|sandbox| sandbox.level == LevelName::Saved && sandbox.step.is_none())
+        })
+        .await;
+    let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
+
+    let blocked = forbidden(port);
+    // The first command after the restore is the outbound connection, then
+    // a second one to tell network latency from the restored guest's first
+    // page faults, then a name lookup; then each forbidden destination must
+    // fail, and fast.
+    let script = format!(
+        "s=$(date +%s%N); if exec 3<>/dev/tcp/1.1.1.1/80; then echo out $(( ($(date +%s%N) - s) / 1000 )); else echo out-failed; fi
+s=$(date +%s%N); if exec 4<>/dev/tcp/1.1.1.1/80; then echo again $(( ($(date +%s%N) - s) / 1000 )); else echo again-failed; fi
+if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; fi
+{}",
+        probe_script(&blocked)
+    );
+    let started = Instant::now();
+    let client = Arc::new(agent.client.clone());
+    let mut wakes = JoinSet::new();
+    for sandbox in ids.iter().copied() {
+        let (client, script) = (Arc::clone(&client), script.clone());
+        wakes.spawn(async move {
+            match try_exec(&client, sandbox, &script, Duration::from_secs(120)).await {
+                Ok(done) => (sandbox, done),
+                Err(why) => panic!(
+                    "{sandbox}: {why}\n{}",
+                    network_report(&client, sandbox).await
+                ),
+            }
+        });
+    }
+    let mut first_connect_ms = Vec::new();
+    let mut second_connect_ms = Vec::new();
+    let mut wake_ms = Vec::new();
+    let mut refusal_ms = Vec::new();
+    let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
+    while let Some(done) = wakes.join_next().await {
+        let (sandbox, (output, waited)) = done.unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        let first = lines.first().copied().unwrap_or_default();
+        let Some(micros) = first.strip_prefix("out ") else {
+            panic!("{sandbox}: the first connection failed: {output}");
+        };
+        #[allow(clippy::cast_precision_loss)]
+        first_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        let second = lines.get(1).copied().unwrap_or_default();
+        let Some(micros) = second.strip_prefix("again ") else {
+            panic!("{sandbox}: the second connection failed: {output}");
+        };
+        #[allow(clippy::cast_precision_loss)]
+        second_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        assert_eq!(lines.get(2).copied(), Some("dns ok"), "{sandbox}: {output}");
+        wake_ms.push(waited.as_secs_f64() * 1e3);
+        let context = format!("sandbox {sandbox}");
+        let (refusals, seen) = check_probes(&context, &lines[3..], &blocked, &[]);
+        refusal_ms.extend(refusals);
+        for (outcome, times) in seen {
+            *outcomes.entry(outcome).or_default() += times;
+        }
+    }
+    let total = started.elapsed();
+    save_results(
+        &format!("network-restore-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "blocked_destinations": blocked,
+            "all_wakes_s": total.as_secs_f64(),
+            "wake_ms": summary(&wake_ms),
+            "first_outbound_connect_ms": summary(&first_connect_ms),
+            "second_outbound_connect_ms": summary(&second_connect_ms),
+            "blocked_refusal_ms": summary(&refusal_ms),
+            "blocked_refusals_over_100ms": refusal_ms.iter().filter(|ms| **ms > 100.0).count(),
+            "blocked_outcomes": outcomes,
+        }),
+    );
+    // A process inside a namespace keeps it, and its link, alive, so
+    // removing that sandbox would wait for it.
+    drop(neighbour);
+    agent.remove_all().await;
+    agent.kill();
+    host.finish(&format!("network-restore-{count}"));
+}
+
+/// A TCP listener on every host address, IPv4 and IPv6, and its port.
+fn listen_everywhere() -> (TcpListener, u16) {
+    let listener = TcpListener::bind("[::]:0")
+        .or_else(|_| TcpListener::bind("0.0.0.0:0"))
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+/// A service on the host's local network: a network namespace of its own
+/// on the host, reached over a veth pair as another machine on the local
+/// network would be, listening on two ports, with two names in the host's
+/// `/etc/hosts` that no public name server knows. Gone when dropped.
+struct LocalService {
+    namespace: String,
+    host_end: String,
+    listener: Child,
+    /// The name a host lists with `--reach`, and one it does not.
+    names: [String; 2],
+}
+
+/// The local service's address, and the host's on the same link.
+const SERVICE: &str = "10.250.0.2";
+const SERVICE_PEER: &str = "10.250.0.1";
+/// The service's ports: one a host lists, one it does not.
+const LISTED: u16 = 18_080;
+const UNLISTED: u16 = 18_081;
+
+impl LocalService {
+    fn start() -> Self {
+        let pid = std::process::id();
+        let namespace = format!("lab-lan-{pid}");
+        let host_end = format!("lablan{}", pid % 100_000);
+        let run = |args: &[&str]| {
+            let status = Command::new(args[0]).args(&args[1..]).status().unwrap();
+            assert!(status.success(), "{args:?}: {status}");
+        };
+        let inside = |args: &[&str]| {
+            let mut all = vec!["ip", "netns", "exec", namespace.as_str()];
+            all.extend(args);
+            run(&all);
+        };
+        run(&["ip", "netns", "add", &namespace]);
+        run(&[
+            "ip", "link", "add", &host_end, "type", "veth", "peer", "name", "lan0", "netns",
+            &namespace,
+        ]);
+        run(&[
+            "ip",
+            "addr",
+            "add",
+            &format!("{SERVICE_PEER}/30"),
+            "dev",
+            &host_end,
+        ]);
+        run(&["ip", "link", "set", &host_end, "up"]);
+        inside(&["ip", "link", "set", "lo", "up"]);
+        inside(&["ip", "addr", "add", &format!("{SERVICE}/30"), "dev", "lan0"]);
+        inside(&["ip", "link", "set", "lan0", "up"]);
+        inside(&["ip", "route", "add", "default", "via", SERVICE_PEER]);
+        let program = format!(
+            "import select, socket\nls = []\nfor port in ({LISTED}, {UNLISTED}):\n    s = socket.socket()\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"{SERVICE}\", port))\n    s.listen(512)\n    ls.append(s)\nwhile True:\n    for s in select.select(ls, [], [])[0]:\n        s.accept()[0].close()"
+        );
+        let listener = Command::new("ip")
+            .args(["netns", "exec", &namespace, "python3", "-c", &program])
+            .spawn()
+            .unwrap();
+        let names = [
+            format!("lan-{pid}.compute-test.invalid"),
+            format!("hidden-{pid}.compute-test.invalid"),
+        ];
+        let mut hosts = std::fs::read_to_string("/etc/hosts").unwrap();
+        if !hosts.ends_with('\n') {
+            hosts.push('\n');
+        }
+        for name in &names {
+            hosts.extend([SERVICE, " ", name.as_str(), "\n"]);
+        }
+        std::fs::write("/etc/hosts", hosts).unwrap();
+        let service = Self {
+            namespace,
+            host_end,
+            listener,
+            names,
+        };
+        // The positive control: both ports answer from the host.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        for port in [LISTED, UNLISTED] {
+            while std::net::TcpStream::connect((SERVICE, port)).is_err() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the local service never answered on {port}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        service
+    }
+}
+
+impl Drop for LocalService {
+    fn drop(&mut self) {
+        let _ = self.listener.kill();
+        let _ = self.listener.wait();
+        if let Ok(hosts) = std::fs::read_to_string("/etc/hosts") {
+            let mut kept = String::new();
+            for line in hosts.lines() {
+                if !self.names.iter().any(|name| line.ends_with(name.as_str())) {
+                    kept.extend([line, "\n"]);
+                }
+            }
+            let _ = std::fs::write("/etc/hosts", kept);
+        }
+        let _ = Command::new("ip")
+            .args(["link", "del", &self.host_end])
+            .status();
+        let _ = Command::new("ip")
+            .args(["netns", "del", &self.namespace])
+            .status();
+    }
+}
+
+/// Asks the name server at the first argument about each name after it,
+/// over UDP and over TCP, and the guest's own resolver too, printing
+/// `server name udp=A tcp=A libc=A`: the first IPv4 address each found, or
+/// `none`.
+const RESOLVE: &str = r#"
+import socket, struct, sys
+def query(name):
+    q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+    for label in name.split("."):
+        q += bytes([len(label)]) + label.encode()
+    return q + b"\0" + struct.pack(">HH", 1, 1)
+def first_a(answer):
+    if len(answer) < 12 or answer[3] & 15:
+        return "none"
+    count = struct.unpack(">H", answer[6:8])[0]
+    at = 12
+    while answer[at]:
+        at += answer[at] + 1
+    at += 5
+    for _ in range(count):
+        if answer[at] & 0xc0 == 0xc0:
+            at += 2
+        else:
+            while answer[at]:
+                at += answer[at] + 1
+            at += 1
+        kind, _, _, length = struct.unpack(">HHIH", answer[at:at + 10])
+        at += 10
+        if kind == 1 and length == 4:
+            return socket.inet_ntoa(answer[at:at + 4])
+        at += length
+    return "none"
+server = sys.argv[1]
+for name in sys.argv[2:]:
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.settimeout(5)
+    u.sendto(query(name), (server, 53))
+    try:
+        answer, source = u.recvfrom(4096)
+        udp = first_a(answer) if source[0] == server else "wrong-source"
+    except OSError:
+        udp = "unanswered"
+    try:
+        t = socket.create_connection((server, 53), 5)
+        q = query(name)
+        t.sendall(struct.pack(">H", len(q)) + q)
+        data = b""
+        while len(data) < 2 or len(data) < 2 + struct.unpack(">H", data[:2])[0]:
+            chunk = t.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        tcp = first_a(data[2:])
+    except OSError:
+        tcp = "unanswered"
+    try:
+        libc = socket.gethostbyname(name)
+    except OSError:
+        libc = "none"
+    print(server, name, "udp=" + udp, "tcp=" + tcp, "libc=" + libc, flush=True)
+"#;
+
+/// A private name server, as an overlay network's, that an older host
+/// could have told a guest about: sandboxes may not reach it.
+const PRIVATE_NAME_SERVER: &str = "100.100.100.100";
+
+/// The first sandbox's names: its resolver uses its gateway; a public
+/// name resolves through the public name servers; the name only the host
+/// knows never does; and the listed name resolves to the service, by every
+/// path, exactly when `listed`.
+///
+/// A guest still told a private name server, as one booted under an older
+/// host is, gets the same answers from it, by every path, since its
+/// queries are answered by its own name server; a public name server it
+/// asks directly answers for itself, so knows no listed name.
+async fn check_names(client: &Client, service: &LocalService, listed: bool) {
+    let [name, hidden] = &service.names;
+    let private = PRIVATE_NAME_SERVER;
+    // Each change to the guest's resolver file prints a line only once it
+    // took, so one that failed fails the test rather than leaving libc on
+    // the gateway, where it would give the same answers.
+    let script = format!(
+        "cat /etc/resolv.conf
+python3 -c '{RESOLVE}' 169.254.0.22 {name} {hidden} example.com
+cp -P /etc/resolv.conf /tmp/resolv.conf.kept && rm -f /etc/resolv.conf && \
+echo nameserver {private} > /etc/resolv.conf && echo \"resolver now $(cat /etc/resolv.conf)\"
+python3 -c '{RESOLVE}' {private} {name} {hidden} example.com
+rm -f /etc/resolv.conf && cp -P /tmp/resolv.conf.kept /etc/resolv.conf && \
+cmp -s /tmp/resolv.conf.kept /etc/resolv.conf && echo resolver back as it was
+python3 -c '{RESOLVE}' 8.8.8.8 {name} example.com"
+    );
+    let (output, _) = exec(client, id(0), &script).await;
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == "nameserver 169.254.0.22"),
+        "the guest's resolver is not its gateway: {output}"
+    );
+    for changed in [
+        format!("resolver now nameserver {private}"),
+        "resolver back as it was".to_owned(),
+    ] {
+        assert!(
+            output.lines().any(|line| line.trim() == changed),
+            "the guest's resolver file did not change ({changed}): {output}"
+        );
+    }
+    let row = |server: &str, name: &str| {
+        output
+            .lines()
+            .find(|line| line.starts_with(&format!("{server} {name} ")))
+            .unwrap_or_else(|| panic!("no answer for {name} from {server}: {output}"))
+            .to_owned()
+    };
+    let found = if listed { SERVICE } else { "none" };
+    for server in ["169.254.0.22", private] {
+        assert_eq!(
+            row(server, name),
+            format!("{server} {name} udp={found} tcp={found} libc={found}")
+        );
+        assert_eq!(
+            row(server, hidden),
+            format!("{server} {hidden} udp=none tcp=none libc=none")
+        );
+        let public = row(server, "example.com");
+        assert!(
+            !public.contains("=none") && !public.contains("=unanswered"),
+            "a public name: {public}"
+        );
+    }
+    assert!(
+        row("8.8.8.8", name).starts_with(&format!("8.8.8.8 {name} udp=none tcp=none ")),
+        "a public name server answers for itself: {output}"
+    );
+    let public = row("8.8.8.8", "example.com");
+    assert!(
+        !public.contains("=none") && !public.contains("=unanswered"),
+        "a public name server: {public}"
+    );
+}
+
+/// Guests reach the host's local network only where its `--reach` entries
+/// say, on exactly the ports listed, and learn only the names listed: the
+/// sandbox's name server answers a listed name with its address, passes
+/// public names to public name servers, and never asks the host's own, so
+/// a name only the host knows stays unknown. Either way the host, the
+/// metadata service and other sandboxes stay out of reach, and forged
+/// packets get nowhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guests_reach_only_the_listed_ports_and_names_of_the_local_network() {
+    let Some(lab) = lab() else { return };
+    let (listener, port) = listen_everywhere();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    let service = LocalService::start();
+    let lan = [
+        format!("{SERVICE}:{LISTED}"),
+        format!("{SERVICE}:{UNLISTED}"),
+    ];
+    let mut targets = lan.to_vec();
+    // The host's end of the service's link is one of the host's addresses.
+    targets.extend(forbidden(port));
+    assert!(targets.contains(&format!("{SERVICE_PEER}:{port}")));
+    let script = probe_script(&targets);
+    let by_name = format!("--reach={}:{LISTED}", service.names[0]);
+    let by_range = format!("--reach=10.250.0.0/30:{UNLISTED}");
+    let cases: [(&str, Option<&str>, Vec<&str>); 3] = [
+        ("none", None, Vec::new()),
+        ("name", Some(by_name.as_str()), vec![lan[0].as_str()]),
+        ("range", Some(by_range.as_str()), vec![lan[1].as_str()]),
+    ];
+    for (case, reach, open) in cases {
+        let mut flags = vec!["--network"];
+        flags.extend(reach);
+        let host = Host::new(&lab, &format!("reach-{case}"), &flags);
+        let agent = host.start().await;
+        agent.create(id(0), NEVER).await;
+        agent.create(id(1), NEVER).await;
+        exec(&agent.client, id(1), "true").await;
+        let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
+        let (output, _) = exec(&agent.client, id(0), &script).await;
+        let lines: Vec<&str> = output.lines().collect();
+        check_probes(&format!("reach={case}"), &lines, &targets, &open);
+        check_names(&agent.client, &service, case == "name").await;
+        spoofing::check_spoofing(&agent.client, &targets, &open).await;
+        drop(neighbour);
+        agent.remove_all().await;
+        agent.kill();
+        host.finish(&format!("reach-{case}"));
+    }
+}
+
+/// What an older version's namespace rules let through, as on a host that
+/// trusted its local network: every guest packet, out of the uplink.
+const OLDER_RULES: &str = "table inet sandbox
+delete table inet sandbox
+table inet sandbox {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname \"uplink\" masquerade
+    }
+}
+";
+
+/// A guest resolver that keeps one UDP socket for its life, as a
+/// long-running one does: it asks the name server at its argument about a
+/// public name every half second, printing its port once, then `answered`
+/// for each answer from that name server, or `unanswered` for each query
+/// not answered within half a second.
+const KEPT_SOCKET: &str = r#"
+import socket, struct, sys, time
+server = sys.argv[1]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", 0))
+s.settimeout(0.5)
+q = struct.pack(">HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+q += b"\x07example\x03com\x00" + struct.pack(">HH", 1, 1)
+print("port", s.getsockname()[1], flush=True)
+while True:
+    s.sendto(q, (server, 53))
+    try:
+        answer, source = s.recvfrom(4096)
+        print("answered" if source[0] == server else "wrong-source", flush=True)
+        time.sleep(0.5)
+    except OSError:
+        print("unanswered", flush=True)
+"#;
+
+/// Runs `nft` with `args` in `namespace`, given `input`, and returns what
+/// it printed.
+fn nft_in(namespace: &str, input: Option<&str>, args: &[&str]) -> String {
+    use std::io::Write as _;
+
+    let mut child = Command::new("ip")
+        .args(["netns", "exec", namespace, "nft"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "nft {args:?} in {namespace}: {}",
+        output.status
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// What the first sandbox's [`KEPT_SOCKET`] resolver has printed, once
+/// `done` holds for the lines after the first `after`; fails after twenty
+/// seconds.
+async fn kept_socket_lines(
+    client: &Client,
+    after: usize,
+    done: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (output, _) = exec(client, id(0), "cat /tmp/kept-socket.log").await;
+        let lines: Vec<String> = output.lines().map(str::to_owned).collect();
+        if lines.get(after..).is_some_and(&done) {
+            return lines;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resolver never got there: {output}"
+        );
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// A guest resolver that keeps one socket, retrying a private name server
+/// an older version of the rules let it ask, is answered by its own name
+/// server once an upgraded agent starts. The kernel keeps sending the
+/// socket's queries wherever the first went for as long as it retries, so
+/// installing the current rules alone changes nothing; the agent, checking
+/// the sandbox's network as it starts, forgets that connection, and the
+/// same socket's next query is redirected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_socket_is_redirected_once_an_upgraded_agent_starts() {
+    let Some(lab) = lab() else { return };
+    let host = Host::new(&lab, "kept-socket", &["--network"]);
+    let agent = host.start().await;
+    agent.create(id(0), NEVER).await;
+    exec(&agent.client, id(0), "true").await;
+    let namespace = format!("ogc-{}", id(0));
+    let current = nft_in(&namespace, None, &["list", "table", "inet", "sandbox"]);
+    nft_in(&namespace, Some(OLDER_RULES), &["-f", "-"]);
+    let start = format!(
+        "python3 -c '{KEPT_SOCKET}' {PRIVATE_NAME_SERVER} \
+         > /tmp/kept-socket.log 2>&1 < /dev/null &"
+    );
+    exec(&agent.client, id(0), &start).await;
+    // The older rules let its queries out, where nothing answers them.
+    let lines = kept_socket_lines(&agent.client, 0, |lines| {
+        lines.iter().filter(|line| *line == "unanswered").count() >= 3
+    })
+    .await;
+    let port = lines[0].clone();
+    assert!(port.starts_with("port "), "{lines:?}");
+
+    // The current rules alone: its queries still go where its first went.
+    let rules = format!("table inet sandbox\ndelete table inet sandbox\n{current}");
+    nft_in(&namespace, Some(&rules), &["-f", "-"]);
+    let installed = kept_socket_lines(&agent.client, 0, |_| true).await.len();
+    sleep(Duration::from_secs(4)).await;
+    let lines = kept_socket_lines(&agent.client, installed, |_| true).await;
+    let since = &lines[installed..];
+    assert!(
+        since.len() >= 4 && since.iter().all(|line| line == "unanswered"),
+        "with the current rules alone: {since:?}"
+    );
+
+    // An upgraded agent: killed and started again, as an upgrade in place
+    // does, it forgets the connection, and the same socket is answered.
+    agent.kill();
+    let agent = host.start().await;
+    let restarted = kept_socket_lines(&agent.client, 0, |_| true).await.len();
+    let lines = kept_socket_lines(&agent.client, restarted, |lines| {
+        lines.iter().any(|line| line == "answered")
+    })
+    .await;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("port "))
+            .count(),
+        1,
+        "one socket: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == "wrong-source"),
+        "{lines:?}"
+    );
+    let log = std::fs::read_to_string(host.root.join("agent.log")).unwrap();
+    assert!(
+        log.lines().any(|line| {
+            line.contains("forgot connections the rules no longer let through")
+                && line.contains(&namespace)
+                && line.contains("forgotten=1")
+        }),
+        "the agent says what it forgot: {log}"
+    );
+    agent.remove_all().await;
+    agent.kill();
+    host.finish("kept-socket");
+}
+
+/// What a sandbox's first command reports: who it is, sixteen random bytes,
+/// how often its random number generator was reseeded since boot (by its
+/// kernel for a VM fork or by the guest for a restore notice), and the
+/// out-of-memory killer's view of the command and of the guest agent that
+/// runs it, and its machine id and hostname.
+const FIRST_COMMAND: &str = "cat /run/sandbox-id 2>/dev/null || echo none
+head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo
+dmesg | grep -c 'crng reseeded'
+echo $(cat /proc/self/oom_score_adj) $(cat /proc/$PPID/oom_score_adj)
+echo $(cat /etc/machine-id) $(hostname)";
+
+/// Shows why a guest may have missed its restore notice.
+const GUEST_NOTICE_STATUS: &str = "systemctl status lab-notice --no-pager 2>&1 | head -20
+journalctl -b -u lab-notice --no-pager 2>&1 | tail -20
+ss -lx --vsock 2>&1 | head";
+
+/// One sandbox's start: created, then its first command run to the end.
+struct Started {
+    sandbox: Id,
+    /// From the create request to the first command's last output.
+    total_ms: f64,
+    create_ms: f64,
+    /// The same command run again at once: the guest's steady pace, without
+    /// its first touches of memory.
+    again_ms: f64,
+    output: Vec<String>,
+}
+
+/// Creates `sandbox` and runs [`FIRST_COMMAND`] in it.
+async fn start_one(client: Client, sandbox: Id) -> Started {
+    let started = Instant::now();
+    create(&client, sandbox, NEVER).await;
+    let create_ms = started.elapsed().as_secs_f64() * 1e3;
+    let (output, _) = exec(&client, sandbox, FIRST_COMMAND).await;
+    let total_ms = started.elapsed().as_secs_f64() * 1e3;
+    let again = Instant::now();
+    exec(&client, sandbox, FIRST_COMMAND).await;
+    Started {
+        sandbox,
+        total_ms,
+        create_ms,
+        again_ms: again.elapsed().as_secs_f64() * 1e3,
+        output: output.lines().map(str::to_owned).collect(),
+    }
+}
+
+/// Starts one sandbox, then `count` at once, and checks each knows its own
+/// id. Returns the single start, the concurrent ones and how long the
+/// concurrent batch took.
+async fn start_batch(agent: &Agent, count: usize) -> (Started, Vec<Started>, f64) {
+    let single = start_one(agent.client.clone(), id(0)).await;
+    let began = Instant::now();
+    let mut starts = JoinSet::new();
+    for n in 1..=count {
+        starts.spawn(start_one(agent.client.clone(), id(n)));
+    }
+    let mut all = Vec::new();
+    while let Some(started) = starts.join_next().await {
+        all.push(started.unwrap());
+    }
+    let wall_s = began.elapsed().as_secs_f64();
+    for started in all.iter().chain([&single]) {
+        if started.output.first() != Some(&started.sandbox.to_string()) {
+            let (diagnosis, _) = exec(&agent.client, started.sandbox, GUEST_NOTICE_STATUS).await;
+            eprintln!(
+                "{}: notice listener in the guest:\n{diagnosis}",
+                started.sandbox
+            );
+        }
+        assert_eq!(
+            started.output.first().map(String::as_str),
+            Some(started.sandbox.to_string().as_str()),
+            "{}: the guest does not know who it is: {:?}",
+            started.sandbox,
+            started.output
+        );
+        assert_eq!(
+            started.output.get(3).map(String::as_str),
+            Some("0 -1000"),
+            "{}: the guest agent must outlast its commands when memory runs out",
+            started.sandbox
+        );
+    }
+    (single, all, wall_s)
+}
+
+/// Checks that clones of one snapshot each draw their own random bytes and
+/// carry their own machine id, with their sandbox id as hostname.
+fn assert_each_its_own(single: &Started, all: &[Started]) {
+    fn line(started: &Started, n: usize) -> &str {
+        started.output.get(n).map_or("", String::as_str)
+    }
+    let clones = all.len() + 1;
+    let random: BTreeSet<&str> = all.iter().chain([single]).map(|s| line(s, 1)).collect();
+    assert_eq!(
+        random.len(),
+        clones,
+        "every clone draws its own random bytes"
+    );
+    let machines: BTreeSet<&str> = all
+        .iter()
+        .chain([single])
+        .map(|started| line(started, 4).split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(machines.len(), clones, "every clone has its own machine id");
+    for started in all.iter().chain([single]) {
+        assert_eq!(
+            line(started, 4).split(' ').nth(1),
+            Some(started.sandbox.to_string().as_str()),
+            "{}: a clone is named after its sandbox: {:?}",
+            started.sandbox,
+            started.output
+        );
+    }
+}
+
+fn totals(all: &[Started]) -> Vec<f64> {
+    all.iter().map(|started| started.total_ms).collect()
+}
+
+fn agains(all: &[Started]) -> Vec<f64> {
+    all.iter().map(|started| started.again_ms).collect()
+}
+
+/// Sandboxes started from a warm template run their first command within a
+/// restore's time of being created, each knowing its own id and drawing its
+/// own random numbers; compared with cold boots on the same host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn warm_templates_start_sandboxes_fast_and_each_its_own() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB");
+        return;
+    };
+    let count = count();
+    let notice = ["--network", "--restore-notice-port", "53"];
+    let warm = Host::new(
+        &lab,
+        "warm",
+        &[
+            &notice[..],
+            &["--template-ready-port", "54", "--template", "1x512"],
+        ]
+        .concat(),
+    );
+    let agent = warm.start().await;
+    let began = Instant::now();
+    agent
+        .wait_until("a ready template", |status| {
+            status
+                .templates
+                .iter()
+                .any(|template| template.state == TemplateState::Ready)
+        })
+        .await;
+    let template_s = began.elapsed().as_secs_f64();
+    assert_eq!(firecrackers(), 0, "the template's VM has ended");
+    let (single, all, wall_s) = start_batch(&agent, count).await;
+    assert_each_its_own(&single, &all);
+    for started in all.iter().chain([&single]) {
+        let reseeds: u32 = started
+            .output
+            .get(2)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        assert!(
+            reseeds >= 1,
+            "{}: no reseed on restore: {:?}",
+            started.sandbox,
+            started.output
+        );
+    }
+    let creates: Vec<f64> = all.iter().map(|started| started.create_ms).collect();
+    let status = agent.status().await;
+    let boots = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "boot")
+        .map(|(_, stats)| stats.done);
+    let restores = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "restore")
+        .map(|(_, stats)| stats.done);
+    agent.remove_all().await;
+    agent.kill();
+    warm.finish(&format!("warm-pool-{count}"));
+
+    let cold = Host::new(&lab, "cold", &notice);
+    let agent = cold.start().await;
+    let (cold_single, cold_all, cold_wall_s) = start_batch(&agent, count).await;
+    agent.remove_all().await;
+    agent.kill();
+    cold.finish(&format!("cold-start-{count}"));
+
+    save_results(
+        &format!("warm-pool-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "template_ready_s": template_s,
+            "warm": {
+                "single_create_to_first_command_ms": single.total_ms,
+                "single_second_command_ms": single.again_ms,
+                "concurrent_create_to_first_command_ms": summary(&totals(&all)),
+                "concurrent_second_command_ms": summary(&agains(&all)),
+                "concurrent_create_ms": summary(&creates),
+                "concurrent_wall_s": wall_s,
+                "boot_steps": boots,
+                "restore_steps": restores,
+            },
+            "cold": {
+                "single_create_to_first_command_ms": cold_single.total_ms,
+                "single_second_command_ms": cold_single.again_ms,
+                "concurrent_create_to_first_command_ms": summary(&totals(&cold_all)),
+                "concurrent_second_command_ms": summary(&agains(&cold_all)),
+                "concurrent_wall_s": cold_wall_s,
+            },
+        }),
+    );
+    assert_eq!(boots, Some(0), "every warm sandbox restored");
+}

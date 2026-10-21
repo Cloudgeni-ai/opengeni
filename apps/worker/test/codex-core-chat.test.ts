@@ -19,6 +19,8 @@ import {
 import {
   assertTurnModelConnection,
   buildCoreCodexRequestTokenResolver,
+  CODEX_CORE_TURN_PROVIDER,
+  prepareCoreCodexTurnEntitlements,
 } from "../src/activities/agent-turn/codex-core-capacity";
 import {
   claimCodexActiveFromCutover,
@@ -45,6 +47,7 @@ import {
   finalizeCoreCodexUsage,
   observeCodexResponseCompletion,
   recordCoreCodexRefusal,
+  recordCoreCodexUsageReading,
 } from "../src/activities/agent-turn/codex-core-settlement";
 import {
   CodexCredentialLeaseLostError,
@@ -52,10 +55,7 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
-import {
-  CodexIncludedUsageExhaustedError,
-  CodexIncludedUsageUnknownError,
-} from "../src/activities/agent-turn/codex-credit-policy";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import {
   coreCodexFailoverDisposition,
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
@@ -76,6 +76,11 @@ import {
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 import { SUBSCRIPTION_CORE_CODEX } from "../../../packages/db/src/subscription-core-codex-adapter";
+import OpenAI from "openai";
+import {
+  CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
+} from "@opengeni/runtime";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
@@ -90,6 +95,56 @@ function spy<T extends object, K extends keyof T>(target: T, key: K) {
 }
 afterEach(() => {
   while (restores.length > 0) restores.pop()!.mockRestore();
+});
+
+/**
+ * The context checkpoint request refused by the included-usage policy before
+ * anything is sent: the Codex transport rejects, the OpenAI client wraps that
+ * refusal, and the runtime wraps the result as a compaction provider failure.
+ */
+async function checkpointRequestCreditPolicyRefusal(
+  refusal: () => Error = () => new CodexIncludedUsageExhaustedError(3600),
+): Promise<CompactionProviderResponseError> {
+  let dispatched = 0;
+  const client = new OpenAI({
+    apiKey: "fixture",
+    baseURL: "https://fixture.invalid",
+    maxRetries: 0,
+    fetch: codexSubscriptionFetch(async () => {
+      dispatched += 1;
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }),
+  });
+  const error = await codexRequestStorage.run(
+    {
+      clientVersion: "fixture",
+      getToken: async () => {
+        throw refusal();
+      },
+      refresh: async () => {
+        throw refusal();
+      },
+      resolveModel: (model) => model,
+    },
+    () =>
+      client.responses.create({ model: "fixture", input: "checkpoint" }).then(
+        () => null,
+        (rejection: unknown) => rejection,
+      ),
+  );
+  expect(dispatched).toBe(0);
+  return new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+}
+
+describe("checkpoint request refused by the included-usage policy", () => {
+  test.each([["exhausted", () => new CodexIncludedUsageExhaustedError(3600)]] as const)(
+    "%s included usage recovers the same turn instead of ending it",
+    async (_label, refusal) => {
+      const error = await checkpointRequestCreditPolicyRefusal(refusal);
+      expect(error.code).toBe(refusal().code);
+      expect(turnErrors.shouldRecoverCompactionProviderFailure(error)).toBe(true);
+    },
+  );
 });
 
 const identity: db.SubscriptionCoreTurnIdentity = {
@@ -189,6 +244,88 @@ function gate(state: "not_configured" | "disabled" | "enabled") {
   );
   spy(db, "readSubscriptionProviderCutoverState").mockResolvedValue(state);
 }
+
+describe("accepted-turn entitlement preparation", () => {
+  test("starts the same scoped read early and placement joins it", async () => {
+    const deps = capacityDeps();
+    deps.turn.initiatingHumanSubjectId = identity.initiatingHumanSubjectId;
+    const refreshGate = Promise.withResolvers<number>();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockReturnValue(
+      refreshGate.promise,
+    );
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(
+      deps.db,
+      deps.settings,
+      {
+        accountId: deps.input.accountId,
+        workspaceId: deps.input.workspaceId,
+        subjectId: identity.initiatingHumanSubjectId,
+      },
+      undefined,
+      { refreshCredentials: false },
+    );
+    let ready = false;
+    const placementGate = CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity).then(() => {
+      ready = true;
+    });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    refreshGate.resolve(Date.now() + 60_000);
+    await placementGate;
+    expect(ready).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["expired preparation", -1],
+    ["still-fresh preparation", 60_000],
+  ] as const)("rechecks %s before placement", async (_label, remainingMs) => {
+    const deps = capacityDeps();
+    deps.codexEntitlementPreparation = Promise.resolve(Date.now() + remainingMs);
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(
+      Date.now() + 60_000,
+    );
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(deps.db, deps.settings, {
+      accountId: deps.input.accountId,
+      workspaceId: deps.input.workspaceId,
+      subjectId: identity.initiatingHumanSubjectId,
+    });
+  });
+
+  test("without preparation the existing live check still runs", async () => {
+    const deps = capacityDeps();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(
+      Date.now() + 60_000,
+    );
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed hint leaves the live placement check authoritative", async () => {
+    const deps = capacityDeps();
+    const failure = new Error("catalog scope refused");
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockRejectedValue(failure);
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    void deps.codexEntitlementPreparation.catch(() => undefined);
+    await expect(CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity)).rejects.toBe(failure);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  test("a failed hint does not fail a successful live check", async () => {
+    const deps = capacityDeps();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements")
+      .mockRejectedValueOnce(new Error("early scope read failed"))
+      .mockResolvedValue(Date.now() + 60_000);
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    void deps.codexEntitlementPreparation.catch(() => undefined);
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("Codex cutover gate dispositions", () => {
   test("no cutover row fails closed and never touches either selector", async () => {
@@ -300,6 +437,8 @@ describe("Codex cutover gate dispositions", () => {
     });
     spy(db, "getSessionGoal").mockResolvedValue(null as never);
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    // No Steer is waiting for this turn's next model step unless a test says so.
+    const waitingSteer = spy(db, "resolveWaitingSteer").mockResolvedValue(null);
     const waiter = {
       waiterId: "waiter-1",
       accountId: "account-1",
@@ -332,7 +471,7 @@ describe("Codex cutover gate dispositions", () => {
     });
     const evaluate = spy(db, "evaluateSubscriptionCoreCodexPlacement");
     const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
-    return { waiter, armed, evaluate, reconcile };
+    return { waiter, armed, evaluate, reconcile, waitingSteer };
   }
 
   test("a core wait parks the turn on the durable core waiter and hands the workflow its reference", async () => {
@@ -452,6 +591,24 @@ describe("Codex cutover gate dispositions", () => {
       expect(credits).not.toHaveBeenCalled();
     },
   );
+
+  test("a Steer waiting for the next model step replaces a new core wait", async () => {
+    gate("enabled");
+    const { armed, evaluate, reconcile, waitingSteer } = coreWaitMocks(
+      new Date(Date.now() + 60_000),
+    );
+    waitingSteer.mockResolvedValue({ wakeRevision: 2, workflowId: "session-1", eventIds: [] });
+    const deps = capacityDeps();
+    const outcome = (await selectCodexTurnCapacity(deps)) as { exit?: { status?: string } };
+    // A Steer waiting for the next model step replaces the capacity wait at once:
+    // the turn ends idle, so the Steer is claimed next, and the wait is never re-evaluated.
+    expect(outcome.exit?.status).toBe("idle");
+    expect(armed).toHaveBeenCalledTimes(1);
+    expect(waitingSteer).toHaveBeenCalledTimes(1);
+    expect(waitingSteer.mock.calls[0]![1]).toMatchObject({ sessionId: "session-1" });
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
 
   test("a core wait whose re-evaluation can already run resumes the same turn", async () => {
     gate("enabled");
@@ -700,6 +857,49 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
   };
   const lease = { holderId: "codex-turn:holder", generation: 3 };
 
+  test("each response appends under the serving lease without waiting for finalization", async () => {
+    const append = spy(db, "recordSubscriptionCoreCodexTurnUsageReading").mockResolvedValue(true);
+    const quota = spy(db, "applySubscriptionCoreCodexQuotaObservation");
+    for (let index = 0; index < 3; index++) {
+      const checkedAt = new Date(1_790_000_000_000 + index * 60_000);
+      await recordCoreCodexUsageReading({
+        db: {} as db.Database,
+        core,
+        lease,
+        credentialVersion: null,
+        usage: {
+          primaryUsedPercent: index * 10,
+          primaryResetAt: null,
+          secondaryUsedPercent: null,
+          secondaryResetAt: null,
+          checkedAt,
+        },
+      });
+      expect(append).toHaveBeenLastCalledWith(
+        {},
+        identity,
+        { connectionId: core.connectionId, ...lease },
+        expect.objectContaining({ observedAt: checkedAt.getTime(), observedRefreshGeneration: 5 }),
+      );
+    }
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(quota).not.toHaveBeenCalled();
+    await recordCoreCodexUsageReading({
+      db: {} as db.Database,
+      core,
+      lease: { holderId: null, generation: null },
+      credentialVersion: 5,
+      usage: {
+        primaryUsedPercent: 40,
+        primaryResetAt: null,
+        secondaryUsedPercent: null,
+        secondaryResetAt: null,
+        checkedAt: new Date(),
+      },
+    });
+    expect(append).toHaveBeenCalledTimes(3);
+  });
+
   test("usage headers become a fenced shared quota observation", () => {
     const checkedAt = new Date("2026-10-08T12:00:00Z");
     const reset = new Date("2026-10-08T15:00:00Z");
@@ -812,10 +1012,7 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     };
   }
 
-  test.each([
-    ["usage_verification_policy", { kind: "rate_limit", cooldownSeconds: 60 }],
-    ["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }],
-  ] as const)(
+  test.each([["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }]] as const)(
     "credit-policy refusal (%s) keeps a stored exhausted weekly window; a usage reading still replaces it",
     async (origin, failure) => {
       const now = new Date("2026-10-08T12:00:00Z");
@@ -825,18 +1022,13 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         resetsAt: weeklyReset,
       });
       const observation = await creditPolicyObservation({ ...failure, origin }, now);
-      // The write itself: a 60-second rate-limit hold with no windows when
-      // usage could not be verified; one exhausted `included_usage` window
-      // (and no deadline) when included usage is exhausted.
+      // The write itself: one exhausted `included_usage` window and no deadline.
       const hold = now.getTime() + 60_000;
       expect(observation).toEqual({
-        windows:
-          origin === "included_usage_policy"
-            ? [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }]
-            : [],
+        windows: [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }],
         modelCooldowns: {},
-        exhaustedUntil: origin === "usage_verification_policy" ? hold : null,
-        exhaustedKind: origin === "usage_verification_policy" ? "rate_limit" : null,
+        exhaustedUntil: null,
+        exhaustedKind: null,
         revision: 0,
         observedAt: now.getTime(),
         observedRefreshGeneration: 5,
@@ -1931,7 +2123,10 @@ describe("core Codex failure settlement", () => {
 
   test.each([
     ["provider quota refusal", () => usageCap()],
-    ["unverifiable included usage", () => new CodexIncludedUsageUnknownError()],
+    [
+      "exhausted included usage on the checkpoint request",
+      () => checkpointRequestCreditPolicyRefusal(),
+    ],
   ] as const)(
     "%s re-places the turn while a cancelled session-title request is unsettled",
     async (_label, makeError) => {
@@ -1950,7 +2145,7 @@ describe("core Codex failure settlement", () => {
         settle: async () => {},
       });
       await titleRequests.reserve({ requestId: "turn-1:title:1", transportAttempt: 1 });
-      const { deps, settle } = failureDeps(makeError(), { ...core, titleRequests });
+      const { deps, settle } = failureDeps(await makeError(), { ...core, titleRequests });
       expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
       expect(recovery).toHaveBeenCalledWith(
         {},
@@ -2460,6 +2655,41 @@ describe("claim-time Codex cutover handling", () => {
 });
 
 describe("run and finalization wiring for core turns", () => {
+  test("early entitlement work belongs to the accepted activity and drains on every exit", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const claimSource = await Bun.file(
+      new URL("../src/activities/agent-turn/claim.ts", import.meta.url),
+    ).text();
+    const claimed = claimSource.indexOf('if (claim.action === "unclaimed")');
+    const hint = claimSource.indexOf("deps.startCodexEntitlementPreparation?.(turn)");
+    expect(hint).toBeGreaterThan(claimed);
+    expect(claimSource.slice(claimed, hint)).toContain('claimedPolicy.kind === "valid"');
+    expect(claimSource.slice(claimed, hint)).toContain(
+      "!settings.subscriptionCrossProviderFailoverEnabled",
+    );
+    const prepare = source.indexOf(
+      "codexEntitlementPreparation ??= prepareCoreCodexTurnEntitlements(",
+    );
+    const learning = source.indexOf(
+      "const [learningResult, attachmentResult] = await Promise.allSettled(",
+    );
+    const actor = source.indexOf("return await withSessionRlsActorContext(", learning);
+    expect(prepare).toBeGreaterThan(0);
+    expect(learning).toBeGreaterThan(prepare);
+    expect(actor).toBeGreaterThan(learning);
+    expect(source.slice(prepare, learning)).toContain("settings,");
+    expect(source.slice(prepare, learning)).toContain(
+      "void codexEntitlementPreparation.catch(() => undefined)",
+    );
+    const drain = source.indexOf("await Promise.allSettled([codexEntitlementPreparation])");
+    const cleanup = source.lastIndexOf("} finally {", drain);
+    const finalize = source.indexOf("await finalizeTurnAttempt(", cleanup);
+    expect(drain).toBeGreaterThan(cleanup);
+    expect(finalize).toBeGreaterThan(drain);
+  });
+
   const core: CodexSubscriptionCoreTurn = {
     identity,
     connectionId: "connection-core",

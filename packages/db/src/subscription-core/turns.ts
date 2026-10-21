@@ -12,10 +12,13 @@
  * persisted refresh and fences quota observations.
  */
 import { sql } from "drizzle-orm";
+import { recordSubscriptionUsageReading, withSubscriptionUsageReading } from "./usage-reading";
+import type { SubscriptionCoreOperationLeaseRef } from "./operations";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
 import {
+  modelServiceTierCatalogEntry,
   readTurnExecutionPolicyV1,
   EMPTY_SUBSCRIPTION_PERSONAL_AUTHORITY_V2,
   SubscriptionPersonalAuthorityV2,
@@ -30,6 +33,7 @@ import {
   personalFallbackActive,
   decidePlacement,
   quotaCapacity,
+  storedQuotaDocument,
   subscriptionCoreCredentialRefresher,
   type Ineligibility,
   type PlacementDecision,
@@ -266,6 +270,12 @@ class SubscriptionBindingConflict extends Error {
 }
 
 const BINDING_CONFLICT_RETRIES = 3;
+
+/**
+ * How long before its settlement a refusal's response headers may have
+ * claimed the cooldown the settlement records (`recordSubscriptionCoreModelCooldown`).
+ */
+export const SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS = 2 * 60_000;
 
 /**
  * The session's explicit choice for this provider names a connection that was
@@ -699,6 +709,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       policy.kind === "valid" && policy.policy.productModelId === productModelId
         ? policy.policy.upstreamModelId
         : null;
+    // An Ultrafast turn needs an account that offers the model at that tier;
+    // an observed list records it next to the slug.
+    const requiredCatalogEntries =
+      upstreamModelId === null
+        ? null
+        : policy.kind === "valid" && policy.policy.latencyMode === "ultrafast"
+          ? [upstreamModelId, modelServiceTierCatalogEntry(upstreamModelId, "ultrafast")]
+          : [upstreamModelId];
     const input: PlacementInput = {
       ...worldInput,
       session: {
@@ -715,10 +733,12 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       connections: worldInput.connections
         .filter((connection) => connection.provider === providerId)
         .map((connection) =>
-          upstreamModelId !== null && connection.observedModelSlugs != null
+          requiredCatalogEntries !== null && connection.observedModelSlugs != null
             ? {
                 ...connection,
-                entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
+                entitledModelIds: requiredCatalogEntries.every((entry) =>
+                  connection.observedModelSlugs!.includes(entry),
+                )
                   ? [productModelId]
                   : [],
               }
@@ -766,7 +786,10 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   /** Read live credit consent and placement without changing a binding or lease. */
   async function canSpendSubscriptionCoreExtraCredits(
     db: Database,
-    request: SubscriptionCorePlacementRequest & { connectionId: string },
+    request: SubscriptionCorePlacementRequest & {
+      connectionId: string;
+      operationRef?: SubscriptionCoreOperationLeaseRef;
+    },
   ): Promise<boolean> {
     const { identity } = request;
     const now = new Date();
@@ -775,12 +798,26 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       provider,
       placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
       async (tx, worldInput) => {
-        if (
-          !(await cutoverEnabled(tx, identity.accountId)) ||
-          !(await readAttemptFence(tx, request))
-        )
-          return false;
-        if (
+        if (!(await cutoverEnabled(tx, identity.accountId))) return false;
+        if (request.operationRef) {
+          const ref = request.operationRef;
+          if (
+            ref.operationKind !== "session_title" ||
+            ref.attemptId !== request.attemptId ||
+            ref.connectionId !== request.connectionId
+          )
+            return false;
+          await authorizeSubscriptionCoreFrozenPersonal(tx, identity);
+          const [connection] = await rawRows<{ status: string }>(
+            tx,
+            sql`
+            select status from opengeni_private.read_subscription_core_connection_credential(${providerId},
+              ${identity.accountId}::uuid, ${identity.workspaceId}::uuid, ${ref.connectionId}::uuid,
+              ${ref.operationId}::uuid, ${ref.attemptId}::uuid, ${ref.holderId}::text, ${ref.generation}::bigint)`,
+          );
+          if (connection?.status !== "active") return false;
+        } else if (
+          !(await readAttemptFence(tx, request)) ||
           !(await assertSubscriptionTurnLeaseCurrent(tx, {
             ...identity,
             provider: providerId,
@@ -995,14 +1032,24 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * state, so placement excludes the model there, a waiter learns when it
    * returns, and a plan change seen on refresh clears it early. Fenced on the
    * refresh generation the refused bearer carried; never shortens a cooldown.
+   *
+   * The cooldown's claim (`QuotaBlockClaim`: which limits it came from, so a
+   * usage reading may end it early) stays only when it is the same refusal's:
+   * the response headers of a refused request are joined before its
+   * settlement, so a claim observed within `SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS`
+   * before `refusedAt` that still explains the stored deadline is moved to
+   * the merged deadline. Any other claim of the model is dropped: a refusal
+   * without that evidence keeps the model cooled until its own end.
    */
   async function recordSubscriptionCoreModelCooldown(
     db: Database,
     identity: SubscriptionCoreTurnIdentity,
     lease: SubscriptionCoreLeaseRef,
-    input: { modelId: string; until: Date; refreshGeneration: number },
+    input: { modelId: string; until: Date; refreshGeneration: number; refusedAt?: number },
   ): Promise<boolean> {
     if (!input.modelId.trim() || input.modelId.length > 256) return false;
+    const claimSince =
+      input.refusedAt === undefined ? null : input.refusedAt - SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS;
     const access = await withLeasedConnection(db, identity, lease, async (tx) => {
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
         tx,
@@ -1019,6 +1066,29 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         exhaustedKind: null,
         source: "refusal",
       };
+      const stored = sql`subscription_connection_quota.quota`;
+      const until = sql`greatest(
+        coalesce((${stored}->'modelCooldowns'->>${input.modelId}::text)::bigint, 0),
+        ${input.until.getTime()}::bigint
+      )`;
+      const claim = sql`(${stored}->'modelCooldownClaims'->${input.modelId}::text)`;
+      const cooled = sql`jsonb_set(
+        case when jsonb_typeof(${stored}->'modelCooldowns') = 'object'
+          then ${stored}
+          else jsonb_set(${stored}, '{modelCooldowns}', '{}'::jsonb)
+        end,
+        array['modelCooldowns', ${input.modelId}],
+        to_jsonb(${until})
+      )`;
+      // The same refusal's claim, still tied to the stored deadline.
+      const keepClaim = sql`(
+        ${claimSince}::bigint is not null
+        and jsonb_typeof(${claim}) = 'object'
+        and ${claim}->'until' = ${stored}->'modelCooldowns'->${input.modelId}::text
+        and case when jsonb_typeof(${claim}->'observedAt') = 'number'
+          then (${claim}->>'observedAt')::numeric >= ${claimSince}::bigint
+          else false end
+      )`;
       const rows = await rawRows<{ connection_id: string }>(
         tx,
         sql`insert into subscription_connection_quota (
@@ -1038,16 +1108,20 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
                 when subscription_connection_quota.observed_refresh_generation
                   is distinct from excluded.observed_refresh_generation
                 then excluded.quota
+                when ${stored}->'modelCooldownClaims' is null then ${cooled}
+                when jsonb_typeof(${stored}->'modelCooldownClaims') <> 'object'
+                  then ${cooled} - 'modelCooldownClaims'
                 else jsonb_set(
-                  case when jsonb_typeof(subscription_connection_quota.quota->'modelCooldowns') = 'object'
-                    then subscription_connection_quota.quota
-                    else jsonb_set(subscription_connection_quota.quota, '{modelCooldowns}', '{}'::jsonb)
-                  end,
-                  array['modelCooldowns', ${input.modelId}],
-                  to_jsonb(greatest(
-                    coalesce((subscription_connection_quota.quota->'modelCooldowns'->>${input.modelId})::bigint, 0),
-                    ${input.until.getTime()}::bigint
-                  ))
+                  ${cooled},
+                  '{modelCooldownClaims}',
+                  ((${stored}->'modelCooldownClaims') - ${input.modelId}::text) ||
+                    case when ${keepClaim}
+                      then jsonb_build_object(
+                        ${input.modelId}::text,
+                        ${claim} || jsonb_build_object('until', ${until})
+                      )
+                      else '{}'::jsonb
+                    end
                 )
               end,
               updated_at = case
@@ -1475,6 +1549,28 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     return (await applySubscriptionCoreQuotaObservation(db, identity, lease, observation)).applied;
   }
 
+  /** Every actual reading is telemetry, independent of the allocator's latest-only merge. */
+  async function recordSubscriptionCoreTurnUsageReading(
+    db: Database,
+    identity: SubscriptionCoreTurnIdentity,
+    lease: SubscriptionCoreLeaseRef,
+    observation: SubscriptionQuota,
+  ): Promise<boolean> {
+    if (observation.source !== "usage_endpoint" && observation.source !== "response_headers")
+      return false;
+    const access = await withLeasedConnection(db, identity, lease, async (tx) => {
+      await recordSubscriptionUsageReading(
+        tx,
+        identity.accountId,
+        lease.connectionId,
+        providerId,
+        observation,
+      );
+      return true;
+    });
+    return access.status === "ok" && access.value;
+  }
+
   /**
    * Same as recordSubscriptionCoreQuotaObservation, and also reports
    * whether the observation ended an exhaustion the store still held: that is
@@ -1494,6 +1590,14 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           and id = ${lease.connectionId}::uuid`,
       );
       if (!connection) return { applied: false, recovered: false };
+      if (observation.source === "usage_endpoint" || observation.source === "response_headers")
+        await recordSubscriptionUsageReading(
+          tx,
+          identity.accountId,
+          lease.connectionId,
+          providerId,
+          observation,
+        );
       const refreshGeneration = Number(connection.refresh_generation);
       const [row] = await rawRows<{
         quota: unknown;
@@ -1519,13 +1623,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         current !== null &&
         quotaCapacity(current, observedNow).kind === "exhausted" &&
         quotaCapacity(next, observedNow).kind !== "exhausted";
-      const stored = {
-        windows: next.windows,
-        modelCooldowns: next.modelCooldowns,
-        exhaustedUntil: next.exhaustedUntil,
-        exhaustedKind: next.exhaustedKind,
-        source: next.source,
-      };
+      const stored = withSubscriptionUsageReading(storedQuotaDocument(next), observation);
       const observedAt = new Date(next.observedAt ?? Date.now()).toISOString();
       await tx.execute(
         sql`insert into subscription_connection_quota (
@@ -1651,6 +1749,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     loadSubscriptionCoreCredential,
     refreshSubscriptionCoreCredential,
     recordSubscriptionCoreQuotaObservation,
+    recordSubscriptionCoreTurnUsageReading,
     applySubscriptionCoreQuotaObservation,
     recordSubscriptionCoreTurnFailure,
     countSubscriptionCoreTurnRefusals,

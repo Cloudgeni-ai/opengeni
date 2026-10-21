@@ -20,6 +20,8 @@ import {
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
+  mutateSessionControlInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -244,6 +246,66 @@ async function startRun(workspace: Fixture, taskId: string) {
 }
 
 describe("the owner is told when a schedule cannot use a connector", () => {
+  test("a reusable paused chat records a specific skipped run without replay or resume", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: person(workspace, workspace.owner),
+      authorization: signedIn(workspace, workspace.owner),
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Periodic check",
+        schedule: { type: "manual" },
+        runMode: "reusable_session",
+        overlapPolicy: "skip",
+        agentConfig: { prompt: "Check progress", tools: [] },
+      }),
+    });
+    const first = await startRun(workspace, task.id);
+    await runTurn(workspace, first.dispatched, first.runId, []);
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspace.workspaceId,
+      workspace.owner,
+      (db) =>
+        mutateSessionControlInTransaction(db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          sessionId: first.dispatched.sessionId,
+          action: "pause",
+          actor: { type: "human", subjectId: workspace.owner },
+          operationKey: crypto.randomUUID(),
+        }),
+    );
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey: `paused-occurrence:${crypto.randomUUID()}`,
+    };
+    const activities = scheduler();
+    for (let retry = 0; retry < 2; retry++) {
+      const result = await activities.dispatchScheduledTaskRun(input);
+      expect(result).toMatchObject({ action: "blocked", reason: "scheduled_run_terminal" });
+    }
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(2);
+    expect(runs.filter((run) => run.status === "skipped")).toMatchObject([
+      {
+        error: "scheduled_session_paused",
+        sessionId: first.dispatched.sessionId,
+      },
+    ]);
+    const [state] = await admin`select s.direct_control_state,
+      (select count(*)::int from session_turns where session_id = s.id) as turns,
+      (select count(*)::int from session_turns where session_id = s.id and status = 'queued') as queued
+      from sessions s where s.id = ${first.dispatched.sessionId}`;
+    expect(state).toMatchObject({ direct_control_state: "paused", turns: 1, queued: 0 });
+  }, 180_000);
+
   test("a revoked pinned account: the run goes without it, the owner is told, and re-pinning clears it", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

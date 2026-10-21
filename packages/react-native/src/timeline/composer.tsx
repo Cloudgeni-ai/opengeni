@@ -2,6 +2,7 @@ import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
 } from "@opengeni/react/composer-messages";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
 import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from "react";
 import {
@@ -23,7 +24,7 @@ import type { NativeVoiceInput } from "../voice-input";
 import type { NativePickedFile } from "../adapters";
 import { useNativeTimelineMessages, type NativeTimelineMessages } from "./messages";
 import { useComposerImagePaste } from "./paste";
-import { composerTrailingMode } from "./composer-state";
+import { composerAlternateSend, composerTrailingMode } from "./composer-state";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -45,6 +46,14 @@ export interface SessionComposerProps {
   placeholder?: string | undefined;
   /** Run state drives the trailing action: pause while running, resume when paused. */
   running?: boolean | undefined;
+  /**
+   * The other way to send while the agent works, shown beside Send once there
+   * is something to send: `queue` when Send steers, `steer` when Send queues,
+   * `null` when Send is not taking its busy path. Pass the composer's
+   * `alternateSend` and `sendAlternate`; omit to offer Send only.
+   */
+  alternateSend?: "queue" | "steer" | null | undefined;
+  onAlternateSend?: (() => void) | undefined;
   paused?: boolean | undefined;
   onPause?: (() => void) | undefined;
   onResume?: (() => void) | undefined;
@@ -218,7 +227,8 @@ export function SessionComposer(props: SessionComposerProps) {
     const lifted = keyboard.height.value - offset;
     return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
   });
-  const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const t = useOpenGeniText();
+  const messages = { ...defaultChatComposerMessages(t), ...props.messages };
   const fieldSize = ios ? 17 : 16;
   const compact = !props.options;
   const voice = props.voice?.available ? props.voice : undefined;
@@ -307,7 +317,7 @@ export function SessionComposer(props: SessionComposerProps) {
         ) : voice?.status === "error" && voice.error ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${voice.error} Dismiss`}
+            accessibilityLabel={t("native.timeline.composer.errorDismiss", { error: voice.error })}
             onPress={voice.clearError}
             style={{
               flexDirection: "row",
@@ -347,7 +357,8 @@ export function SessionComposer(props: SessionComposerProps) {
           >
             {leading}
             <View style={{ flex: 1, minWidth: 0 }}>{field(true)}</View>
-            <View style={{ paddingBottom: 0 }}>
+            <View style={{ paddingBottom: 0, flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <AlternateSendAction {...props} messages={messages} />
               <TrailingAction {...props} messages={messages} />
             </View>
           </View>
@@ -369,6 +380,7 @@ export function SessionComposer(props: SessionComposerProps) {
               <View style={{ flex: 1, flexDirection: "row", alignItems: "center", minWidth: 0 }}>
                 {props.options}
               </View>
+              <AlternateSendAction {...props} messages={messages} />
               <TrailingAction {...props} messages={messages} />
             </View>
           </>
@@ -478,6 +490,7 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
  * the elapsed time, and stop (which transcribes into the draft).
  */
 function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -578,7 +591,7 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Stop and transcribe"
+        accessibilityLabel={t("native.timeline.composer.stopAndTranscribe")}
         onPress={voice.stop}
         disabled={!recording}
         hitSlop={6}
@@ -601,6 +614,68 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
         />
       </Pressable>
     </View>
+  );
+}
+
+/**
+ * Queue or Steer beside Send while the agent works, so a phone (no
+ * Cmd/Ctrl+Enter) always has both choices. Shown only with something to send.
+ */
+function AlternateSendAction(props: SessionComposerProps & { messages: ChatComposerMessages }) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const c = theme.colors;
+  const alternate = composerAlternateSend({
+    trailing: composerTrailingMode({
+      value: props.value,
+      canSend: props.canSend,
+      paused: props.paused,
+      running: props.running,
+      canResume: Boolean(props.onResume),
+      canPause: Boolean(props.onPause),
+      canCall: Boolean(props.call),
+    }),
+    alternateSend: props.alternateSend,
+    available: props.onAlternateSend !== undefined,
+  });
+  const onAlternateSend = props.onAlternateSend;
+  if (alternate === null || !onAlternateSend) return null;
+  const label =
+    alternate === "queue"
+      ? (props.messages.queueLabel ?? t("composerMessages.queue"))
+      : (props.messages.steerLabel ?? t("composerMessages.steer"));
+  const hint =
+    alternate === "queue"
+      ? (props.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+      : (props.messages.steerTitle ?? t("composerMessages.steerReadsItSoon"));
+  const disabled = !props.canSend || Boolean(props.sending);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      hitSlop={6}
+      onPress={() => {
+        props.onActionFeedback?.();
+        onAlternateSend();
+      }}
+      style={({ pressed }) => ({
+        height: 34,
+        paddingHorizontal: 14,
+        borderRadius: 17,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: withAlpha(c.fg, 0.08),
+        opacity: disabled ? 0.42 : pressed ? 0.8 : 1,
+        transform: [{ scale: pressed ? 0.96 : 1 }],
+      })}
+    >
+      <Text style={{ ...fontStyle(theme, 600), fontSize: 14, lineHeight: 18, color: c.fg }}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -687,21 +762,30 @@ export function ComposerPill({
   onPress,
   leading,
   fast = false,
+  ultrafast = false,
 }: {
   label: string;
   /** Secondary text after the label (the reasoning effort); truncates before the label. */
   detail?: string | null | undefined;
   /** Fast latency is on: a filled bolt after the name, as on the web pill. */
   fast?: boolean | undefined;
+  /** Ultrafast latency is on: two filled bolts. Takes precedence over `fast`. */
+  ultrafast?: boolean | undefined;
   onPress?: (() => void) | undefined;
   /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
+  const speedLabel = ultrafast
+    ? t("native.timeline.composer.ultrafast")
+    : fast
+      ? t("native.timeline.composer.fast")
+      : null;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={[label, detail, fast ? "Fast" : null].filter(Boolean).join(", ")}
+      accessibilityLabel={[label, detail, speedLabel].filter(Boolean).join(", ")}
       onPress={onPress}
       disabled={!onPress}
       style={({ pressed }) => ({
@@ -741,7 +825,12 @@ export function ComposerPill({
           {detail}
         </Text>
       ) : null}
-      {fast ? <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} /> : null}
+      {fast || ultrafast ? (
+        <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} />
+      ) : null}
+      {ultrafast ? (
+        <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} />
+      ) : null}
       <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
     </Pressable>
   );

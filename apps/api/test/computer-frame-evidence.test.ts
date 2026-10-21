@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import sharp from "sharp";
 import type {
   ComputerActionCommand,
   ComputerObservation,
@@ -143,11 +144,12 @@ describe("Computer frame evidence pipeline", () => {
       expect(result.content).toEqual([
         {
           type: "text",
-          text: JSON.stringify({
-            ...observation,
-            frameId: frame.metadata.frameId,
-            capturedFrame: { width: sdkFrame.width, height: sdkFrame.height },
-          }),
+          text: [
+            `screen screen:0 "Fixture screen" at 0,0 size 1x1 focused`,
+            `Observation ${observation.observationId}, target generation ${observation.target.targetGeneration}, frame ${frame.metadata.frameId}`,
+            `Screenshot ${sdkFrame.width}x${sdkFrame.height} pixels; pointer x,y use these pixels.`,
+            "The accessibility tree has no readable elements; use the screenshot.",
+          ].join("\n"),
         },
         {
           type: "image",
@@ -156,6 +158,75 @@ describe("Computer frame evidence pipeline", () => {
         },
       ]);
     });
+  });
+
+  test("re-encodes an oversized PNG-only capture as a same-size JPEG without recapturing", async () => {
+    await withPipeline(async ({ driver, reference }) => {
+      driver.pngOnlyNoiseMask = 63;
+      const session = driver.sessionClient!;
+      const frame = await captureModelComputerFrame(session, { ...reference, targetId });
+
+      expect(driver.captureOptions).toHaveLength(1);
+      expect(driver.lastPngBytes).toBeGreaterThan(256 * 1024);
+      expect(frame.mediaType).toBe("image/jpeg");
+      expect(frame.data.byteLength).toBeLessThanOrEqual(256 * 1024);
+      expect(frame.metadata).toMatchObject({
+        frameId: "frame-0",
+        mediaType: "image/jpeg",
+        width: 1_024,
+        height: 768,
+        sha256: createHash("sha256").update(frame.data).digest("hex"),
+      });
+      const decoded = await sharp(frame.data).metadata();
+      expect([decoded.format, decoded.width, decoded.height]).toEqual(["jpeg", 1_024, 768]);
+    });
+  });
+
+  test("falls back to the compact capture when the re-encoded PNG is still too large", async () => {
+    await withPipeline(async ({ driver, reference }) => {
+      driver.pngOnlyNoiseMask = 255;
+      const frame = await captureModelComputerFrame(driver.sessionClient!, {
+        ...reference,
+        targetId,
+      });
+
+      expect(driver.captureOptions).toHaveLength(2);
+      expect(frame.mediaType).toBe("image/jpeg");
+      expect(frame.data.byteLength).toBeLessThanOrEqual(256 * 1024);
+      expect(frame.metadata).toMatchObject({ frameId: "frame-1", width: 640, height: 480 });
+    });
+  });
+
+  test("fails clearly and non-retryably when no capture fits the model bound", async () => {
+    const oversized = padded(jpeg(), 256 * 1024 + 1);
+    const metadata: ComputerControlFrameMetadata = {
+      frameId: "frame-1",
+      ...expected(),
+      targetGeneration: "target-generation-1",
+      sequence: 1,
+      mediaType: "image/jpeg",
+      width: 1,
+      height: 1,
+      capturedAt: "2026-08-30T10:00:00.000Z",
+      sha256: createHash("sha256").update(oversized).digest("hex"),
+    };
+    let captures = 0;
+    const session = {
+      capture: async () => {
+        captures += 1;
+        return {
+          data: oversized,
+          mediaType: "image/jpeg" as const,
+          metadataHeader: Buffer.from(JSON.stringify(metadata)).toString("base64url"),
+          metadata,
+        };
+      },
+    };
+    const failure = await captureModelComputerFrame(session, expected()).catch(
+      (error: unknown) => error,
+    );
+    expect(captures).toBe(2);
+    expect(failure).toMatchObject({ status: 422, code: "limit_exceeded", retryable: false });
   });
 
   test("forwards a PNG capture through the same controller-to-API and SDK evidence boundary", async () => {
@@ -253,11 +324,9 @@ async function withPipeline(
       viewToken,
     });
     if (!driver) throw new Error("computer frame fixture driver was not created");
-    await callback({
-      driver,
-      reference,
-      session: client.computerSessionClient({ reference, controlToken, viewToken }),
-    });
+    const session = client.computerSessionClient({ reference, controlToken, viewToken });
+    (driver as FixtureComputerDriver).sessionClient = session;
+    await callback({ driver, reference, session });
   } finally {
     await server.stop();
     await rm(directory, { recursive: true, force: true });
@@ -281,6 +350,10 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     parallelApps: true,
   };
   readonly captureOptions: ComputerFrameStreamOptions[] = [];
+  /** Emulates a PNG-only adapter (CUA) that ignores the requested JPEG format. */
+  pngOnlyNoiseMask: number | null = null;
+  lastPngBytes = 0;
+  sessionClient: ReturnType<BrowserControlClient["computerSessionClient"]> | null = null;
   private sequence = 0;
 
   constructor(private readonly context: ComputerSupervisorDriverContext) {}
@@ -306,6 +379,25 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     options: ComputerFrameStreamOptions = {},
   ): Promise<ComputerImageFrame> {
     this.captureOptions.push({ ...options });
+    if (this.pngOnlyNoiseMask !== null) {
+      const width = options.maxWidth ?? 1_024;
+      const height = options.maxHeight ?? 768;
+      const data = await noisyPng(width, height, this.pngOnlyNoiseMask);
+      this.lastPngBytes = data.byteLength;
+      return {
+        frameId: `frame-${this.sequence}`,
+        computerSessionId: this.context.computerSessionId,
+        controllerGeneration: this.context.controllerGeneration,
+        targetId,
+        targetGeneration: "target-generation-1",
+        sequence: this.sequence++,
+        mediaType: "image/png",
+        width,
+        height,
+        data,
+        capturedAt: "2026-08-30T10:00:00.000Z",
+      };
+    }
     const mediaType = options.format === "png" ? "image/png" : "image/jpeg";
     const compact = mediaType === "image/png" ? png() : jpeg();
     const data =
@@ -453,6 +545,22 @@ function padded(source: Uint8Array, byteLength: number): Uint8Array {
   const output = new Uint8Array(byteLength);
   output.set(source);
   return output;
+}
+
+async function noisyPng(width: number, height: number, mask: number): Promise<Uint8Array> {
+  const raw = Buffer.alloc(width * height * 3);
+  let seed = 7;
+  for (let index = 0; index < raw.length; index++) {
+    seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
+    const pixel = Math.floor(index / 3);
+    const gradient = ((pixel % width) * 3 + Math.floor(pixel / width) * 2 + (index % 3) * 40) & 255;
+    raw[index] = gradient ^ ((seed >> 8) & mask);
+  }
+  return new Uint8Array(
+    await sharp(raw, { raw: { width, height, channels: 3 } })
+      .png()
+      .toBuffer(),
+  );
 }
 
 function png(): Uint8Array {

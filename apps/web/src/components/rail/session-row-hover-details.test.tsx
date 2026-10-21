@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { SessionListEntry } from "@opengeni/sdk";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { formatAbsoluteTime } from "@/components/ui/relative-time";
+import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
 import {
   formatWaitDuration,
   nextCheckLabel,

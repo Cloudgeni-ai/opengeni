@@ -7,6 +7,7 @@ import type {
   SiteDataQueryRequest,
   SiteDataRecordResponse,
   SiteDataWriteRequest,
+  SiteSqlDescribeResponse,
 } from "@opengeni/sdk";
 
 mock.module("@/context", () => ({ useAppContext: () => ({}) }));
@@ -38,6 +39,7 @@ const described: SiteDataDescribeResponse = {
       name: "contacts",
       accessMode: "shared",
       privateRecords: false,
+      guestAccess: "none",
       jsonSchema: null,
       indexedFields: [],
       uniqueFields: [["email"]],
@@ -51,6 +53,7 @@ const described: SiteDataDescribeResponse = {
       name: "diary",
       accessMode: "per_viewer",
       privateRecords: true,
+      guestAccess: "none",
       jsonSchema: null,
       indexedFields: [],
       uniqueFields: [],
@@ -187,4 +190,79 @@ test("managers browse collections and records, read stored data as text and dele
   ]);
   await act(async () => root.unmount());
   host.remove();
+});
+
+const sqlDescribed = (enabled: boolean, available = true): SiteSqlDescribeResponse => ({
+  siteId: "site",
+  available,
+  enabled,
+  migrations: [],
+  queries: [],
+  usage: { storageBytes: enabled ? 8192 : 0, rowsReadThisMonth: 0, rowsWrittenThisMonth: 0 },
+  limits: {
+    storageBytesPerSite: 50 * 1024 * 1024,
+    rowsReadPerSitePerMonth: 5_000_000,
+    rowsWrittenPerSitePerMonth: 100_000,
+    callsPerMinutePerViewer: 60,
+    callsPerMinutePerSite: 600,
+    maxRowsPerCall: 1000,
+    maxResponseBytes: 1024 * 1024,
+  },
+});
+
+test("summarizes the SQL database in one line", () => {
+  expect(module.siteSqlSummary(sqlDescribed(true))).toBe("8.0 KB of 50 MB · 0 queries");
+  expect(module.siteSqlSummary(sqlDescribed(false))).toContain("Ask Opengeni");
+  expect(
+    module.siteSqlSummary({ ...sqlDescribed(false), usage: { ...sqlDescribed(true).usage } }),
+  ).toBe("Off. Its data is kept.");
+});
+
+test("owners turn the SQL database on where the deployment offers it", async () => {
+  for (const available of [false, true]) {
+    const updates: boolean[] = [];
+    const client = {
+      getSiteData: async () => described,
+      querySiteData: async () => ({ records: [], nextCursor: null }),
+      writeSiteData: async () => ({ results: [] }),
+      exportSiteData: async () => ({ content: "", contentType: "", truncated: false }),
+      getSiteSql: async () => sqlDescribed(false, available),
+      updateSiteSqlSettings: async (_ws: string, _site: string, request: { enabled: boolean }) => {
+        updates.push(request.enabled);
+        return sqlDescribed(request.enabled, available);
+      },
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () =>
+      root.render(
+        <module.SiteDataPanel
+          client={client as never}
+          workspaceId="ws"
+          siteId="site"
+          title="Polls"
+          currentPrincipal="user:me"
+        />,
+      ),
+    );
+    for (let index = 0; index < 5; index += 1) await act(async () => await Promise.resolve());
+    const toggle = host.querySelector<HTMLButtonElement>('button[role="switch"]');
+    if (!available) {
+      expect(toggle).toBeNull();
+      expect(host.textContent).not.toContain("SQL database");
+    } else {
+      expect(host.textContent).toContain("SQL database");
+      expect(toggle?.getAttribute("aria-checked")).toBe("false");
+      await act(async () => toggle!.click());
+      for (let index = 0; index < 5; index += 1) await act(async () => await Promise.resolve());
+      expect(updates).toEqual([true]);
+      expect(host.textContent).toContain("8.0 KB of 50 MB");
+      expect(host.querySelector('button[role="switch"]')?.getAttribute("aria-checked")).toBe(
+        "true",
+      );
+    }
+    await act(async () => root.unmount());
+    host.remove();
+  }
 });

@@ -34,7 +34,7 @@ export function serviceInitiatorFromHeaders(
       )
         throw new Error("flat");
       context = parsed as typeof context;
-      // Keep delegated provenance's reserved, OpenGeni-owned lineage fields.
+      // Keep delegated provenance's reserved, Opengeni-owned lineage fields.
       if (!ServiceTurnInitiatorContext.safeParse(context).success) throw new Error("reserved");
     } catch {
       throw new HTTPException(422, {

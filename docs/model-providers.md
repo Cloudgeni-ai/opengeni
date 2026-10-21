@@ -13,6 +13,72 @@ configured endpoint.
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
+## Pooled subscription limits
+
+Settings → Models shows one limits pool per provider: organization administrators
+see all the organization's shared accounts; a workspace sees all viewer-visible
+accounts whose availability reaches it, including organization and workspace-owned
+accounts, across available inference sources. The owner's personal accounts join
+only in their own Personal workspace through the existing owner-only reader.
+A workspace with no available accounts shows no pool. Limits belong to provider
+accounts: forecasts use total account usage, including other workspaces, not a
+workspace-attributed fraction. The headline forecasts this week's included utilization, with one
+plan-size-weighted total remaining bar beneath it. Account rows and their individual
+usage remain in the account list, not repeated in the pool card.
+Five-hour limits appear only as a muted line when currently blocking an account;
+there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.
+SuperGrok is omitted because its current adapter reports only a billing window.
+Claude setup-token accounts without usage access remain visibly unreported.
+
+Weights estimate relative capacity from attributed call usage divided by stable
+percentage movement, independently per window. Calibration requires three stable
+samples, six calls, ten percentage points and an hour of coverage; median and
+dispersion checks reject outliers. Provider-boundary fallback estimates are
+Codex Plus/unknown 1 and Pro 10, Claude Pro/unknown 1 and Max 5 (explicit Max 20x
+is 20). An unspecified Max tier conservatively uses 5. These are estimates, not
+provider promises; outside use and model mix can bias calibration.
+
+The forecast uses actual percentage movement, including use outside Opengeni.
+Attributed calls shape covered intervals with a uniform floor for outside use.
+It builds a UTC hour-of-week profile from up to seven days, compares the same
+completed hours this calendar week and last week, and applies damped trend
+scaling. The 5-hour projection additionally uses the last full hour. Combined
+scaling is bounded to 0.5–2x; spikes are winsorized. Missing hours use the observed
+average. Sparse history falls back to average pace since the inferred last reset,
+only when positive usage and elapsed time are known. Without sufficient evidence,
+it reports an unavailable forecast rather than assuming no use.
+
+Simulation walks hourly boundaries and exact account resets through the last
+upcoming reset. Demand is distributed by relative capacity and reassigned from
+depleted accounts; it assumes that work can use other accounts, not that every
+model is entitled everywhere. Run-out reports the first exhaustion and next
+reset only when the pool empties strictly before relief, not exactly at refill.
+Expected utilization is one minus the sum of each account's weighted capacity
+left at its own first reset, divided by total weight; it includes usage already
+consumed. Each account's first-reset remainder is counted once, never its later
+refilled capacity. Times display in the viewer's
+timezone. Stale, unknown or already-reset observations never imply a full pool.
+
+`subscription_usage_readings` retains original endpoint/header observations in
+the private schema, including organization Codex inspection without changing
+allocator quota. Identical observation timestamps deduplicate retries; new
+fetches with unchanged percentages remain observations. `subscription_usage_calls`
+is a content-free private projection of attributed call measurements, not a
+billing ledger. Both retain 30 days with bounded maintenance deletes; reads use
+14 days to support same-hours comparisons. The public read returns no call rows,
+session identities, monetary amounts or absolute units.
+
+`model_call_facts.connection_id` is the canonical account ID used by Codex and
+Claude Models lists, in both scopes. Facts have no age-based prune job, but writes
+are best-effort; old unattributed facts, deleted workspaces and deleted accounts
+can leave gaps. Thus seven complete days are not guaranteed. Only known attributed
+facts are backfilled, never fabricated percentage readings. New deployments
+accumulate observation history after rollout and show their actual basis.
+
+Both pool endpoints use existing account-list authorization and a client-scoped
+shared-query cache. They read stored data only; the Models page's Refresh action
+owns live provider checks and invalidates the pool after those checks finish.
+
 ## Configuring inference
 
 Turn inference uses two OpenAI-shaped HTTP APIs: **Responses**
@@ -119,7 +185,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 
 | Route                        | Enable                                        | Wire             | Catalog                                                           |
 | ---------------------------- | --------------------------------------------- | ---------------- | ----------------------------------------------------------------- |
-| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, Opengeni credits                         |
+| Opengeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, Opengeni credits                         |
 | Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
 | Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
 | Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
@@ -611,7 +677,7 @@ ownership must stay explicit:
 - For deployment-managed paid Zen models, declare a separate `kind: "api-key"`
   provider (it may reuse the same base URL) with `apiKeyEnv` and reviewed model
   pricing/capabilities. The deployment owns the upstream account and Opengeni
-  meters those turns through the ordinary OpenGeni-credit path.
+  meters those turns through the ordinary Opengeni-credit path.
 - A workspace member connecting their own OpenCode key/account is not generic
   registry JSON. That requires a reviewed encrypted workspace-connection broker,
   readiness/re-auth UI, and `upstreamPayer: workspace` external billing—the same
@@ -631,7 +697,7 @@ Opper is a first-class reviewed provider, not a registry example; see
 
 ## Curated AI Gateway models
 
-`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
+`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed Opengeni-credit
 models. They are siblings of the built-in GPT-5.6 family in the Opengeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
@@ -729,6 +795,40 @@ of sending it as native thinking. It preserves signed text and encrypted
 reasoning details and leaves stored history unchanged. This also handles older
 non-streamed replies whose reasoning was nested inside text metadata. Other
 Chat targets retain their native reasoning fields.
+
+These explicit Anthropic Chat targets also default to request-level
+`cache_control: { "type": "ephemeral" }` on all three OpenRouter rails. OpenRouter
+requires this opt-in; merely repeating a long prefix does not enable Claude
+caching. Automatic caching advances upstream over the growing history without
+rewriting earlier messages, instructions, tools, or their cache markers locally.
+An explicit request-level control (including `null`) or message/content/tool
+breakpoint remains authoritative; the adapter does not add another breakpoint
+or override its TTL. Other model families and APIs keep their existing cache
+behavior. Session cache keys and provider routing are unchanged.
+
+The default TTL is five minutes; repeated prefixes can be read on later steps
+and later turns while warm, not indefinitely. The first write costs more than
+ordinary input, so one-off or frequently changing prompts can cost more. A cache
+hit still depends on the upstream provider, minimum prompt length, expiry, and
+an identical prefix. The shared Chat adapter preserves the raw provider's
+`prompt_tokens_details` through streamed and non-streamed SDK conversion, including
+`cached_tokens` and `cache_write_tokens`; absent write counts stay unknown. The
+shared usage normalizer still validates counts before telemetry/billing.
+
+A synthetic streamed probe on October 18, 2026 (`anthropic/claude-sonnet-5.5`)
+confirmed two identical 5,179-token requests without the opt-in each read/wrote
+zero cache tokens. With automatic caching, the first request wrote 5,175 tokens;
+two appended-history requests then read 5,175 and 5,192 tokens and wrote 17 each.
+Total request costs were $0.010398 uncached, $0.0129855 for the initial write,
+then $0.000608 and $0.0006097 for the appended requests. This is a small protocol
+probe, not a production performance guarantee.
+The patched SDK adapter was separately exercised with fresh clients and
+JSON-round-tripped assistant history: its three requests reported write/read
+counts of 5,258/0, 17/5,258, and 17/5,275. Normalized telemetry matched the raw
+provider counts exactly, and every earlier message and tool prefix was unchanged.
+
+Sources: [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching)
+and [usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting).
 
 The reviewed code catalog currently ships one v1 starter:
 
@@ -1118,7 +1218,7 @@ An agent-spawned child that omits `model`, `reasoningEffort`, or `latencyMode`
 inherits those fields from the exact worker-signed calling turn. Explicit child
 values still win. The fallback for legacy session-bound grants is the parent
 session, never the deployment default; consequently a Codex-subscription
-manager cannot silently spawn an OpenGeni-credit worker merely by omitting
+manager cannot silently spawn an Opengeni-credit worker merely by omitting
 `model`.
 
 Configuration fails loud when:
@@ -1639,6 +1739,113 @@ A compaction request built from the turn's prepared request carries the same
 model settings, so the portable checkpoint summary is also requested at low
 verbosity. `reasoning.summary` stays `detailed`.
 
+Streaming Codex subscription requests travel over a pooled Responses
+WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
+endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
+The Codex Responses `session_id` header is a cache-affinity hint, not the
+conversation identifier. The worker supplies a deterministic hash of workspace
+and frozen initiating human identity so a new session can reuse a familiar
+prefix. Unknown human identity keeps the session UUID fallback. The body
+`prompt_cache_key` remains the actual session UUID. HTTP requests, WebSocket
+pre-open and authentication retries use the same affinity; session-scoped
+connections and continuation remain separate. Other providers are unchanged.
+See [design and live measurements](design/codex-cache-affinity.md).
+Each worker process keeps one socket per conversation and handshake identity;
+concurrent cold callers share one handshake and credential changes retire the
+old idle connection. Only explicitly scoped main-turn requests own that pool,
+including on Codex: a session-affinity header alone is not socket ownership.
+Titles explicitly leave the main conversation scope and use HTTP with unchanged
+authentication, affinity, request content and custody. They cannot retire a
+warmed main connection or replace its continuation chain.
+A busy socket, a refused handshake, a non-streaming request, or any non-Responses URL uses
+ordinary HTTP instead. Rate-limit and response-metadata events are mapped back
+to the same `x-codex-*` response headers the HTTP path returns, so usage
+accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
+turns the transport off.
+
+A socket that closes mid-response fails that model request, and the turn
+recovers from durable history within its existing model-step recovery budget;
+partial response events are never concatenated with a replacement response.
+The final existing recovery slot uses HTTP after the socket allowance is spent,
+without granting an extra retry. A server refusal selects HTTP immediately.
+That selection lasts for the logical turn, survives worker recovery, and is
+not reset by successful model steps. A new turn tries WebSocket again. There
+are no cooldown timers, and SDK retries cannot multiply the worker's budget.
+
+When a request extends the last completed response on its connection exactly
+(same request fields, the same earlier input, then that response's output),
+the transport sends `previous_response_id` and only the new input items, as
+the Codex CLI does; otherwise, or when the provider no longer holds that
+response, it sends the full request.
+The transport fingerprints rather than retains full prompt bodies. It recognizes
+only proven SDK round-trip equivalences, preserves phase and hosted-call status,
+and leaves explicit caller-owned continuation untouched. A rejected continuation
+settles the old physical request and crosses custody admission again before the
+full-input resend, retaining the original deadline.
+
+The same transport serves the OpenAI API (`https://api.openai.com/v1/responses`)
+and Azure OpenAI's v1 API (`https://<resource>.openai.azure.com/openai/v1/responses`).
+For all three providers, each agent turn's model requests run as one conversation
+with its own connection; requests outside a conversation (titles, summaries) and every other
+OpenAI-compatible host use HTTP. Azure's legacy deployment URLs
+(`/openai/deployments/...`) stay on HTTP. `OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED=false`
+turns this off.
+
+The explicit JavaScript `ws` implementation bypasses Bun's native compatibility
+shim, which retains each socket's largest sent frame. `perMessageDeflate` is off
+so compression state does not replace that retained memory. Reproduce the
+isolated client-memory comparison with
+`bun packages/network/bench/persistent-socket-memory.ts native` and `js` in
+fresh processes; the echo server runs separately.
+
+`opengeni_model_transport_*` metrics use the same bounded labels for every
+Responses provider: connection/input mode, first/later request, outcome and
+fallback reason. They include wire versus full-input bytes, provider-reported
+first-request cache ratio, and the interval from final normalized prefix to send.
+Transport outcomes are not semantic model outcomes: HTTP reader cancellation is
+`cancelled`, including when an SDK stops after `response.completed` before wire
+EOF. Use the provider model-request lifecycle for semantic success or failure;
+HTTP transport `completed` means a successful-status body reached EOF, not that
+the model succeeded. The transport does not parse HTTP SSE a second time just
+for telemetry.
+Codex model-request receipts also separate `dispatchDelayMs` (audit start to
+transport dispatch) from `transport.timing.transportPreparationMs` (transport
+entry through body preparation/handshake to socket send) and
+`transport.timing.sendToFirstEventMs` (socket send to the first protocol response
+event). These intervals overlap; do not sum them. Receipts snapshot timing at
+their own phase, so later metadata never changes a previously emitted receipt.
+For a refused-continuation replacement, preparation restarts after fresh custody
+admission; the rejected request's provider wait and settlement are not preparation.
+`transport.timing.server` retains only finite, nonnegative, allowlisted fields
+from `responsesapi.websocket_timing.timing_metrics.critical_path` with
+`scope: "response"` and a matching response ID. Logical-turn cumulative totals
+are not per-response latency and are excluded. Missing fields are unknown, not
+zero. Timing frames remain out of the model/SSE stream and never affect dispatch
+or retry policy.
+Handshake-only warming sends no model request. Speculative `generate:false`
+prewarm is not enabled: final tools/instructions emerge at request construction,
+after startup preparation, and the remaining credential and custody checks
+cannot be bypassed. These measurements keep that decision testable without
+blocking a turn or sending a different prefix to the provider.
+The October 18, 2026 comparison trace's `generate:false` warmup completed in
+413 ms with no engine calls, no output tokens, and no cache read/write tokens.
+That establishes request-state preparation, not inference prefill or a net
+latency saving. The measured title/main contention is fixed without adding a
+warmup request. Compare physical send-to-first-event clocks after that correction
+before attributing a residual gap to client overhead or introducing speculation.
+
+Azure API-key credentials use the `api-key` header for both HTTP and WebSocket
+requests; Entra tokens retain bearer authentication and explicit caller-owned
+Authorization headers remain unchanged. This avoids Azure deployments redirecting
+bearer-key upgrades to a credential-bearing query URL. The socket transport never follows
+redirects: a 3xx upgrade refusal selects the existing HTTP path for that turn,
+just like a 4xx refusal other than 429. Rate limits, server errors, and connection
+failures retain the existing retry budget. A new turn can try WebSocket again.
+Azure documents Responses WebSocket support for API keys and Entra ID in its
+[WebSocket guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets);
+HTTP API-key header authentication is shown in its
+[Responses guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses).
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
@@ -1658,6 +1865,13 @@ keeps three amounts separate for every authoritative model call:
   including a comparison for externally billed Codex-subscription calls;
 - Opengeni credit price is the actual credits-path price and remains zero for
   externally billed calls.
+
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin for every
+provider-rate model credit calculation, including explicit
+`OPENGENI_MODEL_PRICING_JSON` and registry rates that declare their own
+`marginBps`. Those rates remain provider costs, not fixed customer tariffs.
+Unset preserves existing per-price behavior; direct fixed credit prices are
+not margin-derived and are unchanged.
 
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
 cached input, $5 cache write, and $20 output per million tokens), guaranteed
@@ -1882,6 +2096,19 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
+Claude Opus 5.5 and Sonnet 5.5 write their notes for the person between tool
+calls as progress-update `thinking` blocks, not `text` blocks. For those models
+requests use `thinking.display: "updates"` (beta
+`thinking-display-updates-2026-08-18`): reasoning blocks come back empty, and
+every `thinking` block with text is a progress update. Each non-empty one becomes
+an assistant message, streamed as output text, so it is shown as a reply and
+counts as visible text for `wait_for_input` and final-answer checks; empty
+reasoning blocks stay reasoning items. The message carries the signed block, and
+replay sends that block back unchanged in its original position, so the history
+bytes match what Claude returned. The shown text is Anthropic's short rendering
+of the note, not the verbatim note; replay gives the model its full note. Other
+Claude models keep `display: "summarized"` and their existing reasoning items.
+
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
 become terminal quota; ordinary throttling remains recoverable. General billing
@@ -2025,8 +2252,10 @@ streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/
 artifacts using this profile without `cch`.
 
 The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
-also enable interleaved thinking, thinking token counts, effort, and summarized
-thinking display betas. One-hour caching adds the extended cache TTL beta;
+also enable interleaved thinking, thinking token counts, effort, and thinking
+display updates betas. The profile keeps the adapter's per-model display:
+`updates` for models that write progress updates and `summarized` for the others.
+One-hour caching adds the extended cache TTL beta;
 mid-conversation system messages add their existing beta. Thread, advisor,
 inline-tool, context-management, global-cache-scope and fallback-credit flags
 are not advertised without those features. Normal agent calls stream; title and

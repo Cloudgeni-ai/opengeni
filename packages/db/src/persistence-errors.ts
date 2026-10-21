@@ -107,6 +107,37 @@ export function nestedPostgresSqlState(error: unknown): string | null {
   return fallback;
 }
 
+/**
+ * The message PostgreSQL raised with the SQLSTATE, even under nested causes.
+ * Fences raise fixed, data-free reasons; callers use this to say which one
+ * refused instead of collapsing every refusal into one generic answer.
+ */
+export function nestedPostgresMessage(error: unknown): string | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    const carriesSqlState = SQLSTATE_KEYS.some((key) => {
+      const value = current[key];
+      return (
+        typeof value === "string" &&
+        /^[0-9A-Z]{5}$/i.test(value) &&
+        !RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase())
+      );
+    });
+    if (carriesSqlState && typeof current.message === "string" && current.message.length > 0)
+      return current.message;
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
 export function databaseFailureCode(sqlState: string | null): DatabaseFailureCode {
   if (sqlState === "40P01") return "db_deadlock";
   if (sqlState === "40001") return "db_serialization_failure";
@@ -115,6 +146,19 @@ export function databaseFailureCode(sqlState: string | null): DatabaseFailureCod
 
 export function isRetryablePersistenceSqlState(sqlState: string | null): boolean {
   return sqlState === "40P01" || sqlState === "40001";
+}
+
+// SQLSTATEs a rolling migration produces for a moment in a transaction that
+// overlaps it: a statement already inside a routine planned against the old
+// definition meets the new column type (42883, 42804), or a cached plan meets
+// a changed table (0A000, 42703, 42P01). Outside a migration they are
+// deterministic, so they get only a short, bounded retry and never become
+// retryable failures themselves.
+const SCHEMA_CHANGE_SQLSTATES = new Set(["42883", "42804", "0A000", "42703", "42P01"]);
+const SCHEMA_CHANGE_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+export function isSchemaChangePersistenceSqlState(sqlState: string | null): boolean {
+  return sqlState !== null && SCHEMA_CHANGE_SQLSTATES.has(sqlState);
 }
 
 /**
@@ -377,6 +421,8 @@ export type IdempotentPersistenceTransactionOptions = {
   maxAttempts?: number;
   correlationId?: string;
   onRetry?: (input: { attempt: number; sqlState: "40P01" | "40001" }) => void | Promise<void>;
+  /** Waits before retrying a schema-change SQLSTATE; tests shorten it. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -398,13 +444,31 @@ export async function runIdempotentPersistenceTransaction<T>(
     try {
       return await transaction(attempt);
     } catch (error) {
-      const sqlState = nestedPostgresSqlState(error);
+      // An uncertain transport/commit outcome is not a confirmed rollback,
+      // even when an older error in its cause chain carries a retryable state.
+      const sqlState = isRetryableDatabaseTransportFailure(error)
+        ? null
+        : nestedPostgresSqlState(error);
       const retryable = isRetryablePersistenceSqlState(sqlState);
       if (retryable && attempt < maxAttempts) {
         await options.onRetry?.({
           attempt,
           sqlState: sqlState as "40P01" | "40001",
         });
+        continue;
+      }
+      if (
+        isSchemaChangePersistenceSqlState(sqlState) &&
+        attempt < maxAttempts &&
+        isDatabasePersistenceFailure(error)
+      ) {
+        // A migration may be swapping a type under this transaction; give it
+        // a moment to commit, then run the same idempotent transaction again.
+        const delayMs =
+          SCHEMA_CHANGE_RETRY_DELAYS_MS[attempt - 1] ?? SCHEMA_CHANGE_RETRY_DELAYS_MS.at(-1)!;
+        await (options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
+          delayMs,
+        );
         continue;
       }
       if (!isDatabasePersistenceFailure(error)) throw error;

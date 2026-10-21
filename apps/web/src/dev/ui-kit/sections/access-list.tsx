@@ -6,19 +6,19 @@ import {
   type AccessListProps,
   type AccessMember,
   type AccessScope,
-} from "@/components/ui/access-list";
-import { Button } from "@/components/ui/button";
+} from "@opengeni/react/ui/access-list";
+import { Button } from "@opengeni/react/ui/button";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailSection } from "@/components/ui/detail-sheet";
-import { DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { DetailPage, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import {
   RoleSelect,
   roleLabel,
   type RoleOption,
   type RoleValue,
-} from "@/components/ui/role-select";
+} from "@opengeni/react/ui/role-select";
 import {
   organizationRoles,
   people,

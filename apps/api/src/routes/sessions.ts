@@ -9,20 +9,34 @@ import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-comma
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
-import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
-import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import {
+  requireWorkspace,
+  scheduledSessionIds,
+  currentSiteViewerRlsContext,
+  nestedPostgresSqlState,
+} from "@opengeni/db";
+import {
+  currentSiteSessionOrigin,
+  isVerifiedDelegatedHumanAuthorization,
+  withSiteSessionOrigin,
+} from "@opengeni/core";
+import {
+  freezeSessionRealtimeConnectionAccounts,
+  managedSessionGroupBackend,
+} from "@opengeni/core";
 import {
   createRealtimeVoiceBilling,
   RealtimeVoiceUnavailableError,
   TranscriptionBillingRefusedError,
 } from "@opengeni/core";
-import type { CreditDebitAttribution } from "@opengeni/db";
+import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
@@ -52,7 +66,7 @@ import {
   BeginSessionRealtimeRequest,
   ClearSessionContextRequest,
   CodexRealtimeWebrtcRequest,
-  GatewayRealtimeConnectRequest,
+  SessionRealtimeWebsocketRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   CreateSessionRequest,
@@ -258,10 +272,10 @@ import {
   publishDurableSessionEvents,
 } from "@opengeni/events";
 import {
-  createGatewayRealtimeConnectionSecret,
-  GatewayRealtimeBrokerError,
-} from "../gateway-realtime";
-import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xai-realtime";
+  createRealtimeWebsocketConnection,
+  RealtimeWebsocketBrokerError,
+  realtimeWebsocketProvider,
+} from "../realtime-websocket";
 import {
   prepareExternalLinkTurnAdmission,
   externalContinuationCommitAuthorizer,
@@ -276,12 +290,17 @@ import {
   type ChannelAOperation,
 } from "../sandbox/channel-a";
 import {
+  connectedCommandStopRpc,
+  deliverConnectedCommandStop,
+} from "../sandbox/command-completion";
+import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
   resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
+  usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -308,6 +327,7 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionRetryConflictError } from "@opengeni/db";
+import { reauthorizeSiteSessionRequest } from "../site-publishing/session-request-authority";
 import {
   attachViewer,
   detachViewer,
@@ -360,7 +380,12 @@ import {
   sessionUsageLimitForRead,
   setSessionUsageLimitForAccess,
 } from "@opengeni/core";
-import { assertSessionExists, boundedLimit } from "../http/common";
+import {
+  assertSessionExists,
+  boundedLimit,
+  requireSessionSequence,
+  SESSION_SEQUENCE_HEADER,
+} from "../http/common";
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
@@ -382,6 +407,8 @@ import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
+/** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
+const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -606,7 +633,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Every deployment has one fail-closed authorization seam for every HTTP
-  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // session surface. The core boundary always enforces durable Opengeni-owned
   // private-session rules; an embedding host port can add narrower policy.
   // Register it before the routes so a newly added path cannot accidentally
   // inherit workspace access without an explicit operation classification. The
@@ -728,8 +755,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           c.req.header("x-opengeni-site-id"),
           c.req.header("x-opengeni-site-version"),
+          // A frame without a published Site (inline HTML, a preview) is
+          // recorded as that frame, so its later requests reach this session.
+          {
+            marker: c.req.header("x-opengeni-site-frame"),
+            frameId: c.req.header("x-opengeni-site-frame-id"),
+          },
         ),
       );
+      // Site provenance binds the private audience, not the agent's tools or
+      // capabilities. Ordinary session creation resolves the viewer's settings.
+      const siteOrigin = origin ?? currentSiteSessionOrigin();
+      if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
+        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        if (refused)
+          return c.json(
+            {
+              code: "SITE_SESSION_TOOLS_FORBIDDEN",
+              message: "This session field must be set in the console, not by a Site page",
+              details: { code: "site_frame_field_forbidden", field: refused },
+            },
+            403,
+          );
+        // Ordinary Site viewers use native Only-me ownership. An agent preview
+        // inherits its parent's native visibility; the Site audience binding
+        // additionally restricts that execution to the parent's real owner.
+        if (grant.principalKind !== "agent_attempt")
+          (payload as Record<string, unknown>).visibility = "private";
+      }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
@@ -919,6 +972,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       throw sessionAuthorizationHttpError(error);
     }
+    // Console-only command projection shares chat discovery authorization; it
+    // neither adds a command lifecycle nor changes ordinary session responses.
+    if (c.req.query("view") === "running_commands") {
+      const cursor = c.req.query("cursor");
+      if (cursor !== undefined && !z.string().uuid().safeParse(cursor).success)
+        throw new HTTPException(400, { message: "Invalid running command cursor" });
+      try {
+        return c.json(
+          await listWorkspaceBackgroundCommandsForSubject(
+            db,
+            workspaceId,
+            {
+              subjectId: grant.subjectId,
+              ...(authorizationScope ? { authorizationScope } : {}),
+              personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+            },
+            cursor,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof SessionListAccessError)
+          throw new HTTPException(403, { message: error.message });
+        throw error;
+      }
+    }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
     const projection = c.req.query("projection");
@@ -944,6 +1022,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.includeTotals ? { includeTotals: true } : {}),
           ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+          ...(query.mineOnly ? { mineOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -953,6 +1032,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -1013,6 +1093,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorateEntry),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorateEntry),
       });
     }
@@ -1035,6 +1116,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorate),
       });
     }
@@ -1349,7 +1431,33 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!result.command) {
         throw new HTTPException(404, { message: "background command not found" });
       }
-      return c.json(result);
+      const { stopTarget, ...body } = result;
+      if (stopTarget) {
+        // Deliver the cancellation now rather than on the next reconciliation
+        // pass. The runner's pushed exit settles the command; when this
+        // delivery fails, the reconciler delivers it on its next pass.
+        const budgetMs = Math.min(
+          settings.sandboxSelfhostedControlTimeoutMs,
+          BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS,
+        );
+        const delivery = await deliverConnectedCommandStop(
+          connectedCommandStopRpc({
+            db,
+            settings,
+            connect: async () => bus.getRequestConnection(),
+            budgetMs,
+          }),
+          stopTarget,
+          budgetMs,
+        );
+        if (!delivery.delivered) {
+          deps.observability?.warn("background command stop delivery deferred", {
+            commandId,
+            error: delivery.error,
+          });
+        }
+      }
+      return c.json(body);
     },
   );
 
@@ -1845,18 +1953,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
+  /**
+   * Open (or rotate) the provider WebSocket of an active realtime mode: claim
+   * the connection, admit billing, mint the provider client secret, and record
+   * the connection before the browser opens the socket itself. One handler
+   * serves every WebSocket provider; the older per-provider paths stay as
+   * aliases for clients loaded before the unified path existed.
+   */
+  const negotiateRealtimeWebsocket = async (c: Context) => {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const sessionId = c.req.param("sessionId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
+    const parsed = SessionRealtimeWebsocketRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid Gateway realtime request",
-      });
+      throw new HTTPException(422, { message: "invalid realtime WebSocket request" });
     }
     c.header("cache-control", "private, no-store");
     const {
@@ -1867,9 +1980,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       expectedVersion,
       expectedConnectionEpoch,
       rotate,
+      language,
+      voiceSettings,
     } = parsed.data;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
+    let provider: ReturnType<typeof realtimeWebsocketProvider> = null;
     let connectionCompleted = false;
     try {
       claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -1892,7 +2008,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (claim.replay) {
         throw new SessionRealtimeConflictError(
           "REALTIME_CONNECTION_STATE_CHANGED",
-          "Realtime Gateway tokens are single-use; reconnect with a new operation",
+          "Realtime client secrets are single-use; reconnect with a new operation",
+        );
+      }
+      provider = realtimeWebsocketProvider(claim.mode.model);
+      if (!provider) {
+        throw new RealtimeWebsocketBrokerError(
+          "model_unavailable",
+          "This voice model does not use a WebSocket connection",
         );
       }
       await realtimeVoiceBilling.admit({
@@ -1901,13 +2024,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         model: claim.mode.model,
         attribution: creditDebitAttributionForGrant(grant),
       });
-      const secret = await createGatewayRealtimeConnectionSecret({
+      const connection = await createRealtimeWebsocketConnection({
         db,
         settings,
+        accountId: grant.accountId,
         workspaceId,
         sessionId,
         model: claim.mode.model,
-        fetchImpl: deps.codexFetch ?? fetch,
+        language,
+        voiceSettings,
+        fetchImpls: {
+          "ai-gateway": deps.codexFetch,
+          supergrok: deps.xaiFetch,
+          elevenlabs: deps.codexFetch,
+        },
       });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -1919,11 +2049,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             connectionId: claimed.connection.id,
             operationId,
             connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "gateway-client-secret-minted",
+            sdpAnswer: `${connection.provider}-client-secret-minted`,
           }),
         ),
       );
       connectionCompleted = true;
+      // Finish the first-minute settlement before returning the usable connection.
+      // A heartbeat may never arrive; do not detach this debit from the request.
       await settleRealtimeVoice({
         grant,
         attribution: creditDebitAttributionForGrant(grant),
@@ -1931,8 +2063,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         realtimeId,
       });
+      const { provider: _provider, ...answer } = connection;
       return c.json({
-        ...secret,
+        ...answer,
         connectionId: completed.connection.id,
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,
@@ -1952,12 +2085,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               operationId,
               connectionEpoch: claimed.connection.connectionEpoch,
               failureCode:
-                error instanceof GatewayRealtimeBrokerError
+                error instanceof RealtimeWebsocketBrokerError
                   ? error.code
                   : error instanceof TranscriptionBillingRefusedError ||
                       error instanceof RealtimeVoiceUnavailableError
                     ? "billing_refused"
-                    : "gateway_error",
+                    : `${provider?.id ?? "websocket"}_error`,
             }),
           ),
         ).catch(() => undefined);
@@ -1965,13 +2098,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const refused = realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
-      if (!(error instanceof GatewayRealtimeBrokerError)) throw error;
-      const status = error.code === "credential_unavailable" ? 409 : 502;
+      if (!(error instanceof RealtimeWebsocketBrokerError)) throw error;
+      const status =
+        error.code === "credential_unavailable" || error.code === "voice_unavailable" ? 409 : 502;
       return c.json(
         {
           error: {
             status,
-            code: `GATEWAY_REALTIME_${error.code.toUpperCase()}`,
+            code: `${provider?.errorCodePrefix ?? "REALTIME"}_${error.code.toUpperCase()}`,
             message: error.message,
             retryable: error.code === "provider_error",
           },
@@ -1979,122 +2113,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         status,
       );
     }
-  });
-
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    if (!z.string().uuid().safeParse(sessionId).success) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid SuperGrok realtime request" });
-    }
-    c.header("cache-control", "private, no-store");
-    const {
-      realtimeId,
-      operationId,
-      browserInstanceId,
-      ownerKey,
-      expectedVersion,
-      expectedConnectionEpoch,
-      rotate,
-    } = parsed.data;
-    let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
-      null;
-    let connectionCompleted = false;
-    try {
-      claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            operationId,
-            ownerSubjectId: grant.subjectId,
-            browserInstanceId,
-            ownerKey,
-            expectedVersion,
-            expectedConnectionEpoch,
-            rotate,
-            promotionMode: "staged",
-          }),
-        ),
-      );
-      if (claim.replay) {
-        throw new SessionRealtimeConflictError(
-          "REALTIME_CONNECTION_STATE_CHANGED",
-          "SuperGrok realtime tokens are single-use; reconnect with a new operation",
-        );
-      }
-      const secret = await createXaiRealtimeConnectionSecret({
-        db,
-        settings,
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        sessionId,
-        model: claim.mode.model,
-        fetchImpl: deps.xaiFetch ?? fetch,
-      });
-      const claimed = claim;
-      const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            connectionId: claimed.connection.id,
-            operationId,
-            connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "supergrok-client-secret-minted",
-          }),
-        ),
-      );
-      connectionCompleted = true;
-      return c.json({
-        ...secret,
-        connectionId: completed.connection.id,
-        connectionEpoch: completed.connection.connectionEpoch,
-        startupFenceSequence: completed.connection.startupFenceSequence,
-        modeVersion: claimed.modeVersion,
-        replay: false as const,
-      });
-    } catch (error) {
-      if (claim !== null && !claim.replay && !connectionCompleted) {
-        const claimed = claim;
-        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              connectionId: claimed.connection.id,
-              operationId,
-              connectionEpoch: claimed.connection.connectionEpoch,
-              failureCode: error instanceof XaiRealtimeBrokerError ? error.code : "supergrok_error",
-            }),
-          ),
-        ).catch(() => undefined);
-      }
-      if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
-      if (!(error instanceof XaiRealtimeBrokerError)) throw error;
-      const status = error.code === "credential_unavailable" ? 409 : 502;
-      return c.json(
-        {
-          error: {
-            status,
-            code: `SUPERGROK_REALTIME_${error.code.toUpperCase()}`,
-            message: error.message,
-            retryable: error.code === "provider_error",
-          },
-        },
-        status,
-      );
-    }
-  });
+  };
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    negotiateRealtimeWebsocket,
+  );
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway",
+    negotiateRealtimeWebsocket,
+  );
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok",
+    negotiateRealtimeWebsocket,
+  );
 
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/connections/:connectionId/activate",
@@ -2385,6 +2416,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const observedSequence = await requireSessionSequence(
+      db,
+      workspaceId,
+      c.req.param("sessionId"),
+    );
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
     const sessionIds = [
       c.req.param("sessionId"),
@@ -2416,6 +2452,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       grant.subjectId,
       lineageSessions,
     );
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2848,8 +2885,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     if (!goal) {
       // `?absent=null` opts in to a successful `null` for a goal-less session,
       // so a browser polling a fresh chat logs no failed request. Without it
@@ -3349,6 +3387,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       SessionEventSemanticClass,
       "excludeClasses",
     );
+    // Conversation-first readers exclude step events but keep presented tool
+    // calls (images, published files, Skill changes) and turnless rows such as
+    // PTY output, which no per-turn step read finds. Unknown values are ignored
+    // so older and newer clients degrade to the plain type filter.
+    const retainPresentedToolCalls = c.req.query("presentedToolCalls") === "include";
     const limit = latestClass
       ? 1
       : eventListLimit(
@@ -3367,6 +3410,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
+      ...(retainPresentedToolCalls && !latestClass ? { retainPresentedToolCalls: true } : {}),
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });
@@ -3546,8 +3590,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:
-          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+          c.req.header("x-opengeni-site-frame") === "1"
+            ? 2_000
+            : (authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS),
         reauthorize: async () => {
+          await reauthorizeSiteSessionRequest(c.req.raw);
           const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
           await requireSessionAuthorization(deps, freshGrant, {
             sessionId,
@@ -3601,8 +3648,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     if (!snapshot) throw new HTTPException(404, { message: "session not found" });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json(projectQueueSnapshot(snapshot, sessionId, relatedSessionAccessFor(c)));
   });
 
@@ -3791,8 +3840,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
       );
       if (
-        projection.operationId === receipt.operationId &&
-        projection.status === "consent_accepted"
+        ("action" in parsed.data && receipt.outcome === "accepted") ||
+        (projection.operationId === receipt.operationId && projection.status === "consent_accepted")
       ) {
         // Establish/verify only. No failed-turn Retry, Send, tool callback or
         // command replay. The ordinary cold->warming election owns creation.
@@ -4187,7 +4236,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const rawStatus = c.req.query("status");
     const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
     if (status && !status.success) {
@@ -4198,6 +4247,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
       ...(status?.success ? { status: status.data } : {}),
     });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({ requests });
   });
 
@@ -4430,8 +4480,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       },
     };
     if (capabilities.DesktopStream.transport !== null) {
+      // A compute group box serves its agent's relay framebuffer, like a
+      // Connected Machine; a Modal swap target keeps noVNC.
+      const computeGroupActive =
+        activeSandbox === null &&
+        managedSessionGroupBackend(settings.sandboxBackend, session.sandboxBackend) === "compute";
       const wire = resolveActiveDesktopTransport(
-        selfhostedActive,
+        selfhostedActive || computeGroupActive,
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {
@@ -4903,6 +4958,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         authorization,
         session: ctx.session,
         path: request.path,
+        visibility: request.visibility,
         signal: ctx.waitSignal,
       }),
     );
@@ -5121,7 +5177,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.open");
     const req = await parseChannelABody(c, PtyOpenRequest);
-    if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
+    // A durable PTY is a provider process retained under the session-home lease.
+    // Agent-transport routes (Connected Machines and compute sandboxes) serve
+    // interactive terminals as relay streams from the agent instead (the
+    // viewer's `relay-pty` transport), so they are refused here before any PTY
+    // is opened.
+    if (usesAgentTransport(ctx.session.sandboxBackend) || ctx.session.activeSandboxId !== null) {
       throw new HTTPException(409, {
         message:
           "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",
@@ -5489,10 +5550,12 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
   }
-  if (suffix === "/realtime/gateway" && verb === "POST") {
-    return "session.realtime.start";
-  }
-  if (suffix === "/realtime/supergrok" && verb === "POST") {
+  if (
+    (suffix === "/realtime/websocket" ||
+      suffix === "/realtime/gateway" ||
+      suffix === "/realtime/supergrok") &&
+    verb === "POST"
+  ) {
     return "session.realtime.start";
   }
   if (suffix === "/realtime" && verb === "POST") {
@@ -5590,7 +5653,7 @@ export function sessionAuthorizationOperationForHttp(
   return null;
 }
 
-function sessionAuthorizationHttpError(error: unknown): HTTPException {
+export function sessionAuthorizationHttpError(error: unknown): HTTPException {
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, { message: "session not found" });
   }
@@ -5603,6 +5666,17 @@ function sessionAuthorizationHttpError(error: unknown): HTTPException {
   throw error;
 }
 
+const SESSION_FORK_POINT_REFUSAL_MESSAGES: Record<SessionForkPointRefusal, string> = {
+  message_unavailable:
+    "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
+  boundary_not_retained:
+    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+  history_compacted:
+    "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+  unfinished_tool_exchange:
+    "The agent was still waiting for a tool result at this message. Choose a later message, or fork the whole session.",
+};
+
 export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return new ApiHttpError(403, {
@@ -5611,7 +5685,10 @@ export function sessionTenancyHttpError(error: unknown): Error {
       retryable: false,
     });
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: "Only-me chats are not enabled for this organization.",
@@ -5665,6 +5742,14 @@ export function sessionTenancyHttpError(error: unknown): Error {
     });
   }
   if (error instanceof SessionTenancyInvalidRequestError) {
+    if (error.forkPointRefusal) {
+      return new ApiHttpError(422, {
+        code: "validation_failed",
+        message: SESSION_FORK_POINT_REFUSAL_MESSAGES[error.forkPointRefusal],
+        retryable: false,
+        details: { reason: `fork_point_${error.forkPointRefusal}` },
+      });
+    }
     return new ApiHttpError(422, {
       code: "validation_failed",
       message: "Invalid session tenancy request.",
@@ -5743,6 +5828,7 @@ export function sessionListQuery(
   allowCursor = true,
 ): {
   originSiteId: string | undefined;
+  siteAccessId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -5752,6 +5838,7 @@ export function sessionListQuery(
   includeTotals: boolean;
   needsYouOnly: boolean;
   contentArchivedOnly: boolean;
+  mineOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5766,6 +5853,14 @@ export function sessionListQuery(
 } {
   const parentSessionId = query.parentSessionId;
   const originSiteId = query.originSiteId;
+  const siteAccessId = query.siteAccessId;
+  if (
+    siteAccessId !== undefined &&
+    (!z.string().uuid().safeParse(siteAccessId).success || originSiteId !== undefined)
+  )
+    throw new HTTPException(400, {
+      message: "siteAccessId must name one Site without an origin filter",
+    });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -5801,17 +5896,20 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
-  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly"]) {
+  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly", "mineOnly"]) {
     if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
       throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
   }
   const includeTotals = query.includeTotals === "true";
   const needsYouOnly = query.needsYouOnly === "true";
   const contentArchivedOnly = query.contentArchivedOnly === "true";
+  const mineOnly = query.mineOnly === "true";
   if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
     throw new HTTPException(400, { message: "includeTotals requires a root page" });
   if (needsYouOnly && !allowCursor)
     throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
+  if (mineOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'mineOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5899,7 +5997,7 @@ export function sessionListQuery(
     const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
     if (!parsedEndUser.success) {
       throw new HTTPException(400, {
-        message: "scopeSubjectId must be a canonical Opengeni user subject",
+        message: "scopeSubjectId must be a canonical user subject",
       });
     }
     scopeSubjectId = parsedEndUser.data;
@@ -5907,7 +6005,9 @@ export function sessionListQuery(
   const hasPageFilters =
     needsYouOnly ||
     contentArchivedOnly ||
+    mineOnly ||
     originSiteId !== undefined ||
+    siteAccessId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
     updatedFrom !== undefined ||
@@ -5929,6 +6029,7 @@ export function sessionListQuery(
   return {
     limit: query.limit,
     originSiteId,
+    siteAccessId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -5942,6 +6043,7 @@ export function sessionListQuery(
     includeTotals,
     needsYouOnly,
     contentArchivedOnly,
+    mineOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -6070,8 +6172,8 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
     if (
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.sortRevision) ||
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.snapshotRevision) ||
-      BigInt(parsed.cursor.sortRevision) > 9_223_372_036_854_775_807n ||
-      BigInt(parsed.cursor.snapshotRevision) > 9_223_372_036_854_775_807n ||
+      BigInt(parsed.cursor.sortRevision) > (1n << 65n) - 1n ||
+      BigInt(parsed.cursor.snapshotRevision) > (1n << 65n) - 1n ||
       Number.isNaN(Date.parse(parsed.cursor.sortAt)) ||
       Number.isNaN(Date.parse(parsed.cursor.snapshotAt))
     ) {
@@ -6340,7 +6442,10 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       403,
     );
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return c.json(
       {
         code: "SESSION_TENANCY_NOT_ACTIVATED",

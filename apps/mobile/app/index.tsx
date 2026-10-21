@@ -1,4 +1,5 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { recentSessionsForHome } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
@@ -92,6 +93,7 @@ function Gate() {
 /* The web home canvas at phone width: the question, the new-session composer
    and the quiet Recent sessions list under it. The rail lives behind the menu. */
 function Home() {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
@@ -184,8 +186,11 @@ function Home() {
         : { workspaceId, model, effort, latencyMode }),
       ...patch,
     }));
-  const pill = model ? compactModelPill(models, model, effort) : null;
-  const recent = useMemo(() => recentSessionsForHome(lists.sessions, lists.pinned, 6), [lists]);
+  const pill = model ? compactModelPill(t, models, model, effort) : null;
+  const recent = useMemo(
+    () => recentSessionsForHome(t, lists.sessions, lists.pinned, 6),
+    [t, lists],
+  );
   const togglePin = useSessionPinToggle({ client, workspaceId, setLists });
   useEffect(() => {
     if (workspaceId && (lists.pinned.length > 0 || lists.sessions.length > 0)) {
@@ -457,6 +462,7 @@ function Home() {
                   label={pill.name}
                   detail={pill.effort}
                   fast={latencyMode === "fast"}
+                  ultrafast={latencyMode === "ultrafast"}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();

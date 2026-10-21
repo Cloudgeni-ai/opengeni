@@ -1,9 +1,10 @@
+import { t } from "@/lib/console-text";
 import { modelDisplayName } from "@opengeni/react";
 import { labelReasoningEffort } from "@opengeni/react/model-policy";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "@opengeni/react/timeline-model";
 
-import type { SemanticTone } from "@/components/ui/status-dot";
-import { formatAbsoluteTime, inSentence } from "@/components/ui/relative-time";
+import type { SemanticTone } from "@opengeni/react/ui/status-dot";
+import { formatAbsoluteTime, inSentence } from "@opengeni/react/ui/relative-time";
 import { sessionStatusLabel, sessionInputWait } from "@/lib/session-rail";
 import type { RailSession } from "@/lib/session-list-entry";
 import { sessionSiteOrigin } from "@/lib/session-site-origin";
@@ -225,7 +226,8 @@ export function sessionHoverFacts(
     model: modelId
       ? {
           id: modelId,
-          effort: effort && effort !== "none" ? `${labelReasoningEffort(effort)} reasoning` : null,
+          effort:
+            effort && effort !== "none" ? `${labelReasoningEffort(t, effort)} reasoning` : null,
         }
       : null,
     subAgents: subAgentFacts(session, descendantCount, descendantCountTruncated),

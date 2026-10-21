@@ -1,7 +1,7 @@
 import { ChevronRightIcon, CloudIcon, CodeXmlIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { LogoTile } from "@/components/ui/logo-tile";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import type { OnboardingUseCase } from "@/lib/onboarding-use-case";
 
 const USE_CASES: Array<{

@@ -1,3 +1,4 @@
+import { desktopBridge } from "@/lib/desktop";
 import {
   createContext,
   useCallback,
@@ -69,6 +70,11 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
       delete root.dataset.ogThemeSwitching;
     };
   }, [resolvedTheme]);
+
+  // The desktop app follows, so window materials and controls match the page.
+  useEffect(() => {
+    desktopBridge?.setAppearance(appearance);
+  }, [appearance]);
 
   const setAppearance = useCallback((value: Appearance) => {
     updateAppearance(value);

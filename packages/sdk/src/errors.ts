@@ -34,8 +34,8 @@ export class OpenGeniApiError extends Error {
     const displayMessage =
       options.displayMessage ??
       (gatewayFailure && fromResponse
-        ? (decoded?.message ?? "Opengeni is temporarily unavailable — retry.")
-        : `Opengeni API ${status}: ${message}`);
+        ? (decoded?.message ?? "The workspace is temporarily unavailable — retry.")
+        : `API ${status}: ${message}`);
     super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
     this.name = "OpenGeniApiError";
     this.status = status;
@@ -263,7 +263,7 @@ export class OpenGeniSecureContextRequiredError extends Error {
   constructor(reason: OpenGeniSecureContextRequiredReason) {
     super(
       reason === "insecure_context"
-        ? "Couldn’t attach this file because Opengeni is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
+        ? "Couldn’t attach this file because this page is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
         : "Couldn’t attach this file because secure browser cryptography is unavailable. Attachments require HTTPS and Web Crypto support. Open a secure site in a supported browser or configure HTTPS for this deployment.",
     );
     this.name = "OpenGeniSecureContextRequiredError";
@@ -328,6 +328,15 @@ function boundedApiDetails(value: unknown): Record<string, unknown> | undefined 
       if (bounded !== undefined) details[key] = bounded;
     } else if (typeof entry === "number" || typeof entry === "boolean" || entry === null) {
       details[key] = entry;
+    } else if (
+      key === "action" &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>).type === "upgrade" &&
+      (entry as Record<string, unknown>).href === "/billing"
+    ) {
+      // Preserve the bounded public seat-limit action, not arbitrary nested data.
+      details.action = { type: "upgrade", href: "/billing" };
     }
   }
   return Object.keys(details).length > 0 ? details : undefined;
@@ -359,7 +368,7 @@ export class OpenGeniApiContractMismatchError extends Error {
   readonly actual: string;
 
   constructor(expected: string, actual: string) {
-    super(`Opengeni API contract mismatch: client expects ${expected}, API serves ${actual}`);
+    super(`API contract mismatch: client expects ${expected}, API serves ${actual}`);
     this.name = "OpenGeniApiContractMismatchError";
     this.expected = expected;
     this.actual = actual;
@@ -393,8 +402,18 @@ export function formatErrorMessage(
       error.code === "SESSION_TENANCY_NOT_ACTIVATED"
     ) {
       message = "Private conversations are unavailable. Ask an administrator to enable them.";
+    } else if (error.details?.code === "not_available_for_viewer") {
+      message = "This Site's assistant is not available for this viewer.";
+    } else if (error.details?.code === "site_budget_exhausted") {
+      message = "This Site's assistant has reached its usage limit for now.";
+    } else if (error.details?.code === "site_budget_busy") {
+      message = "This Site's assistant is busy. Try again in a moment.";
+    } else if (error.details?.code === "site_platform_brake_engaged") {
+      message = "This Site's assistant is paused for visitors right now.";
     } else if (error.code === "allowance_exhausted") {
       message = "Usage limit reached. Wait for the reset or ask an administrator for more usage.";
+    } else if (error.code === "seat_limit_reached") {
+      message = "Your organization has reached its seat limit. Upgrade the plan to add people.";
     } else if (error instanceof OpenGeniSessionListCursorError) {
       message = "The conversation list changed. Refresh and try again.";
     } else if (error.status === 401) {

@@ -1,4 +1,5 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
@@ -85,6 +86,7 @@ function LiveSession(props: {
   sessionId: string;
   workspaceId: string;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
   // Reading the session reads its replies in the inbox, on arrival and on leaving.
@@ -161,7 +163,7 @@ function LiveSession(props: {
   const model = policy?.model ?? session?.model ?? null;
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
-  const pill = model ? compactModelPill(props.models, model, effort ?? undefined) : null;
+  const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
@@ -366,6 +368,7 @@ function LiveSession(props: {
               label={pill.name}
               detail={pill.effort}
               fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy

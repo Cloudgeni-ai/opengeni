@@ -28,14 +28,19 @@
  * shared with chat refresh.
  */
 import { sql } from "drizzle-orm";
+import { recordSubscriptionUsageReading, withSubscriptionUsageReading } from "./usage-reading";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
 import {
   applyQuotaObservation,
+  quotaBlockClaim,
   quotaCapacity,
+  storedQuotaDocument,
   subscriptionCoreCredentialRefresher,
+  type StoredQuotaDocument,
   type SubscriptionQuota,
+  type SubscriptionQuotaBlock,
 } from "@opengeni/subscriptions";
 
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "../database";
@@ -198,13 +203,60 @@ export type SubscriptionCoreStoredQuotaRow = {
   quota_updated_at: Date | string | null;
 };
 
+/** How one usage reading may change a stored quota beyond its windows. */
+export type SubscriptionCoreUsageMergeOptions = {
+  /**
+   * The adapter's `usageReadConfirmsAvailability` for the response that was
+   * decoded (undefined: the adapter has none). False: the reading never ends
+   * a stored quota exhaustion.
+   */
+  confirmsAvailability?: boolean | undefined;
+  /**
+   * The adapter's `usageReadEndsClaimedBlock` for the response that was
+   * decoded (undefined: no cooldown ends early, and an adapter that defines
+   * the hook ends no quota exhaustion deadline either). Applied only with a
+   * reading that may end a stored quota exhaustion, to each stored block
+   * with its claim as the store holds it now (under the row lock).
+   */
+  endsClaimedBlock?: ((block: SubscriptionQuotaBlock) => boolean) | undefined;
+};
+
+/** The merge options one decoded `fetchUsage` response carries, from the adapter. */
+export function subscriptionCoreUsageMergeOptions(
+  adapter: SubscriptionCoreProvider["adapter"],
+  response: unknown,
+): SubscriptionCoreUsageMergeOptions {
+  return {
+    confirmsAvailability: adapter.usageReadConfirmsAvailability?.(response),
+    endsClaimedBlock: adapter.usageReadEndsClaimedBlock?.(response),
+  };
+}
+
+/**
+ * A stored quota a usage re-read can end now: it is exhausted, or (for an
+ * adapter whose reading can end claimed blocks) a model cooldown runs whose
+ * claim still explains it. A cooldown without a claim runs to its own end,
+ * so it never warrants a read.
+ */
+export function subscriptionCoreQuotaBlocksNow(
+  adapter: SubscriptionCoreProvider["adapter"],
+  quota: SubscriptionQuota | null,
+  now: number,
+): boolean {
+  if (!quota) return false;
+  if (quotaCapacity(quota, now).kind === "exhausted") return true;
+  return (
+    adapter.usageReadEndsClaimedBlock !== undefined &&
+    Object.entries(quota.modelCooldowns).some(
+      ([modelId, until]) => until > now && quotaBlockClaim(quota, modelId) !== null,
+    )
+  );
+}
+
 /** The quota write one usage observation makes. */
 export type SubscriptionCoreUsageObservationWrite = {
   /** The quota document to store. */
-  stored: Pick<
-    SubscriptionQuota,
-    "windows" | "modelCooldowns" | "exhaustedUntil" | "exhaustedKind" | "source"
-  >;
+  stored: StoredQuotaDocument;
   /** When it was observed (the row's `updated_at`). */
   observedAt: number;
   /** It ends a stored exhaustion (the caller wakes waiters after commit). */
@@ -779,40 +831,49 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
    */
   async function recordSubscriptionCoreUsageObservation(
     db: Database,
-    scope: Extract<SubscriptionCoreOperationScope, { kind: "workspace" }>,
+    scope: SubscriptionCoreOperationScope,
     connectionId: string,
     observation: SubscriptionQuota,
+    options: SubscriptionCoreUsageMergeOptions = {},
+    ref: SubscriptionCoreOperationLeaseRef | null = null,
   ): Promise<{ applied: boolean; recovered: boolean }> {
+    const { accountId } = scopeTenant(scope);
     const access = await withOperationScope(db, scope, async (tx) => {
-      if (!(await cutoverEnabled(tx, scope.accountId))) return { applied: false, recovered: false };
+      if (!(await cutoverEnabled(tx, accountId))) return { applied: false, recovered: false };
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
         tx,
         sql`select refresh_generation from opengeni_private.read_subscription_core_connection_credential(${providerId},
-          ${routineArgs(scope, connectionId, null)}
+          ${routineArgs(scope, connectionId, ref)}
         )`,
       );
       if (!connection) return { applied: false, recovered: false };
+      // Preserve the fetched measurement even if generation/merge policy declines it.
+      if (observation.source === "usage_endpoint" || observation.source === "response_headers")
+        await recordSubscriptionUsageReading(tx, accountId, connectionId, providerId, observation);
       const refreshGeneration = Number(connection.refresh_generation);
+      if (ref && observation.observedRefreshGeneration !== refreshGeneration)
+        return { applied: false, recovered: false };
       const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
         tx,
         sql`select quota, revision as quota_revision,
           observed_refresh_generation as quota_observed_refresh_generation,
           updated_at as quota_updated_at
         from subscription_connection_quota
-        where account_id = ${scope.accountId}::uuid and connection_id = ${connectionId}::uuid
+        where account_id = ${accountId}::uuid and connection_id = ${connectionId}::uuid
         for update`,
       );
       const write = mergeSubscriptionCoreUsageObservation(
         row ?? null,
         refreshGeneration,
         observation,
+        options,
       );
       if (!write) return { applied: false, recovered: false };
       await tx.execute(
         sql`insert into subscription_connection_quota (
           account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
         ) values (
-          ${scope.accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(write.stored)}::jsonb,
+          ${accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(write.stored)}::jsonb,
           ${refreshGeneration}, 1, ${new Date(write.observedAt).toISOString()}::timestamptz
         )
         on conflict (connection_id) do update
@@ -827,6 +888,34 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     return access?.value ?? { applied: false, recovered: false };
   }
 
+  /** Read-only quota evidence under the same exact live grant as credentials. */
+  async function readSubscriptionCoreOperationQuota(
+    db: Database,
+    scope: SubscriptionCoreOperationScope,
+    ref: SubscriptionCoreOperationLeaseRef,
+  ): Promise<{ quota: SubscriptionQuota | null } | null> {
+    const { accountId } = scopeTenant(scope);
+    const access = await withOperationScope(db, scope, async (tx) => {
+      if (!(await cutoverEnabled(tx, accountId))) return null;
+      const [connection] = await rawRows<{ status: string }>(
+        tx,
+        sql`
+        select status from opengeni_private.read_subscription_core_connection_credential(${providerId},
+          ${routineArgs(scope, ref.connectionId, ref)})`,
+      );
+      if (connection?.status !== "active") return null;
+      const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
+        tx,
+        sql`
+        select quota, revision as quota_revision, observed_refresh_generation as quota_observed_refresh_generation,
+          updated_at as quota_updated_at from subscription_connection_quota
+        where account_id = ${accountId}::uuid and connection_id = ${ref.connectionId}::uuid`,
+      );
+      return { quota: row ? decodeSubscriptionQuota(row) : null };
+    });
+    return access?.value ?? null;
+  }
+
   /**
    * The quota write one usage observation makes on a connection's stored
    * quota (null: it changes nothing, or the refresh-generation fence refuses
@@ -837,36 +926,72 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     row: SubscriptionCoreStoredQuotaRow | null,
     refreshGeneration: number,
     observation: SubscriptionQuota,
+    options: SubscriptionCoreUsageMergeOptions = {},
   ): SubscriptionCoreUsageObservationWrite | null {
     const current = row ? decodeSubscriptionQuota(row) : null;
+    // A reading below the limit that does not confirm availability ends
+    // nothing: it is merged as partial, so an exhausted window it omits keeps
+    // running too. (A reading at the limit replaces the windows as usual.)
+    const endsNothing =
+      options.confirmsAvailability === false &&
+      !observation.windows.some((window) => window.status === "exhausted");
     const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
-      usageReadingsComplete: provider.adapter.usageReadingsComplete === true,
+      usageReadingsComplete: provider.adapter.usageReadingsComplete === true && !endsNothing,
     });
     if (!observed || observed === current) return null;
     // An authoritative usage read below the limit ends a quota exhaustion
     // (adapter opt-in; the caller holds the row, and the write bumps its
-    // revision). An at-limit read without a known reset is not below the limit.
-    const next =
+    // revision). An at-limit read without a known reset is not below the limit,
+    // and neither is a reading the adapter says does not confirm availability.
+    const authoritative =
       provider.adapter.usageReadEndsQuotaExhaustion === true &&
+      options.confirmsAvailability !== false &&
       observation.source === "usage_endpoint" &&
       observation.exhaustedUntil === null &&
-      observation.exhaustedKind === null &&
-      observed.exhaustedKind === "quota"
-        ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
-        : observed;
+      observation.exhaustedKind === null;
+    // With the adapter's claim judgement, every block is judged from the
+    // claim the store holds now (under the row lock), so a newer refusal
+    // stored while the reading was in flight keeps its own block.
+    const claimed = provider.adapter.usageReadEndsClaimedBlock !== undefined;
+    const endsBlock = authoritative ? options.endsClaimedBlock : undefined;
+    const ends = (modelId: string | null, until: number): boolean =>
+      endsBlock?.({ modelId, until, claim: quotaBlockClaim(observed, modelId) }) ?? false;
+    const endsExhaustion =
+      authoritative &&
+      observed.exhaustedKind === "quota" &&
+      (!claimed || (observed.exhaustedUntil !== null && ends(null, observed.exhaustedUntil)));
+    const ended: SubscriptionQuota = endsExhaustion
+      ? { ...observed, exhaustedUntil: null, exhaustedKind: null, exhaustedClaim: null }
+      : observed;
+    // The same reading ends the stored model cooldowns whose claimed limits
+    // it shows below the limit (a limit reset early that a refusal cooled
+    // the model for); a cooldown the reading itself reports stands, and so
+    // does one without a claim (an unrecognized limit, or a refusal without
+    // usage evidence), until its own end.
+    const next: SubscriptionQuota = endsBlock
+      ? {
+          ...ended,
+          modelCooldowns: Object.fromEntries(
+            Object.entries(ended.modelCooldowns).filter(
+              ([modelId, until]) =>
+                observation.modelCooldowns[modelId] !== undefined || !ends(modelId, until),
+            ),
+          ),
+        }
+      : ended;
     const observedAt = observation.observedAt ?? Date.now();
-    const recovered =
+    const cooldownEnded =
       current !== null &&
-      quotaCapacity(current, observedAt).kind === "exhausted" &&
-      quotaCapacity(next, observedAt).kind !== "exhausted";
+      Object.entries(current.modelCooldowns).some(
+        ([modelId, until]) => until > observedAt && next.modelCooldowns[modelId] === undefined,
+      );
+    const recovered =
+      cooldownEnded ||
+      (current !== null &&
+        quotaCapacity(current, observedAt).kind === "exhausted" &&
+        quotaCapacity(next, observedAt).kind !== "exhausted");
     return {
-      stored: {
-        windows: next.windows,
-        modelCooldowns: next.modelCooldowns,
-        exhaustedUntil: next.exhaustedUntil,
-        exhaustedKind: next.exhaustedKind,
-        source: next.source,
-      },
+      stored: withSubscriptionUsageReading(storedQuotaDocument(next), observation),
       observedAt,
       recovered,
     };
@@ -906,6 +1031,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     mergeSubscriptionCoreUsageObservation,
     recordSubscriptionCoreModelCatalog,
     recordSubscriptionCoreUsageObservation,
+    readSubscriptionCoreOperationQuota,
     resolveSubscriptionCoreConnectionId,
   };
 });

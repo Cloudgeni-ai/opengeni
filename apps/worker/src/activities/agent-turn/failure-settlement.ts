@@ -1,6 +1,9 @@
+import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
+import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
+import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
-  requestSessionTurnRecovery,
+  requestSessionTurnRecovery as persistSessionTurnRecovery,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -211,35 +214,26 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A refused socket applies to the entire logical turn, including recovery
+  // caused later by a lease, tool, or worker interruption rather than a model.
+  const requestTurnRecovery: typeof persistSessionTurnRecovery = (
+    database,
+    workspaceId,
+    recovery,
+  ) =>
+    persistSessionTurnRecovery(database, workspaceId, {
+      ...recovery,
+      ...(providerTurn.persistentModelTransportHttpOnly
+        ? { persistentModelTransportHttpOnly: true as const }
+        : {}),
+    });
   // Capture before any recovery/checkpoint DB operation can fail again.
   if (isSessionEventPersistenceError(error)) {
-    try {
-      const diagnosticId = observability.recordFailureDiagnostic({
-        code: error.details.code,
-        stage:
-          error.details.stage === "session_events.append_generic"
-            ? "session_events.append_generic"
-            : error.details.stage === "session_events.append_for_turn_attempt"
-              ? "session_events.append_for_turn_attempt"
-              : error.details.stage === "session_attempts.claim"
-                ? "session_attempts.claim"
-                : "failure_settlement",
-        retryDecision: error.details.retryOutcome,
-        error,
-        sessionId: input.sessionId,
-        ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
-        attemptId: input.attemptId,
-        attempts: error.details.attempts,
-        eventTypes: error.details.eventTypes,
-        sqlState: error.details.sqlState,
-        ...(error.details.database.constraint
-          ? { constraint: error.details.database.constraint }
-          : {}),
-      });
-      observability.error("session event persistence failed", { correlationId: diagnosticId });
-    } catch {
-      // Failure settlement must not depend on telemetry availability.
-    }
+    reportSessionPersistenceFailure(observability, error, {
+      sessionId: input.sessionId,
+      ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
+      attemptId: input.attemptId,
+    });
   }
   // Graceful worker shutdown (deploy / rollout restart): checkpoint the
   // same current inference for a new fenced attempt instead of failing the
@@ -265,13 +259,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.triggerEventId &&
     attempt.executionGeneration > 0
   ) {
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       if (eventing.turnStartedPublished) {
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ requireDurable: true });
       }
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId,
@@ -346,7 +340,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             reason: "rotation_in_progress" as const,
           }
         : undefined;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const transitionRetryAfterMs =
+        transitionPending && !sandboxLifecycleWait
+          ? sandboxDeadlineRotationRecoveryDelayMs(settings)
+          : undefined;
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -371,6 +369,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             }
           : {}),
         ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
+        ...(transitionRetryAfterMs !== undefined ? { retryAfterMs: transitionRetryAfterMs } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -384,10 +383,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       control.turnMetricOutcome = "recovering";
       return claimedResult({
         status: "recovering",
-        ...(transitionPending && !sandboxLifecycleWait
-          ? {
-              continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
-            }
+        ...(transitionRetryAfterMs !== undefined
+          ? { continueDelayMs: transitionRetryAfterMs }
           : {}),
       });
     } catch (recoveryError) {
@@ -416,16 +413,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     eventing.turnStartedPublished
   ) {
     recordSessionUsageLimitEvent(observability, "between_calls", "unavailable");
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId,
         attemptId: input.attemptId,
         reason: SESSION_USAGE_CUSTODY_PENDING,
+        retryAfterMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
         detail: {
           code: SESSION_USAGE_CUSTODY_PENDING,
           retryable: true,
@@ -469,7 +467,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -510,7 +508,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
       const rotation = sandboxRotationController.signal.reason;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -559,7 +557,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       // action crosses the durable execution-admission fence before provider
       // invocation, so a consumed step resumes as already-executed or
       // outcome-unknown rather than calling MCP again.
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -698,9 +696,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // Codex refusal, quota attribution and failover belong exclusively to the
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
-  // A SuperGrok turn on the shared core: unknown request outcomes are never
-  // replayed, and refusals settle through the shared core (X1b) instead of
-  // the legacy SuperGrok wait below.
+  // A SuperGrok turn on the shared core: refusals settle through the shared
+  // core (X1b) instead of the legacy SuperGrok wait below.
   const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
   // A Claude turn runs only on the shared core (the legacy Claude runtime is
   // deleted): its refusals, unknown outcomes and lease loss settle there.
@@ -713,30 +710,40 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // When the ambiguity is this attempt's own interrupted request (a stream
   // that dropped or stalled before its terminal event, or a gateway timeout),
   // the same turn recovers from its durable checkpoint within the bounded
-  // provider-recovery budget. Codex requests are stateless (`store: false`)
-  // and function tools only run after a complete response, so a replay can
-  // at most repeat provider-hosted work and spend more quota. A refusal by
-  // the durable admission fence, an unsettled request, or a deterministic
-  // provider terminal stays a terminal unknown-outcome failure, as does an
-  // interruption combined with a lost lease or a disconnected source.
+  // provider-recovery budget, for every core provider. Function tools only
+  // run after a complete response, so a replay can at most repeat
+  // provider-hosted work (a hosted web search) and spend more quota. A
+  // refusal by the durable admission fence, an unsettled request, or a
+  // deterministic provider terminal stays a terminal unknown-outcome failure,
+  // as does an interruption combined with a lost lease, lost access or a
+  // disconnected source.
   //
   // The parallel session-title request never fences replay: it is a plain,
   // tool-less request whose text only ever becomes the session title, and it
   // is cancelled and joined before settlement. Its custody row keeps its
   // outcome; the replacement attempt's new generation is admitted past it.
+  const interruptedCore = coreCodex
+    ? { core: coreCodex, displayName: "Codex", leaseLost: leases.codex.lost }
+    : coreXai
+      ? { core: coreXai, displayName: "SuperGrok", leaseLost: leases.xai.lost }
+      : coreClaude
+        ? { core: coreClaude, displayName: "Claude", leaseLost: leases.claude.lost }
+        : null;
   const coreUnknownRecoveryFailure =
-    coreCodex &&
-    !leases.codex.lost &&
+    interruptedCore &&
+    !interruptedCore.leaseLost &&
     !hasErrorInCauseChain(error, CodexCredentialLeaseLostError) &&
     !hasErrorInCauseChain(error, SubscriptionCoreCodexLeaseLostError) &&
-    !hasErrorInCauseChain(error, SubscriptionCoreCodexSourceDisconnectedError) &&
-    !hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
-      ? ownInterruptedCodexRequestRecovery(error, coreCodex, billingState.isCodexTurn)
+    !coreDispatchAuthorityLost(error)
+      ? ownInterruptedCoreRequestRecovery(error, interruptedCore.core, {
+          displayName: interruptedCore.displayName,
+          isCodexTurn: billingState.isCodexTurn,
+        })
       : null;
-  const coreRequestOutcomeUnknown =
-    !coreUnknownRecoveryFailure &&
-    (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
-      coreCodex?.requests?.hasUnknownOutcome())
+  const coreRequestOutcomeUnknown = coreUnknownRecoveryFailure
+    ? null
+    : hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
+        coreCodex?.requests?.hasUnknownOutcome()
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
       : coreXai
         ? xaiCoreRequestOutcomeUnknown(error, coreXai)
@@ -802,7 +809,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
     }
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
@@ -952,11 +959,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       Date.now(),
       Math.random(),
     );
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: attempt.turnId,
         triggerEventId: attempt.triggerEventId!,
@@ -966,6 +973,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           startedAt: new Date(leaseBusyChain.startedAt).toISOString(),
           executionGeneration: leaseBusyChain.executionGeneration,
         },
+        retryAfterMs: continueDelayMs,
         detail: { ...error.payload, continueDelayMs },
       });
     } catch (recoveryError) {
@@ -1197,7 +1205,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       providerTurn.lastCodexRequestOpaqueArtifacts.length > 0
         ? historySink.providerArtifactCandidates.runStateId
         : undefined;
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
@@ -1328,12 +1336,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
     const recoveryCode = providerRecoveryCode(error, failure);
+    const internalMcpWait = recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
     // A recovery that interrupts a running tool is followed by a successful
     // model response before the tool runs again, which resets the in-memory
     // budget. Count those recoveries since the turn's last tool progress so
     // the same bounded backoff and limit still apply.
     const toolProgress =
-      earlyRecoverableSetup || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+      earlyRecoverableSetup || internalMcpWait || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
         ? null
         : await readSessionTurnToolProgressRecoveryState(db, input.workspaceId, {
             sessionId: input.sessionId,
@@ -1351,6 +1360,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       retryAfterMs: providerRetryAfterMs(error),
       jitterSample: Math.random(),
     });
+    if (
+      shouldFallbackModelSocket({
+        error,
+        recovery: recoveryResult,
+        httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
+        nextRecoveryCount: nextProviderRecoveryCount,
+        recoveryLimit: providerRecoveryLimit(recoveryCode) ?? Infinity,
+      })
+    ) {
+      providerTurn.persistentModelTransportHttpOnly = true;
+    }
     const setupRecoveryExhausted =
       earlyCommandStartUnavailable &&
       recoveryResult.status === "exhausted" &&
@@ -1359,7 +1379,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (setupRecoveryExhausted) {
         // This is positive pre-dispatch proof, not an ambiguous command. Park
         // the SAME accepted turn without resetting or advancing its budget.
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
@@ -1395,19 +1415,29 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
           attemptId: input.attemptId,
           reason: recoveryCode ?? "provider_unavailable",
-          providerRecoveryCount: nextProviderRecoveryCount,
+          // Internal setup waits do not spend or reset the model-provider budget.
+          ...(!internalMcpWait ? { providerRecoveryCount: nextProviderRecoveryCount } : {}),
+          retryAfterMs: recoveryResult.continueDelayMs,
           ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
           detail: {
             ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
-            providerRecoveryCount: nextProviderRecoveryCount,
-            maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
+            ...(internalMcpWait
+              ? {
+                  code: FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+                  error:
+                    "Opengeni's tool service is temporarily unavailable. This turn will continue automatically when it returns.",
+                }
+              : {
+                  providerRecoveryCount: nextProviderRecoveryCount,
+                  maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
+                }),
           },
         });
         if (recovery.action === "stale") {
@@ -1491,7 +1521,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               providerRecovery: {
                 failureCode: recoveryCode ?? "provider_unavailable",
                 providerRecoveryCount: nextProviderRecoveryCount,
-                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE ||
+                recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
                   ? { continueDelayMs: recoveryResult.continueDelayMs }
                   : {}),
               },
@@ -1592,17 +1623,60 @@ function findInCauseChain<T extends Error>(
   return null;
 }
 
-const INTERRUPTED_CODEX_RESPONSE_MESSAGE = "The Codex response was interrupted before it finished";
+/** An error code anywhere in the cause chain. */
+function hasErrorCodeInCauseChain(error: unknown, matches: (code: string) => boolean): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && matches(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+const CORE_DISPATCH_AUTHORITY_LOST_CODES = new Set([
+  "subscription_core_lease_lost",
+  "subscription_core_access_lost",
+  "subscription_core_source_disconnected",
+]);
 
 /**
- * Classify a Codex failure whose only replay obstacle is this attempt's own
- * interrupted request. Returns the retryable failure the bounded provider
- * recovery should use, or null when the unknown outcome must stay terminal.
+ * The core turn lost the authority to dispatch on its account (its lease, its
+ * access or its source), for any provider: an interruption alongside it is
+ * settled by that path, never by an in-turn replay.
  */
-export function ownInterruptedCodexRequestRecovery(
+function coreDispatchAuthorityLost(error: unknown): boolean {
+  return hasErrorCodeInCauseChain(
+    error,
+    (code) =>
+      CORE_DISPATCH_AUTHORITY_LOST_CODES.has(code) || code.endsWith("_credential_lease_lost"),
+  );
+}
+
+/**
+ * Failure codes that mean the response stream broke (ended without its
+ * terminal event, or went silent after it began) rather than a provider
+ * answer. Each provider classifies them as terminal on their own; with this
+ * attempt's own settled request as the only obstacle they are recovered.
+ */
+const INTERRUPTED_RESPONSE_CODES = new Set([
+  "invalid_sse_terminal",
+  "codex_response_timeout",
+  "xai_response_stream_idle_timeout",
+  "xai_hosted_tool_continuation_stalled",
+  "anthropic_stream_interrupted",
+]);
+
+/**
+ * Classify a core subscription failure (Codex, SuperGrok or Claude) whose
+ * only replay obstacle is this attempt's own interrupted request. Returns the
+ * retryable failure the bounded provider recovery should use, or null when
+ * the unknown outcome must stay terminal.
+ */
+export function ownInterruptedCoreRequestRecovery(
   error: unknown,
   core: Pick<CodexSubscriptionCoreTurn, "requests">,
-  isCodexTurn: boolean,
+  options: { displayName: string; isCodexTurn: boolean },
 ): ReturnType<typeof agentRunFailurePayload> | null {
   const lane = core.requests;
   if (!lane?.hasUnknownOutcome()) return null;
@@ -1613,30 +1687,30 @@ export function ownInterruptedCodexRequestRecovery(
   if (findInCauseChain(error, CodexStreamingTerminalError)?.code === "response_incomplete") {
     return null;
   }
+  const interrupted = {
+    error: `The ${options.displayName} response was interrupted before it finished`,
+    code: "provider_unavailable",
+    retryable: true,
+  };
   // After an interrupted request the tracker refuses the SDK's own retry with
   // the native unknown-outcome error; the SDK retried, so the cause was
   // transient.
-  if (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError)) {
-    return {
-      error: INTERRUPTED_CODEX_RESPONSE_MESSAGE,
-      code: "provider_unavailable",
-      retryable: true,
-    };
+  if (
+    hasErrorCodeInCauseChain(
+      error,
+      (code) =>
+        code === "subscription_core_request_outcome_unknown" ||
+        INTERRUPTED_RESPONSE_CODES.has(code),
+    )
+  ) {
+    return interrupted;
   }
   let failure: ReturnType<typeof agentRunFailurePayload>;
   try {
-    failure = agentRunFailurePayload(error, { isCodexTurn });
+    failure = agentRunFailurePayload(error, { isCodexTurn: options.isCodexTurn });
   } catch {
     return null;
   }
-  // A stream that ended without a terminal event, or stalled after it began,
-  // is a broken connection rather than a provider answer.
-  if (failure.code === "invalid_sse_terminal" || failure.code === "codex_response_timeout") {
-    return {
-      error: INTERRUPTED_CODEX_RESPONSE_MESSAGE,
-      code: "provider_unavailable",
-      retryable: true,
-    };
-  }
+  if (failure.code && INTERRUPTED_RESPONSE_CODES.has(failure.code)) return interrupted;
   return failure.retryable === true ? failure : null;
 }

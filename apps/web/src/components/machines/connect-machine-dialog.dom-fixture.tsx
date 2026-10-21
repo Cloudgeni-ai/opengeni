@@ -27,7 +27,7 @@ let mintImpl: (input: MintInput) => Promise<MintResult> = async (input) =>
   echo(`oget_preview${++mintCount}.sig`, input);
 const mintEnrollToken = mock(async (_workspaceId: string, input: MintInput) => mintImpl(input));
 const copyTextToClipboard = mock(async (_text: string) => true);
-const context = { client: { mintEnrollToken } };
+const context = { client: { mintEnrollToken }, accessContext: { subjectId: "person" } };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@opengeni/react/clipboard", () => ({ copyTextToClipboard }));
 GlobalRegistrator.register();
@@ -83,6 +83,7 @@ beforeEach(() => {
 });
 
 type Props = {
+  advanced?: boolean;
   workspaceId?: string;
   machines?: MachineView[];
   loading?: boolean;
@@ -135,6 +136,14 @@ async function render(initial: Props = {}) {
       (candidate) =>
         candidate.textContent?.trim() === label || candidate.textContent?.startsWith(label),
     ) ?? null;
+  const openAdvanced = async () => {
+    if (props.advanced === false || dialog()?.querySelector("[data-connect-machine-setup]")) return;
+    const trigger = [...(dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (candidate) => candidate.textContent?.startsWith("Connect a server instead"),
+    );
+    if (trigger) await click(trigger);
+  };
+  await openAdvanced();
   return {
     dialog,
     text: () => dialog()?.textContent ?? "",
@@ -146,6 +155,7 @@ async function render(initial: Props = {}) {
     update: async (next: Props) => {
       props = { ...props, ...next };
       await draw();
+      await openAdvanced();
     },
     flush: async () => await act(async () => await settle()),
     close: async () => {
@@ -164,10 +174,50 @@ async function click(element: HTMLElement | null) {
 }
 
 describe("Connect a machine dialog", () => {
+  test("ordinary setup offers the app and an account-bound handoff without minting or rendering a command", async () => {
+    const h = await render({ advanced: false });
+    try {
+      expect(h.text()).toContain("Download for Mac");
+      expect(h.text()).toContain("Open app and connect");
+      expect(h.command()).toBe("");
+      expect(h.text()).not.toContain("curl");
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      const links = [...h.dialog()!.querySelectorAll<HTMLAnchorElement>("a")];
+      expect(links.find((link) => link.textContent === "Download for Mac")?.href).toBe(
+        "https://app.example.test/desktop/latest/Opengeni-mac.dmg",
+      );
+      const handoff = new URL(
+        links.find((link) => link.textContent === "Open app and connect")!.href,
+      );
+      expect(handoff.protocol).toBe("opengeni:");
+      expect(handoff.searchParams.get("subject")).toBe("person");
+      expect(handoff.searchParams.get("url")).toBe("https://app.example.test/workspaces/workspace");
+      expect(h.text()).not.toContain("replacing the old version");
+      await click(links.find((link) => link.textContent === "Open app and connect")!);
+      expect(h.text()).toContain("opens without connecting");
+      expect(h.text()).toContain("replacing the old version");
+      expect(h.text()).not.toContain("Machine connected");
+      expect(h.onConnected).not.toHaveBeenCalled();
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      await click(h.button("Windows"));
+      expect(h.text()).toContain("Download for Windows");
+      await click(h.button("Linux"));
+      expect(h.text()).toContain("Download .deb");
+      expect(h.text()).toContain("Download AppImage");
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      await h.update({ machines: [machine("new-computer", "My computer")] });
+      expect(h.text()).toContain("Machine connected");
+      expect(h.text()).not.toContain("replacing the old version");
+      expect(h.onConnected).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
   test("defaults to Only me with screen control off, and remints when access changes", async () => {
     const h = await render();
     try {
-      expect(h.text()).toContain("Connect a machine");
+      expect(h.text()).toContain("Use your computer");
       expect(h.text()).toContain("Who can use it?");
       expect(h.radio("Only me")?.getAttribute("aria-checked")).toBe("true");
       expect(h.radio("This workspace")?.getAttribute("aria-checked")).toBe("false");
@@ -377,7 +427,7 @@ describe("Connect a machine dialog", () => {
     try {
       // The snapshot waits for the first load, so existing machines never count.
       await h.update({ loading: false });
-      expect(h.text()).toContain("Connect a machine");
+      expect(h.text()).toContain("Use your computer");
       await h.update({ machines: [existing, machine("mac", "Studio Mac")] });
       expect(h.text()).toContain("Machine connected");
       expect(h.text()).toContain("Studio Mac");

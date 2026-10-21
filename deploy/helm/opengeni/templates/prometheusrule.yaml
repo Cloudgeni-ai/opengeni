@@ -1516,7 +1516,7 @@ spec:
             next_step: 'Check worker logs for memory-guard errors and that host/cgroup memory files are readable.'
             description: The hard headroom protection is degraded. Restore readable host/cgroup memory signals and the graceful worker lifecycle before admitting sustained turn load.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
-        # ── OpenGeni-hosting node pressure ───────────────────────────────────
+        # ── Opengeni-hosting node pressure ───────────────────────────────────
         - alert: OpenGeniNodeMemoryPressureStalled
           expr: |
             opengeni:node_memory_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1

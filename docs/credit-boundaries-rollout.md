@@ -1,6 +1,6 @@
 # Credit boundaries and optional usage charges
 
-This change separates OpenGeni-funded model/video usage from sandbox warm time,
+This change separates Opengeni-funded model/video usage from sandbox warm time,
 Knowledge embedding, and unpriced source preparation. Do not activate a new
 customer charge simply by deploying the migration or enabling Stripe.
 
@@ -12,7 +12,7 @@ Keep `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false`,
 posture, existing model/video rails remain the only charged resources. The new
 warm/embedding usage facts can be observed without a customer debit. A zero
 balance must not prevent an unpriced sandbox or document source from working;
-model and OpenGeni-funded video admission still enforce their own credits.
+model and Opengeni-funded video admission still enforce their own credits.
 
 The signed ledger is account-wide. A new verified managed human completing the
 first self-service organization setup can receive exactly one $10 grant once
@@ -101,3 +101,20 @@ erase historical charges. Keep usage, ledger, failed-settlement and funding-wait
 signals visible to operators. A rollback of the binary across new migration
 contracts may need the deployment-specific maintenance procedure; do not assume
 restarting an old image is safe.
+
+## Site platform usage
+
+Published Sites' platform usage (gateway requests, Site SQL rows and
+storage) follows the same ladder with `OPENGENI_SITES_PLATFORM_BILLING_MODE`:
+start in `usage_only` (the default) and compare the Usage page and the
+`site_platform_usage` rows with the Cloudflare bill, move to `shadow` and
+compare `shadow_micros` with what you expect to charge, then switch to
+`credits`. Set the values in the reviewed Helm values file
+(`config.OPENGENI_SITES_PLATFORM_*`) like the other modes. In credits mode a
+workspace past its monthly allowance with no credits (or with
+`OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED=false`) gets 402
+`site_platform_quota_exhausted` on Site SQL calls, storage-adding Site Data
+writes and new publications; pages keep serving. Going back to `usage_only`
+stops new charges and refusals; it does not reverse charges already made.
+The Opengeni-wide brake (`OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD`) works
+in every mode; see "Platform usage" in [`published-sites.md`](published-sites.md).

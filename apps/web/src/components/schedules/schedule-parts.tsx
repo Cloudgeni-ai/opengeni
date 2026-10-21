@@ -14,19 +14,21 @@ import {
   Trash2Icon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/dropdown-menu";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@/context";
 import { creatorInitials } from "@/lib/creator-initials";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
+import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { PausedChatRunBadge } from "./schedule-blocker-notice";
 import { cn } from "@/lib/utils";
 import type { ScheduledTask, ScheduledTaskRun } from "@/types";
 
@@ -131,7 +133,7 @@ export function useScheduleNavigation(workspaceId: string) {
   };
 }
 
-export { inAppClick } from "@/lib/in-app-click";
+export { inAppClick } from "@opengeni/react/ui/in-app-click";
 
 /* ----------------------------------------------------------------------------
    Values.
@@ -170,6 +172,7 @@ const RUN_BADGE: Record<
 };
 
 export function RunStatusBadge({ run }: { run: ScheduledTaskRun }) {
+  if (scheduledRunSkippedForPausedChat(run)) return <PausedChatRunBadge />;
   const badge = RUN_BADGE[run.status] ?? { status: "queued" as const, label: run.status };
   return (
     <StatusBadge

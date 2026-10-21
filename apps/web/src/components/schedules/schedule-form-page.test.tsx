@@ -8,7 +8,7 @@ GlobalRegistrator.register();
   true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const selectMenu = await import("@/components/ui/select-menu");
+const selectMenu = await import("@opengeni/react/ui/select-menu");
 
 const workspaceId = "workspace-example";
 let task: ScheduledTask;
@@ -67,6 +67,9 @@ const context = {
     workspaceGrants: [{ workspaceId, permissions: ["connections:read"] }],
   },
 };
+mock.module("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
+}));
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
@@ -126,7 +129,7 @@ mock.module("./schedule-composer", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormPage: ({
     children,
     onSubmit,
@@ -147,7 +150,7 @@ mock.module("@/components/ui/form-dialog", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/select-menu", () => ({
+mock.module("@opengeni/react/ui/select-menu", () => ({
   ...selectMenu,
   SelectMenu: ({
     value,
@@ -286,6 +289,16 @@ test("an existing-chat schedule shows no account picker and saves no pins when r
   task.agentConfig.tools = [];
   const { container, root } = await render();
   expect(container.querySelector('[aria-label="retained accounts"]')).toBeNull();
+  const inherited = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.includes("Uses this chat’s settings"),
+  )!;
+  expect(inherited.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => {
+    inherited.click();
+    await flush();
+  });
+  expect(container.textContent).toContain("Changes apply to the chat and its scheduled runs.");
+  expect(container.textContent).toContain("Open chat settings");
   const destination = [...container.querySelectorAll("select")].find(
     (select) => select.value === "source-chat",
   )!;

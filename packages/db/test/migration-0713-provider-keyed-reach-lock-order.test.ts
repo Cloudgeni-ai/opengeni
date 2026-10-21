@@ -171,17 +171,31 @@ async function heldBy(pid: number): Promise<Lock[]> {
   ];
 }
 
-/** Wait until `expected` backends of this database wait for a lock on `relation`. */
-async function waitForWaitersOn(relation: string, expected: number): Promise<void> {
+/**
+ * Wait until `expected` backends of this database wait for a lock on
+ * `relation`. With `queuedOnAdvisory`, that many of them may instead be
+ * queued on an advisory lock held by one of the relation's waiters.
+ */
+async function waitForWaitersOn(
+  relation: string,
+  expected: number,
+  queuedOnAdvisory = 0,
+): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    const [row] = await database!.admin<{ waiting: number }[]>`
-      select count(*)::int as waiting
+    const [row] = await database!.admin<{ waiting: number; advisory: number }[]>`
+      select count(*) filter (where lock_row.locktype = 'relation')::int as waiting,
+        count(*) filter (where lock_row.locktype = 'advisory')::int as advisory
       from pg_locks lock_row
       join pg_stat_activity activity on activity.pid = lock_row.pid
-      where not lock_row.granted and lock_row.locktype = 'relation'
-        and lock_row.relation = ${relation}::regclass
+      where not lock_row.granted
+        and (
+          (lock_row.locktype = 'relation' and lock_row.relation = ${relation}::regclass)
+          or lock_row.locktype = 'advisory'
+        )
         and activity.datname = current_database()`;
-    if ((row?.waiting ?? 0) >= expected) return;
+    const waiting = row?.waiting ?? 0;
+    const advisory = Math.min(row?.advisory ?? 0, queuedOnAdvisory);
+    if (waiting >= expected - queuedOnAdvisory && waiting + advisory >= expected) return;
     await pause(25);
   }
   throw new Error(`fewer than ${expected} backends waited on ${relation} within the probe window`);
@@ -622,8 +636,10 @@ describe("migration 0713 lock order", () => {
         );
         // Both creations reach 0689's triggers and wait on the reach table
         // 0713 holds, holding their new rows; both reach writes wait on it
-        // too.
-        await waitForWaitersOn(REACH_TABLE, 4);
+        // too. The workspace creation and the membership claim both take the
+        // organization-membership lock (0797's seat check reuses it), so
+        // whichever arrives second queues on that lock behind the first.
+        await waitForWaitersOn(REACH_TABLE, 4, 1);
         reader.release();
         expect(await reader.done).toEqual({ ok: true });
         await applying.finish("commit");

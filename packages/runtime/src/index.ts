@@ -2,6 +2,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -14,7 +15,12 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection } from "./anthropic-messages";
+export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
+export {
+  createModelImageSizer,
+  type ModelImageSizerOptions,
+  type SizedImage,
+} from "./model-image-sizing";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -33,6 +39,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
   toolPolicyActionName,
   toolReviewContextFromSchema,
@@ -98,6 +105,7 @@ import {
 } from "@opengeni/codemode";
 import {
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -111,6 +119,7 @@ import { createSecretArgumentResolver } from "./secret-argument-resolution";
 import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -196,6 +205,7 @@ import {
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
+  restoreDirectDeferredCallArgumentTypes,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
@@ -222,6 +232,7 @@ import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
   wrapAttemptToolDefinitions,
@@ -246,6 +257,7 @@ export {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorAttachmentMaterializer,
   type ConnectorAttachmentTransferProjectionOptions,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 export {
   GMAIL_REST_API_BASE,
@@ -294,6 +306,7 @@ import {
   applyDiff,
   RunContext,
   ToolGuardrailFunctionOutputFactory,
+  defineToolInputGuardrail,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -414,14 +427,34 @@ import {
   sandboxCommandStillRunning,
   sandboxCommandStdout,
 } from "./sandbox/command-result";
+import {
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+} from "./sandbox/operation-purpose";
 import { shellCodemodePath } from "./sandbox/codemode-token";
 import {
   installManagedCodemodeClient,
   loadManagedCodemodeClient,
   managedCodemodeClientDirectory,
+  type ManagedCodemodeClientDownload,
+} from "./sandbox/codemode-client";
+export {
+  loadManagedCodemodeClient,
+  managedCodemodeClientBytes,
+  managedCodemodeClientDigest,
+  type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import { withModelStepHandover } from "./model-step-handover";
+export { ModelStepHandover } from "./model-step-handover";
+export {
+  ModelPreemption,
+  isModelPreempted,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+  preemptedResponseDone,
+} from "./model-preemption";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -582,6 +615,7 @@ export type {
   ModelPreparationPhase,
   ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
+export { withModelTransportStartedObserver } from "./model-preparation-diagnostics";
 export {
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
@@ -612,6 +646,7 @@ export {
   normalizeVercelGatewayRequestBody,
   resolveTurnModel,
   vercelGatewayRoutingFetch,
+  warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
   appendWorkspaceGovernance,
@@ -783,6 +818,8 @@ export {
   type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionAttachmentFileIds,
+  type AttachmentUploadTimes,
   compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
@@ -1066,7 +1103,7 @@ export type GenerateSessionTitleOptions = {
   provider?: ResolvedModelProvider;
   model?: Model;
   modelName?: string;
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Reasoning effort for the title request only. Callers pass the model's
    * lowest runnable effort to leave room in the output budget for the title.
@@ -2143,7 +2180,7 @@ export type BuildAgentOptions = {
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   /**
    * Responses `text.verbosity`, set only for routes and models that accept it.
    * Hosts must keep it constant for a session: like reasoning effort, a
@@ -2206,6 +2243,8 @@ export type BuildAgentOptions = {
    * may separately exempt an exact attempt-local tool below.
    */
   toolPreparationReady?: Promise<void>;
+  /** Start the owned deferred preparation if tool demand precedes provider dispatch. */
+  startToolPreparation?: () => void;
   /**
    * Exact attempt-local function names that remain visible and executable while
    * deferred catalog preparation is pending. This is a per-tool exception; it
@@ -2316,6 +2355,9 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
+  // Signed, digest-addressed URL for the release's managed Codemode client so a
+  // fresh box fetches it in one command. Absent: the bytes are staged as before.
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   /**
    * Whether this attempt exposes the frozen Codemode catalog. Managed sandboxes
    * infer this from `codemodeTokenSeed`; Connected Machines set it explicitly
@@ -2566,6 +2608,11 @@ export function agentPromptExperimentsFor(settings: Settings): {
     : {};
 }
 
+function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
+  const instructions = settings.deploymentAgentInstructions?.trim();
+  return instructions ? `${content}\n\n# Deployment environment\n\n${instructions}` : content;
+}
+
 function inspectModularAgentInstructions(
   settings: Settings,
   config: ResolvedAgentConfig,
@@ -2579,7 +2626,7 @@ function inspectModularAgentInstructions(
   const composed = composeModularAgentInstructions({
     capabilities: config.capabilities,
     renderer: config.renderer,
-    identity,
+    identity: appendDeploymentAgentInstructions(identity, settings),
     resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
@@ -2610,11 +2657,14 @@ export function inspectPersistentAgentInstructions(
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
   const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
-  const personaAndCore = composeAgentInstructions(
-    personaTemplate,
-    options.workspaceEnvironment,
-    options.rig,
-    agentPromptExperimentsFor(settings).experiments,
+  const personaAndCore = appendDeploymentAgentInstructions(
+    composeAgentInstructions(
+      personaTemplate,
+      options.workspaceEnvironment,
+      options.rig,
+      agentPromptExperimentsFor(settings).experiments,
+    ),
+    settings,
   );
   if (settings.experimentSystemPromptCacheSplit) {
     // The deployment persona with no workspace environment or sandbox
@@ -2762,6 +2812,7 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
+const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
 // A missing-title directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -2842,7 +2893,14 @@ export async function secretQuestionRejection(
       return `Question "${question.id}" saves to "Only me", but no person is acting in this run. Use saveTo "task" or "workspace" and call request_human_input again.`;
     }
     if (spec.vault && context.validateQuestionVault) {
-      const reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      let reason: string | null;
+      try {
+        reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      } catch (error) {
+        // This runs in a tool input guardrail, and a guardrail that throws fails
+        // the whole turn. A vault lookup that cannot complete is a tool error.
+        return `Question "${question.id}" names vault "${spec.vault}", which could not be checked, so nothing was asked. Omit vault to use the default vault for saveTo, or call request_human_input again. Error: ${exactErrorMessage(error)}`;
+      }
       if (reason) {
         return `Question "${question.id}" names vault "${spec.vault}": ${reason} Omit vault to use the default vault for saveTo, then call request_human_input again.`;
       }
@@ -2863,6 +2921,17 @@ export function mcpToolErrorOutput(error: unknown): {
   // carries the ready request_human_input call (never a value).
   if (isSecretReferenceError(error)) {
     return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+  }
+  if (error instanceof ToolGatewaySchemaCompilationError) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "The tool was not called because its input or output schema is invalid. Changing the arguments will not fix this. Use another tool or report the unavailable tool.",
+        },
+      ],
+    };
   }
   const text =
     invalidToolArgumentsText(error) ??
@@ -3263,6 +3332,7 @@ export function buildOpenGeniAgent(
       options.approvedToolCallId,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+    installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -3363,6 +3433,9 @@ export function buildOpenGeniAgent(
   if (options.codemodeTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentCodemodeTokenSeed.set(agent, options.codemodeTokenSeed);
     agentCodemodeTokenSessionId.set(agent, options.codemodeTokenSessionId!);
+    if (options.codemodeClientDownload) {
+      agentCodemodeClientDownload.set(agent, options.codemodeClientDownload);
+    }
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3393,6 +3466,7 @@ export function buildOpenGeniAgent(
     options.approvedToolCallId,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
+  installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -3453,6 +3527,23 @@ function maybeInstallLazyToolTransport(
     },
     options.agentConfig != null,
     options.toolRouterInHistory === true,
+    options.startToolPreparation,
+    new Set(
+      mcpServers
+        .filter(
+          (server) =>
+            (server as MCPServer & { deferredPreparation?: boolean }).deferredPreparation === true,
+        )
+        .map((server) => mcpServerRegistryId(server)),
+    ),
+    () => {
+      const names = new Set<string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer)) continue;
+        for (const name of server.firstRequestModelToolNames()) names.add(name);
+      }
+      return names;
+    },
   );
 }
 
@@ -3543,6 +3634,110 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
   return identity?.modelName === modelName ? identity.callId : undefined;
 }
 
+const TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS = 2_000;
+
+/**
+ * Dynamic approval hooks installed by Opengeni's own approval wrappers. Only
+ * these run fallible preflight work (bindings, previews, policy prepare), so
+ * only these are contained. Every other tool keeps its original approval
+ * function identity: the SDK recognizes static policies by identity and
+ * handles, for example, malformed JSON differently for dynamic ones.
+ */
+const opengeniApprovalHooks = new WeakSet<object>();
+function opengeniApprovalHook<T extends object>(hook: T): T {
+  opengeniApprovalHooks.add(hook);
+  return hook;
+}
+
+/** Model-facing result for a call whose approval preflight failed. Nothing ran. */
+export function toolPreflightFailureOutput(error: unknown): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  const message = exactErrorMessage(error);
+  const bounded =
+    message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
+      ? `${message.slice(0, TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS)}…`
+      : message;
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text:
+          "The tool was not run: it failed while being prepared, before anything was executed, so no change was made. " +
+          `Error: ${bounded}`,
+      },
+    ],
+  };
+}
+
+/**
+ * Contain every error thrown while the model SDK asks a tool whether it needs
+ * approval. The SDK treats a throwing `needsApproval` as a fatal
+ * `ToolCallError` that ends the whole turn, and the per-tool MCP errorFunction
+ * only covers the invocation itself. Approval preflight runs policy lookups,
+ * connector bindings, review-context parsing and provider preview reads, any
+ * of which can fail because of model arguments or a transient dependency.
+ *
+ * Instead, the failure is remembered for that exact call id and the SDK is told
+ * no approval is needed; the matching `invoke` then returns the failure as an
+ * ordinary tool error without calling any inner wrapper, so the action never
+ * executes and the model can correct itself. A call without an id cannot be
+ * correlated and keeps the original behavior. A remembered failure is only
+ * cleared by its own invoke or by a later successful preflight of the same
+ * call: evicting it early would let a still-pending call fall through to
+ * execution. Entries live only as long as this agent instance (one turn).
+ *
+ * This must be installed last so it wraps every other approval wrapper, and is
+ * reinstalled on each clone for the same reason as the approval policy.
+ */
+function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
+  const failures = new Map<string, unknown>();
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof needsApproval>[0],
+          parsedInput: Parameters<typeof needsApproval>[1],
+          callId: Parameters<typeof needsApproval>[2],
+        ) => {
+          try {
+            const required = await needsApproval(runContext, parsedInput, callId);
+            if (callId) failures.delete(callId);
+            return required;
+          } catch (error) {
+            if (!callId) throw error;
+            failures.set(callId, error);
+            return false;
+          }
+        },
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          if (typeof callId === "string" && failures.has(callId)) {
+            const error = failures.get(callId);
+            failures.delete(callId);
+            return toolPreflightFailureOutput(error) as unknown as string;
+          }
+          return await invoke(runContext, input, details);
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installToolPreflightContainment(cloned);
+      return cloned;
+    };
+  }
+}
+
 /**
  * Install the canonical connector decision on each agent instance's MCP tools.
  * The SDK approval hook reflects that decision, while standalone adapters keep
@@ -3579,6 +3774,7 @@ function installMcpApprovalPolicy(
         inputSchema: unknown;
         title?: string;
         accountLabel?: string | undefined;
+        recommendsApproval: boolean;
         readReview: ToolReviewReader;
       }
     >();
@@ -3597,6 +3793,7 @@ function installMcpApprovalPolicy(
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
+          recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -3617,8 +3814,12 @@ function installMcpApprovalPolicy(
       const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const legacyApproval =
-        !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+      // The recommendation: the session's requireApproval or the tool's own
+      // tools/list `_meta`. Either one asking makes Ask the default.
+      const recommendsApproval =
+        mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+        identity?.recommendsApproval === true;
+      const legacyApproval = !policy.connectorBacked && recommendsApproval;
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
@@ -3640,45 +3841,44 @@ function installMcpApprovalPolicy(
           }),
           actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
-          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-            ? "ask"
-            : "allow",
+          defaultDecision: recommendsApproval ? "ask" : "allow",
         };
       };
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return (
-              mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-              (await originalNeedsApproval(runContext, parsedInput, callId))
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return (
+                recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
+              );
+            }
+            if (!callId) {
+              throw new Error("Connector action is missing its durable approval identity");
+            }
+            const preparation = await prepareConnectorReview(
+              connectorCall(callId, parsedInput),
+              connectorActionPolicy,
+              identity?.readReview,
             );
-          }
-          if (!callId) {
-            throw new Error("Connector action is missing its durable approval identity");
-          }
-          const preparation = await prepareConnectorReview(
-            connectorCall(callId, parsedInput),
-            connectorActionPolicy,
-            identity?.readReview,
-          );
-          preparations.set(callId, preparation);
-          if (preparation.managed && preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          // An explicit Allow is a decision, not an exemption from one of several floors.
-          const requiresApproval = preparation.managed
-            ? preparation.decision === "ask"
-            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+            preparations.set(callId, preparation);
+            if (preparation.managed && preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            // An explicit Allow is a decision, not an exemption from one of several floors.
+            const requiresApproval = preparation.managed
+              ? preparation.decision === "ask"
+              : recommendsApproval;
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           if (!connectorActionPolicy && !policy.connectorBacked) {
             throw new Error(
@@ -3771,40 +3971,42 @@ function installAttemptConnectorActionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
-        needsApproval: async (
-          runContext: Parameters<typeof originalNeedsApproval>[0],
-          parsedInput: Parameters<typeof originalNeedsApproval>[1],
-          callId: Parameters<typeof originalNeedsApproval>[2],
-        ) => {
-          if (!connectorActionPolicy) {
-            return await originalNeedsApproval(runContext, parsedInput, callId);
-          }
-          if (!callId) {
-            throw new Error("Attempt connector action is missing its durable approval identity");
-          }
-          let call: ConnectorActionToolCall;
-          try {
-            call = binding.call(callId, parsedInput);
-          } catch (error) {
-            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
-            // Exact-resource and connection bindings are evaluated before the
-            // provider can run. A model can name a repository outside the
-            // accepted turn resources; that is an ordinary rejected tool call,
-            // not an Agents SDK lifecycle failure.
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const preparation = await connectorActionPolicy.prepare(call);
-          preparations.set(callId, preparation);
-          if (!preparation.managed || preparation.decision === "block") {
-            approvalRequiredCallIds.delete(callId);
-            return false;
-          }
-          const requiresApproval = preparation.decision === "ask";
-          if (requiresApproval) approvalRequiredCallIds.add(callId);
-          else approvalRequiredCallIds.delete(callId);
-          return requiresApproval;
-        },
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof originalNeedsApproval>[0],
+            parsedInput: Parameters<typeof originalNeedsApproval>[1],
+            callId: Parameters<typeof originalNeedsApproval>[2],
+          ) => {
+            if (!connectorActionPolicy) {
+              return await originalNeedsApproval(runContext, parsedInput, callId);
+            }
+            if (!callId) {
+              throw new Error("Attempt connector action is missing its durable approval identity");
+            }
+            let call: ConnectorActionToolCall;
+            try {
+              call = binding.call(callId, parsedInput);
+            } catch (error) {
+              if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+              // Exact-resource and connection bindings are evaluated before the
+              // provider can run. A model can name a repository outside the
+              // accepted turn resources; that is an ordinary rejected tool call,
+              // not an Agents SDK lifecycle failure.
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const preparation = await connectorActionPolicy.prepare(call);
+            preparations.set(callId, preparation);
+            if (!preparation.managed || preparation.decision === "block") {
+              approvalRequiredCallIds.delete(callId);
+              return false;
+            }
+            const requiresApproval = preparation.decision === "ask";
+            if (requiresApproval) approvalRequiredCallIds.add(callId);
+            else approvalRequiredCallIds.delete(callId);
+            return requiresApproval;
+          },
+        ),
         invoke: async (runContext, input, details) => {
           const callId = details?.toolCall?.callId;
           if (!callId) {
@@ -3867,6 +4069,23 @@ function activeModelToolInvocation(modelName: string): ModelToolInvocation | nul
   return invocation?.modelName === modelName ? invocation : null;
 }
 
+/** Why interaction_request_human arguments cannot be recorded as an
+ * intervention, in words the model can act on, or null when they can. */
+export function interactionRequestArgumentsProblem(serialized: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return "Invalid interaction_request_human arguments: they are not valid JSON. Nothing was requested; call it again with a JSON object matching its schema.";
+  }
+  const parsed = RequestHumanInteractionToolInput.safeParse(value);
+  if (parsed.success) return null;
+  const issues = parsed.error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`);
+  return `Invalid interaction_request_human arguments: ${issues.join("; ")}. Nothing was requested; call it again with corrected arguments.`;
+}
+
 /**
  * Turn the canonical interaction-request tool into a typed SDK interruption.
  * Its MCP/Codemode catalog entry and execution stay unchanged; this projection
@@ -3889,6 +4108,22 @@ function installInteractionInterventionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
+        // Runs before the approval pause, so invalid arguments come back to
+        // the model as a correctable tool result. Without it the call would
+        // pause first, the intervention could never be recorded, and the
+        // turn would fail.
+        inputGuardrails: [
+          ...(tool.inputGuardrails ?? []),
+          defineToolInputGuardrail({
+            name: "validate_interaction_request_human",
+            run: async ({ toolCall }) => {
+              const problem = interactionRequestArgumentsProblem(toolCall.arguments);
+              return problem
+                ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
+                : ToolGuardrailFunctionOutputFactory.allow();
+            },
+          }),
+        ],
         needsApproval: async (
           _runContext: Parameters<typeof originalNeedsApproval>[0],
           _parsedInput: Parameters<typeof originalNeedsApproval>[1],
@@ -3931,7 +4166,9 @@ function installInteractionInterventionPolicy(
 
 /**
  * Translate the canonical decision into the model SDK interruption protocol.
- * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Legacy requireApproval and a tool's `opengeni/recommendedPermission` `_meta`
+ * are recommendations only when no explicit choice exists. Every external MCP
+ * server is wrapped so a tool's own recommendation holds even without hooks.
  * Standalone runtimes without policy hooks retain their configured behavior;
  * they cannot execute an approval-gated call without the durable authority.
  * Prepared server/tool identities take precedence over longest-prefix legacy
@@ -3948,7 +4185,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
+        attemptToolSource(server.id) === "mcp" ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -4464,6 +4701,8 @@ export type PreparedAgentTools = {
    * promise; an ordinary first model response does not.
    */
   ready?: Promise<PreparedAgentTools>;
+  /** Start the same deferred preparation on first provider dispatch or earlier tool demand. */
+  startDeferredPreparation?: () => void;
 };
 
 /**
@@ -4637,8 +4876,15 @@ export type PrepareToolsOptions = {
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
+  /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
+  /** When deferred preparation is enabled, keep its CPU/database work off the
+   * pre-request path. The host calls startDeferredPreparation at provider
+   * dispatch; real tool demand can start it earlier. Existing hosts start
+   * immediately unless they explicitly own this lifecycle. */
+  deferredPreparationStart?: "immediate" | "provider-dispatch";
   /** @internal Shared live cells used by deferred preparation handles. */
   deferredCodexConnectorNamespaces?: Set<string>;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4697,43 +4943,61 @@ export type ConnectedMcpServerBatches = {
 };
 
 /**
- * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
- * failing strict batch; this wrapper additionally closes every earlier batch
- * before rethrowing, so a later-batch failure cannot leak live connections.
+ * Connect SDK-managed MCP servers concurrently, at most
+ * MCP_MAX_CONCURRENT_SERVER_OPERATIONS at a time. Each server runs the SDK's
+ * awaited single-server path, so the turn's wall time is the slowest server
+ * rather than the sum of every handshake. Results keep the input order. A
+ * strict failure stops scheduling more servers, closes every server that did
+ * connect, and rethrows the failure of the earliest failing server.
  */
 export async function connectMcpServersInBatches(
   servers: MCPServer[],
   options: { strict: boolean; connectTimeoutMs?: number },
 ): Promise<ConnectedMcpServerBatches> {
   assertMcpServerSelectionWithinBounds(servers);
-  const batches: ConnectedMcpServerBatch[] = [];
-  try {
-    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+  const connectedByIndex = new Array<ConnectedMcpServerBatch | undefined>(servers.length);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let nextIndex = 0;
+  const connectNext = async (): Promise<void> => {
+    while (failures.length === 0) {
+      const index = nextIndex;
+      if (index >= servers.length) return;
+      nextIndex += 1;
+      const server = servers[index]!;
       try {
-        batches.push(
-          await connectMcpServers(batchServers, {
-            ...(options.connectTimeoutMs === undefined
-              ? {}
-              : { connectTimeoutMs: options.connectTimeoutMs }),
-            // Opengeni already bounds lifecycle work in batches. The Agents SDK
-            // parallel path additionally starts a detached `void drain()` task;
-            // a best-effort server rejection can escape that task as a process-
-            // level unhandled rejection even though the session records and
-            // degrades the failed server. Keep lifecycle ownership on the
-            // awaited serial path inside each bounded batch.
-            connectInParallel: false,
-            strict: options.strict,
-          }),
-        );
+        connectedByIndex[index] = await connectMcpServers([server], {
+          ...(options.connectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.connectTimeoutMs }),
+          // Concurrency is owned here, one awaited server per slot. The Agents
+          // SDK parallel path additionally starts a detached `void drain()`
+          // task; a best-effort server rejection can escape that task as a
+          // process-level unhandled rejection even though the session records
+          // and degrades the failed server.
+          connectInParallel: false,
+          strict: options.strict,
+        });
       } catch (error) {
         const sdkError = error instanceof Error ? error : new Error(String(error));
-        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+        failures.push({
+          index,
+          error: unwrapMcpLifecycleErrorFromServers([server], sdkError, "connect"),
+        });
       }
     }
-  } catch (error) {
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MCP_MAX_CONCURRENT_SERVER_OPERATIONS, servers.length) }, () =>
+      connectNext(),
+    ),
+  );
+  const batches = connectedByIndex.filter(
+    (batch): batch is ConnectedMcpServerBatch => batch !== undefined,
+  );
+  if (failures.length > 0) {
     await closeMcpServerBatches(batches).catch(() => undefined);
-    throw error;
+    failures.sort((left, right) => left.index - right.index);
+    throw failures[0]!.error;
   }
 
   const errors = new Map<MCPServer, Error>();
@@ -4819,7 +5083,8 @@ class DeferredPreparedMcpServer implements MCPServer {
   };
 
   async connect(): Promise<void> {
-    // Physical connection is already running inside resolveTarget.
+    // The preparation owner starts the physical connection; merely exposing
+    // this provisional server must not start it before provider dispatch.
   }
 
   async close(): Promise<void> {
@@ -4852,6 +5117,11 @@ class DeferredPreparedMcpServer implements MCPServer {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
     return target.unprefixedToolName(name);
+  }
+
+  /** Only meaningful after listTools; an unprepared server owns no first-party tool. */
+  isFirstPartyCatalog(): boolean {
+    return this.preparedTarget?.isFirstPartyCatalog() ?? false;
   }
 
   async callTool(
@@ -4993,10 +5263,27 @@ export async function prepareAgentTools(
     "server_construction",
     async () =>
       await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
-        const config = registry.get(tool.id);
-        if (!config) {
+        const registeredConfig = registry.get(tool.id);
+        if (!registeredConfig) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
         }
+        // `eager: true` puts every schema on the first request. A list keeps the
+        // server deferred but prepares it before the first request, so exactly
+        // the named tools are in it and the rest stay searchable.
+        const eagerToolNames =
+          Array.isArray(tool.eager) && tool.eager.length > 0 ? tool.eager : undefined;
+        const firstRequestTools = tool.eager === true || eagerToolNames !== undefined;
+        const config =
+          tool.allowedTools === undefined
+            ? registeredConfig
+            : {
+                ...registeredConfig,
+                allowedTools: tool.allowedTools.filter(
+                  (name) =>
+                    registeredConfig.allowedTools === undefined ||
+                    registeredConfig.allowedTools.includes(name),
+                ),
+              };
         if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
           throw new Error("Codex Apps server id is reserved for the canonical endpoint");
         }
@@ -5035,6 +5322,8 @@ export async function prepareAgentTools(
                 options.mcpAccountLabels?.get(config.id),
                 undefined,
                 local.effectAuthority,
+                false,
+                eagerToolNames,
               ),
               config,
               options,
@@ -5043,8 +5332,8 @@ export async function prepareAgentTools(
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
-            eager: tool.eager === true,
-            joinsFirstRequestBarrier: tool.eager === true,
+            eager: firstRequestTools,
+            joinsFirstRequestBarrier: firstRequestTools,
             timeoutMs: mcpSetupTimeoutMs(config),
           };
         }
@@ -5185,6 +5474,9 @@ export async function prepareAgentTools(
               ? { materializeGmailFile: options.materializeGmailFile }
               : {}),
             ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(options.materializeConnectorFile
+              ? { materializeConnectorFile: options.materializeConnectorFile }
+              : {}),
             ...(settings.gmailWatchTopicName
               ? { watchTopicName: settings.gmailWatchTopicName }
               : {}),
@@ -5207,6 +5499,7 @@ export async function prepareAgentTools(
             // sanitize the response on the wire before validation. The namespace Set
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
             ...(await mcpServerRequestInit(settings, config)),
             ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
             ...mcpSessionTimeoutOptions(config),
@@ -5235,6 +5528,7 @@ export async function prepareAgentTools(
             options.runMcpCredentials,
             undefined,
             firstParty,
+            eagerToolNames,
           ),
           config,
           options,
@@ -5245,9 +5539,9 @@ export async function prepareAgentTools(
           server,
           bestEffort,
           optional,
-          eager: tool.eager === true,
+          eager: firstRequestTools,
           joinsFirstRequestBarrier:
-            tool.eager === true ||
+            firstRequestTools ||
             (firstParty &&
               config.id === HARNESS_CONTROL_MCP_SERVER_ID &&
               harnessControlToolsPossible),
@@ -5262,7 +5556,10 @@ export async function prepareAgentTools(
   // preparation promise as every other deferred server. Required eager MCPs
   // retain their fail-closed pre-inference contract. The first-party server
   // that lists the always-visible harness control tools also joins, so their
-  // schemas are in the first request; its other schemas stay deferred.
+  // schemas are in the first request; its other schemas stay deferred. A
+  // ToolRef.eager tool list follows the same rule as `eager: true` (`eager`
+  // below): its required server joins so exactly the named tools are in the
+  // first request, and its other schemas stay deferred.
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
@@ -5367,11 +5664,20 @@ export async function prepareAgentTools(
         options.subjectId ?? "worker:mcp-model",
       )
     : null;
-  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
+  // Eager servers must connect before disclosure, but their complete execution
+  // catalog is still independent of the first model request. The same deferred
+  // lifecycle owns catalog work even when no server needs a deferred connection.
+  const exposesDeferredPreparation =
+    deferNonEager &&
+    (deferredEntries.length > 0 || options.deferredPreparationStart === "provider-dispatch");
   const closePublishedServers = async (): Promise<void> => {
     await localToolServer?.close().catch(() => undefined);
     await connectedEagerBestEffort?.close().catch(() => undefined);
     await connectedEagerRequired?.close().catch(() => undefined);
+  };
+  const closeUnstartedPreparation = async (): Promise<void> => {
+    await Promise.all(deferredEntries.map((entry) => entry.server.close().catch(() => undefined)));
+    await closePublishedServers();
   };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     const execution = exposesDeferredPreparation ? "background" : "blocking";
@@ -5479,14 +5785,29 @@ export async function prepareAgentTools(
     }
   };
 
-  if (!deferNonEager || deferredEntries.length === 0) {
+  if (!exposesDeferredPreparation) {
     return await completePreparation();
   }
 
-  // Non-eager connection/listing starts immediately but is not a first-request
-  // dependency. Search and direct deferred invocation join this exact promise.
-  const ready = completePreparation();
+  // One preparation and completion fence, regardless of whether provider
+  // dispatch or an earlier real tool demand starts it. Merely observing ready
+  // must not start synchronous catalog work on the first-request path.
+  let preparation: Promise<PreparedAgentTools> | null = null;
+  let preparationClosed = false;
+  let resolveReady!: (value: PreparedAgentTools) => void;
+  let rejectReady!: (reason: unknown) => void;
+  const ready = new Promise<PreparedAgentTools>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const startDeferredPreparation = (): void => {
+    if (preparation || preparationClosed) return;
+    preparation = Promise.resolve().then(completePreparation);
+    void preparation.then(resolveReady, rejectReady);
+  };
+  if (options.deferredPreparationStart !== "provider-dispatch") startDeferredPreparation();
   localToolServer?.bindAttemptToolEnvironmentProvider(async () => {
+    startDeferredPreparation();
     const prepared = await ready;
     if (!prepared.attemptToolEnvironment) {
       throw new Error("local model tool server has no exact attempt authority");
@@ -5516,9 +5837,13 @@ export async function prepareAgentTools(
     // Join the bounded deferred preparation and let its complete owner close
     // every server when available; if preparation itself failed, it already
     // released deferred resources and this scope still owns eager/local ones.
-    const fullyPrepared = await ready.catch(() => null);
+    preparationClosed = true;
+    if (!preparation) rejectReady(error);
+    const fullyPrepared = preparation ? await ready.catch(() => null) : null;
     if (fullyPrepared) {
       await fullyPrepared.close().catch(() => undefined);
+    } else if (!preparation) {
+      await closeUnstartedPreparation();
     } else {
       await closePublishedServers();
     }
@@ -5531,6 +5856,7 @@ export async function prepareAgentTools(
         entry.server.registryId,
         () => preparationSettled,
         async () => {
+          startDeferredPreparation();
           const prepared = await ready;
           return prepared.mcpServers.includes(entry.server) ? entry.server : null;
         },
@@ -5550,6 +5876,12 @@ export async function prepareAgentTools(
     inputWaitYield,
     resolvedMcpConnectionIds,
     close: async () => {
+      preparationClosed = true;
+      if (!preparation) {
+        rejectReady(new Error("Deferred tool preparation closed before it started"));
+        await closeUnstartedPreparation();
+        return;
+      }
       let prepared: PreparedAgentTools;
       try {
         prepared = await ready;
@@ -5565,6 +5897,7 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
     ready,
+    startDeferredPreparation,
   };
 }
 
@@ -5807,10 +6140,7 @@ function installAttemptConnectorActionGatewayLifecycle(
                 definition.inputSchema,
                 arguments_,
               ),
-              defaultDecision:
-                attemptToolApproval(config!, definition.identity.toolName) === "human"
-                  ? "ask"
-                  : "allow",
+              defaultDecision: definition.approval === "human" ? "ask" : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -6119,7 +6449,7 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
-          approval: attemptToolApproval(config, toolName),
+          approval: attemptToolApproval(config, toolName, tool),
           effectAuthorityDigest: digestCanonicalJson({
             version: 1,
             serverId: server.registryId,
@@ -6287,10 +6617,12 @@ function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
 function attemptToolApproval(
   config: Settings["mcpServers"][number],
   toolName: string,
+  tool: object,
 ): ToolGatewayDefinition["approval"] {
   if (
     config.requireApproval === true ||
-    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))
+    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName)) ||
+    (attemptToolSource(config.id) === "mcp" && mcpToolRecommendsApproval(tool))
   ) {
     return "human";
   }
@@ -6887,7 +7219,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain after provider submission. Opengeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. The platform did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
@@ -7150,6 +7482,7 @@ type McpTransportErrorOptions = {
 // the authoritative caller receives the original Error object. Keep retry
 // classification out-of-band so exact Error identity and content are unchanged.
 const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
+const firstPartyMcpSetupFailures = new WeakSet<object>();
 
 function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
   try {
@@ -7386,6 +7719,23 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
   );
 }
 
+/** Only the verified required first-party connect/list boundary may grant this wait. */
+export function isFirstPartyMcpSetupUnavailableError(error: unknown): boolean {
+  return !!error && typeof error === "object" && firstPartyMcpSetupFailures.has(error);
+}
+
+/**
+ * An MCP connectivity failure whose server answered HTTP 503 Service
+ * Unavailable: it is reachable but refusing work for now, as a server does
+ * while it is being deployed or maintained. Callers wait such a server out
+ * for longer than a server that cannot be reached at all.
+ */
+export function isMcpServiceUnavailableError(error: unknown): boolean {
+  if (!isMcpTransportConnectivityError(error)) return false;
+  const inspection = inspectMcpTransportError(error as object);
+  return inspection.statuses.includes(503);
+}
+
 /**
  * Preserve the MCP SDK's exact request-timeout meaning. The numeric code is not sufficient:
  * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
@@ -7393,6 +7743,22 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
  */
 export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
   return inspectMcpTransportError(error, seen).hasRequestTimeout;
+}
+
+function markFirstPartyMcpSetupFailure(error: object, options: McpTransportErrorOptions): void {
+  if (options.recoverySafeSetup !== true) return;
+  const inspection = inspectMcpTransportError(error);
+  if (!inspection.complete || inspection.statuses.some((status) => status >= 400 && status < 500))
+    return;
+  // Generic statusless Errors and route 404s retain bounded recovery. They may
+  // be configuration/programming faults, not evidence that our API is down.
+  if (
+    inspection.hasConnectivityCode ||
+    inspection.hasSetupSocketCode ||
+    inspection.statuses.some((status) => status === 502 || status === 503 || status === 504)
+  ) {
+    firstPartyMcpSetupFailures.add(error);
+  }
 }
 
 export function mcpTransportErrorWithRetryMetadata(
@@ -7409,6 +7775,7 @@ export function mcpTransportErrorWithRetryMetadata(
     mcpTransportFailureKinds.set(classified, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
     mcpTransportFailureKinds.set(classified, "connectivity_unavailable");
+    markFirstPartyMcpSetupFailure(classified, options);
   }
   return classified;
 }
@@ -7431,6 +7798,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
     mcpTransportFailureKinds.set(exactError, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
     mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
+    markFirstPartyMcpSetupFailure(exactError, options);
   }
   return exactError;
 }
@@ -8161,6 +8529,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
+  private readonly eagerToolNames: ReadonlySet<string>;
+  private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
@@ -8171,6 +8541,14 @@ export class PrefixedMcpServer implements MCPServer {
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {
     return this.originalToolNames.keys();
+  }
+  /**
+   * Model names of the listed tools that stay on the first request although
+   * this server's other schemas are deferred: the harness control tools and
+   * the session's exact eager tool list.
+   */
+  firstRequestModelToolNames(): ReadonlySet<string> {
+    return this.firstRequestModelNames;
   }
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
@@ -8201,7 +8579,13 @@ export class PrefixedMcpServer implements MCPServer {
      * then may a catalog tool name become a metric label.
      */
     private readonly firstPartyCatalog = false,
+    /**
+     * Exact unprefixed names (ToolRef.eager list) that stay on the first model
+     * request while this server's other schemas are deferred behind search.
+     */
+    eagerToolNames?: readonly string[],
   ) {
+    this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
     // Keep it unique per prepared registry server while never including URLs,
@@ -8353,6 +8737,11 @@ export class PrefixedMcpServer implements MCPServer {
     return this.unprefixToolName(toolName);
   }
 
+  /** True only for a verified first-party Opengeni server (deployment URL + reserved id). */
+  isFirstPartyCatalog(): boolean {
+    return this.firstPartyCatalog;
+  }
+
   hasCatalogCallPreflight(): boolean {
     return this.catalogCallPreflight !== undefined;
   }
@@ -8410,7 +8799,10 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            ...(this.accountLabel
+            // Name the account only when the turn has several accounts of this
+            // connector to tell apart. With one account the line adds nothing
+            // the model can act on, and it would repeat on every tool.
+            ...(this.accountLabel?.account
               ? {
                   description:
                     `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
@@ -8421,9 +8813,13 @@ export class PrefixedMcpServer implements MCPServer {
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
-      const alwaysVisible = bounded.filter((tool) =>
-        isHarnessControlMcpToolName(this.registryId, tool.name),
+      const alwaysVisible = bounded.filter(
+        (tool) =>
+          isHarnessControlMcpToolName(this.registryId, tool.name) ||
+          this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? ""),
       );
+      this.firstRequestModelNames.clear();
+      for (const tool of alwaysVisible) this.firstRequestModelNames.add(tool.name);
       this.alwaysVisibleToolSchemaTokens =
         alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;
@@ -8828,7 +9224,7 @@ export async function restoreInterruptedRunState(
   });
 }
 
-export const TURN_OPERATIONAL_NOTICE_PREFIX = "[OpenGeni turn-scoped operational notice]\n";
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
@@ -8940,6 +9336,8 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
+  modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -8964,7 +9362,7 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
-  // OpenGeni-minted Codemode token renewal registration. Called only after the
+  // Opengeni-minted Codemode token renewal registration. Called only after the
   // initial token file reached the real sandbox session.
   onCodemodeTokenSessionReady?: (session: CodemodeTokenWriterSession) => Promise<void> | void;
   // Host-owned run material is seeded off-manifest before setup and every
@@ -9194,6 +9592,7 @@ export async function runAgentStream(
           ? { beforeModelRequest: overrides.beforeModelRequest }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
         withPreparedCompactionRequest(agent, () =>
@@ -9315,6 +9714,7 @@ async function runAgentStreamInternal(
     const resourceClient =
       fileDownloads.length > 0
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
+            sandboxBackend: agentActiveSandboxBackend.get(agent),
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
             ...(runAs ? { runAs } : {}),
             ...(overrides.turnToolCancellationFence
@@ -9331,6 +9731,7 @@ async function runAgentStreamInternal(
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
     const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
     const ownedCodemodeTokenSeed = codemodeTokenSeedForAgent(agent);
+    const ownedCodemodeClientDownload = agentCodemodeClientDownload.get(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
       // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -9357,6 +9758,9 @@ async function runAgentStreamInternal(
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
       ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
+      ...(ownedCodemodeClientDownload
+        ? { codemodeClientDownload: ownedCodemodeClientDownload }
+        : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
@@ -9432,7 +9836,7 @@ async function runAgentStreamInternal(
       toolExecution: { preApprovalInputGuardrails: true },
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
-      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+      errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -9480,6 +9884,7 @@ async function runAgentStreamInternal(
   const resourceClient =
     refreshedClient && fileDownloads.length > 0
       ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
+          sandboxBackend: agentActiveSandboxBackend.get(agent),
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
         })
@@ -9597,7 +10002,7 @@ async function runAgentStreamInternal(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
-    ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+    errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
@@ -9676,6 +10081,126 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   };
 }
 
+/** Catalog sources Opengeni itself serves (mirrors `toolFamilyForCatalogIdentity`). */
+const FIRST_PARTY_CATALOG_SOURCES: ReadonlySet<ToolCallCatalogIdentity["source"]> = new Set([
+  "opengeni",
+  "files",
+  "docs",
+  "interaction",
+]);
+
+type BareToolNameEntry = { modelName: string; bareName: string; firstParty: boolean };
+
+/** The bare catalog name behind each model-visible tool one server lists. */
+async function bareToolNameEntries(server: MCPServer): Promise<BareToolNameEntry[]> {
+  const tools = await server.listTools();
+  if (server instanceof PrefixedMcpServer) {
+    const firstParty = server.isFirstPartyCatalog();
+    return tools.map((tool) => ({
+      modelName: tool.name,
+      bareName: server.unprefixedToolName(tool.name),
+      firstParty,
+    }));
+  }
+  if (server instanceof DeferredPreparedMcpServer) {
+    const entries: BareToolNameEntry[] = [];
+    for (const tool of tools) {
+      entries.push({
+        modelName: tool.name,
+        bareName: await server.unprefixedToolName(tool.name),
+        firstParty: server.isFirstPartyCatalog(),
+      });
+    }
+    return entries;
+  }
+  if (server instanceof AttemptDefinitionMcpServer) {
+    return tools.map((tool) => {
+      const identity = server.toolCatalogIdentity(tool.name);
+      return {
+        modelName: tool.name,
+        bareName: identity?.identity.toolName ?? tool.name,
+        firstParty: identity !== undefined && FIRST_PARTY_CATALOG_SOURCES.has(identity.source),
+      };
+    });
+  }
+  // Unknown server shapes never own an alias, but still count as a collision.
+  return tools.map((tool) => {
+    const separator = tool.name.lastIndexOf("__");
+    return {
+      modelName: tool.name,
+      bareName: separator >= 0 ? tool.name.slice(separator + 2) : tool.name,
+      firstParty: false,
+    };
+  });
+}
+
+/**
+ * Claude sometimes calls a first-party tool by the bare name the agent
+ * instructions use (`command_wait` for `opengeni__command_wait`) and only
+ * reaches the tool after a "not found" round trip. Bind such a call when
+ * exactly one listed MCP tool, across every server, has that bare catalog
+ * name and a verified first-party server serves it. Any other server listing
+ * the same bare name leaves the call unresolved. The call is renamed to the
+ * canonical model-facing name before dispatch, so history, events, display,
+ * and approvals all see the tool that actually runs. Instructions stay
+ * provider-neutral and prompt-cache stable.
+ */
+async function resolveBareFirstPartyToolCall(
+  agent: Agent<any, any>,
+  input: { name: string; toolCall?: unknown },
+  resolveCurrent: ReturnType<typeof createResolveMissingFunctionTool> | null,
+) {
+  const call = input.toolCall;
+  if (
+    !call ||
+    typeof call !== "object" ||
+    (call as { type?: unknown }).type !== "function_call" ||
+    (call as { name?: unknown }).name !== input.name ||
+    (call as { namespace?: unknown }).namespace !== undefined ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(input.name) ||
+    input.name.includes("__")
+  ) {
+    return null;
+  }
+  const matches: BareToolNameEntry[] = [];
+  try {
+    for (const server of agent.mcpServers) {
+      for (const entry of await bareToolNameEntries(server)) {
+        if (entry.bareName === input.name) matches.push(entry);
+      }
+    }
+  } catch {
+    // Uniqueness cannot be proven without every catalog; keep the not-found result.
+    return null;
+  }
+  const [match] = matches;
+  if (matches.length !== 1 || !match?.firstParty || match.modelName === input.name) return null;
+  // With progressive disclosure the lazy runtime's authorized pool is the only
+  // source; otherwise the agent's own (policy-wrapped) MCP tool list is.
+  const listed = resolveCurrent
+    ? undefined
+    : (await agent.getMcpTools(new RunContext())).find(
+        (candidate) => candidate.type === "function" && candidate.name === match.modelName,
+      );
+  const tool = resolveCurrent
+    ? await resolveCurrent({ name: match.modelName })
+    : listed?.type === "function"
+      ? listed
+      : null;
+  if (!tool || tool.name !== match.modelName) return null;
+  const record = call as Record<string, unknown>;
+  record.name = match.modelName;
+  // An exact-name call to a search-disclosed tool gets its string-encoded
+  // values restored when the response arrives, before this resolver runs.
+  // Apply the same restoration now that the call carries the real name.
+  const runtime = lazyToolRuntimeForAgent(agent);
+  if (runtime) {
+    const restored = restoreDirectDeferredCallArgumentTypes(record, runtime);
+    if (restored !== record) record.arguments = restored.arguments;
+  }
+  return tool;
+}
+
 /** Old hashes are aliases only for an exact tool in the current authorized
  * catalog. Never recover tools from history, labels, URLs, or a different account. */
 function mcpToolResolverForAgent(agent: Agent<any, any>) {
@@ -9684,6 +10209,8 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
   return async (input: { name: string; toolCall?: unknown }) => {
     const current = await resolveCurrent?.(input);
     if (current) return current;
+    const bare = await resolveBareFirstPartyToolCall(agent, input, resolveCurrent);
+    if (bare) return bare;
     if (!/^[a-f0-9]{64}$/.test(input.name)) return null;
     const tools = await agent.getMcpTools(new RunContext());
     let resolvedName: string | undefined;
@@ -10006,6 +10533,7 @@ export async function runOwnedSandboxSetup(
     gitTokenSeedOverride?: string;
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
     codemodeTokenSeedOverride?: string;
+    codemodeClientDownloadOverride?: ManagedCodemodeClientDownload;
     commandRunner?: SandboxLifecycleCommandRunner;
     /** Durable host coordinator for immutable rig setup on one exact managed
      * sandbox. Turn-private hooks always run after this callback returns. */
@@ -10037,6 +10565,8 @@ export async function runOwnedSandboxSetup(
   const ownedGitCredentialBindings =
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
   const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
+  const ownedCodemodeClientDownload =
+    opts.codemodeClientDownloadOverride ?? agentCodemodeClientDownload.get(agent);
   const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedRigSetupHooks = sandboxRigSetupHooksForAgent(agent);
@@ -10046,7 +10576,8 @@ export async function runOwnedSandboxSetup(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       rigCredentialHooksForAgent(agent),
     ),
-    ...sandboxCodemodeTokenHooksForAgent(agent),
+    // Every owned caller registers token renewal after this setup returns.
+    ...sandboxCodemodeTokenHooksForAgent(agent, { seedIndependent: true }),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
@@ -10057,6 +10588,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
     ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
+    ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -10106,6 +10638,7 @@ export async function runOwnedSandboxSetup(
   // rig, credential, and Azure setup remain excluded above on selfhosted.
   if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
     const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      sandboxBackend: agentActiveSandboxBackend.get(agent),
       ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
@@ -10137,7 +10670,7 @@ function mergePathGrants(
 export function withSandboxFileDownloads(
   client: SandboxClient,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
+  context: SandboxFileDownloadMaterializationContext = {},
 ): SandboxClient {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -10263,82 +10796,155 @@ export function withSandboxSessionReady(
   };
 }
 
+export type SandboxFileDownloadMaterializationContext = Pick<
+  SandboxLifecycleHookContext,
+  "onRuntimeEvent" | "runAs" | "commandRunner"
+> & {
+  /** The turn's effective sandbox backend. Only `selfhosted` (a Connected
+   * Machine) receives working-directory guidance on a failed staging command. */
+  sandboxBackend?: Settings["sandboxBackend"] | undefined;
+};
+
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
+  context: SandboxFileDownloadMaterializationContext = {},
+): Promise<SandboxFileDownloadMaterializationResult> {
+  return await withSandboxOperationPurpose("file_resources", () =>
+    materializeSandboxFileDownloadsUnscoped(session, downloads, context),
+  );
+}
+
+async function materializeSandboxFileDownloadsUnscoped(
+  session: SandboxSessionLike,
+  downloads: SandboxFileDownload[],
+  context: SandboxFileDownloadMaterializationContext,
 ): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
     return { failures: [] };
   }
-  const failures: SandboxFileDownloadFailure[] = [];
   const workspaceRoot = sandboxSessionWorkspaceRoot(session);
-  for (const download of normalizedDownloads) {
-    const targetRelativePath = sandboxDownloadRelativePath(download);
-    const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
-    const payload = {
-      fileId: download.fileId,
-      path: targetPath,
-      sizeBytes: download.sizeBytes ?? null,
-      expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
-    };
+  // Each download is one sandbox command whose cost is dominated by the
+  // provider's per-command round trip, not by the transfer. Run independent
+  // targets concurrently; downloads that share a target path stay ordered in
+  // their own lane so the last one written is still the last one listed.
+  // Failures are reported in input order regardless of completion order.
+  const failuresByIndex: (SandboxFileDownloadFailure | undefined)[] = [];
+  const lanes = new Map<string, number[]>();
+  normalizedDownloads.forEach((download, index) => {
+    const key = sandboxDownloadRelativePath(download);
+    const lane = lanes.get(key);
+    if (lane) lane.push(index);
+    else lanes.set(key, [index]);
+  });
+  const pending = [...lanes.values()];
+  let cancellation: { error: unknown } | undefined;
+  const runLanes = async (): Promise<void> => {
+    for (let lane = pending.shift(); lane && !cancellation; lane = pending.shift()) {
+      for (const index of lane) {
+        if (cancellation) return;
+        try {
+          failuresByIndex[index] = await materializeOneSandboxFileDownload(
+            session,
+            normalizedDownloads[index]!,
+            workspaceRoot,
+            context,
+          );
+        } catch (error) {
+          cancellation ??= { error };
+          return;
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SANDBOX_FILE_DOWNLOAD_CONCURRENCY, lanes.size) }, runLanes),
+  );
+  if (cancellation) throw cancellation.error;
+  return {
+    failures: failuresByIndex.filter(
+      (failure): failure is SandboxFileDownloadFailure => failure !== undefined,
+    ),
+  };
+}
+
+const SANDBOX_FILE_DOWNLOAD_CONCURRENCY = 6;
+
+/** Download one file into the sandbox. Resolves to its failure (or undefined on
+ * success); rejects only for turn cancellation or a runtime-event publication
+ * failure, either of which aborts the whole batch as it did when sequential. */
+async function materializeOneSandboxFileDownload(
+  session: SandboxSessionLike,
+  download: SandboxFileDownload,
+  workspaceRoot: string,
+  context: SandboxFileDownloadMaterializationContext,
+): Promise<SandboxFileDownloadFailure | undefined> {
+  const targetRelativePath = sandboxDownloadRelativePath(download);
+  const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
+  const payload = {
+    fileId: download.fileId,
+    path: targetPath,
+    sizeBytes: download.sizeBytes ?? null,
+    expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload: { name: "file-resource-download", ...payload },
+  });
+  if (!session.exec && !session.execCommand) {
+    const failure = sandboxFileDownloadFailure(
+      download,
+      targetPath,
+      "Sandbox file download materialization requires command execution support",
+    );
     await context.onRuntimeEvent?.({
-      type: "sandbox.operation.started",
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+      },
+    });
+    return failure;
+  }
+  let result: unknown;
+  try {
+    result = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: sandboxFileDownloadCommand(download, targetRelativePath),
+        workdir: workspaceRoot,
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 20_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
       payload: { name: "file-resource-download", ...payload },
     });
-    if (!session.exec && !session.execCommand) {
-      const failure = sandboxFileDownloadFailure(
-        download,
-        targetPath,
-        "Sandbox file download materialization requires command execution support",
-      );
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-        },
-      });
-      continue;
-    }
-    let result: unknown;
-    try {
-      result = await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd: sandboxFileDownloadCommand(download, targetRelativePath),
-          workdir: workspaceRoot,
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 20_000,
-        },
-        context.commandRunner,
-      );
-      assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.completed",
-        payload: { name: "file-resource-download", ...payload },
-      });
-    } catch (error) {
-      if (error instanceof TurnSandboxCommandCancelledError) throw error;
-      const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
-      failures.push(failure);
-      await context.onRuntimeEvent?.({
-        type: "sandbox.operation.failed",
-        payload: {
-          name: "file-resource-download",
-          ...payload,
-          error: failure.reason,
-          ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
-          ...(failure.output ? { output: failure.output } : {}),
-        },
-      });
-    }
+    return undefined;
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    const failure = explainConnectedMachineRootDownloadFailure(
+      sandboxFileDownloadFailure(download, targetPath, error, result),
+      { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
+    );
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.failed",
+      payload: {
+        name: "file-resource-download",
+        ...payload,
+        error: failure.reason,
+        ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+        ...(failure.output ? { output: failure.output } : {}),
+      },
+    });
+    return failure;
   }
-  return { failures };
 }
 
 function sandboxFileDownloadFailure(
@@ -10356,6 +10962,38 @@ function sandboxFileDownloadFailure(
     reason: error instanceof Error ? error.message : String(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
+  };
+}
+
+/**
+ * A Connected Machine session whose working directory is the filesystem root
+ * (an older macOS LaunchAgent started by launchd at `/`, persisted on the
+ * session at attach time) usually cannot stage Opengeni-owned files there: `/`
+ * is a read-only system volume on macOS and unwritable for ordinary users
+ * elsewhere. The raw command error tells neither the model nor the user what to
+ * do, so prepend conditional guidance. The condition is structural (effective
+ * backend + root), never a match on localized command output, so the wording
+ * stays conditional. The raw output and exit code are kept unchanged, and
+ * nothing is redirected to another host location: the cwd-relative
+ * `.opengeni/...` contract stays intact.
+ */
+function explainConnectedMachineRootDownloadFailure(
+  failure: SandboxFileDownloadFailure,
+  input: {
+    sandboxBackend: Settings["sandboxBackend"] | undefined;
+    workspaceRoot: string;
+    targetRelativePath: string;
+  },
+): SandboxFileDownloadFailure {
+  if (input.sandboxBackend !== "selfhosted") return failure;
+  if (posixPath.normalize(input.workspaceRoot) !== "/") return failure;
+  return {
+    ...failure,
+    reason: [
+      `The session's working directory is the filesystem root (/), which is often not writable (it is read-only on macOS), so staging the file at ${input.targetRelativePath} may have failed for that reason.`,
+      "This session keeps that folder; start a new session on this machine with a writable working folder (for example the home directory). An updated agent defaults new sessions to the home directory.",
+      `Underlying error: ${failure.reason}`,
+    ].join(" "),
   };
 }
 
@@ -10767,6 +11405,7 @@ export type SandboxLifecycleHookContext = {
   gitCredentialBindings?: GitCredentialBindingSeed[];
   codemodeTokenSeed?: string;
   codemodeTokenFile?: string;
+  codemodeClientDownload?: ManagedCodemodeClientDownload;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -10807,6 +11446,9 @@ export type SandboxLifecycleHook = {
   id: string;
   phase: SandboxLifecycleHookPhase;
   shouldRun?: (context: SandboxLifecycleHookContext) => boolean;
+  /** The hook neither depends on nor affects any other hook, so it may run
+   * concurrently with them. Hooks without this flag keep their relative order. */
+  independent?: boolean;
   run: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>;
 };
 
@@ -10860,8 +11502,54 @@ export async function runBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
-    await hook.run(session, context);
+  await runApplicableBeforeAgentStartHooks(
+    session,
+    applicableBeforeAgentStartHooks(hooks, context),
+    context,
+  );
+}
+
+/**
+ * Each hook costs at least one provider round trip, so independent hooks start
+ * at once and overlap the ordered ones; ordered hooks still run one after
+ * another and stop at the first failure. Setup waits for every started hook,
+ * then reports the failure of the earliest hook in declaration order, so the
+ * error does not depend on which round trip happened to finish first.
+ */
+async function runApplicableBeforeAgentStartHooks(
+  session: SandboxSessionLike,
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  const runHook = (hook: SandboxLifecycleHook): Promise<void> =>
+    withSandboxOperationPurpose(sandboxHookOperationPurpose(hook.id), () =>
+      hook.run(session, context),
+    );
+  if (!hooks.some((hook) => hook.independent)) {
+    for (const hook of hooks) await runHook(hook);
+    return;
+  }
+  const failures = new Map<SandboxLifecycleHook, unknown>();
+  const record = (hook: SandboxLifecycleHook) => (error: unknown) => {
+    failures.set(hook, error);
+  };
+  const independent = hooks
+    .filter((hook) => hook.independent)
+    .map((hook) => runHook(hook).catch(record(hook)));
+  const ordered = (async () => {
+    for (const hook of hooks) {
+      if (hook.independent) continue;
+      try {
+        await runHook(hook);
+      } catch (error) {
+        record(hook)(error);
+        return;
+      }
+    }
+  })();
+  await Promise.all([...independent, ordered]);
+  for (const hook of hooks) {
+    if (failures.has(hook)) throw failures.get(hook);
   }
 }
 
@@ -10877,9 +11565,7 @@ export function withSandboxLifecycleHooks(
   const seen = new WeakSet<object>();
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
-      for (const hook of beforeAgentStartHooks) {
-        await hook.run(session, context);
-      }
+      await runApplicableBeforeAgentStartHooks(session, beforeAgentStartHooks, context);
       seen.add(session);
     }
     return session;
@@ -10952,6 +11638,7 @@ export function sandboxArtifactRuntimeDoctorHooks(
     {
       id: "artifact-runtime-doctor",
       phase: "beforeAgentStart",
+      independent: true,
       run: async (session, context) => {
         const result = await runSandboxLifecycleCommand(
           session,
@@ -11003,7 +11690,16 @@ function codemodeTokenFileForAgent(
   return codemodeTokenFileFromEnvironment(environment, sessionId);
 }
 
-function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+/**
+ * The token seed is ordered only so that a renewal-registration hook declared
+ * after it (legacy SDK-owned setup) observes a seeded session. Owned setup
+ * attaches renewal after every hook has finished, so there the seed is one
+ * independent round trip that overlaps credential and repository setup.
+ */
+function sandboxCodemodeTokenHooksForAgent(
+  agent: Agent<any, any>,
+  options: { seedIndependent?: boolean } = {},
+): SandboxLifecycleHook[] {
   return codemodeTokenSeedForAgent(agent)
     ? [
         ...(agentActiveSandboxBackend.get(agent) !== "selfhosted"
@@ -11011,6 +11707,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
               {
                 id: "codemode-client",
                 phase: "beforeAgentStart" as const,
+                independent: true,
                 run: runManagedCodemodeClientHook,
               },
             ]
@@ -11018,6 +11715,7 @@ function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifec
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
+          ...(options.seedIndependent ? { independent: true } : {}),
           run: runCodemodeTokenSeedHook,
         },
       ]
@@ -12215,7 +12913,10 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // (set -eu would exit before any cleanup). Fetch diagnostics are held back so
   // an empty remote (below) does not print a misleading "couldn't find remote
   // ref"; every other outcome replays them unchanged.
-  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" 2>&1)"; }; then',
+  // A plain depth-1 fetch, not a blob-less partial clone: the checkout below
+  // needs every blob of that one commit anyway, and fetching them lazily in a
+  // second promisor round made a 10k-file repository take ~16 s instead of ~5 s.
+  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags origin "$ref" 2>&1)"; }; then',
   // A freshly created repository has no refs at all, so no ref can be fetched.
   // `ls-remote` succeeding with no output (it fails on auth or access errors)
   // proves that. Attaching such a repository is valid: leave an initialized
@@ -12359,7 +13060,11 @@ export function repositoryCloneCommand(
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
   options: { optionalCloneTimeoutSeconds?: number } = {},
 ): string {
-  const cloneConcurrency = 4;
+  // Shallow clones are network- and filesystem-bound, not CPU-bound: nine
+  // repositories in one sandbox finished in ~11 s all at once versus ~28 s in
+  // batches of four (each batch waits for its slowest clone). Keep a bound for
+  // unusually large resource lists.
+  const cloneConcurrency = 16;
   assertUniqueResourceMountPaths(resources);
   const optionalCloneTimeoutSeconds = Math.max(
     1,
@@ -12512,22 +13217,27 @@ export async function runManagedCodemodeClientHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  await installManagedCodemodeClient(
-    session,
-    await loadManagedCodemodeClient(),
-    async (cmd) =>
-      await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd,
-          workdir: "/workspace",
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 1_000,
-        },
-        context.commandRunner,
-      ),
-    context.runAs,
+  const client = await loadManagedCodemodeClient();
+  await withSandboxOperationPurpose("hook.codemode-client", () =>
+    installManagedCodemodeClient(
+      session,
+      client,
+      async (cmd) =>
+        await runSandboxLifecycleCommand(
+          session,
+          {
+            cmd,
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 1_000,
+          },
+          context.commandRunner,
+        ),
+      context.runAs,
+      "/workspace",
+      context.codemodeClientDownload,
+    ),
   );
 }
 
@@ -12575,11 +13285,108 @@ const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 // Modal's command transport caps aggregate argv at 64 KiB. Cancellation and
 // run-as wrappers duplicate/expand this command, so stage moderate scripts too.
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
-// Both cancellation and the SDK run-as wrapper repeat the payload three times.
-// Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
+// Base64 command payloads (staged chunks and the single-command repository
+// setup programs). Cancellation carries a command once (about 5.5 KiB of fixed
+// shell around it) and the SDK run-as wrapper repeats the result three times,
+// so 12 KiB leaves about 10 KiB under Modal's 64-KiB argv ceiling. Each staged
+// chunk costs one sandbox round trip, so chunks are as large as is safe.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 12 * 1024;
+const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 12 * 1024;
+const REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT = "/tmp/opengeni/repository-setup-payloads";
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
+// Content-addressed repository setup programs live in the persisted workspace
+// state directory (excluded from workspace capture), one directory per run-as
+// identity so a program staged by one user is never executed by another.
+const REPOSITORY_SETUP_PROGRAM_ROOT = "/workspace/.opengeni/setup-programs";
+const REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL = "__OPENGENI_SETUP_PROGRAM_MISSING__";
+const REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE = 86;
+
+function repositorySetupProgramPath(program: string, runAs: string | undefined): string {
+  const digest = createHash("sha256").update(program, "utf8").digest("hex");
+  const owner = createHash("sha256")
+    .update(runAs ?? "", "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return `${REPOSITORY_SETUP_PROGRAM_ROOT}-${owner}/${digest}.sh`;
+}
+
+/** One command: export this turn's seeds, then run the staged program only if
+ * it is present and (where sha256sum exists) matches its content hash. A
+ * missing or mismatched program reports the sentinel instead of running.
+ *
+ * With `embedded`, the launcher also carries the gzip-compressed program and
+ * installs it in the same command when the box lacks a verified copy, so a
+ * fresh box clones in one round trip instead of probing, staging chunks,
+ * decoding and launching again. Boxes without base64 or gzip still report the
+ * sentinel and take the staged fallback. */
+function repositorySetupProgramLauncher(
+  program: string,
+  programPath: string,
+  seedPrefix: string,
+  embedded?: { gzipBase64: string },
+): string {
+  const digest = createHash("sha256").update(program, "utf8").digest("hex");
+  const verified =
+    '[ -f "$opengeni_setup_program" ] && { ! command -v sha256sum >/dev/null 2>&1 || ' +
+    `printf '%s  %s\\n' ${shellQuote(digest)} "$opengeni_setup_program" | sha256sum -c >/dev/null 2>&1; }`;
+  return [
+    "set +x",
+    ...(seedPrefix ? [seedPrefix] : []),
+    `opengeni_setup_program=${shellQuote(programPath)}`,
+    // Programs for older repository sets or runtime versions, and transfers a
+    // crashed turn abandoned, are pruned in-box once they are a day old.
+    `find ${shellQuote(posixPath.dirname(programPath))} -maxdepth 1 -type f \\( -name '*.sh' ! -name ${shellQuote(`${digest}.sh`)} -o -name '*.b64' -o -name '*.tmp' \\) -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
+    ...(embedded
+      ? [
+          // Concurrent holders decode privately, then rename atomically.
+          `if ! { ${verified}; } && command -v base64 >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then`,
+          '  opengeni_setup_transfer="$opengeni_setup_program.$$.tmp"',
+          `  if ! ( umask 077 && mkdir -p ${shellQuote(posixPath.dirname(programPath))} && printf '%s' ${shellQuote(embedded.gzipBase64)} | base64 -d | gzip -dc > "$opengeni_setup_transfer" && chmod 0700 "$opengeni_setup_transfer" && mv -f "$opengeni_setup_transfer" "$opengeni_setup_program" ); then`,
+          '    rm -f "$opengeni_setup_transfer"',
+          "  fi",
+          "fi",
+        ]
+      : []),
+    `if ${verified}; then`,
+    '  exec /bin/sh "$opengeni_setup_program"',
+    "fi",
+    `echo ${shellQuote(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)}`,
+    `exit ${REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE}`,
+  ].join("\n");
+}
+
+function repositorySetupProgramMissing(result: unknown): boolean {
+  return (
+    sandboxCommandExitCode(result) === REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE &&
+    sandboxCommandOutput(result).includes(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)
+  );
+}
+
+/** One command for a program unique to this turn (it carries this turn's seeds
+ * or broker routes): decode the compressed program into a private temporary
+ * file, run it, and remove it. Null when it does not fit inline. Boxes without
+ * base64 or gzip report the missing-program sentinel and stage instead. */
+function repositorySetupOneShotCommand(program: string, payloadPath: string): string | null {
+  const encoded = gzipSync(Buffer.from(program, "utf8")).toString("base64");
+  const command = [
+    "set +x",
+    `opengeni_setup_payload=${shellQuote(payloadPath)}`,
+    "if command -v base64 >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1 && " +
+      `( umask 077 && mkdir -p ${shellQuote(posixPath.dirname(payloadPath))} && printf '%s' ${shellQuote(encoded)} | base64 -d | gzip -dc > "$opengeni_setup_payload" ); then`,
+    '  /bin/sh "$opengeni_setup_payload"',
+    "  opengeni_setup_status=$?",
+    '  rm -f "$opengeni_setup_payload"',
+    '  exit "$opengeni_setup_status"',
+    "fi",
+    'rm -f "$opengeni_setup_payload"',
+    `echo ${shellQuote(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)}`,
+    `exit ${REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE}`,
+  ].join("\n");
+  return Buffer.byteLength(command, "utf8") <= REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES
+    ? command
+    : null;
+}
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -12716,11 +13523,22 @@ async function stageRigSetupScript(
   session: SandboxSessionLike,
   script: string,
   context: SandboxLifecycleHookContext,
-  options: { payloadRoot?: string; label?: string } = {},
+  options: {
+    payloadRoot?: string;
+    label?: string;
+    /** Install at this exact path (atomic rename) instead of a random name.
+     * Used for content-addressed programs that are reused across turns. */
+    payloadPath?: string;
+  } = {},
 ): Promise<string> {
-  const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
-  const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
-  const encodedPath = `${payloadPath}.b64`;
+  const payloadPath =
+    options.payloadPath ?? `${options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const payloadRoot = posixPath.dirname(payloadPath);
+  // Unique transfer names: concurrent holders may stage the same
+  // content-addressed program; each decodes privately, then renames atomically.
+  const transferId = randomUUID();
+  const encodedPath = `${payloadPath}.${transferId}.b64`;
+  const decodedPath = `${payloadPath}.${transferId}.tmp`;
   const bytes = Buffer.from(script, "utf8");
   const compressed = gzipSync(bytes);
   const compressionUseful = compressed.length < bytes.length;
@@ -12763,7 +13581,7 @@ async function stageRigSetupScript(
       );
     }
     commands.push(
-      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(decodedPath)}\nchmod 0700 ${shellQuote(decodedPath)}\nmv -f ${shellQuote(decodedPath)} ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
     );
     for (const command of commands) {
       const result = await runSandboxLifecycleCommand(
@@ -12787,7 +13605,7 @@ async function stageRigSetupScript(
     await runSandboxLifecycleCommand(
       session,
       {
-        cmd: `rm -f ${shellQuote(payloadPath)} ${shellQuote(encodedPath)}`,
+        cmd: `rm -f ${shellQuote(decodedPath)} ${shellQuote(encodedPath)}${options.payloadPath ? "" : ` ${shellQuote(payloadPath)}`}`,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -13014,6 +13832,8 @@ export async function runRepositoryCloneHook(
     staged: [],
   };
   let stagedCloneScript: string | null = null;
+  // A successful program has moved every staged broker seed into its token file.
+  let brokerSeedsConsumed = false;
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -13041,31 +13861,96 @@ export async function runRepositoryCloneHook(
       stagedBrokerSeeds.staged,
       options,
     );
-    let command = sandboxGitProvisioningCommand(
+    const runClone = (cmd: string) =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 20_000,
+        },
+        context.commandRunner,
+      );
+    const inlineCommand = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
     );
-    // SDK setup also wraps run-as commands and cancellation can expand them.
-    // Reuse the bounded script transport instead of sending the whole clone
-    // program through those nested shell arguments.
-    if (Buffer.byteLength(command, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
-      stagedCloneScript = await stageRigSetupScript(session, command, context, {
-        payloadRoot: "/tmp/opengeni/repository-setup-payloads",
-        label: "Repository setup payload staging",
-      });
-      command = `exec /bin/sh ${shellQuote(stagedCloneScript)}`;
+    let result: unknown;
+    if (Buffer.byteLength(inlineCommand, "utf8") <= RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
+      result = await runClone(inlineCommand);
+    } else {
+      // SDK setup wraps run-as commands and cancellation expands them, so a
+      // large clone program cannot ride inline. Stage the token-free program
+      // once per box under its content hash (inside the persisted workspace
+      // state, so restored boxes keep it) and pass only this turn's seeds
+      // inline. A box that already has the verified program clones (or skips
+      // present repositories) in ONE command instead of re-staging the whole
+      // program through several round trips on every turn.
+      const program = sandboxGitProvisioningCommand(cloneCommand);
+      const programPath = repositorySetupProgramPath(program, context.runAs);
+      const plainLauncher = repositorySetupProgramLauncher(program, programPath, seedPrefix);
+      // A fresh box would otherwise pay probe, bootstrap, chunk and decode
+      // round trips before cloning; carry the compressed program when it fits.
+      const selfInstallingLauncher = repositorySetupProgramLauncher(
+        program,
+        programPath,
+        seedPrefix,
+        {
+          gzipBase64: gzipSync(Buffer.from(program, "utf8")).toString("base64"),
+        },
+      );
+      const launcher =
+        Buffer.byteLength(selfInstallingLauncher, "utf8") <= REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES
+          ? selfInstallingLauncher
+          : plainLauncher;
+      // Per-turn staging of the complete (seeded) program remains the fallback
+      // when the seeds alone are too large to ride inline, or when the
+      // persisted program cannot be installed and verified on this box.
+      const stageForThisTurn = async () => {
+        // One round trip when the compressed program fits: decode it into a
+        // private temporary file, run it, and remove it in the same command.
+        const oneShotPath = `${REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+        const oneShot = repositorySetupOneShotCommand(inlineCommand, oneShotPath);
+        if (oneShot) {
+          // Until the command reports an exit, the box may still hold the file.
+          stagedCloneScript = oneShotPath;
+          const attempt = await runClone(oneShot);
+          if (sandboxCommandExitCode(attempt) !== null) stagedCloneScript = null;
+          if (!repositorySetupProgramMissing(attempt)) return attempt;
+        }
+        stagedCloneScript = await stageRigSetupScript(session, inlineCommand, context, {
+          payloadRoot: REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT,
+          label: "Repository setup payload staging",
+        });
+        return await runClone(`exec /bin/sh ${shellQuote(stagedCloneScript)}`);
+      };
+      // A program that names this turn's random broker seed files is unique to
+      // the turn and would never be reused, so it is not persisted.
+      if (
+        stagedBrokerSeeds.staged.length > 0 ||
+        Buffer.byteLength(plainLauncher, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+      ) {
+        result = await stageForThisTurn();
+      } else {
+        result = await runClone(launcher);
+        if (repositorySetupProgramMissing(result)) {
+          const installed = await stageRigSetupScript(session, program, context, {
+            payloadPath: programPath,
+            label: "Repository setup payload staging",
+          }).then(
+            () => true,
+            () => false,
+          );
+          result = installed ? await runClone(launcher) : null;
+          if (!installed || repositorySetupProgramMissing(result)) {
+            result = await stageForThisTurn();
+          }
+        }
+      }
     }
-    const result = await runSandboxLifecycleCommand(
-      session,
-      {
-        cmd: command,
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      },
-      context.commandRunner,
-    );
     assertSandboxCommandSucceeded(result, "Repository clone hook");
+    brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
       sandboxCommandOutput(result),
       resources,
@@ -13106,7 +13991,7 @@ export async function runRepositoryCloneHook(
         context.commandRunner,
       ).catch(() => undefined);
     }
-    if (stagedBrokerSeeds.editor) {
+    if (stagedBrokerSeeds.editor && !brokerSeedsConsumed) {
       await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
     }
   }

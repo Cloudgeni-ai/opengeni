@@ -32,7 +32,7 @@ import type { ProviderRegistration } from "./types";
  * route; an unconfigured deployment falls back to a placeholder host (the URL shape
  * is still well-formed; the relay is simply unreachable until configured).
  */
-function resolveRelayConfig(settings: Settings): SelfhostedRelayConfig {
+export function resolveRelayConfig(settings: Settings): SelfhostedRelayConfig {
   const raw = settings.selfhostedRelayUrl?.trim();
   if (!raw) {
     return { host: "relay.opengeni.local", port: 443, tls: true, path: "/stream" };

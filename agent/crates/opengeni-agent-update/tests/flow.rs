@@ -56,6 +56,31 @@ fn manifest_only_check_does_not_download_the_artifact() {
     }
 }
 
+#[test]
+fn a_pinned_version_reads_that_release_manifest_not_the_channel_pointer() {
+    let release = staged_release();
+    // The release's own signed manifest lives under its version; the channel
+    // pointer is gone, as when it still redirects to another release.
+    let stable = release.path().join("agent/stable");
+    let pinned = release.path().join("agent/v1.0.1");
+    fs::create_dir_all(&pinned).expect("mkdir pinned");
+    for name in ["manifest.json", "manifest.json.minisig"] {
+        fs::rename(stable.join(name), pinned.join(name)).expect("move manifest");
+    }
+    let source = DirSource::new(release.path());
+    let mut cfg = config_for(release.path());
+    assert!(matches!(
+        check_update_manifest(&source, &cfg),
+        Err(UpdateError::Download { .. })
+    ));
+
+    cfg.pinned_version = Some("1.0.1".to_string());
+    match check_update_manifest(&source, &cfg).expect("pinned manifest check") {
+        ManifestCheckOutcome::Available(plan) => assert_eq!(plan.version, "1.0.1"),
+        ManifestCheckOutcome::UpToDate(reason) => panic!("expected update plan: {reason}"),
+    }
+}
+
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }

@@ -1,9 +1,38 @@
 import { describe, expect, test } from "bun:test";
+import { InteractionSemanticNode } from "@opengeni/contracts";
 import {
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAxNode,
 } from "../src";
+import { semanticRef } from "../src/cdp-accessibility";
+
+describe("semanticRef", () => {
+  const identity = {
+    controllerGeneration: "controller-1",
+    targetId: "target-1",
+    documentGeneration: "document-1",
+    frameId: null,
+    nodeId: "7",
+    backendDOMNodeId: 9,
+  };
+
+  test("is short, kind-prefixed and scoped to the exact document", () => {
+    const ref = semanticRef(identity, new Set());
+    expect(ref).toMatch(/^e[0-9a-f]{8}$/);
+    expect(semanticRef({ ...identity, backendDOMNodeId: null }, new Set())).toMatch(
+      /^a[0-9a-f]{8}$/,
+    );
+    expect(semanticRef({ ...identity, documentGeneration: "document-2" }, new Set())).not.toBe(ref);
+  });
+
+  test("falls back to the full digest when the short form is taken in the snapshot", () => {
+    const short = semanticRef(identity, new Set());
+    const long = semanticRef(identity, new Set([short]));
+    expect(long).toMatch(/^e[0-9a-f]{16}$/);
+    expect(long.startsWith(short)).toBe(true);
+  });
+});
 
 describe("normalizeCdpAccessibilityTree", () => {
   test("offers fill on native date and time inputs, not on their part spin buttons", () => {
@@ -82,46 +111,50 @@ describe("normalizeCdpAccessibilityTree", () => {
       name: "Important static text",
       actions: [],
     });
-    expect(snapshot.focusedRef).toStartWith("element-");
+    expect(snapshot.focusedRef).toMatch(/^e[0-9a-f]{8}$/);
     expect(snapshot.entriesByRef.get(snapshot.focusedRef!)?.backendDOMNodeId).toBe(9);
     expect(JSON.stringify(snapshot.roots)).not.toContain("backendDOMNodeId");
   });
 
-  test("does not project editable control values", () => {
+  test("projects form field values but reports a masked password as redacted", () => {
+    const field = (nodeId: string, name: string, value: string) => ({
+      nodeId,
+      ignored: false,
+      role: { value: "textbox" },
+      name: { value: name },
+      value: { value },
+      backendDOMNodeId: Number(nodeId),
+      childIds: [`${nodeId}0`],
+    });
+    const text = (nodeId: string, parentId: string, name: string) => ({
+      nodeId,
+      parentId,
+      ignored: false,
+      role: { value: "StaticText" },
+      name: { value: name },
+    });
     const snapshot = normalizeCdpAccessibilityTree({
       controllerGeneration: "controller-1",
       targetId: "target-1",
       documentGeneration: "document-1",
       nodes: [
-        {
-          nodeId: "1",
-          ignored: false,
-          role: { value: "textbox" },
-          name: { value: "Password" },
-          value: { value: "super-secret" },
-          backendDOMNodeId: 42,
-          childIds: ["2"],
-        },
-        {
-          nodeId: "2",
-          parentId: "1",
-          ignored: false,
-          role: { value: "generic" },
-          childIds: ["3"],
-        },
-        {
-          nodeId: "3",
-          parentId: "2",
-          ignored: false,
-          role: { value: "StaticText" },
-          name: { value: "super-secret" },
-        },
+        { nodeId: "1", ignored: false, role: { value: "RootWebArea" }, childIds: ["2", "3"] },
+        { ...field("2", "Draft", "Reference 4821"), parentId: "1" },
+        text("20", "2", "Reference 4821"),
+        { ...field("3", "Password", "\u2022\u2022\u2022\u2022\u2022\u2022"), parentId: "1" },
+        text("30", "3", "\u2022\u2022\u2022\u2022\u2022\u2022"),
       ],
     });
 
-    expect(snapshot.roots[0]).not.toHaveProperty("value");
-    expect(JSON.stringify(snapshot.roots)).not.toContain("super-secret");
-    expect(snapshot.entries).toHaveLength(1);
+    const [draft, password] = snapshot.roots[0]!.children!;
+    expect(draft).toMatchObject({ role: "textbox", name: "Draft", value: "Reference 4821" });
+    expect(draft).not.toHaveProperty("children");
+    expect(password).toMatchObject({
+      role: "textbox",
+      name: "Password",
+      value: { redacted: true, reason: "password" },
+    });
+    expect(JSON.stringify(snapshot.roots)).not.toContain("\u2022");
   });
 
   test("keeps colliding frame-local AX ids and backend ids independently addressable", () => {
@@ -244,4 +277,33 @@ test("focused document does not replace the focused descendant select", () => {
     ],
   });
   expect(snapshot.entriesByRef.get(snapshot.focusedRef!)?.backendDOMNodeId).toBe(2);
+});
+
+test("a page with document-sized accessible names still yields a valid snapshot", () => {
+  const snapshot = normalizeCdpAccessibilityTree({
+    controllerGeneration: "controller",
+    targetId: "target",
+    documentGeneration: "document",
+    nodes: [
+      {
+        nodeId: "root",
+        role: { value: "RootWebArea" },
+        name: { value: "Fingerprint report" },
+        childIds: ["cell"],
+        backendDOMNodeId: 1,
+      },
+      {
+        nodeId: "cell",
+        parentId: "root",
+        role: { value: "cell" },
+        name: { value: "x".repeat(20_000) },
+        description: { value: "y".repeat(9_000) },
+        backendDOMNodeId: 2,
+      },
+    ],
+  });
+  const cell = snapshot.roots[0]!.children![0]!;
+  expect(cell.name).toHaveLength(8_192);
+  expect(cell.description).toHaveLength(8_192);
+  expect(InteractionSemanticNode.safeParse(snapshot.roots[0]).success).toBe(true);
 });

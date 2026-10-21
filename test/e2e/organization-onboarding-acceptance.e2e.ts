@@ -222,8 +222,10 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
       pathname,
     ) ||
     // Sending from the new-chat page routes to the new session, which can
-    // cancel that session's first composer-draft read.
-    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/composer-draft$/u.test(pathname) ||
+    // cancel that session's first composer-draft and secrets reads.
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/(?:composer-draft|secrets)$/u.test(
+      pathname,
+    ) ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname)
   );
 }
@@ -876,9 +878,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       "Couldn't load your connected machines",
     );
     await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/machines`);
-    await setupPage
-      .getByText("Machines are managed by your workspace admin", { exact: true })
-      .waitFor();
+    // Members see and pick the workspace's machines; enrolling stays admin-managed.
+    await setupPage.getByRole("heading", { name: "Machines" }).first().waitFor();
+    await setupPage.waitForLoadState("networkidle");
+    expect(
+      await setupPage
+        .getByText("Machines are managed by your workspace admin", { exact: true })
+        .count(),
+    ).toBe(0);
     expect(await setupPage.getByRole("button", { name: /Connect a machine/ }).count()).toBe(0);
     expect(deniedReads).toEqual([]);
     await setupPage.screenshot({

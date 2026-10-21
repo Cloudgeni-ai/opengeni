@@ -290,7 +290,7 @@
     {
       "type": "timeseries",
       "title": "Opengeni pre-dispatch p95 / p50 (model entry -> provider dispatch)",
-      "description": "OpenGeni-owned seconds per model request before bytes reach the provider: admission, durable history and audit checkpoints, credit revalidation, request build. The red line is the default 2-second warning threshold.",
+      "description": "Opengeni-owned seconds per model request before bytes reach the provider: admission, durable history and audit checkpoints, credit revalidation, request build. The red line is the default 2-second warning threshold.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

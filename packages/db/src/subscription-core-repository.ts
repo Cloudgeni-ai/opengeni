@@ -1,14 +1,16 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type {
   ConnectionHealth,
   ConnectionKind,
   ConnectionOwnership,
   InferencePool,
   ProviderId,
+  QuotaBlockClaim,
   SubscriptionConnection,
   SubscriptionQuota,
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
+import { quotaAfterRateLimitReset, storedQuotaDocument } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 
@@ -96,6 +98,33 @@ export async function listSubscriptionConnectionAssignmentPolicies(
 }
 
 /**
+ * The status of `alias`'s connection row as an availability read sees it at
+ * `now`. A 403 quarantine is `error` with `health_retry_at` (only the
+ * quarantine writer sets it; any other status or error write drops it) and
+ * it ends by itself at that time: from then on the connection reads
+ * `active`, without waiting for a turn to run the recovery routine, which
+ * stores the same transition for the connections that turn may lease.
+ */
+export function subscriptionConnectionEffectiveStatus(
+  alias: string,
+  now: SQL = sql`clock_timestamp()`,
+): SQL {
+  const row = sql.raw(alias);
+  return sql`case when ${row}.status = 'error' and ${row}.health_retry_at <= ${now}
+    then 'active' else ${row}.status end`;
+}
+
+/** The row's last error as availability reads see it: none once its quarantine ended. */
+export function subscriptionConnectionEffectiveLastError(
+  alias: string,
+  now: SQL = sql`clock_timestamp()`,
+): SQL {
+  const row = sql.raw(alias);
+  return sql`case when ${row}.status = 'error' and ${row}.health_retry_at <= ${now}
+    then null else ${row}.last_error end`;
+}
+
+/**
  * Read the provider/workspace-visible connection world for the pure placement
  * policy. Account and workspace are mandatory; provider and connection kind
  * may narrow the result (the shared core passes both: a row of another kind
@@ -103,6 +132,14 @@ export async function listSubscriptionConnectionAssignmentPolicies(
  * credential load).
  * Callers cannot accidentally turn this into a viewer-derived or cross-account pool read.
  * Credential ciphertext is deliberately never selected here.
+ *
+ * `health` says how an ended quarantine reads. `effective`: healthy, for a
+ * reader that only decides availability (admission, the catalog), which
+ * cannot run the recovery routine. `stored`: still `error`, for placement of
+ * an accepted turn, whose lease and credential reads enforce the stored
+ * status; the turn recovers ended quarantines before it places, and one that
+ * ends after that recovery waits for the turn's next check rather than being
+ * leased and refused at credential load.
  */
 export async function listSubscriptionConnectionsForPlacement(
   db: Database,
@@ -112,6 +149,7 @@ export async function listSubscriptionConnectionsForPlacement(
     provider?: ProviderId;
     kind?: ConnectionKind;
     now?: Date;
+    health: "effective" | "stored";
   },
 ): Promise<SubscriptionConnection[]> {
   const now = (input.now ?? new Date()).toISOString();
@@ -126,6 +164,8 @@ export async function listSubscriptionConnectionsForPlacement(
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
     observed_model_slugs: string[] | null;
+    model_catalog_observed_at: Date | string | null;
+    model_catalog_expires_at: Date | string | null;
     excluded_models: string[];
     allowed_model_ids: string[] | null;
     refresh_generation: number | string;
@@ -140,12 +180,17 @@ export async function listSubscriptionConnectionsForPlacement(
     db,
     sql`select connection.id::text as id, connection.provider, connection.kind,
       connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
-      connection.status as health, connection.allocator_enabled, connection.extra_credits_enabled,
+      ${
+        input.health === "effective"
+          ? subscriptionConnectionEffectiveStatus("connection", sql`${now}::timestamptz`)
+          : sql`connection.status`
+      } as health, connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
       case when quota.model_catalog_refresh_generation = connection.refresh_generation
         and quota.model_catalog_observed_at <= ${now}::timestamptz
         and quota.model_catalog_expires_at > ${now}::timestamptz
         then quota.model_catalog_slugs else null end as observed_model_slugs,
+      quota.model_catalog_observed_at, quota.model_catalog_expires_at,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
       connection.managed_by_workspace_id::text as managed_by_workspace_id,
@@ -250,6 +295,12 @@ export async function listSubscriptionConnectionsForPlacement(
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
       observedModelSlugs: row.observed_model_slugs,
+      modelCatalogObservedAt: row.model_catalog_observed_at
+        ? new Date(row.model_catalog_observed_at).getTime()
+        : null,
+      modelCatalogExpiresAt: row.model_catalog_expires_at
+        ? new Date(row.model_catalog_expires_at).getTime()
+        : null,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
       // A shared connection with no assignment-policy row for this workspace
@@ -342,7 +393,7 @@ export function decodeSubscriptionQuota(row: {
     )
   )
     return null;
-  return {
+  const quota: SubscriptionQuota = {
     windows: parsedWindows,
     modelCooldowns,
     exhaustedUntil,
@@ -355,6 +406,88 @@ export function decodeSubscriptionQuota(row: {
         : Number(row.quota_observed_refresh_generation),
     source,
   };
+  // Block evidence is optional and fails closed: a malformed claim is
+  // dropped (its block runs to its own deadline), never the quota.
+  const claims = raw.modelCooldownClaims;
+  if (claims !== null && typeof claims === "object" && !Array.isArray(claims)) {
+    const parsed: Record<string, QuotaBlockClaim> = {};
+    for (const [modelId, claim] of Object.entries(claims)) {
+      const decoded = decodeQuotaBlockClaim(claim);
+      if (decoded && modelCooldowns[modelId] !== undefined) parsed[modelId] = decoded;
+    }
+    if (Object.keys(parsed).length > 0) quota.modelCooldownClaims = parsed;
+  }
+  const exhaustedClaim = exhaustedUntil === null ? null : decodeQuotaBlockClaim(raw.exhaustedClaim);
+  if (exhaustedClaim) quota.exhaustedClaim = exhaustedClaim;
+  return quota;
+}
+
+function decodeQuotaBlockClaim(value: unknown): QuotaBlockClaim | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const claim = value as Record<string, unknown>;
+  if (
+    typeof claim.until !== "number" ||
+    !Number.isFinite(claim.until) ||
+    typeof claim.observedAt !== "number" ||
+    !Number.isFinite(claim.observedAt) ||
+    !Array.isArray(claim.windowIds) ||
+    claim.windowIds.length === 0 ||
+    claim.windowIds.length > 16 ||
+    !claim.windowIds.every((id) => typeof id === "string" && id.length > 0 && id.length <= 128)
+  )
+    return null;
+  return {
+    until: claim.until,
+    observedAt: claim.observedAt,
+    windowIds: [...new Set(claim.windowIds as string[])],
+  };
+}
+
+/**
+ * Record, inside the caller's transaction, that the provider reset a
+ * connection's rate limits at `resetAt` (`quotaAfterRateLimitReset`): the
+ * stored windows and exhaustion deadline are invalidated, so placement no
+ * longer waits on readings taken before the reset. Only a quota observed with
+ * the connection's current refresh generation is rewritten (an observation of
+ * an older credential is left for the generation fence to discard). Returns
+ * whether the stored quota changed.
+ */
+export async function recordSubscriptionCoreRateLimitResetInTransaction(
+  tx: Database,
+  input: { accountId: string; provider: ProviderId; connectionId: string; resetAt: Date },
+): Promise<boolean> {
+  const [row] = await rawRows<{
+    quota: unknown;
+    quota_revision: number | string | null;
+    quota_observed_refresh_generation: number | string | null;
+    quota_updated_at: Date | string | null;
+  }>(
+    tx,
+    sql`select quota.quota, quota.revision as quota_revision,
+      quota.observed_refresh_generation as quota_observed_refresh_generation,
+      quota.updated_at as quota_updated_at
+    from subscription_connection_quota quota
+    join subscription_connections connection
+      on connection.account_id = quota.account_id and connection.id = quota.connection_id
+    where quota.account_id = ${input.accountId}::uuid
+      and quota.connection_id = ${input.connectionId}::uuid
+      and connection.provider = ${input.provider}
+      and quota.observed_refresh_generation = connection.refresh_generation
+    for update of quota`,
+  );
+  if (!row) return false;
+  const current = decodeSubscriptionQuota(row);
+  if (!current) return false;
+  const next = quotaAfterRateLimitReset(current, input.resetAt.getTime());
+  if (next === current) return false;
+  await tx.execute(
+    sql`update subscription_connection_quota
+      set quota = ${JSON.stringify(storedQuotaDocument(next))}::jsonb,
+        revision = revision + 1,
+        updated_at = ${new Date(next.observedAt ?? input.resetAt.getTime()).toISOString()}::timestamptz
+      where account_id = ${input.accountId}::uuid and connection_id = ${input.connectionId}::uuid`,
+  );
+  return true;
 }
 
 /** Canonical IDs win; otherwise resolve one visible provider-scoped alias. */
@@ -807,6 +940,7 @@ function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
 }
 
 export type SubscriptionOperationKind =
+  | "session_title"
   | "image"
   | "video"
   | "realtime"

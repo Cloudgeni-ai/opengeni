@@ -10,6 +10,10 @@ import { provisionRoles } from "../src/provision-roles";
 
 const migrationName = "0233_skill_and_integration_authority_cutover.sql";
 const skillCutover = "0433_unified_skill_lifecycle.sql";
+// The library entry's provenance as 0233 recorded it. 0233 accepts only its
+// exact curated selection, and installations keep the provenance they were
+// made with, so later edits to the library's wording must not reach this replay.
+const historicalProvenance = "OpenGeni-authored guidance; reviewed immutable opt-in entry.";
 
 describe("Skill and Integration authority migration replay", () => {
   test("preserves exact curated selection and makes the generic ledger MCP-only", async () => {
@@ -70,13 +74,13 @@ describe("Skill and Integration authority migration replay", () => {
           ${entry.category},
           ${shared.admin.json([...entry.tags])},
           ${entry.sourceUrl},
-          ${entry.provenance},
+          ${historicalProvenance},
           ${shared.admin.json({
             libraryId: entry.id,
             version: entry.version,
             contentSha256: entry.contentSha256,
             sourceCommit: entry.sourceCommit,
-            provenance: entry.provenance,
+            provenance: historicalProvenance,
           })}
         )
       `;
@@ -101,7 +105,7 @@ describe("Skill and Integration authority migration replay", () => {
             libraryVersion: entry.version,
             contentSha256: entry.contentSha256,
             sourceCommit: entry.sourceCommit,
-            provenance: entry.provenance,
+            provenance: historicalProvenance,
           })}
         )
       `;
@@ -223,7 +227,7 @@ describe("Skill and Integration authority migration replay", () => {
           pluginKey: `skill/library/${entry.id}`,
           source: "library",
           version: entry.version,
-          provenance: entry.provenance,
+          provenance: historicalProvenance,
           contentSha256: entry.contentSha256,
           fileCount: loaded.skill.files.length,
           owners: [

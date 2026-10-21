@@ -36,6 +36,40 @@ export type ConnectorAttachmentMaterializer = (
   request: ConnectorAttachmentMaterializationRequest,
 ) => Promise<ConnectorAttachmentReceiptEnvelopeValue>;
 
+/**
+ * Exact bytes one reviewed connector tool downloaded from its provider. The
+ * host stages them privately and materializes them as a connector attachment;
+ * neither bytes nor transfer URLs ever enter a model-visible result.
+ */
+export type ConnectorFileMaterializationRequest = Readonly<{
+  serverId: string;
+  toolName: string;
+  connectionId: string;
+  operationId: string;
+  providerAttachmentId: { provider: string; kind: "attachment"; value: string };
+  fileName: string;
+  mediaType: string;
+  bytes: Uint8Array;
+  authorizeProviderRequest: () => Promise<boolean>;
+}>;
+
+/** A portable leaf filename accepted by the connector attachment contract. */
+export function connectorAttachmentFileName(value: string, fallback = "attachment.bin"): string {
+  let name = value
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/gu, "_")
+    .replace(/[ .]+$/u, "")
+    .trim();
+  if (
+    !name ||
+    name === "." ||
+    name === ".." ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)
+  )
+    name = fallback;
+  while (Buffer.byteLength(name) > 240) name = [...name].slice(0, -1).join("");
+  return name;
+}
+
 export type ConnectorAttachmentTransferProjectionOptions = Readonly<{
   serverId: string;
   toolName: string;

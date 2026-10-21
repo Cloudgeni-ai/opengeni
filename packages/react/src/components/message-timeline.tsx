@@ -15,6 +15,7 @@ import {
 import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
+import { TurnStepsAction, TurnStepsLoader } from "../timeline/turn-steps";
 import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
 import {
   isTimelineSearchTarget,
@@ -26,9 +27,9 @@ import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timelin
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
-  COMPACTION_FAILURE_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
+  compactionSkipTitle,
 } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
@@ -92,6 +93,7 @@ import {
   type OlderHistoryLoader,
 } from "../older-history";
 import { Markdown, type MarkdownProps } from "./markdown";
+import { linkifyText } from "./linkified-text";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -195,10 +197,12 @@ import {
   type RenderAllowanceExhausted,
 } from "../timeline/allowance-exhausted-row";
 import { SessionUsageLimitRow } from "../timeline/session-usage-limit-row";
+import { LearningRefusalRow } from "../timeline/learning-refusal-row";
 import type { AllowanceLabels } from "../usage/allowance-copy";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
@@ -654,16 +658,17 @@ export function MessageTimeline({
   emptyState,
   className,
 }: MessageTimelineProps) {
+  const t = useOpenGeniText();
   const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
-    const projectedItems = items ?? buildTimeline(events ?? []);
+    const projectedItems = items ?? buildTimeline(t, events ?? []);
     if (!shouldRenderAuthNeeded) {
       return projectedItems;
     }
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded]);
+  }, [items, events, shouldRenderAuthNeeded, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;
@@ -786,8 +791,8 @@ export function MessageTimeline({
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
   const projectedGroups = useMemo(
-    () => groupTimeline(resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns],
+    () => groupTimeline(t, resolvedItems, { readableTurns }),
+    [resolvedItems, readableTurns, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
@@ -2739,8 +2744,8 @@ export function MessageTimeline({
                                       <span className={LOADING_CHIP_CLASS}>
                                         <span className="og-shimmer-text">
                                           {loadingOldest
-                                            ? "Jumping to start…"
-                                            : "Loading earlier activity…"}
+                                            ? t("messageTimeline.jumpingToStart")
+                                            : t("messageTimeline.loadingEarlierActivity")}
                                         </span>
                                       </span>
                                     ) : null}
@@ -2802,9 +2807,9 @@ export function MessageTimeline({
                                       >
                                         {underfillRetryReady
                                           ? underfillSettledAttempt?.[2]?.tailPreserved
-                                            ? "Load earlier activity"
-                                            : "Retry earlier activity"
-                                          : "Jump to start"}
+                                            ? t("messageTimeline.loadEarlierActivity")
+                                            : t("messageTimeline.retryEarlierActivity")
+                                          : t("messageTimeline.jumpToStart")}
                                       </button>
                                     ) : null}
                                   </motion.div>
@@ -2813,7 +2818,7 @@ export function MessageTimeline({
                               {!groups.length
                                 ? (emptyState ?? (
                                     <p className="py-10 text-center text-og-menu text-og-fg-subtle">
-                                      No activity yet.
+                                      {t("messageTimeline.noActivityYet")}
                                     </p>
                                   ))
                                 : null}
@@ -2874,7 +2879,9 @@ export function MessageTimeline({
                                   className="flex flex-col items-center gap-2 px-4 py-3 text-center text-og-menu text-og-fg-muted"
                                 >
                                   <p role="status" className="max-w-prose [overflow-wrap:anywhere]">
-                                    Couldn’t load later activity. {newerFailure.message}
+                                    {t("messageTimeline.couldnTLoadLaterActivity", {
+                                      message: newerFailure.message,
+                                    })}
                                   </p>
                                   <button
                                     ref={newerRetryButtonRef}
@@ -2886,8 +2893,8 @@ export function MessageTimeline({
                                     onClick={() => requestNewer(true)}
                                   >
                                     {newerRetryPending
-                                      ? "Retrying later activity…"
-                                      : "Retry later activity"}
+                                      ? t("messageTimeline.retryingLaterActivity")
+                                      : t("messageTimeline.retryLaterActivity")}
                                   </button>
                                 </div>
                               ) : null}
@@ -2928,12 +2935,14 @@ export function MessageTimeline({
                                 type="button"
                                 data-og-question-nav=""
                                 data-og-jump-to-question=""
-                                title="Back to your message"
+                                title={t("messageTimeline.backToYourMessage")}
                                 onClick={() => jumpToQuestion(questionNav.key)}
                                 className={NAV_BUTTON_CLASS}
                               >
                                 <ArrowUpIcon aria-hidden className="size-4" />
-                                <span className="sr-only">Back to your message</span>
+                                <span className="sr-only">
+                                  {t("messageTimeline.backToYourMessage")}
+                                </span>
                               </motion.button>
                             ) : null}
                           </AnimatePresence>
@@ -2952,7 +2961,9 @@ export function MessageTimeline({
                                 className="flex max-w-full justify-center"
                               >
                                 <span className={LOADING_CHIP_CLASS}>
-                                  <span className="og-shimmer-text">Loading later activity…</span>
+                                  <span className="og-shimmer-text">
+                                    {t("messageTimeline.loadingLaterActivity")}
+                                  </span>
                                 </span>
                               </motion.div>
                             ) : null}
@@ -2962,7 +2973,7 @@ export function MessageTimeline({
                                 {...NAV_FADE}
                                 type="button"
                                 data-og-jump-to-latest=""
-                                title="Jump to latest"
+                                title={t("messageTimeline.jumpToLatest")}
                                 onClick={() => {
                                   // Returning to the tip explicitly releases reader-owned
                                   // prose. Clear only this timeline's selection before the
@@ -3024,7 +3035,7 @@ export function MessageTimeline({
                                 className={NAV_BUTTON_CLASS}
                               >
                                 <ArrowDownIcon aria-hidden className="size-4" />
-                                <span className="sr-only">Jump to latest</span>
+                                <span className="sr-only">{t("messageTimeline.jumpToLatest")}</span>
                               </motion.button>
                             ) : null}
                           </AnimatePresence>
@@ -3195,6 +3206,23 @@ function timelineRenderResetKeysChanged(
  * entire conversation. Keep the boundary outside the row component so React
  * can replace an invalid element type (error #130) with a bounded fallback.
  */
+function TimelineGroupRenderError() {
+  const t = useOpenGeniText();
+  return (
+    <div
+      data-testid="timeline-group-render-error"
+      role="status"
+      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
+    >
+      <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+      <div>
+        <p className="font-medium text-og-fg">{t("messageTimeline.timelineItemUnavailable")}</p>
+        <p>{t("messageTimeline.timelineItemUnavailableDetail")}</p>
+      </div>
+    </div>
+  );
+}
+
 class TimelineGroupRenderBoundary extends Component<
   TimelineGroupRenderBoundaryProps,
   TimelineGroupRenderBoundaryState
@@ -3220,21 +3248,7 @@ class TimelineGroupRenderBoundary extends Component<
 
   render(): ReactNode {
     if (this.state.failed) {
-      return (
-        <div
-          data-testid="timeline-group-render-error"
-          role="status"
-          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
-        >
-          <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-          <div>
-            <p className="font-medium text-og-fg">Timeline item unavailable</p>
-            <p>
-              This item could not be displayed. The rest of the conversation is still available.
-            </p>
-          </div>
-        </div>
-      );
+      return <TimelineGroupRenderError />;
     }
     return this.props.children;
   }
@@ -3443,6 +3457,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
 }) {
+  const t = useOpenGeniText();
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
@@ -3507,7 +3522,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             />
           );
         }
-        const workStatus = readableWorkStatus({ ...group, work: group.work });
+        const workStatus = readableWorkStatus(t, { ...group, work: group.work });
         const status: TurnSummaryStatus =
           workStatus.kind === "working"
             ? {
@@ -3570,6 +3585,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               failureText={group.failureText}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
+              unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
               facets={turnSummary?.facets}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
@@ -3579,6 +3595,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
               }
             >
               <TurnRailFrame compact>
+                {group.work.steps ? (
+                  <TurnStepsLoader
+                    steps={group.work.steps}
+                    autoLoad={!readableWorkDefaultOpen(group)}
+                  />
+                ) : null}
                 {renderFoldedGroups(
                   group.work.details,
                   {
@@ -4191,6 +4213,8 @@ export function TimelineRow({
       return <NoticeRow item={item} />;
     case "context-compaction":
       return <CompactionRow item={item} />;
+    case "turn-steps":
+      return <TurnStepsAction steps={item} />;
     case "auth-needed":
       return (
         renderAuthNeeded?.(item) ?? (
@@ -4206,43 +4230,46 @@ export function TimelineRow({
   }
 }
 
-const COMPACTION_TRIGGER_LABEL: Record<NonNullable<ContextCompactionItem["trigger"]>, string> = {
-  auto: "Auto",
-  operator: "Manual",
-  proactive: "Auto",
-  overflow: "Overflow",
-};
+const COMPACTION_TRIGGER_LABEL = (
+  t: OpenGeniText,
+): Record<NonNullable<ContextCompactionItem["trigger"]>, string> => ({
+  auto: t("messageTimeline.auto"),
+  operator: t("messageTimeline.manual"),
+  proactive: t("messageTimeline.auto"),
+  overflow: t("messageTimeline.overflow"),
+});
 
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
+    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL(t)[item.trigger] : null;
   const before =
     item.estimatedTokensBefore != null
-      ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
+      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
       : null;
   const after =
     item.estimatedTokensAfter != null
-      ? Math.round(item.estimatedTokensAfter).toLocaleString("en-US")
+      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
       : null;
   const title =
     item.phase === "started"
-      ? "Compacting conversation history…"
+      ? t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
         ? before && after
-          ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
-          : "Conversation history compacted"
-        : COMPACTION_FAILURE_TITLE;
+          ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+          : t("messageTimeline.conversationHistoryCompacted")
+        : compactionSkipTitle(t, item.skipReason);
   const subtitle =
     item.phase === "compacted"
-      ? "Chat history above is unchanged"
+      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(item.skipReason, item.providerRejection)
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
         : null;
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
-  const details = compactionFailureDetails(item);
+  const details = compactionFailureDetails(t, item);
   const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
   const pill = failed
     ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -4291,7 +4318,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
                   "pointer-coarse:-my-2 pointer-coarse:px-1 pointer-coarse:py-2",
                 )}
               >
-                Details
+                {t("messageTimeline.details")}
                 <ChevronDownIcon
                   aria-hidden
                   className={cn("size-3 transition-transform", detailsOpen && "rotate-180")}
@@ -4327,6 +4354,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
 
 /** Hover-reveal clock beside the copy control (sent / finished). */
 function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
+  const t = useOpenGeniText();
   return (
     <time
       dateTime={occurredAt}
@@ -4336,7 +4364,7 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
         "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-100",
       )}
     >
-      {formatClockTime(occurredAt)}
+      {formatClockTime(t, occurredAt)}
     </time>
   );
 }
@@ -4352,6 +4380,7 @@ function UserMessageRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const deliveryFailed = item.delivery?.state === "failed";
   return (
@@ -4365,7 +4394,7 @@ function UserMessageRow({
               .map((annotation) => `${annotation.quote}\n${annotation.note}`)
               .join("\n\n")
           }
-          label="Copy message"
+          label={t("messageTimeline.copyMessage")}
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
@@ -4405,7 +4434,7 @@ function UserMessageRow({
             <span className="flex min-w-0 items-start gap-1">
               <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
               <span className="min-w-0 break-words">
-                {item.delivery?.error || "Message not sent"}
+                {item.delivery?.error || t("messageTimeline.messageNotSent")}
               </span>
             </span>
             <div className="flex flex-wrap items-center gap-2">
@@ -4415,7 +4444,7 @@ function UserMessageRow({
                   className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onEdit}
                 >
-                  Edit message
+                  {t("messageTimeline.editMessage")}
                 </button>
               ) : null}
               {item.delivery?.onRetry ? (
@@ -4424,7 +4453,7 @@ function UserMessageRow({
                   className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onRetry}
                 >
-                  Retry
+                  {t("messageTimeline.retry")}
                 </button>
               ) : null}
               {item.delivery?.onRemove ? (
@@ -4433,7 +4462,7 @@ function UserMessageRow({
                   className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onRemove}
                 >
-                  Remove
+                  {t("messageTimeline.remove")}
                 </button>
               ) : null}
             </div>
@@ -4445,6 +4474,7 @@ function UserMessageRow({
 }
 
 function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const multipleQuestions = Math.max(item.questions.length, item.answers.length) > 1;
   const questionNumberById = new Map(
@@ -4452,13 +4482,13 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
   const settledLabel =
     item.response.outcome === "answered"
-      ? "You answered"
+      ? t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
-        ? "Skipped"
+        ? t("messageTimeline.skipped")
         : item.response.outcome === "expired"
-          ? "Expired"
-          : "Cancelled";
-  const copyText = humanInputConversationCopyText(item, settledLabel);
+          ? t("messageTimeline.expired")
+          : t("messageTimeline.cancelled");
+  const copyText = humanInputConversationCopyText(t, item, settledLabel);
 
   return (
     <div
@@ -4470,13 +4500,15 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
           <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-og-xs font-medium text-og-fg-subtle">Agent asked</p>
+          <p className="text-og-xs font-medium text-og-fg-subtle">
+            {t("messageTimeline.agentAsked")}
+          </p>
           <div className="mt-1.5 space-y-3">
             {item.questions.length > 0 ? (
               item.questions.map((question, index) => (
                 <div key={question.id}>
                   {question.label ? (
-                    <p className="text-og-sm font-semibold text-og-fg">
+                    <p className="text-og-sm font-semibold text-og-fg [overflow-wrap:anywhere]">
                       {multipleQuestions ? (
                         <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                       ) : null}
@@ -4486,7 +4518,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                   ) : null}
                   <p
                     className={cn(
-                      "text-og-md leading-6 text-og-fg",
+                      "text-og-md leading-6 text-og-fg [overflow-wrap:anywhere]",
                       question.label && "mt-0.5 text-og-sm text-og-fg-muted",
                     )}
                   >
@@ -4494,12 +4526,14 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {question.prompt}
+                    {linkifyText(question.prompt)}
                   </p>
                 </div>
               ))
             ) : (
-              <p className="text-og-sm text-og-fg-muted">The agent requested structured input.</p>
+              <p className="text-og-sm text-og-fg-muted">
+                {t("messageTimeline.theAgentRequestedStructuredInput")}
+              </p>
             )}
           </div>
         </div>
@@ -4508,7 +4542,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
       <div className="flex justify-end">
         <CopyHoverFrame
           copyText={copyText}
-          label="Copy answer"
+          label={t("messageTimeline.copyAnswer")}
           className="w-fit max-w-[90%] min-w-0 sm:max-w-[82%]"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
@@ -4531,7 +4565,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                         {answer.secret ? (
                           <SecretAnswerChip
                             result={answer.secret}
-                            label={secretAnswerLabel(answer.secret)}
+                            label={secretAnswerLabel(t, answer.secret)}
                           />
                         ) : answer.values.length > 1 ? (
                           <ul className="list-disc space-y-0.5 pl-5">
@@ -4540,13 +4574,13 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                             ))}
                           </ul>
                         ) : (
-                          <p>{answer.values[0] || "Answered"}</p>
+                          <p>{answer.values[0] || t("messageTimeline.answered")}</p>
                         )}
                       </div>
                     </div>
                   ))
                 ) : (
-                  <p>Answered</p>
+                  <p>{t("messageTimeline.answered")}</p>
                 )}
               </div>
             ) : null}
@@ -4557,11 +4591,15 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
 }
 
-function humanInputConversationCopyText(item: HumanInputItem, settledLabel: string): string {
+function humanInputConversationCopyText(
+  t: OpenGeniText,
+  item: HumanInputItem,
+  settledLabel: string,
+): string {
   const questions = item.questions
     .map(
       (question, index) =>
-        `${item.questions.length > 1 ? `${index + 1}. ` : ""}${question.label || "Question"}: ${question.prompt}`,
+        `${item.questions.length > 1 ? `${index + 1}. ` : ""}${question.label || t("messageTimeline.question")}: ${question.prompt}`,
     )
     .join("\n\n");
   const questionNumberById = new Map(
@@ -4576,8 +4614,8 @@ function humanInputConversationCopyText(item: HumanInputItem, settledLabel: stri
             : ""
         }${answer.label}: ${
           answer.secret
-            ? `${secretAnswerLabel(answer.secret)} (${answer.secret.reference})`
-            : answer.values.join(", ") || "Answered"
+            ? `${secretAnswerLabel(t, answer.secret)} (${answer.secret.reference})`
+            : answer.values.join(", ") || t("messageTimeline.answered")
         }`,
     )
     .join("\n\n");
@@ -4597,6 +4635,7 @@ function AgentMessageRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   // No streaming caret: it fought the trailing block layout (inline ↔ block)
   // and snapped on exit. Live text carries the stream via tip ink.
@@ -4612,7 +4651,7 @@ function AgentMessageRow({
   return (
     <CopyHoverFrame
       copyText={item.text}
-      label="Copy message"
+      label={t("messageTimeline.copyMessage")}
       align="start"
       className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
       trailing={
@@ -4649,32 +4688,49 @@ type WorkerCompletionMeta = {
 };
 
 function workerCompletionMeta(
+  t: OpenGeniText,
   item: WorkerCompletionItem,
   name: string | null,
 ): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
     return {
-      title: namedAgentTitle(name, "", " failed", "Worker failed"),
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.nameFailed", { name: agent }),
+        t("messageTimeline.workerFailed"),
+      ),
       icon: XCircleIcon,
       failed: true,
     };
   }
   if (item.goalStatus === "paused") {
     return {
-      title: namedAgentTitle(name, "", " paused", "Worker paused"),
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.namePaused", { name: agent }),
+        t("messageTimeline.workerPaused"),
+      ),
       icon: PauseCircleIcon,
       failed: false,
     };
   }
   if (item.goalStatus === "completed") {
     return {
-      title: namedAgentTitle(name, "", " completed its goal", "Worker completed"),
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.nameCompletedItsGoal", { name: agent }),
+        t("messageTimeline.workerCompleted"),
+      ),
       icon: CheckCircle2Icon,
       failed: false,
     };
   }
   return {
-    title: namedAgentTitle(name, "Result from ", "", "Worker reported back"),
+    title: namedAgentTitle(
+      name,
+      (agent) => t("messageTimeline.resultFromName", { name: agent }),
+      t("messageTimeline.workerReportedBack"),
+    ),
     icon: BotIcon,
     failed: false,
   };
@@ -4687,9 +4743,10 @@ function WorkerCompletionRow({
   item: WorkerCompletionItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const identity = useAgentIdentity();
-  const meta = workerCompletionMeta(item, identity.titleFor(item.childSessionId));
+  const meta = workerCompletionMeta(t, item, identity.titleFor(item.childSessionId));
   const Icon = meta.icon;
   // "Paused because" only when the outcome actually IS a pause — completion
   // payloads can carry a leftover pausedReason/rationale from earlier in the
@@ -4697,12 +4754,18 @@ function WorkerCompletionRow({
   const showPausedReason =
     item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
   const details: { label: string; value: string; muted?: boolean }[] = [
-    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
+    ...(item.text.trim() ? [{ label: t("messageTimeline.report"), value: item.text.trim() }] : []),
     ...(item.evidence?.trim()
-      ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
+      ? [{ label: t("messageTimeline.evidence"), value: item.evidence.trim(), muted: true }]
       : []),
     ...(showPausedReason
-      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      ? [
+          {
+            label: t("messageTimeline.pausedBecause"),
+            value: item.pausedReason!.trim(),
+            muted: true,
+          },
+        ]
       : []),
   ];
   return (
@@ -4740,9 +4803,10 @@ function SessionStatusRow({
     resolvedAt?: string;
   };
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const status = item.blocked ? "blocked" : item.status;
-  const meta = SESSION_STATUS_META[status];
+  const meta = SESSION_STATUS_META(t)[status];
   return (
     <div
       className={cn(
@@ -4754,8 +4818,8 @@ function SessionStatusRow({
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
         {item.resolvedAt ? null : <StatusDot status={status} className="size-1" />}
-        {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
-        {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
+        {item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} ·{" "}
+        {formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}
       </span>
       <span className="h-px flex-1 bg-og-border" />
     </div>
@@ -4785,32 +4849,36 @@ const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
 // Shared production chunks can be cyclic. Resolve icon bindings during render,
 // after their modules initialize, rather than permanently capturing undefined.
-function goalMeta(action: GoalItem["action"]): GoalMeta {
+function goalMeta(t: OpenGeniText, action: GoalItem["action"]): GoalMeta {
   const metadata: Record<GoalItem["action"], GoalMeta> = {
     set: {
-      label: "Goal set",
+      label: t("messageTimeline.goalSet"),
       pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
       icon: TargetIcon,
     },
-    updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+    updated: { label: t("messageTimeline.goalUpdated"), pill: NEUTRAL_PILL, icon: PencilLineIcon },
     completed: {
-      label: "Goal completed",
+      label: t("messageTimeline.goalCompleted"),
       pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
       icon: CheckIcon,
     },
     paused: {
-      label: "Goal paused",
+      label: t("messageTimeline.goalPaused"),
       pill: WAITING_PILL_CLASS,
       icon: PauseIcon,
     },
-    resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
-    cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+    resumed: { label: t("messageTimeline.goalResumed"), pill: NEUTRAL_PILL, icon: PlayIcon },
+    cleared: { label: t("messageTimeline.goalCleared"), pill: NEUTRAL_PILL, icon: Trash2Icon },
     held: {
-      label: "Goal held",
+      label: t("messageTimeline.goalHeld"),
       pill: WAITING_PILL_CLASS,
       icon: PauseCircleIcon,
     },
-    continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+    continuation: {
+      label: t("messageTimeline.continuingTowardTheGoal"),
+      pill: NEUTRAL_PILL,
+      icon: ArrowRightIcon,
+    },
   };
   return metadata[action];
 }
@@ -4821,8 +4889,9 @@ function goalMeta(action: GoalItem["action"]): GoalMeta {
  * palette stays restrained — see that table for the per-action rationale.
  */
 function GoalRow({ item }: { item: GoalItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = goalMeta(item.action);
+  const { label, pill, icon: Icon } = goalMeta(t, item.action);
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span
@@ -4850,9 +4919,10 @@ function MachineInputBatchRow({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const identity = useAgentIdentity();
-  const label = machineInputBatchLabel(item.members, identity.titleFor);
+  const label = machineInputBatchLabel(t, item.members, identity.titleFor);
   const single = item.members.length === 1 ? item.members[0]! : null;
   if (single?.kind === "media_generation_result" && single.result) {
     return (
@@ -4869,14 +4939,16 @@ function MachineInputBatchRow({
     !item.compact &&
     single != null &&
     !isAgentMember(single) &&
-    machineInputSummaryIsUseful(single.kind, singleSummary);
+    machineInputSummaryIsUseful(t, single.kind, singleSummary);
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
       <details
         className="group w-full max-w-full"
         data-og-machine-input-batch=""
-        title={`Received ${formatClockTime(item.occurredAt)}`}
+        title={t("messageTimeline.receivedClocktime", {
+          clockTime: formatClockTime(t, item.occurredAt),
+        })}
       >
         <summary className="flex cursor-pointer list-none justify-center [&::-webkit-details-marker]:hidden">
           <span
@@ -4894,7 +4966,8 @@ function MachineInputBatchRow({
         </summary>
         <div className="mx-auto mt-2 w-full max-w-lg space-y-1.5 border-t border-og-border/50 pt-2">
           <p className="text-og-xs text-og-fg-subtle">
-            Received <time dateTime={item.occurredAt}>{formatClockTime(item.occurredAt)}</time>
+            {t("messageTimeline.received")}{" "}
+            <time dateTime={item.occurredAt}>{formatClockTime(t, item.occurredAt)}</time>
           </p>
           {groupMachineInputMembers(item.members).map((group) =>
             group.kind === "agent" ? (
@@ -4973,11 +5046,12 @@ function AgentMemberRow({
   members: MachineInputBatchItem["members"];
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const identity = useAgentIdentity();
   const latest = members[members.length - 1]!;
   const sessionId = agentMemberSessionId(latest);
-  const title = agentMemberTitle(latest, identity.titleFor(sessionId));
-  const texts = members.map((member) => agentMemberText(member));
+  const title = agentMemberTitle(t, latest, identity.titleFor(sessionId));
+  const texts = members.map((member) => agentMemberText(t, member));
   const latestText = texts[texts.length - 1]!;
   const bodies = texts
     .map((text, index) => ({ id: members[index]!.id, body: text.body }))
@@ -5013,6 +5087,7 @@ function MachineInputRow({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
+  const t = useOpenGeniText();
   if (member.kind === "media_generation_result" && member.result) {
     return (
       <VideoGenerationResultRow
@@ -5029,9 +5104,13 @@ function MachineInputRow({
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
         <span className="text-og-control font-medium text-og-fg-muted">
-          {MACHINE_INPUT_META[member.kind]}
+          {MACHINE_INPUT_META(t)[member.kind]}
         </span>
-        {source && <span className="ml-1.5 text-og-control text-og-fg-subtle">from {source}</span>}
+        {source && (
+          <span className="ml-1.5 text-og-control text-og-fg-subtle">
+            {t("messageTimeline.fromSource", { source })}
+          </span>
+        )}
         {summary ? (
           <p className="mt-0.5 whitespace-pre-wrap break-words text-og-menu leading-5 text-og-fg">
             {truncate(summary, 320)}
@@ -5056,6 +5135,7 @@ function VideoGenerationResultRow({
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
   compact?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   if (result.status !== "ready") {
     return (
@@ -5067,7 +5147,7 @@ function VideoGenerationResultRow({
       >
         <div className="flex items-center gap-2 text-og-sm font-medium text-og-status-failed">
           <XCircleIcon aria-hidden className="size-4" />
-          Video generation failed
+          {t("messageTimeline.videoGenerationFailed")}
         </div>
         <p className="mt-1 text-og-sm leading-5 text-og-fg-muted">{result.boundedPublicReason}</p>
       </div>
@@ -5077,7 +5157,7 @@ function VideoGenerationResultRow({
   const facts = receipt.video;
   return (
     <section
-      aria-label="Generated video"
+      aria-label={t("messageTimeline.generatedVideo")}
       className={cn(
         enter && "animate-og-enter",
         "mx-auto w-full max-w-2xl overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 shadow-sm",
@@ -5097,13 +5177,16 @@ function VideoGenerationResultRow({
       )}
       <div className="flex items-center justify-between gap-4 px-3.5 py-2.5">
         <div className="min-w-0">
-          <p className="text-og-sm font-medium text-og-fg">Generated video</p>
+          <p className="text-og-sm font-medium text-og-fg">{t("messageTimeline.generatedVideo")}</p>
           <p className="truncate text-og-xs text-og-fg-subtle">
             {facts.width}×{facts.height} · {formatVideoDuration(facts.durationSeconds)}
             {facts.hasAudio ? " · Audio" : ""}
           </p>
         </div>
-        <CheckCircle2Icon aria-label="Ready" className="size-4 shrink-0 text-og-status-success" />
+        <CheckCircle2Icon
+          aria-label={t("messageTimeline.ready")}
+          className="size-4 shrink-0 text-og-status-success"
+        />
       </div>
     </section>
   );
@@ -5114,9 +5197,11 @@ function formatVideoDuration(seconds: number): string {
 }
 
 function NoticeRow({ item }: { item: NoticeItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   if (item.allowance) return <AllowanceExhaustedRow refusal={item.allowance} />;
   if (item.sessionUsageLimit) return <SessionUsageLimitRow stop={item.sessionUsageLimit} />;
+  if (item.learningRefusal) return <LearningRefusalRow refusal={item.learningRefusal} />;
   if (item.recordedOutcome) {
     return (
       <details
@@ -5129,8 +5214,8 @@ function NoticeRow({ item }: { item: NoticeItem }) {
             aria-hidden
             className="size-3.5 transition-transform group-open:rotate-90"
           />
-          <span title={new Date(item.occurredAt).toLocaleString()}>
-            {recordedWaitSummary(item)}
+          <span title={new Date(item.occurredAt).toLocaleString(t.locale)}>
+            {recordedWaitSummary(t, item)}
           </span>
         </summary>
         <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
@@ -5162,7 +5247,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         />
       )}
       <div className="min-w-0 flex-1">
-        <span className="whitespace-pre-wrap break-words">{noticeDisplayText(item)}</span>
+        <span className="whitespace-pre-wrap break-words">{noticeDisplayText(t, item)}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
@@ -5193,32 +5278,56 @@ function NoticeRow({ item }: { item: NoticeItem }) {
  * "Waiting for 2 agents · since 10:32" (with the date on a later day). The
  * reason stays behind the disclosure.
  */
-function recordedWaitSummary(item: NoticeItem): ReactNode {
+function recordedWaitSummary(t: OpenGeniText, item: NoticeItem): ReactNode {
   const agents = item.waitingAgents ?? 0;
-  const target = agents > 0 ? ` for ${agents} ${agents === 1 ? "agent" : "agents"}` : "";
   const waitedMs = item.waitEndedAt
     ? durationBetween(item.occurredAt, item.waitEndedAt)
     : undefined;
   if (waitedMs !== undefined) {
-    return (
-      <>
-        Waited{target} ·{" "}
-        <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(waitedMs)}</time>
-      </>
+    return withSlot(
+      agents > 0
+        ? t("timeline.noticePresentation.waitedForAgentsElapsed", { count: agents, elapsed: SLOT })
+        : t("timeline.noticePresentation.waitedElapsed", { elapsed: SLOT }),
+      <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(t, waitedMs)}</time>,
     );
   }
   // An open wait is historical once its day has passed; keep its date visible.
   const started = new Date(item.occurredAt);
   const sameDay = started.toDateString() === new Date().toDateString();
+  const text = item.waitEndedAt
+    ? agents > 0
+      ? t("timeline.noticePresentation.waitedForAgentsSince", { count: agents, since: SLOT })
+      : t("timeline.noticePresentation.waitedSince", { since: SLOT })
+    : agents > 0
+      ? t("timeline.noticePresentation.waitingForAgentsSince", { count: agents, since: SLOT })
+      : t("timeline.noticePresentation.waitingSince", { since: SLOT });
+  return withSlot(
+    text,
+    <time dateTime={item.occurredAt}>
+      {sameDay
+        ? formatClockTime(t, item.occurredAt)
+        : started.toLocaleString(t.locale, { dateStyle: "medium", timeStyle: "short" })}
+    </time>,
+  );
+}
+
+/** Marks where a rendered element goes inside translated text. */
+const SLOT = "\u0000";
+
+function withSlot(text: string, node: ReactNode): ReactNode {
+  const at = text.indexOf(SLOT);
+  if (at < 0) {
+    return (
+      <>
+        {text} {node}
+      </>
+    );
+  }
   return (
     <>
-      {item.waitEndedAt ? "Waited" : "Waiting"}
-      {target} · since{" "}
-      <time dateTime={item.occurredAt}>
-        {sameDay
-          ? formatClockTime(item.occurredAt)
-          : started.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
-      </time>
+      {text.slice(0, at)}
+      {node}
+      {text.slice(at + SLOT.length)}
     </>
   );
 }
@@ -5240,13 +5349,16 @@ function AuthNeededRow({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const recommendation = item.capability ?? null;
   const provider =
     recommendation?.name ??
-    (item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain));
+    (item.serverId === "codex_apps"
+      ? t("messageTimeline.codexApps")
+      : providerLabel(t, item.providerDomain));
   const unavailable =
     item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||
@@ -5254,21 +5366,21 @@ function AuthNeededRow({
   const missing = item.reason === "missing_connection";
   const actionLabel = recommendation
     ? recommendation.action === "connect"
-      ? "Connect"
-      : "Review"
+      ? t("messageTimeline.connect")
+      : t("messageTimeline.review")
     : missing
-      ? "Connect"
-      : "Reconnect";
+      ? t("messageTimeline.connect")
+      : t("messageTimeline.reconnect");
   const title = recommendation
     ? recommendation.action === "connect"
-      ? `Connect ${provider}`
+      ? t("messageTimeline.connectProvider", { provider })
       : recommendation.action === "add_credentials"
-        ? `Set up ${provider}`
-        : `Enable ${provider}`
+        ? t("messageTimeline.setUpProvider", { provider })
+        : t("messageTimeline.enableProvider", { provider })
     : unavailable
-      ? `${provider} tools unavailable`
+      ? t("messageTimeline.providerToolsUnavailable", { provider })
       : `${actionLabel} ${provider}`;
-  const reasonLine = recommendation?.rationale ?? authReasonLine(item.reason);
+  const reasonLine = recommendation?.rationale ?? authReasonLine(t, item.reason);
   const hostAuthorizationUrl = item.authoritySource === "host" ? item.authorizationUrl : null;
 
   const start = async () => {
@@ -5289,6 +5401,15 @@ function AuthNeededRow({
     }
   };
 
+  if (recommendation?.id === "api:connected-machine") {
+    return (
+      <div className="og-session-capability-setup" role="status">
+        <p>{t("thisComputer.card.name")}</p>
+        <p>{t("thisComputer.card.hostSetupUnavailable")}</p>
+      </div>
+    );
+  }
+
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
@@ -5302,12 +5423,16 @@ function AuthNeededRow({
             <p className="line-clamp-2 text-og-sm text-og-fg-subtle">{reasonLine}</p>
             {recommendation ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                Provider: {item.providerDomain}
+                {t("messageTimeline.providerProviderdomain", {
+                  providerDomain: item.providerDomain,
+                })}
               </p>
             ) : null}
             {recommendation && recommendation.requiredVariables.length > 0 ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                Needs variables: {recommendation.requiredVariables.join(", ")}
+                {t("messageTimeline.needsVariablesJoin", {
+                  join: recommendation.requiredVariables.join(", "),
+                })}
               </p>
             ) : null}
           </div>
@@ -5336,7 +5461,7 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? "Opening…" : actionLabel}
+            {busy ? t("messageTimeline.opening") : actionLabel}
           </button>
         ) : item.authoritySource !== "host" && !unavailable && item.authorizationUrl ? (
           <a
@@ -5356,13 +5481,19 @@ function AuthNeededRow({
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
           {recommendation
-            ? "No access has been granted. Review and confirm the provider before continuing."
-            : `This tool call wasn't replayed. After ${missing ? "connecting" : "reconnecting"}, send a new message to try again.`}
+            ? t("messageTimeline.noAccessHasBeenGranted")
+            : t(
+                missing
+                  ? "messageTimeline.toolCallNotReplayedAfterConnecting"
+                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+              )}
         </p>
       ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
+          {t("messageTimeline.couldnTStart")}{" "}
+          {missing ? t("messageTimeline.connecting") : t("messageTimeline.reconnecting")}{" "}
+          {t("messageTimeline.providerTryAgain", { provider })}
         </p>
       ) : null}
     </div>
@@ -5418,7 +5549,7 @@ function monogram(label: string): string {
 
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
     name for the provider — never the raw domain shown as a label. */
-function providerLabel(domain: string): string {
+function providerLabel(t: OpenGeniText, domain: string): string {
   const host =
     domain
       .trim()
@@ -5427,29 +5558,29 @@ function providerLabel(domain: string): string {
       .split("/")[0] ?? "";
   const first = host.split(".")[0] ?? host;
   if (!first) {
-    return "this service";
+    return t("messageTimeline.thisService");
   }
   return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
 /** A calm, human helper line per reauth reason — the `reason` informs the copy
     but is never rendered as a raw enum/code. */
-function authReasonLine(reason: AuthNeededItem["reason"]): string {
+function authReasonLine(t: OpenGeniText, reason: AuthNeededItem["reason"]): string {
   switch (reason) {
     case "insufficient_scope":
-      return "It needs additional access to continue.";
+      return t("messageTimeline.itNeedsAdditionalAccessTo");
     case "missing_connection":
-      return "It isn't connected yet.";
+      return t("messageTimeline.itIsnTConnectedYet");
     case "expired":
     case "refresh_failed":
-      return "Its access expired.";
+      return t("messageTimeline.itsAccessExpired");
     case "personal_authority_unavailable":
-      return "This automation was not granted access to your personal connection.";
+      return t("messageTimeline.thisAutomationWasNotGranted");
     case "unsupported_auth":
-      return "This connection cannot authenticate the configured tool endpoint.";
+      return t("messageTimeline.thisConnectionCannotAuthenticateThe");
     case "resource_scope_unavailable":
-      return "This tool endpoint cannot enforce the selected repository access.";
+      return t("messageTimeline.thisToolEndpointCannotEnforce");
     default:
-      return "Its connection needs attention.";
+      return t("messageTimeline.itsConnectionNeedsAttention");
   }
 }

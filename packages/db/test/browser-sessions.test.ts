@@ -8,6 +8,7 @@ import {
   bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   BrowserSessionNotFoundError,
+  BrowserCapacitySuspendClaimRejectedError,
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
   ComputerSessionStateError,
@@ -21,6 +22,7 @@ import {
   createSession,
   dispatchBrowserSessionOperation,
   dispatchComputerSessionOperation,
+  failBrowserSessionResumePreparation,
   failBrowserSessionSuspension,
   failBrowserSessionOperation,
   failPreparedBrowserSessionEnd,
@@ -29,7 +31,9 @@ import {
   getBrowserSession,
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
+  continueExpiredBrowserSessionResume,
   getExpiredBrowserSessionResume,
+  listBrowserCapacitySuspendCandidates,
   listBrowserSessions,
   LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
@@ -44,6 +48,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   settleExpiredBrowserSessionResume,
   touchBrowserSessionController,
+  touchExpiredBrowserSessionResume,
   touchInteractionOperation,
 } from "../src";
 import type { BrowserStateArtifactCommitInput } from "../src";
@@ -172,6 +177,45 @@ async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
   return { ...active, controllerGeneration };
 }
 
+/** An active browser suspended to a committed private checkpoint, with its
+ * controller already cleaned up: the state any resume starts from. */
+async function suspendedBrowserWithCheckpoint(
+  scope: Awaited<ReturnType<typeof fixture>>,
+): Promise<string> {
+  const active = await activeBrowser(scope);
+  const browserSessionId = active.session.id;
+  const operationId = crypto.randomUUID();
+  await prepareBrowserSessionSuspend(client.db, {
+    ...scope,
+    browserSessionId,
+    operationId,
+    actorSubjectId: scope.subjectId,
+  });
+  await dispatchBrowserSessionOperation(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId,
+    controllerGeneration: active.controllerGeneration,
+    stateUpload: {
+      objectKey: checkpointArtifact(scope, operationId).objectKey,
+      cleanupAfter: new Date(Date.now() + 60_000),
+    },
+  });
+  await commitBrowserSessionSuspension(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId,
+    controllerGeneration: active.controllerGeneration,
+    artifact: checkpointArtifact(scope, operationId),
+  });
+  await clearSuspendedBrowserSessionController(client.db, {
+    ...scope,
+    browserSessionId,
+    expectedControllerGeneration: active.controllerGeneration,
+  });
+  return browserSessionId;
+}
+
 function checkpointArtifact(
   scope: Awaited<ReturnType<typeof fixture>>,
   operationId: string,
@@ -202,6 +246,120 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("lists idle saveable browsers on one controller instance, least recently used first", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browsers = [];
+    for (let index = 0; index < 4; index += 1) browsers.push(await activeBrowser(scope));
+    const [recent, older, oldest, busy] = browsers.map((browser) => browser.session.id) as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    const minutesAgo = async (id: string, minutes: number) => {
+      await shared!.admin`
+        update browser_sessions
+        set last_used_at = now() - make_interval(mins => ${minutes})
+        where workspace_id = ${scope.workspaceId} and id = ${id}`;
+    };
+    await minutesAgo(recent, 1);
+    await minutesAgo(older, 10);
+    await minutesAgo(oldest, 20);
+    await minutesAgo(busy, 30);
+    // A browser with a lifecycle operation in flight is never a candidate.
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: busy,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: scope.subjectId,
+    });
+    const input = {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      placement: { kind: "sandbox_group" as const, sandboxGroupId: scope.sandboxGroupId },
+      placementInstanceId: "placement:test",
+      excludeBrowserSessionId: crypto.randomUUID(),
+      idleBefore: new Date(Date.now() - 5 * 60_000),
+      limit: 3,
+    };
+    expect(await listBrowserCapacitySuspendCandidates(client.db, input)).toEqual([oldest, older]);
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        excludeBrowserSessionId: oldest,
+        limit: 1,
+      }),
+    ).toEqual([older]);
+    // Browsers on another controller instance or placement are not this
+    // controller's to save.
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        placementInstanceId: "placement:other",
+      }),
+    ).toEqual([]);
+    expect(
+      await listBrowserCapacitySuspendCandidates(client.db, {
+        ...input,
+        placement: { kind: "connected_machine", sandboxId: crypto.randomUUID() },
+      }),
+    ).toEqual([]);
+  });
+
+  test("a capacity save claims a browser only while it is still idle on the same controller", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const idle = await activeBrowser(scope);
+    const used = await activeBrowser(scope);
+    const moved = await activeBrowser(scope);
+    for (const browser of [idle, used, moved]) {
+      await shared!.admin`
+        update browser_sessions set last_used_at = now() - interval '20 minutes'
+        where workspace_id = ${scope.workspaceId} and id = ${browser.session.id}`;
+    }
+    const claimFor = (browser: typeof idle) => ({
+      idleBefore: new Date(Date.now() - 5 * 60_000),
+      placementInstanceId: "placement:test",
+      controllerGeneration: browser.session.controller!.controllerGeneration,
+    });
+    const suspend = (browser: typeof idle, claim = claimFor(browser)) =>
+      prepareBrowserSessionSuspend(client.db, {
+        ...scope,
+        browserSessionId: browser.session.id,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: "system:browser-capacity",
+        capacityClaim: claim,
+      });
+
+    // Used again after it was picked: refused, nothing written.
+    const usedClaim = claimFor(used);
+    await shared!.admin`
+      update browser_sessions set last_used_at = now()
+      where workspace_id = ${scope.workspaceId} and id = ${used.session.id}`;
+    await expect(suspend(used, usedClaim)).rejects.toBeInstanceOf(
+      BrowserCapacitySuspendClaimRejectedError,
+    );
+    // Rebound to another controller generation since it was picked: refused.
+    await expect(
+      suspend(moved, { ...claimFor(moved), controllerGeneration: crypto.randomUUID() }),
+    ).rejects.toBeInstanceOf(BrowserCapacitySuspendClaimRejectedError);
+    for (const browser of [used, moved]) {
+      const current = await getBrowserSessionControlRecord(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        browserSessionId: browser.session.id,
+      });
+      expect(current.session.lifecycle).toBe("active");
+    }
+
+    // Still idle: claimed. A second concurrent claim does not count it again.
+    const claimed = await suspend(idle);
+    expect(claimed.operation.state).toBe("prepared");
+    expect(claimed.session.lifecycle).toBe("suspending");
+    await expect(suspend(idle)).rejects.toBeInstanceOf(BrowserCapacitySuspendClaimRejectedError);
+  });
+
   test("replays a legacy Lightpanda create with corrected screenshot capabilities", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -989,6 +1147,60 @@ describe("durable BrowserSession lifecycle", () => {
     expect(failed.session).toMatchObject({ lifecycle: "lost", controller });
   });
 
+  test("narrows the inventory by associated session and terminal lifecycle", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const live = await activeBrowser(scope);
+    const ending = await activeBrowser(scope);
+    const endOperationId = crypto.randomUUID();
+    await prepareBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: ending.session.id,
+      operationId: endOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await completeBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: ending.session.id,
+      operationId: endOperationId,
+      expectedControllerGeneration: ending.controllerGeneration,
+    });
+    const peer = await createSession(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "peer",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    const peerBrowser = await prepareBrowserSessionCreate(client.db, {
+      ...createInput({ ...scope, sessionId: peer.id, sandboxGroupId: peer.sandboxGroupId }),
+    });
+    const ids = async (filter: { associatedSessionId?: string; includeTerminal?: boolean }) =>
+      (await listBrowserSessions(client.db, { ...scope, ...filter })).sessions
+        .map((session) => session.id)
+        .sort();
+
+    expect(await ids({})).toEqual(
+      [live.session.id, ending.session.id, peerBrowser.session.id].sort(),
+    );
+    expect(await ids({ includeTerminal: false })).toEqual(
+      [live.session.id, peerBrowser.session.id].sort(),
+    );
+    expect(await ids({ associatedSessionId: scope.sessionId })).toEqual(
+      [live.session.id, ending.session.id].sort(),
+    );
+    expect(await ids({ associatedSessionId: scope.sessionId, includeTerminal: false })).toEqual([
+      live.session.id,
+    ]);
+    expect(await ids({ associatedSessionId: peer.id, includeTerminal: false })).toEqual([
+      peerBrowser.session.id,
+    ]);
+  });
+
   test("serializes end and rejects a second active lifecycle operation", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -1261,6 +1473,60 @@ describe("durable BrowserSession lifecycle", () => {
     ).not.toBeNull();
   });
 
+  test("a resume that fails before dispatch returns to suspended", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browserSessionId = await suspendedBrowserWithCheckpoint(scope);
+    const operationId = crypto.randomUUID();
+    const input = { ...scope, browserSessionId, operationId, actorSubjectId: scope.subjectId };
+    // The resume is prepared, then its placement turns out to be offline
+    // before the controller is ever dispatched.
+    expect((await prepareBrowserSessionResume(client.db, input)).session.lifecycle).toBe(
+      "restoring",
+    );
+    const failed = await failBrowserSessionResumePreparation(client.db, {
+      ...input,
+      error: { code: "resource_unavailable", message: "Placement is offline", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "suspended", controller: null },
+      operation: { state: "failed", error: { message: "Placement is offline" } },
+    });
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, { ...scope, browserSessionId }),
+    ).not.toBeNull();
+
+    // A fresh resume starts over; once dispatched, a late failure is a no-op.
+    const nextOperationId = crypto.randomUUID();
+    const next = await prepareBrowserSessionResume(client.db, {
+      ...input,
+      operationId: nextOperationId,
+    });
+    expect(next.operation.state).toBe("prepared");
+    const generation = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: nextOperationId,
+      browserSessionId,
+      controllerGeneration: generation,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: generation,
+        placementInstanceId: "placement:resumed",
+      },
+    });
+    expect(
+      await failBrowserSessionResumePreparation(client.db, {
+        ...input,
+        operationId: nextOperationId,
+        error: { code: "driver_failed", message: "Too late", retryable: true },
+      }),
+    ).toBeNull();
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "restoring",
+    });
+  });
+
   test("an expired resume returns to suspended and resumes from the same private checkpoint", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -1338,7 +1604,7 @@ describe("durable BrowserSession lifecycle", () => {
     ).rejects.toBeInstanceOf(BrowserSessionStateError);
 
     expect(await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId })).toEqual(
-      { controllerGeneration: expiredGeneration },
+      { controllerGeneration: expiredGeneration, settleable: true },
     );
     await expect(
       settleExpiredBrowserSessionResume(client.db, {
@@ -1414,10 +1680,187 @@ describe("durable BrowserSession lifecycle", () => {
         expectedControllerGeneration: active.controllerGeneration,
       }),
     ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller: {
+          controllerId: "browserd:test",
+          controllerGeneration: active.controllerGeneration,
+          placementInstanceId: "placement:test",
+        },
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
     expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
       lifecycle: "lost",
       controller: { controllerGeneration: active.controllerGeneration },
     });
+  });
+
+  test("an expired resume continues on its retained generation without restoring over it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
+    });
+    await commitBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      artifact: checkpointArtifact(scope, suspendOperationId),
+    });
+    await clearSuspendedBrowserSessionController(client.db, {
+      ...scope,
+      browserSessionId,
+      expectedControllerGeneration: active.controllerGeneration,
+    });
+    const checkpoint = await getBrowserPrivateCheckpointAuthority(client.db, {
+      ...scope,
+      browserSessionId,
+    });
+
+    const expiredOperationId = crypto.randomUUID();
+    await prepareBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: expiredOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    const expiredGeneration = crypto.randomUUID();
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: expiredGeneration,
+      placementInstanceId: "placement:expired",
+    };
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: expiredOperationId,
+      browserSessionId,
+      controllerGeneration: expiredGeneration,
+      controller,
+    });
+    await expireBrowserTransition(scope.workspaceId, browserSessionId, expiredOperationId);
+
+    // A different generation or controller instance cannot claim the record.
+    for (const stale of [
+      { ...controller, controllerGeneration: crypto.randomUUID() },
+      { ...controller, placementInstanceId: "placement:other" },
+    ]) {
+      await expect(
+        continueExpiredBrowserSessionResume(client.db, {
+          ...scope,
+          browserSessionId,
+          operationId: crypto.randomUUID(),
+          actorSubjectId: scope.subjectId,
+          controller: stale,
+        }),
+      ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+    }
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "controller_transition_expired",
+    });
+
+    const operationId = crypto.randomUUID();
+    // While the controller adopts the working copy, the continuation has no
+    // dispatched operation of its own; the expired resume is its authority.
+    expect(
+      await touchInteractionOperation(client.db, {
+        ...scope,
+        operationId,
+        resourceId: browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(false);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(true);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    const continued = await continueExpiredBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      controller,
+    });
+    expect(continued.session).toMatchObject({
+      id: browserSessionId,
+      lifecycle: "active",
+      failureCode: null,
+      controller: { controllerGeneration: expiredGeneration },
+    });
+    // Once continued it is an ordinary active browser, no longer an expired resume.
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(false);
+    expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
+    // Same record, same durable checkpoint; the expired attempt stays settled.
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, { ...scope, browserSessionId }),
+    ).toEqual(checkpoint);
+    const operations = await shared!.admin<{ operation_id: string; state: string }[]>`
+      select operation_id, state from interaction_operations
+      where workspace_id = ${scope.workspaceId}
+        and operation_id in (${expiredOperationId}, ${operationId})`;
+    expect(Object.fromEntries(operations.map((row) => [row.operation_id, row.state]))).toEqual({
+      [expiredOperationId]: "outcome_unknown",
+      [operationId]: "completed",
+    });
+
+    // A retried request replays; a new one finds nothing left to continue.
+    expect(
+      (
+        await continueExpiredBrowserSessionResume(client.db, {
+          ...scope,
+          browserSessionId,
+          operationId,
+          actorSubjectId: scope.subjectId,
+          controller,
+        })
+      ).operation,
+    ).toMatchObject({ operationId, state: "completed" });
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
   });
 
   test("returns a failed suspension to the same active controller", async () => {
@@ -1505,6 +1948,109 @@ describe("durable BrowserSession lifecycle", () => {
     });
     expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
     expect(replay.session.lifecycle).toBe("lost");
+  });
+
+  test("a browser lost to a restarted controller continues from its working copy", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+    });
+    await failBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      missingControllerSession: true,
+      error: {
+        code: "resource_not_found",
+        message: "browser session is not active",
+        retryable: false,
+      },
+    });
+
+    // The failed suspension's generation owns the working copy, which ran past
+    // any checkpoint, so it is never settled back to suspended.
+    expect(await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId })).toEqual(
+      { controllerGeneration: active.controllerGeneration, settleable: false },
+    );
+    await expect(
+      settleExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        expectedControllerGeneration: null,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    await expect(
+      prepareBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: active.controllerGeneration,
+      }),
+    ).toBe(true);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: active.controllerGeneration,
+      placementInstanceId: "placement:restarted",
+    };
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller: { ...controller, controllerGeneration: crypto.randomUUID() },
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+    const operationId = crypto.randomUUID();
+    const continued = await continueExpiredBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      controller,
+    });
+    expect(continued.session).toMatchObject({
+      id: browserSessionId,
+      lifecycle: "active",
+      failureCode: null,
+      controller: {
+        controllerGeneration: active.controllerGeneration,
+        placementInstanceId: "placement:restarted",
+      },
+    });
+    expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
+    expect(
+      await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId }),
+    ).toBeNull();
   });
 
   test("enforces workspace RLS for reads", async () => {

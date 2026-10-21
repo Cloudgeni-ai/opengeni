@@ -51,6 +51,54 @@ export function siteDataModifyReach(rules: SiteDataModeRules, role: SiteDataRole
   }
 }
 
+/**
+ * What anonymous guests of a published Site may do in a collection, on top of
+ * its access mode (they are never more than viewers):
+ * - none (default): nothing; the collection is invisible to guests.
+ * - read: read what a viewer may read; never write.
+ * - append: add records and read only their own.
+ * - own: add, read, change and delete only their own records.
+ */
+export const SITE_DATA_GUEST_ACCESS = ["none", "read", "append", "own"] as const;
+export type SiteDataGuestAccess = (typeof SITE_DATA_GUEST_ACCESS)[number];
+
+function narrower(a: SiteDataReach, b: SiteDataReach): SiteDataReach {
+  const order: SiteDataReach[] = ["none", "own", "all"];
+  return order[Math.min(order.indexOf(a), order.indexOf(b))]!;
+}
+
+/** Which records a guest may read. */
+export function siteDataGuestReadReach(
+  rules: SiteDataModeRules,
+  guestAccess: SiteDataGuestAccess,
+): SiteDataReach {
+  switch (guestAccess) {
+    case "none":
+      return "none";
+    case "read":
+      return siteDataReadReach(rules, "viewer");
+    case "append":
+    case "own":
+      return narrower(siteDataReadReach(rules, "viewer"), "own");
+  }
+}
+
+/** Whether a guest may create records. */
+export function siteDataGuestMayCreate(
+  rules: SiteDataModeRules,
+  guestAccess: SiteDataGuestAccess,
+): boolean {
+  return (guestAccess === "append" || guestAccess === "own") && siteDataMayCreate(rules, "viewer");
+}
+
+/** Which records a guest may update or delete. */
+export function siteDataGuestModifyReach(
+  rules: SiteDataModeRules,
+  guestAccess: SiteDataGuestAccess,
+): SiteDataReach {
+  return guestAccess === "own" ? narrower(siteDataModifyReach(rules, "viewer"), "own") : "none";
+}
+
 /** Per-viewer collections give each viewer their own key and unique-value space. */
 export function siteDataScopedPerViewer(mode: SiteDataAccessMode): boolean {
   return mode === "per_viewer" || mode === "append_only";

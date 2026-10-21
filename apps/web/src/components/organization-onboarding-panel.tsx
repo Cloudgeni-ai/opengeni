@@ -27,15 +27,15 @@ import {
   type OnboardingDestination,
 } from "@/components/onboarding/developer-setup-step";
 import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
-import { Button } from "@/components/ui/button";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@opengeni/react/ui/button";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import {
   apiErrorTechnicalFacts,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {
@@ -191,33 +191,45 @@ export function OrganizationOnboardingPanel({
   }, [createdSetup, previewState, onComplete, statusRequest]);
 
   useEffect(() => {
-    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId) return;
+    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId || modelStepDone)
+      return;
     const unconfirmed = { includedModel: null, startingCredits: null };
     if (!client) {
       setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...unconfirmed });
       return;
     }
     let active = true;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const check = JSON.parse(liveCheckKey) as {
       includedCandidate: IncludedOnboardingModel | null;
       checkStartingCredits: boolean;
     };
-    void loadModelAccessOnboarding(client, {
-      organizationId: confirmingOrganizationId,
-      workspaceId: confirmingWorkspaceId,
-      billingMode: check.checkStartingCredits ? "stripe" : "disabled",
-      includedCandidate: check.includedCandidate,
-    })
-      // Unverifiable is not included: fall back to the ordinary choice screen.
-      .catch(() => unconfirmed)
-      .then((result) => {
-        if (active)
+    const refresh = () => {
+      void loadModelAccessOnboarding(client, {
+        organizationId: confirmingOrganizationId,
+        workspaceId: confirmingWorkspaceId,
+        billingMode: check.checkStartingCredits ? "stripe" : "disabled",
+        includedCandidate: check.includedCandidate,
+      })
+        // Unverifiable is not included: fall back to the ordinary choice screen.
+        .catch(() => unconfirmed)
+        .then((result) => {
+          if (!active) return;
           setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...result });
-      });
+          // Monthly Free funding is asynchronous. Re-read both the catalog and
+          // balance: the default model can change when maintenance issues it.
+          // Never infer funds from eligibility or an unreadable balance.
+          if (check.checkStartingCredits && !result.startingCredits?.balance) {
+            refreshTimer = setTimeout(refresh, 15_000);
+          }
+        });
+    };
+    refresh();
     return () => {
       active = false;
+      clearTimeout(refreshTimer);
     };
-  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey]);
+  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey, modelStepDone]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;

@@ -2,23 +2,26 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { RowSelect } from "@/components/settings/row-select";
-import { SettingRow } from "@/components/ui/setting-row";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 
 const NONE = "none";
 
 /**
  * The Sandbox Environment new sessions start on unless someone picks another
- * under "+" > Runs on. It is the workspace default rig (`rigs:manage`); the
- * row is hidden while the workspace has no environments to choose from.
+ * under "+" > Runs on. It is the workspace default rig (`rigs:manage` plus
+ * workspace settings authority); the row is hidden while the workspace has no
+ * environments to choose from.
  */
 export function DefaultSandboxEnvironmentRow({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
+  const canManage =
+    hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage") &&
+    canManageWorkspaceSettings(context.accessContext, workspace, context.managedSelfContext);
   const rigs = useWorkspaceRigs({ workspaceId });
   const [saving, setSaving] = useState(false);
   // A personal ("Only me") environment is never a workspace default.
@@ -71,9 +74,7 @@ export function DefaultSandboxEnvironmentRow({ workspaceId }: { workspaceId: str
           value={current ?? NONE}
           loading={rigs.loading}
           disabled={!canManage || saving}
-          disabledReason={
-            canManage ? undefined : "Only people who manage sandbox environments can change this."
-          }
+          disabledReason={canManage ? undefined : "Only a workspace admin can change this."}
           onValueChange={(value) => void change(value)}
         />
       }

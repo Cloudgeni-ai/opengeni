@@ -13,12 +13,12 @@ import { Popover as PopoverPrimitive } from "radix-ui";
 import { useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { ModelsFormPage } from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   DetailAside,
@@ -26,30 +26,35 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmailChipsInput, type EmailChip } from "@/components/ui/email-chips-input";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack } from "@/components/ui/field";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RoleSelect } from "@/components/ui/role-select";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Toolbar, ToolbarGroup, ToolbarSearch, ToolbarSummary } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmailChipsInput, type EmailChip } from "@opengeni/react/ui/email-chips-input";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack } from "@opengeni/react/ui/field";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RoleSelect } from "@opengeni/react/ui/role-select";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Toolbar, ToolbarGroup, ToolbarSearch, ToolbarSummary } from "@opengeni/react/ui/toolbar";
 import {
   canInviteOrganizationRole,
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
 } from "@/lib/organization-admin";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
+import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
@@ -467,6 +472,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
   const total = shownMembers.length + shownInvitations.length;
   return (
     <div className="flex min-w-0 flex-col gap-4">
+      <PlanSeats plan={directory.plan} />
       <Toolbar>
         <ToolbarSearch
           value={query}
@@ -1064,6 +1070,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
+  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1108,6 +1115,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       pendingLabel="Sending…"
       footerStart="Invitations expire in 7 days."
       onSubmit={async () => {
+        setSeatLimitError(null);
         setShowErrors(true);
         if (emails.length === 0 || problems.length > 0) return false;
         if (!canInviteOrganizationRole(directory.actorRole, role)) {
@@ -1126,6 +1134,11 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
         }
         if (result.failed.length > 0) {
           setEmails(result.failed.map((each) => each.email));
+          const seatFailure = result.failed.find((each) => each.seatLimitReached);
+          if (seatFailure) {
+            setSeatLimitError(seatFailure.message);
+            return false;
+          }
           throw new Error(
             result.failed.length === 1
               ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
@@ -1137,6 +1150,17 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       }}
     >
       <FieldStack>
+        <PlanSeats plan={directory.plan} />
+        {seatLimitError && directory.plan ? (
+          <SeatLimitNotice
+            canManage={directory.actorRole === "owner"}
+            onUpgrade={() => nav.openSection("billing")}
+          />
+        ) : seatLimitError ? (
+          <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
+            {seatLimitError}
+          </Notice>
+        ) : null}
         <Field
           label="Email addresses"
           hint="Separate with commas, or press Enter after each one."

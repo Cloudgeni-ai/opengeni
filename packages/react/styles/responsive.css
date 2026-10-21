@@ -66,12 +66,27 @@
   display: var(--og-model-policy-label-short-display);
 }
 
+/* A host row too narrow for even the short model name (a phone composer that
+   also offers Queue or Steer beside Send) shows the pill's icon alone rather
+   than a clipped sliver of the name. */
+@container model-controls (max-width: 7.999rem) {
+  [data-og-responsive-basis="container"] .og-model-policy-label-short {
+    display: none;
+  }
+}
+
 [data-og-responsive-basis="container"] .og-model-policy-effort {
   display: var(--og-model-policy-effort-display);
 }
 
 [data-og-responsive-basis="container"] .og-model-policy-chevron {
   display: var(--og-model-policy-chevron-display);
+}
+
+/* Pause steps aside on a narrow composer while there is a draft, so Send and
+   its Queue/Steer choice keep their room. */
+[data-og-responsive-basis="container"] .og-composer-pause-yields {
+  display: inline-flex;
 }
 
 [data-og-responsive-basis="container"] .og-model-picker-native {
@@ -143,6 +158,10 @@
 
   [data-og-responsive-basis="container"] .og-composer-actions {
     flex-wrap: nowrap;
+  }
+
+  [data-og-responsive-basis="container"] .og-composer-pause-yields {
+    display: none;
   }
 
   [data-og-responsive-basis="container"]

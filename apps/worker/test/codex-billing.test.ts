@@ -49,12 +49,12 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     }
   });
 
-  test("(c) a normal turn with 0 credits still throws insufficient Opengeni credits", async () => {
+  test("(c) a normal turn with 0 credits still throws insufficient workspace credits", async () => {
     const restore = mockZeroBalance();
     try {
       await expect(
         ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
-      ).rejects.toThrow("insufficient Opengeni credits");
+      ).rejects.toThrow("insufficient workspace credits");
     } finally {
       restore();
     }

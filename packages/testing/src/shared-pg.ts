@@ -97,6 +97,7 @@ const TEMPLATE_DB_PREFIX = "og_test_template_";
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
 const TEMPLATE_CONTRACT_FILES = [
   fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
+  fileURLToPath(new URL("../../db/src/migration-postgres-compatibility.ts", import.meta.url)),
   fileURLToPath(new URL("../../db/src/knowledge-migration.ts", import.meta.url)),
   fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
   fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
@@ -990,7 +991,9 @@ export async function acquireRestrictedRuntimeTestDatabase(
   if (!owner) return null;
   let admin: postgres.Sql | null = null;
   try {
-    await owner.admin.unsafe(`CREATE SCHEMA ${schema} AUTHORIZATION "${owner.ownerRole}"`);
+    await owner.admin.unsafe(
+      `CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION "${owner.ownerRole}"`,
+    );
     await owner.admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${schema}`);
     await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
     await provisionRoles(owner.adminUrl, {

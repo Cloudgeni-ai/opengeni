@@ -16,7 +16,13 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
+import { registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
+import {
+  sessionChatUrl,
+  withMachinePermissionCard,
+  type MachinePermissionCardPost,
+} from "./machine-permission-card";
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
@@ -111,6 +117,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
+  appendTurnCapabilityCardOnce,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -175,6 +182,10 @@ import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-comp
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
+import { registerSitePublicationTools } from "./site-publication-tools";
+import { registerSiteSqlTools } from "./site-sql-tools";
+import { siteSqlGatewayConfig } from "../site-sql/gateway";
+import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -228,7 +239,10 @@ import {
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
-import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  changeWorkspaceFileVisibility,
+  publishSandboxFileArtifact,
+} from "../sandbox-file-artifacts";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -294,6 +308,7 @@ import {
 } from "@opengeni/core";
 import {
   buildFleetContextForSession,
+  fleetAgentNotice,
   listFleet,
   provisionSandbox,
   runOnSandbox,
@@ -328,6 +343,7 @@ import {
 } from "./session-event-errors";
 import {
   acknowledgeConsumedChildEvents,
+  hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
 } from "@opengeni/db";
@@ -376,6 +392,12 @@ import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discov
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
+  afterSiteArtifactMutation,
+  requireSiteVersionPublishOpen,
+} from "../site-publishing/service";
+import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
+
+import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
 } from "./session-admin-access-tools";
@@ -415,7 +437,7 @@ type OrchestrationToolName = "session_create" | "session_send_message" | "sessio
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (!normalized) return "Opengeni could not complete the request.";
+  if (!normalized) return "The workspace could not complete the request.";
   const encoded = new TextEncoder().encode(normalized);
   if (encoded.byteLength <= ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
   let end = ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES;
@@ -529,7 +551,7 @@ export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error:
         code: orchestrationFailureCode(tool, error),
         message:
           error.status >= 500
-            ? "Opengeni is temporarily unavailable — retry."
+            ? "The workspace is temporarily unavailable — retry."
             : boundedOrchestrationFailureMessage(error.message),
       },
     };
@@ -582,7 +604,7 @@ export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error:
   return {
     error: {
       code: `${tool}_failed`,
-      message: "Opengeni could not complete the request.",
+      message: "The workspace could not complete the request.",
     },
   };
 }
@@ -726,7 +748,7 @@ function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolNam
         .max(SESSION_TITLE_MAX_CHARACTERS)
         .optional()
         .describe(
-          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; Opengeni derives a sensitive-safe bounded fallback from that text.",
+          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title, a sensitive-safe bounded fallback is derived from that text.",
         ),
       instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
       goal: GoalSpec.optional(),
@@ -959,6 +981,34 @@ export function slackBotFileContentResult(
   };
 }
 
+/**
+ * The first-party server as seen by MCP protocol messages that touch no tool:
+ * `initialize`, `ping` and notifications. It advertises exactly what the full
+ * server does (the same name, version and tools capability) without the
+ * workspace, catalog, Memory and admin reads that registering tools needs.
+ * Never route `tools/*` here: it lists no tools.
+ */
+export function buildOpenGeniMcpProtocolServer(grant: AccessGrant): McpServer {
+  const sessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, new Set());
+  server.ensureToolsListHandler();
+  return server;
+}
+
+/** JSON-RPC methods {@link buildOpenGeniMcpProtocolServer} answers like the full server. */
+export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const method = (message as { method?: unknown }).method;
+  if (typeof method !== "string") return false;
+  if (method === "initialize" || method === "ping") return true;
+  // Notifications carry no id and get no response. The stateless transport
+  // holds no in-flight request a cancellation could reach.
+  return method.startsWith("notifications/") && !("id" in message);
+}
+
 export function buildOpenGeniMcpServer(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1076,6 +1126,18 @@ export function buildOpenGeniMcpServer(
       json,
     });
   }
+  // Office.js code in a workbook the person has open with the Opengeni add-in.
+  if (sessionId !== null) {
+    registerExcelTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+    });
+  }
   // PolicyMcpServer applies each tool's own permission contract. Register this
   // mixed group for every session so session-level wait_for_input remains
   // available with sessions:control even when goals:manage is intentionally
@@ -1133,12 +1195,45 @@ export function buildOpenGeniMcpServer(
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
+
       json,
     });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    // A published Site's own agent: its Site Data and Site SQL tools are
+    // pinned to that Site and act as the conversation's viewer. Resolve on
+    // every call: a long-lived MCP server must observe audience revocations.
+    const siteAgent = () =>
+      resolveSiteAgentDataContext(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        sessionId,
+      );
     registerSiteDataTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    // Site SQL tools need a configured gateway (they also reach databases
+    // that already exist after the deployment stops offering Site SQL).
+    if (siteSqlGatewayConfig(deps.settings) !== null)
+      registerSiteSqlTools(
+        server,
+        deps,
+        grant,
+        async () => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+        },
+        json,
+        siteAgent,
+      );
+    registerSitePublicationTools(
       server,
       deps,
       grant,
@@ -1255,7 +1350,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "social_posts_recent",
       {
-        description: "List recent social media posts imported or synced into Opengeni.",
+        description: "List recent social media posts imported or synced into the workspace.",
         inputSchema: {
           connectionIds: z4.array(z4.string().uuid()).optional(),
           since: z4.string().optional(),
@@ -1570,7 +1665,7 @@ export function buildOpenGeniMcpServer(
       "social_posts_sync",
       {
         description:
-          "Sync the connected account's own recent posts from the provider into Opengeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
+          "Sync the connected account's own recent posts from the provider into the workspace's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
         inputSchema: {
           connectionId: z4.string().uuid(),
           limit: z4.number().int().positive().optional(),
@@ -1667,7 +1762,7 @@ export function buildOpenGeniMcpServer(
       server.registerTool(
         `${provider}_posts_sync`,
         {
-          description: `Sync one exact connected ${providerName} account's recent posts into Opengeni (idempotent).`,
+          description: `Sync one exact connected ${providerName} account's recent posts into the workspace (idempotent).`,
           inputSchema: {
             connectionId: z4.string().uuid(),
             limit: z4.number().int().positive().optional(),
@@ -1974,11 +2069,12 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task =
+        const adminPause =
           viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
-            ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
-            : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
+          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
+        const task = adminPause
+          ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+          : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -2060,6 +2156,7 @@ export function buildOpenGeniMcpServer(
             db: deps.db,
             grant,
             runMode: task.runMode,
+            reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
             audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
@@ -2205,19 +2302,34 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it. A new file gets this chat's visibility (Only me in an Only me chat, otherwise the workspace) unless you pass visibility; to change an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check the result's access.whoCanOpen before sharing a link with anyone.",
       inputSchema: {
-        path: z4.string().min(1).max(4_096),
+        path: z4.string().min(1).max(4_096).optional(),
+        artifactId: z4.string().uuid().optional(),
+        visibility: z4
+          .enum(["private", "workspace"])
+          .optional()
+          .describe(
+            '"private" is Only me (only the person you work for); "workspace" is everyone in the workspace.',
+          ),
       },
     },
-    async ({ path }) => {
+    async ({ path, artifactId, visibility }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      if ((path === undefined) === (artifactId === undefined))
+        throw new Error("Pass exactly one of path or artifactId.");
+      if (artifactId !== undefined) {
+        if (!visibility)
+          throw new Error("Pass visibility with artifactId to change who can open that file.");
+        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+      }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
-          path,
+          path: path!,
+          visibility,
         }),
       );
     },
@@ -2260,7 +2372,7 @@ function registerSlackBotTools(
     "slack_bot_list_channels",
     {
       description:
-        "List public and bot-visible private Slack channels through the workspace-shared Opengeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
+        "List public and bot-visible private Slack channels through the workspace-shared Slack bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -2285,7 +2397,7 @@ function registerSlackBotTools(
     "slack_bot_channel_history",
     {
       description:
-        "Read Slack channel history as the workspace-shared Opengeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
+        "Read Slack channel history as the workspace-shared Slack bot. Public and private channels both require bot membership; invite the bot to private channels first.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2309,7 +2421,7 @@ function registerSlackBotTools(
     "slack_bot_thread_replies",
     {
       description:
-        "Read a Slack thread as the workspace-shared Opengeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
+        "Read a Slack thread as the workspace-shared Slack bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2334,7 +2446,7 @@ function registerSlackBotTools(
   server.registerTool(
     "slack_bot_list_users",
     {
-      description: "List Slack workspace users through the workspace-shared Opengeni bot.",
+      description: "List Slack workspace users through the workspace-shared Slack bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -2356,7 +2468,7 @@ function registerSlackBotTools(
     "slack_bot_list_files",
     {
       description:
-        "List Slack files and canvases shared with a channel where the workspace-shared Opengeni bot is already a member.",
+        "List Slack files and canvases shared with a channel where the workspace-shared Slack bot is already a member.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2380,7 +2492,7 @@ function registerSlackBotTools(
     "slack_bot_file_info",
     {
       description:
-        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared Opengeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the indirect share.",
+        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared Slack bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so the indirect share can be verified.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2404,7 +2516,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared Opengeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared Slack bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so the channel-to-canvas-to-transcript chain can be verified. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2438,7 +2550,7 @@ function registerSlackBotTools(
     "slack_bot_upload_file",
     {
       description:
-        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the Opengeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
+        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the workspace Slack bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
       inputSchema: { fileId: z4.string().uuid(), operationId: z4.string().uuid() },
     },
     async ({ fileId, operationId }) => {
@@ -2462,9 +2574,9 @@ function registerSlackBotTools(
     },
   );
 
-  // Scheduled runs retain their person-chosen channel; ordinary chats supply
-  // an explicit destination. A server-owned prepared message id is the durable
-  // Slack delivery identity in both cases.
+  // All accepted work uses the same selected bot capability. A server-owned
+  // prepared message ID is the durable delivery identity; legacy schedules can
+  // still use their saved destination as a default.
   const authorizeBotPost = async () => {
     if (sessionId === null) {
       throw new Error("Bot posting requires a chat");
@@ -2475,7 +2587,7 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message as the Opengeni bot, never as a personal Slack account. In an ordinary chat supply channelId and, if multiple bots are available, connectionId. Scheduled runs omit both and use only the channel chosen by a person in Post to Slack. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
+        "Prepare a message as the workspace Slack bot, never as a personal Slack account. Supply channelId and, if multiple bots are available, connectionId. Scheduled and interactive work use the same capability. Older schedules may omit both to use their saved destination. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4
@@ -2508,7 +2620,7 @@ function registerSlackBotTools(
     "slack_bot_send_prepared_message",
     {
       description:
-        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, as the Opengeni bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: Opengeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
+        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, as the workspace Slack bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: the send checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
       inputSchema: { messageId: z4.string().uuid() },
     },
     async ({ messageId }) => {
@@ -2531,7 +2643,7 @@ function registerSlackBotTools(
     "slack_bot_delete_message",
     {
       description:
-        "Delete a message authored by the workspace-shared Opengeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+        "Delete a message authored by the workspace-shared Slack bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         operationId: z4.string().uuid(),
@@ -2887,7 +2999,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -3056,7 +3168,7 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. Opengeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
       inputSchema: {
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -3341,6 +3453,11 @@ function registerWorkspaceArtifactTools(
       });
   const mutation = async (response: WorkspaceArtifactMutationResponse) =>
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  // A published Site follows its Site here exactly as through the API routes:
+  // the same hook resyncs the edge and scans a version that became current.
+  const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
+    await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
+
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3439,7 +3556,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3567,8 +3684,17 @@ function registerWorkspaceArtifactTools(
       idempotencyKey,
     }) => {
       await authorize();
+
+      const braked = await sitePlatformBrakeToolRefusal(() =>
+        requireSiteVersionPublishOpen(
+          deps,
+          { accountId: grant.accountId, workspaceId: grant.workspaceId },
+          artifactId,
+        ),
+      );
+      if (braked) return braked;
       return json(
-        await mutation(
+        await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3578,6 +3704,7 @@ function registerWorkspaceArtifactTools(
             ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_publish"),
           }),
+          true,
         ),
       );
     },
@@ -3598,8 +3725,9 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+
       return json(
-        await mutation(
+        await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3608,6 +3736,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_rollback"),
           }),
+          true,
         ),
       );
     },
@@ -3627,8 +3756,9 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3637,6 +3767,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_archive"),
           }),
+          false,
         ),
       );
     },
@@ -3656,8 +3787,9 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3666,6 +3798,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_restore"),
           }),
+          false,
         ),
       );
     },
@@ -4149,6 +4282,15 @@ function registerFleetTools(
       workspaceId: grant.workspaceId,
       sessionId,
       ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
+      ...(actor && claims
+        ? {
+            commandAttempt: {
+              turnId: claims.turnId,
+              attemptId: claims.attemptId,
+              executionGeneration: claims.executionGeneration,
+            },
+          }
+        : {}),
       ...(actor?.initiatingHumanSubjectId && claims
         ? {
             attemptAuthority: {
@@ -4183,41 +4325,103 @@ function registerFleetTools(
     };
   };
 
+  // A refusal that only the owner's permission can resolve posts the Connected
+  // Machine card right away, in the agent's own turn, so the person can allow
+  // the machine without the agent having to find and call the card tool. Only
+  // exact agent attempts post it. A repeated machine refusal in the same turn
+  // reuses that turn's machine card (it lists every machine); the lookup and
+  // append run atomically under the attempt fence so parallel refusals cannot
+  // stack copies. Cards for every other capability are never limited.
+  const machinePermissionCard =
+    (toolName: string): MachinePermissionCardPost =>
+    async () => {
+      if (!exactAgentAttemptClaims(grant)) return null;
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+        (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+      )!;
+      const appended = await appendTurnCapabilityCardOnce(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        item.id,
+        {
+          type: "tool.auth_needed",
+          payload: capabilityCardPayload(item, {
+            action: "connect",
+            rationale: "Allow this chat to use your computer.",
+            toolName,
+          }),
+        },
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
+      if (!appended.accepted) {
+        throw new Error("The calling turn was replaced before the machine card committed.");
+      }
+      return {
+        eventId: appended.existingEventId ?? appended.events[0]?.id ?? null,
+        chatUrl: sessionChatUrl(
+          deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+          grant.workspaceId,
+          sessionId,
+        ),
+      };
+    };
+
   server.registerTool(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
+        "List the sandboxes this session can run on: the person's connected computers and machines (enrolled selfhosted Connected Machines, such as their Mac, Windows PC or laptop, Linux desktop or server), plus the session's own managed sandbox when the deployment has one. Check it before telling the person you cannot reach their computer; when exactly one entry fits what they mean, use it without asking which. To work on a machine (commands, files, its screen with computer_open, a browser on it with browser_open), sandbox_swap to its `id`; staying there afterwards is fine. run_on is a one-off side channel to another machine without swapping. When talking to the person, name their computers plainly; never mention sandboxes, placements, swaps, sessions, enrollments, tool names or ids. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
-    async () => json(await listFleet(services, await fleetContext())),
+    async () => {
+      const fleet = await listFleet(services, await fleetContext());
+      // The notice comes first so it is read before the machine details.
+      return json({ notice: fleetAgentNotice(fleet), ...fleet });
+    },
   );
 
   server.registerTool(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: the platform checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_attach"),
+        ),
+      ),
   );
 
   server.registerTool(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: the platform checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      json(
+        await withMachinePermissionCard(
+          await swapActiveSandbox(services, await fleetContext(), target),
+          machinePermissionCard("sandbox_swap"),
+        ),
+      ),
   );
 
   server.registerTool(
     "run_on",
     {
       description:
-        "Run a ONE-OFF op on a SPECIFIC enrolled selfhosted machine WITHOUT changing this session's active sandbox (a side-channel to another machine). Ops: exec (run a command), read (read a file), write (write a file). Exec returns exact exitCode plus typed timedOut and the effective deadlineMs; a deadline kill or missing exit proof is never ok:true, and an ambiguous transport loss is not replayed. `target` = a selfhosted sandboxes_list `id`. To make a machine the active sandbox instead, use sandbox_swap.",
+        "Run a ONE-OFF op on a SPECIFIC enrolled selfhosted machine WITHOUT changing this session's active sandbox (a side-channel to another machine). Ops: exec (run a command), read (read a file), write (write a file). Exec returns exact exitCode plus typed timedOut and the effective deadlineMs. Long-running agent calls return state:running and a retained commandId: use command_read or command_wait rather than starting the command again. The observation wait does not stop the process. A deadline kill or a result without terminal proof or retained command ownership is never ok:true, and an ambiguous transport loss is not replayed. `target` = a selfhosted sandboxes_list `id`. To make a machine the active sandbox instead, use sandbox_swap.",
       inputSchema: {
         target: z4.string().min(1),
         op: z4.discriminatedUnion("kind", [
@@ -4250,10 +4454,13 @@ function registerFleetTools(
             )
           : null;
       return json(
-        await runOnSandbox(services, await fleetContext(), target, typedOp, {
-          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-          ...(secretResolver ? { secretResolver } : {}),
-        }),
+        await withMachinePermissionCard(
+          await runOnSandbox(services, await fleetContext(), target, typedOp, {
+            ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+            ...(secretResolver ? { secretResolver } : {}),
+          }),
+          machinePermissionCard("run_on"),
+        ),
       );
     },
   );
@@ -4262,7 +4469,7 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the OpenGeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person sets up their own computer from the card and chooses it for this chat; once it is connected, the card also offers the Chrome browser extension. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
@@ -4301,9 +4508,9 @@ function registerFleetTools(
           eventId,
           message: `${
             setup.status === "ready"
-              ? `${setup.detail} The Connected Machine card lists them with Use in this chat and can connect another.`
-              : "The Connected Machine card was posted. The person copies its one-line connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+              ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
+              : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
+          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
         });
       }
       return json(
@@ -4332,7 +4539,7 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
         OPENGENI_BROWSER_EXTENSION_URL +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
@@ -4341,6 +4548,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+
       const minted = await mintEnrollToken(deps, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -4363,7 +4571,7 @@ function registerConnectedMachineTools(
     "connected_machine_enable_screen_control",
     {
       description:
-        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: OpenGeni records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for OpenGeni: open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch OpenGeni on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the OpenGeni Browser extension (" +
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
         OPENGENI_BROWSER_EXTENSION_URL +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
@@ -4372,6 +4580,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+
       // Personal machines belong to the person the attempt acts for.
       const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
       const resourceGrant =
@@ -4912,6 +5121,33 @@ function registerWorkspaceOrchestrationTools(
           { turnId: claims.turnId, attemptId: claims.attemptId },
         )
       : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
+  };
+  // Whether a Steer is waiting for the caller's own running turn. A foreground
+  // wait then returns early so the turn reaches its next model step, where the
+  // Steer is read; whatever was waited on keeps running.
+  const callerTurnSteerPending = async (ownSessionId: string): Promise<boolean> => {
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== ownSessionId) return false;
+    try {
+      return await hasPendingSteerForTurn(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: ownSessionId,
+        turnId: claims.turnId,
+      });
+    } catch {
+      // The next model step checks on its own; a failed read only delays it.
+      return false;
+    }
+  };
+  const listOwnPendingKinds = async (ownSessionId: string): Promise<string[]> => {
+    const [updates, steer] = await Promise.all([
+      listOwnPendingUpdates(ownSessionId),
+      callerTurnSteerPending(ownSessionId),
+    ]);
+    const kinds = updates.map((update) => update.kind);
+    // An agent Steer is already listed as its own pending update.
+    return steer && !kinds.includes("agent_steer_instruction") ? [...kinds, "steer"] : kinds;
   };
   if (callerSessionId && can("sessions:read")) {
     server.registerTool(
@@ -5668,10 +5904,7 @@ function registerWorkspaceOrchestrationTools(
               return { events: page.events, hasMore: page.hasMore };
             },
             readOwnPendingUpdateKinds:
-              ownSessionId === null
-                ? null
-                : async () =>
-                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
+              ownSessionId === null ? null : async () => await listOwnPendingKinds(ownSessionId),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
@@ -5689,14 +5922,9 @@ function registerWorkspaceOrchestrationTools(
             // The returned answer may be the pending input this result
             // counted; report what is still pending so the caller is not told
             // to end its turn only to receive the answer it already has.
-            const pending = await listOwnPendingUpdates(ownSessionId);
+            const pending = await listOwnPendingKinds(ownSessionId);
             if (pending.length !== result.ownPendingUpdates) {
-              return json(
-                withOwnPendingUpdateKinds(
-                  result,
-                  pending.map((update) => update.kind),
-                ),
-              );
+              return json(withOwnPendingUpdateKinds(result, pending));
             }
           }
         }
@@ -5747,6 +5975,7 @@ function registerWorkspaceOrchestrationTools(
                 },
                 subscribe: (onEvents) =>
                   deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },
@@ -5760,7 +5989,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateToolInput(childSelectableTools),
       },
       async (args) => {
@@ -6485,7 +6714,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in Opengeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -6555,7 +6784,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -6610,7 +6839,7 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
@@ -6628,7 +6857,7 @@ function registerCapabilityDiscoveryTools(
         eventId,
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
-            ? "The Connected Machine card was posted. The person copies its connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet. Do not paste an enroll token into the chat."
+            ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
@@ -6968,21 +7197,7 @@ async function appendCapabilityCardEvent(
 ): Promise<string | null> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
-  const payload = ToolAuthNeededPayload.parse({
-    serverId: item.runtime.mcpServerId ?? "opengeni",
-    toolName: input.toolName ?? "capability_authorization_request",
-    providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
-    capability: {
-      id: item.id,
-      name: item.name,
-      kind: item.kind,
-      source: item.source,
-      action: input.action,
-      rationale: input.rationale,
-      requiredVariables: capabilityRequiredVariables(item),
-    },
-  });
+  const payload = capabilityCardPayload(item, input);
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -6997,6 +7212,32 @@ async function appendCapabilityCardEvent(
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
   return appended.events[0]?.id ?? null;
+}
+
+/** The `tool.auth_needed` payload that renders a capability card in the chat. */
+function capabilityCardPayload(
+  item: CapabilityCatalogItem,
+  input: {
+    action: "connect" | "add_credentials" | "enable";
+    rationale: string;
+    toolName?: string;
+  },
+): ToolAuthNeededPayload {
+  return ToolAuthNeededPayload.parse({
+    serverId: item.runtime.mcpServerId ?? "opengeni",
+    toolName: input.toolName ?? "capability_authorization_request",
+    providerDomain: capabilityProviderDomain(item),
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: input.action,
+      rationale: input.rationale,
+      requiredVariables: capabilityRequiredVariables(item),
+    },
+  });
 }
 
 function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {
@@ -7146,6 +7387,26 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
 }
 
 export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
+  if (BigInt(cursor.snapshotRevision) >= 1n << 64n) {
+    // Compact positional envelope keeps even relevance/Site cursors inside the
+    // existing 512-character tool input. No PostgreSQL snapshot is embedded.
+    return Buffer.from(
+      JSON.stringify([
+        5,
+        cursor.orderBy,
+        cursor.sortRank,
+        cursor.sortRevision,
+        cursor.sortAt,
+        cursor.id,
+        cursor.snapshotAt,
+        cursor.snapshotRevision,
+        cursor.updatedAfter,
+        cursor.filterHash,
+        cursor.originSiteId ?? null,
+      ]),
+      "utf8",
+    ).toString("base64url");
+  }
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
@@ -7166,7 +7427,7 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
-const SESSION_DISCOVERY_REVISION_MAX = 9_223_372_036_854_775_807n;
+const SESSION_DISCOVERY_REVISION_MAX = (1n << 65n) - 1n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -7192,7 +7453,42 @@ function normalizeSessionDiscoveryRevision(value: string, label: string): string
 
 export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+    let decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (Array.isArray(decoded) && decoded[0] === 5 && decoded.length === 11) {
+      const [
+        ,
+        orderBy,
+        sortRank,
+        sortRevision,
+        sortAt,
+        id,
+        snapshotAt,
+        snapshotRevision,
+        updatedAfter,
+        filterHash,
+        originSiteId,
+      ] = decoded;
+      if (
+        (orderBy !== "relevance" && (sortRank !== null || filterHash !== null)) ||
+        (originSiteId !== null &&
+          (typeof originSiteId !== "string" || !SESSION_DISCOVERY_UUID.test(originSiteId)))
+      ) {
+        throw new Error("invalid cursor fields");
+      }
+      decoded = {
+        v: originSiteId ? 4 : orderBy === "relevance" ? 3 : 2,
+        orderBy,
+        sortRevision,
+        sortAt,
+        id,
+        snapshotAt,
+        snapshotRevision,
+        updatedAfter,
+        ...(orderBy === "relevance" ? { sortRank, filterHash } : {}),
+        ...(originSiteId ? { originSiteId } : {}),
+      };
+    }
+    const parsed = decoded as {
       v?: unknown;
       orderBy?: unknown;
       sortRevision?: unknown;
@@ -7292,6 +7588,9 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       parsed.sortRevision,
       "cursor sortRevision",
     );
+    if (BigInt(sortRevision) >= 1n << 64n) {
+      throw new Error("cursor sortRevision exceeds the database activity revision range");
+    }
     const snapshotRevision = normalizeSessionDiscoveryRevision(
       parsed.snapshotRevision,
       "cursor snapshotRevision",

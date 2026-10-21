@@ -16,6 +16,7 @@ import {
   type PickerBillingClass,
   type PickerModelRow,
 } from "./model-policy";
+import { type OpenGeniText } from "./messages/runtime";
 
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
@@ -29,6 +30,12 @@ export type ModelPolicyPickerMessages = {
   thinking: string;
   fast: string;
   fastRateHint: string;
+  /** Label for the Standard/Fast/Ultrafast choice shown when a model offers Ultrafast. */
+  speed?: string;
+  standard?: string;
+  ultrafast?: string;
+  /** How Ultrafast counts against a ChatGPT/Codex plan's usage limits. */
+  ultrafastUsageHint?: string;
   codexOnly: string;
   searchLabel?: string;
   searchPlaceholder?: string;
@@ -42,36 +49,40 @@ export type ModelPolicyPickerMessages = {
   billingHints: Record<PickerBillingClass, string>;
 };
 
-export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
-  label: "Model and effort",
-  loading: "Loading model catalog…",
-  noModels: "No models available.",
-  connectTitle: "Connect a model",
-  connectBody: "Use a subscription or a provider key you already have.",
-  connectAction: "Open Models",
-  thinking: "Thinking",
-  fast: "Fast",
+export const defaultModelPolicyPickerMessages = (t: OpenGeniText): ModelPolicyPickerMessages => ({
+  label: t("modelPickerModel.modelAndEffort"),
+  loading: t("modelPickerModel.loadingModelCatalog"),
+  noModels: t("modelPickerModel.noModelsAvailable"),
+  connectTitle: t("modelPickerModel.connectAModel"),
+  connectBody: t("modelPickerModel.useASubscriptionOrA"),
+  connectAction: t("modelPickerModel.openModels"),
+  thinking: t("modelPickerModel.thinking"),
+  fast: t("modelPickerModel.fast"),
   fastRateHint: "2× rate",
-  codexOnly: "Codex-only session",
-  searchLabel: "Search models or providers",
-  searchPlaceholder: "Search models or providers…",
-  currentModel: "Current model",
-  noMatches: "No matching models. Try a model or provider name.",
-  unsupportedAttachments: "This model cannot view the attached images.",
-  thinkingEffort: "Thinking effort",
-  selected: "Selected",
-  free: "Free",
+  speed: t("modelPickerModel.speed"),
+  standard: t("modelPolicy.standard"),
+  ultrafast: t("modelPolicy.ultrafast"),
+  ultrafastUsageHint: "8× usage",
+  codexOnly: t("modelPickerModel.codexOnlySession"),
+  searchLabel: t("modelPickerModel.searchModelsOrProviders"),
+  searchPlaceholder: t("modelPickerModel.searchModelsOrProviders2"),
+  currentModel: t("modelPickerModel.currentModel"),
+  noMatches: t("modelPickerModel.noMatchingModelsTryA"),
+  unsupportedAttachments: t("modelPickerModel.thisModelCannotViewThe"),
+  thinkingEffort: t("modelPickerModel.thinkingEffort"),
+  selected: t("modelPickerModel.selected"),
+  free: t("modelPickerModel.free"),
 
   billingHints: {
-    opengeni_credits: "Provided by Opengeni",
-    external: "Provider terms and limits apply",
-    codex_subscription: "ChatGPT / Codex plan",
-    supergrok_subscription: "SuperGrok / xAI plan",
-    claude_subscription: "Claude plan",
-    byok: "Billed to the connected provider account",
-    organization_byok: "Billed to the connected provider account",
+    opengeni_credits: t("modelPickerModel.providedByOpengeni"),
+    external: t("modelPickerModel.providerTermsAndLimitsApply"),
+    codex_subscription: t("modelPickerModel.chatgptCodexPlan"),
+    supergrok_subscription: t("modelPickerModel.supergrokXaiPlan"),
+    claude_subscription: t("modelPickerModel.claudePlan"),
+    byok: t("modelPickerModel.billedToTheConnectedProvider"),
+    organization_byok: t("modelPickerModel.billedToTheConnectedProvider"),
   },
-};
+});
 
 /** Host branding for one payment group; the icon type belongs to the renderer. */
 export type ModelPickerGroupBranding<TIcon = unknown> = {
@@ -102,10 +113,12 @@ export type ModelPickerInput<TIcon = unknown> = {
 };
 
 /** Models settings keeps naming who is billed for a key. */
-export const SCOPED_BILLING_HINTS: Partial<Record<PickerBillingClass, string>> = {
-  byok: "Billed to the workspace provider account",
-  organization_byok: "Billed to the organization provider account",
-};
+export const SCOPED_BILLING_HINTS = (
+  t: OpenGeniText,
+): Partial<Record<PickerBillingClass, string>> => ({
+  byok: t("modelPickerModel.billedToTheWorkspaceProvider"),
+  organization_byok: t("modelPickerModel.billedToTheOrganizationProvider"),
+});
 
 export function isCodexPickerModel(model: ClientModel): boolean {
   return model.id.startsWith("codex/") || model.source === "codex";
@@ -165,16 +178,20 @@ export function groupPresentationFor<TIcon>(
   return undefined;
 }
 
-export function effectiveRows<TIcon>(props: ModelPickerInput<TIcon>): ClientPickerModelRow[] {
-  const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+export function effectiveRows<TIcon>(
+  t: OpenGeniText,
+  props: ModelPickerInput<TIcon>,
+): ClientPickerModelRow[] {
+  const rows =
+    props.rows !== undefined ? props.rows : projectClientModelRows(t, props.models ?? []);
+  const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
   return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
     const scoped =
       props.collapseScopes === false
         ? {
             ...row,
             label: row.catalog.label,
-            billingClassLabel: scopedBillingClassLabel(row.billingClass),
+            billingClassLabel: scopedBillingClassLabel(t, row.billingClass),
           }
         : row;
     if (props.collapseScopes === false) {
@@ -197,9 +214,22 @@ export type ModelPickerThinking = {
   efforts: ReasoningEffort[];
   value: ReasoningEffort;
   showThinking: boolean;
+  /** The single Fast toggle; false when `speeds` replaces it. */
   showFast: boolean;
+  /**
+   * The speed choice for models that offer more than one faster mode
+   * (Standard, Fast, Ultrafast), or null when the Fast toggle (or nothing) applies.
+   */
+  speeds: ModelPickerSpeed[] | null;
   /** The selected row cannot run, so its controls are read-only. */
   disabled: boolean;
+};
+
+export type ModelPickerSpeed = {
+  id: LatencyMode;
+  label: string;
+  /** What the speed costs relative to Standard, or null for Standard. */
+  hint: string | null;
 };
 
 export type ModelPickerMenuView = {
@@ -220,21 +250,22 @@ export type ModelPickerMenuView = {
 
 /** Everything a picker menu shows for this input and search query. */
 export function modelPickerMenuView<TIcon>(
+  t: OpenGeniText,
   props: ModelPickerInput<TIcon>,
   query: string,
 ): ModelPickerMenuView {
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
-  const rows = effectiveRows(props);
+  const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
+  const rows = effectiveRows(t, props);
   const selected = findPickerRow(rows, props.model);
   const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const filtered = rows.filter((row) => {
     const description = groupPresentationFor(props, row.billingClass)?.description;
     const text =
-      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(row.catalog) : (description ?? "")}`.toLowerCase();
+      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(t, row.catalog) : (description ?? "")}`.toLowerCase();
     return words.every((word) => text.includes(word));
   });
   const matchingIds = new Set(filtered.map((row) => row.id));
-  const groups = groupPickerRowsByBillingClass(rows, {
+  const groups = groupPickerRowsByBillingClass(t, rows, {
     codexOnly: props.codexOnly === true,
     selectedId: props.model,
     collapseScopes: props.collapseScopes !== false,
@@ -245,8 +276,9 @@ export function modelPickerMenuView<TIcon>(
       const defaultHint =
         props.collapseScopes === false &&
         messages.billingHints[group.billingClass] ===
-          defaultModelPolicyPickerMessages.billingHints[group.billingClass]
-          ? (SCOPED_BILLING_HINTS[group.billingClass] ?? messages.billingHints[group.billingClass])
+          defaultModelPolicyPickerMessages(t).billingHints[group.billingClass]
+          ? (SCOPED_BILLING_HINTS(t)[group.billingClass] ??
+            messages.billingHints[group.billingClass])
           : messages.billingHints[group.billingClass];
       return {
         billingClass: group.billingClass,
@@ -273,7 +305,7 @@ export function modelPickerMenuView<TIcon>(
     searching: words.length > 0,
     groups,
     matchCount: filtered.length,
-    thinking: selected ? modelPickerThinking(props, selected) : null,
+    thinking: selected ? modelPickerThinking(props, selected, messages) : null,
     unsupportedAttachments,
   };
 }
@@ -281,21 +313,55 @@ export function modelPickerMenuView<TIcon>(
 function modelPickerThinking(
   props: Pick<ModelPickerInput, "effort" | "allowLatencyMode">,
   selected: ClientPickerModelRow,
+  messages: ModelPolicyPickerMessages,
 ): ModelPickerThinking | null {
   const efforts = effortOptionsForModel(selected.catalog);
   const showThinking =
     efforts.length > 1 && selected.catalog.capabilities?.reasoning.runnable !== false;
-  const showFast =
-    props.allowLatencyMode !== false &&
-    runnableLatencyModesForModel(selected.catalog).includes("fast");
-  if (!showThinking && !showFast) return null;
+  const runnable =
+    props.allowLatencyMode === false ? [] : runnableLatencyModesForModel(selected.catalog);
+  const speeds = runnable.includes("ultrafast") ? speedOptions(selected, runnable, messages) : null;
+  const showFast = speeds === null && runnable.includes("fast");
+  if (!showThinking && !showFast && !speeds) return null;
   return {
     efforts,
     value: coerceReasoningEffortForModel(selected.catalog, props.effort),
     showThinking,
     showFast,
+    speeds,
     disabled: !selected.selectable,
   };
+}
+
+function speedOptions(
+  selected: ClientPickerModelRow,
+  runnable: readonly LatencyMode[],
+  messages: ModelPolicyPickerMessages,
+): ModelPickerSpeed[] {
+  const speeds: ModelPickerSpeed[] = [
+    { id: "standard", label: messages.standard ?? "Standard", hint: null },
+  ];
+  if (runnable.includes("fast")) {
+    speeds.push({ id: "fast", label: messages.fast, hint: messages.fastRateHint });
+  }
+  speeds.push({
+    id: "ultrafast",
+    label: messages.ultrafast ?? "Ultrafast",
+    hint: ultrafastHint(selected, messages),
+  });
+  return speeds;
+}
+
+/** Plans count Ultrafast against usage limits; metered routes bill a multiple of the rate. */
+function ultrafastHint(
+  selected: ClientPickerModelRow,
+  messages: ModelPolicyPickerMessages,
+): string | null {
+  if (selected.billingClass === "codex_subscription") return messages.ultrafastUsageHint ?? null;
+  const bps = selected.catalog.capabilities?.latencyModes.find(
+    (mode) => mode.id === "ultrafast",
+  )?.billingMultiplierBps;
+  return bps && bps > 10_000 ? `${bps / 10_000}× rate` : null;
 }
 
 export type ModelPickerChoice = {
@@ -325,6 +391,10 @@ export function modelPickerChoice(
 }
 
 /** The web segmented control's short labels ("X-high" fits a phone row). */
-export function compactEffortLabel(effort: ReasoningEffort, label: string): string {
-  return effort === "xhigh" ? "X-high" : label;
+export function compactEffortLabel(
+  t: OpenGeniText,
+  effort: ReasoningEffort,
+  label: string,
+): string {
+  return effort === "xhigh" ? t("modelPickerModel.xHigh") : label;
 }

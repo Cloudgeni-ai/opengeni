@@ -370,7 +370,12 @@ function fingerprint(
   };
 }
 
-async function verifyInventory(rootPath: string, root: FileHandle, tree: TreeIndex) {
+async function verifyInventory(
+  rootPath: string,
+  root: FileHandle,
+  tree: TreeIndex,
+  signal?: AbortSignal,
+) {
   const fresh = await openRoot(rootPath);
   try {
     if (!sameVersion(tree.directories.get("")!, await fresh.stat({ bigint: true }))) changed();
@@ -378,10 +383,12 @@ async function verifyInventory(rootPath: string, root: FileHandle, tree: TreeInd
     await fresh.close();
   }
   for (const path of tree.directories.keys()) {
+    signal?.throwIfAborted();
     const handle = await openDirectory(root, path, tree);
     await handle.close();
   }
   for (const [path, expected] of tree.files) {
+    signal?.throwIfAborted();
     const [parent, name] = parentAndName(path);
     const handle = await openDirectory(root, parent, tree);
     try {
@@ -412,7 +419,7 @@ async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex, sig
     );
     total += size;
   }
-  await verifyInventory(rootPath, root, tree);
+  await verifyInventory(rootPath, root, tree, signal);
   return fingerprint(hash, directories.length, tree.files.size, total);
 }
 
@@ -615,7 +622,7 @@ export async function captureHostWorkspaceArchive(
       );
       try {
         signal?.throwIfAborted();
-        const index = await indexArchive(encoded, payload, {});
+        const index = await indexArchive(encoded, payload, {}, signal);
         signal?.throwIfAborted();
         decoded = await fingerprintArchiveIndex(index, payload, signal);
       } finally {
@@ -626,7 +633,7 @@ export async function captureHostWorkspaceArchive(
     }
     await unlink(payloadPath);
     signal?.throwIfAborted();
-    await verifyInventory(root, handle, tree);
+    await verifyInventory(root, handle, tree, signal);
     const after = await hashTree(
       root,
       handle,
@@ -667,11 +674,15 @@ class JsonReader {
   constructor(
     private readonly handle: FileHandle,
     size: number,
+    private readonly signal?: AbortSignal,
   ) {
     this.buffer = Buffer.allocUnsafe(size);
   }
   private async fill() {
     if (this.cursor < this.available) return true;
+    // Re-reading a multi-gigabyte capture is not instantaneous: stop at the
+    // next chunk like every other capture pass.
+    this.signal?.throwIfAborted();
     const { bytesRead } = await this.handle.read(this.buffer, 0, this.buffer.length, this.position);
     this.position += bytesRead;
     this.cursor = 0;
@@ -964,8 +975,9 @@ async function indexArchive(
   input: FileHandle,
   payload: FileHandle,
   options: HostWorkspaceArchiveOptions,
+  signal?: AbortSignal,
 ): Promise<ArchiveIndex> {
-  const reader = new JsonReader(input, chunkSize(options));
+  const reader = new JsonReader(input, chunkSize(options), signal);
   const limits = limitsFor(options);
   const directories: string[] = [];
   const files: FileSpan[] = [];

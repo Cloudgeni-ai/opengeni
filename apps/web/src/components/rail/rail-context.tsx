@@ -18,7 +18,8 @@ import {
 
 import { useAppContext } from "@/context";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
-import { OPEN_SESSION_SEARCH_EVENT } from "@/lib/session-search-route";
+import { desktopBridge, desktopCapability } from "@/lib/desktop";
+import { OPEN_SESSION_SEARCH_EVENT, requestSessionSearch } from "@/lib/session-search-route";
 import { workspaceManagementLocation } from "@/lib/workspace-management-location";
 
 const SessionSearchDialog = lazy(() => import("@/components/session/session-search-dialog"));
@@ -27,10 +28,23 @@ const RAIL_COLLAPSED_KEY = "opengeni.rail.collapsed";
 const RAIL_WIDTH_KEY = "opengeni.rail.width";
 /** Below this viewport width the rail is an overlay drawer, not a fixed column. */
 export const RAIL_DRAWER_BREAKPOINT = 1024;
+/**
+ * A desktop app window is never a phone: it keeps the rail as a column down to
+ * its minimum width, where the person can still collapse it.
+ */
+const DESKTOP_RAIL_DRAWER_BREAKPOINT = 640;
+const railDrawerBreakpoint = desktopBridge
+  ? DESKTOP_RAIL_DRAWER_BREAKPOINT
+  : RAIL_DRAWER_BREAKPOINT;
 /** Resize bounds for the expanded desktop rail (px). */
 export const RAIL_MIN_WIDTH = 220;
 export const RAIL_MAX_WIDTH = 480;
-export const RAIL_DEFAULT_WIDTH = 244;
+/**
+ * A desktop app window is wider than most browser windows next to other tabs
+ * and the sidebar is its main way around, so it starts wide enough for real
+ * session titles beside each row's status and time.
+ */
+export const RAIL_DEFAULT_WIDTH = desktopBridge ? 288 : 244;
 
 function clampRailWidth(width: number): number {
   if (!Number.isFinite(width)) {
@@ -124,7 +138,7 @@ export function RailProvider({
     setDrawerOpenState(next);
   }, []);
   const [isMobile, setIsMobile] = useState<boolean>(() =>
-    typeof window !== "undefined" ? window.innerWidth < RAIL_DRAWER_BREAKPOINT : false,
+    typeof window !== "undefined" ? window.innerWidth < railDrawerBreakpoint : false,
   );
   const restoreDrawerFocus = useCallback(() => {
     // Search owns this close even if a result navigates before the drawer's
@@ -172,7 +186,7 @@ export function RailProvider({
     if (typeof window === "undefined") {
       return;
     }
-    const query = window.matchMedia(`(max-width: ${RAIL_DRAWER_BREAKPOINT - 1}px)`);
+    const query = window.matchMedia(`(max-width: ${railDrawerBreakpoint - 1}px)`);
     const apply = () => setIsMobile(query.matches);
     apply();
     query.addEventListener("change", apply);
@@ -274,6 +288,22 @@ export function RailProvider({
       requestCreateComposerFocus();
     });
   }, [appContext, navigate, workspaceId, setDrawerOpen]);
+
+  // The desktop app's menu bar and shortcuts: New Session, Search Sessions,
+  // Toggle Sidebar and Inbox act on this workspace.
+  useEffect(() => {
+    const bridge = desktopCapability("commands");
+    if (!bridge) return;
+    return bridge.commands.onCommand((command) => {
+      if (command === "newSession") startNewSession();
+      else if (command === "searchSessions") requestSessionSearch(workspaceId);
+      else if (command === "toggleSidebar") toggleCollapsed();
+      else if (command === "openInbox") {
+        setDrawerOpen(false);
+        void navigate({ to: "/workspaces/$workspaceId/inbox", params: { workspaceId } });
+      }
+    });
+  }, [navigate, setDrawerOpen, startNewSession, toggleCollapsed, workspaceId]);
 
   const value = useMemo<RailContextValue>(
     () => ({

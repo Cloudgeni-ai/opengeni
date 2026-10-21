@@ -1,7 +1,7 @@
 export * from "./types";
 export { pollDeviceAuthorization } from "./device";
 export { findConnectRecoveryAccount } from "./recovery";
-export { pollConnectAttempt } from "./poll";
+export { ConnectWaitTimedOutError, pollConnectAttempt } from "./poll";
 export {
   authorizeConnectAttempt,
   ConnectPopupClosedError,
@@ -114,6 +114,7 @@ export class ConnectController {
           ...options,
           signal,
           minimumRevision: attempt.revision,
+          expiresAt: attempt.expiresAt,
         }),
       false,
       attempt.id,

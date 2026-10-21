@@ -1,9 +1,46 @@
 import type { ComponentProps } from "react";
 import { ProviderTile } from "./models-ui";
-import { ListRow } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+
+/** The on/off words for an account's allocator, shared by its switch and read-only facts. */
+export const ACCOUNT_ENABLED_LABELS = { on: "Enabled", off: "Disabled" } as const;
+
+/** Whether new work may pick a subscription account. Running work is never interrupted. */
+export function EnableAccountRow({
+  name,
+  checked,
+  pending,
+  disabled,
+  onCheckedChange,
+}: {
+  name: string;
+  checked: boolean;
+  pending: boolean;
+  disabled: boolean;
+  onCheckedChange: (enabled: boolean) => void;
+}) {
+  return (
+    <SettingRow
+      label="Enable account"
+      description="Allow this account to be used for new work. Turning it off won’t interrupt running work."
+      control={
+        <Switch
+          aria-label={`Enable ${name}`}
+          showStateText
+          stateLabels={ACCOUNT_ENABLED_LABELS}
+          checked={checked}
+          pending={pending}
+          disabled={disabled}
+          onCheckedChange={onCheckedChange}
+        />
+      }
+    />
+  );
+}
 
 export function SubscriptionAccountRow({
   provider,
@@ -61,5 +98,17 @@ export function SubscriptionRotationSettingRows({
         }
       />
     </SettingRowGroup>
+  );
+}
+
+/**
+ * Splits the one account list into subscriptions and pay-as-you-go keys, so
+ * gateways nobody uses never sit among (or above) the subscription pools.
+ */
+export function AccountGroupHeading({ children }: { children: string }) {
+  return (
+    <li className="col-span-full list-none px-3 pt-5 pb-1 first:pt-2">
+      <h3 className="m-0 text-xs font-medium tracking-wide text-fg-muted uppercase">{children}</h3>
+    </li>
   );
 }

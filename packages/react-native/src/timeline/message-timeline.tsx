@@ -66,6 +66,8 @@ import {
   type NativeTurnStatus,
   type PreparingProps,
 } from "./turn";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
 
@@ -129,11 +131,12 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
 export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const items = useMemo(
-    () => props.items ?? buildTimeline(props.events ?? []),
-    [props.items, props.events],
+    () => props.items ?? buildTimeline(t, props.events ?? []),
+    [t, props.items, props.events],
   );
-  const groups = useMemo(() => groupTimeline(items, { readableTurns: true }), [items]);
+  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Opening on a moment starts away from the tip; the landing decides where.
@@ -602,6 +605,7 @@ function TimelineGroupView({
   context: GroupContext;
   insideTurn?: boolean;
 }) {
+  const t = useOpenGeniText();
   switch (group.kind) {
     case "activity": {
       if (group.work) {
@@ -614,7 +618,7 @@ function TimelineGroupView({
             />
           );
         }
-        const base = readableWorkStatus({ ...group, work: group.work });
+        const base = readableWorkStatus(t, { ...group, work: group.work });
         const status: NativeTurnStatus =
           base.kind === "working"
             ? {
@@ -641,6 +645,7 @@ function TimelineGroupView({
             failureText={group.failureText}
             foldKey={group.id}
             defaultOpen={readableWorkDefaultOpen(group)}
+            unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
             facets={context.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
             onOpenStateChange={
@@ -652,6 +657,12 @@ function TimelineGroupView({
             }
           >
             <TurnRailFrame compact>
+              {group.work.steps ? (
+                <TurnStepsLoader
+                  steps={group.work.steps}
+                  autoLoad={!readableWorkDefaultOpen(group)}
+                />
+              ) : null}
               <FoldedGroups groups={group.work.details} context={context} />
             </TurnRailFrame>
           </TurnSummary>
@@ -748,6 +759,7 @@ function FoldedGroups({
 
 function TimelineRow({ item, context }: { item: TimelineItem; context: GroupContext }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} context={context} />;
@@ -756,11 +768,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "human-input":
       return <HumanInputRow item={item} onCopy={context.onCopy} />;
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION[item.blocked ? "blocked" : item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
-          text={`${item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} · ${formatRelativeTime(item.resolvedAt ?? item.occurredAt)}`}
+          text={`${item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} · ${formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}`}
         />
       );
     }
@@ -787,7 +799,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.base, color: theme.colors.fg }}
           >
-            Worker reported back
+            {t("native.timeline.messageTimeline.workerReportedBack")}
           </Text>
           <Text
             numberOfLines={3}
@@ -816,7 +828,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.md, color: theme.colors.fg }}
           >
-            Connection needed
+            {t("native.timeline.messageTimeline.connectionNeeded")}
           </Text>
           <Text
             style={{
@@ -826,7 +838,9 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
               color: theme.colors["fg-muted"],
             }}
           >
-            {item.providerDomain} needs to be reconnected before the agent can continue.
+            {t("native.timeline.messageTimeline.providerdomainNeedsToBeReconnected", {
+              providerDomain: item.providerDomain,
+            })}
           </Text>
         </View>
       );
@@ -839,12 +853,13 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
  * The web footer stamp. Hermes/iOS ICU joins date and time with " at " where the
  * browser's ICU uses ", "; normalize to the web form.
  */
-function nativeClockTime(iso: string): string {
-  return formatClockTime(iso).replace(" at ", ", ");
+function nativeClockTime(t: OpenGeniText, iso: string): string {
+  return formatClockTime(t, iso).replace(" at ", ", ");
 }
 
 function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
@@ -862,7 +877,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(item).replace(" at ", ", ")}
+            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -908,7 +923,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         <Icon name="triangle-alert" size={16} color={accent} />
       </View>
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
-        {noticeDisplayText(item)}
+        {noticeDisplayText(t, item)}
       </Text>
     </View>
   );
@@ -956,6 +971,7 @@ function MessageFooter({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [copied, setCopied] = useState(false);
   return (
     <View
@@ -996,7 +1012,7 @@ function MessageFooter({
           fontVariant: ["tabular-nums"],
         }}
       >
-        {nativeClockTime(occurredAt)}
+        {nativeClockTime(t, occurredAt)}
       </Text>
     </View>
   );
@@ -1063,6 +1079,7 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
 
 /** Top of the loaded window: a spinner while older history loads, else a manual control. */
 function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   return (
@@ -1078,7 +1095,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
               color: theme.colors["fg-muted"],
             }}
           >
-            Load earlier messages
+            {t("native.timeline.messageTimeline.loadEarlierMessages")}
           </Text>
         </Pressable>
       )}
@@ -1087,6 +1104,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
 }
 
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const failed = item.delivery?.state === "failed";
@@ -1160,7 +1178,7 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                     textDecorationLine: "underline",
                   }}
                 >
-                  Retry
+                  {t("native.timeline.messageTimeline.retry")}
                 </Text>
               </Pressable>
             ) : null}
@@ -1210,6 +1228,7 @@ function HumanInputRow({
   item: HumanInputItem;
   onCopy?: ((text: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
@@ -1273,7 +1292,7 @@ function HumanInputRow({
               color: theme.colors["fg-subtle"],
             }}
           >
-            Agent asked
+            {t("native.timeline.messageTimeline.agentAsked")}
           </Text>
           <View style={{ marginTop: 6, gap: 12 }}>
             {item.questions.map((question, index) => (

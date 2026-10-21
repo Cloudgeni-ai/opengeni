@@ -6,8 +6,10 @@ import { CompactActivityContext } from "./shared";
 import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
 import { toolDisplayName } from "./tool-display-name";
+import { toolStepPhase } from "./tool-steps";
 import type { ActivityItem } from "./types";
 import { rollingActivityItem } from "./work-presentation";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** One stable viewport; updates replace its content without moving the conversation. */
 export function RollingActivity({
@@ -23,6 +25,7 @@ export function RollingActivity({
   /** Show "+N earlier"; off when an enclosing status line already counts steps. */
   showCount?: boolean;
 }) {
+  const t = useOpenGeniText();
   const reduced = useReducedMotion();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
@@ -35,7 +38,9 @@ export function RollingActivity({
     <span className="og-rolling-label">
       <WrenchIcon className="size-3.5" />
       <span>
-        {item.kind === "tool-call" ? toolDisplayName(item.name, item.display) : "Working"}
+        {item.kind === "tool-call"
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
+          : t("timeline.rollingActivity.working")}
       </span>
     </span>
   );
@@ -43,10 +48,10 @@ export function RollingActivity({
     <span className="og-rolling-status" data-running={selected.running ? "true" : undefined}>
       <span className="sr-only">
         {item.kind === "tool-call"
-          ? toolDisplayName(item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
           : item.kind === "reasoning"
-            ? "Thinking"
-            : "Working"}
+            ? t("timeline.rollingActivity.thinking")
+            : t("timeline.rollingActivity.working")}
       </span>
       <span className="og-rolling-window" aria-hidden="true">
         <AnimatePresence initial={false} mode="sync">
@@ -66,7 +71,7 @@ export function RollingActivity({
           >
             <CompactActivityContext.Provider value={true}>
               <Suspense fallback={fallback}>
-                {renderActivity(item, toolRegistry, undefined, undefined, undefined, undefined)}
+                {renderActivity(t, item, toolRegistry, undefined, undefined, undefined, undefined)}
               </Suspense>
             </CompactActivityContext.Provider>
           </motion.span>

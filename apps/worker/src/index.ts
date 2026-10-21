@@ -24,6 +24,7 @@ import {
 } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
@@ -42,12 +43,14 @@ import { fileURLToPath } from "node:url";
 import type { createControlActivities } from "./activities-control";
 import type { createTurnActivities } from "./activities-turn";
 import type { ActivityDependencies } from "./activities/types";
+import { closeNativeExternalVaultProviders } from "./external-vault-providers";
 import type {
   InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
+  StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
@@ -427,6 +430,7 @@ export async function createWorkerWorkflowSignaler(
   ) => Promise<TurnTaskQueueStats>;
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
+  startSessionTitleWorkflow: StartSessionTitleWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -567,6 +571,22 @@ export async function createWorkerWorkflowSignaler(
         }
       }
       return starts[0].status === "fulfilled" ? "started" : "already_running";
+    },
+    startSessionTitleWorkflow: async ({ accountId, workspaceId, operationId }) => {
+      try {
+        await temporal.workflow.start("sessionTitleWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `session-title:${operationId}`,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [
+            { accountId, workspaceId, operationId, baseTaskQueue: settings.temporalTaskQueue },
+          ],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
     },
     startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
       try {
@@ -784,7 +804,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow ||
       !options.activityDependencies.startSandboxReaperWorkflow ||
-      !options.activityDependencies.startVideoGenerationWorkflow;
+      !options.activityDependencies.startVideoGenerationWorkflow ||
+      !options.activityDependencies.startSessionTitleWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -809,13 +830,16 @@ export async function createOpenGeniWorkerService(
     const startVideoGenerationWorkflow =
       options.activityDependencies.startVideoGenerationWorkflow ??
       signaler?.startVideoGenerationWorkflow;
+    const startSessionTitleWorkflow =
+      options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
       !inspectSessionAttemptActivity ||
       !signalCodexCapacityWorkflow ||
       !startSandboxReaperWorkflow ||
-      !startVideoGenerationWorkflow
+      !startVideoGenerationWorkflow ||
+      !startSessionTitleWorkflow
     ) {
       throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -834,6 +858,7 @@ export async function createOpenGeniWorkerService(
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
+        startSessionTitleWorkflow,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
           cleanupContainment.request();
@@ -1068,6 +1093,11 @@ export async function startWorker() {
   const observability = createObservability(settings, { component: `worker-${role}` });
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
+  // `kill -USR2 <pid>` samples this process for 30 s and logs where the event
+  // loop was busy, so stalls can be attributed on a live worker.
+  installCpuSamplingSignal({
+    log: (message, attributes) => observability.info(message, attributes),
+  });
   // The Agents SDK also listens for unhandled rejections and exits the process.
   // Keep detached SDK/transport promises observational here: durable turn
   // activity boundaries own failures, while process exit causes cross-session
@@ -1077,9 +1107,14 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
+  const preparedStatements =
+    settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements };
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1089,6 +1124,7 @@ export async function startWorker() {
   const readinessDbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
     max: 1,
   });
   const databasePosture = {
@@ -1129,7 +1165,12 @@ export async function startWorker() {
       },
     });
   } finally {
-    await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    await Promise.allSettled([
+      closeNativeExternalVaultProviders(),
+      bus?.close(),
+      readinessDbClient.close(),
+      dbClient.close(),
+    ]);
     disposeUnhandledRejectionBoundary();
   }
 }

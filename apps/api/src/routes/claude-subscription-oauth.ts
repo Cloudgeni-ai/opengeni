@@ -14,11 +14,8 @@ import {
   completeClaudeSubscriptionOAuth,
   type ClaudeOAuthScope,
 } from "../claude-subscription-oauth";
-import {
-  managedCookieHuman,
-  requireOrganizationCodexHuman,
-  requireSameOriginBrowserMutation,
-} from "./codex";
+import { managedCookieHuman, requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { claudeCoreRoute, requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
 
 export function registerClaudeSubscriptionOAuthRoutes(

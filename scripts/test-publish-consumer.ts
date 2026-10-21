@@ -1208,7 +1208,7 @@ try {
         "};",
         "",
         'if (sessionRealtimeTransportKind("gpt-live-1-boulder-alpha") !== "codex") throw new Error("Codex transport selection drifted");',
-        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "gateway") throw new Error("Gateway transport selection drifted");',
+        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "websocket") throw new Error("Gateway transport selection drifted");',
         "void createSessionRealtimeController;",
         "const markup = renderToStaticMarkup(",
         "  <>",
@@ -1230,7 +1230,7 @@ try {
         "    />",
         "  </>,",
         ");",
-        'if ((markup.match(/aria-label="Start voice with Codex Live"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
+        'if ((markup.match(/aria-label="Start voice"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
         'if (!markup.includes("Choose voice model and options")) throw new Error("SSR output lost realtime model picker ARIA copy");',
         "console.log(`REALTIME_SUBPATH_SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);",
         "",
@@ -1301,12 +1301,14 @@ try {
     join(minimalSpreadsheetRoot, "dist", "spreadsheet-artifact.js"),
     "utf8",
   );
-  if (!spreadsheetOnlyBundle.includes("This workbook has no worksheets.")) {
+  if (!spreadsheetOnlyBundle.includes("og-spreadsheet-canvas")) {
     throw new Error("Spreadsheet-only packed consumer did not include its editor runtime");
   }
+  // Code-only markers: every consumer carries the default English message catalog,
+  // so user-facing text such as "Document editor" no longer proves a modality leaked.
   for (const forbidden of [
     "DocumentArtifactSurface",
-    "Document editor",
+    "og-document-editor",
     "PresentationArtifactSurface",
     "presentation-selection",
   ]) {
@@ -1358,7 +1360,7 @@ try {
   for (const forbidden of [
     "function OpenGeniProvider",
     "streamWorkspaceControlEvents",
-    "Opengeni updated",
+    // Provider code only; its "Opengeni updated" text lives in the shared catalog.
     "data-opengeni-api-contract-mismatch",
     "react/jsx-runtime",
     "@uiw/react-codemirror",

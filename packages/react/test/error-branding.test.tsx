@@ -27,6 +27,9 @@ import { useComposer, type ComposerControllerState } from "../src/hooks/use-comp
 import { conversationTimeline } from "../src/conversation-timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -511,7 +514,7 @@ describe("native branded-host error paths", () => {
       const [value, setValue] = useState("/compact");
       const [notice, setNotice] = useState<Notice | null>(null);
       command = useSlashCommands({
-        commands: defaultCommands,
+        commands: defaultCommands(englishText),
         context: {
           client: sdk,
           workspaceId: WORKSPACE_ID,
@@ -827,7 +830,8 @@ describe("native branded-host error paths", () => {
       });
       expect(uploads.hasUnresolved).toBe(true);
       expect(uploads.readyResources).toEqual([]);
-      expect(failure.message).toContain("Opengeni");
+      expect(failure.message).toContain("this page is open over HTTP");
+      expect(failure.message).not.toMatch(/opengeni/i);
     } finally {
       await view.unmount();
     }

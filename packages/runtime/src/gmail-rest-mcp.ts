@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import PostalMime, { addressParser, decodeWords } from "postal-mime";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import { connectorAttachmentFileName } from "./connector-attachments";
 import {
   GMAIL_EXTRA_TOOLS,
   GMAIL_EXTRA_MUTATIONS,
@@ -568,7 +569,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         .replaceAll("\u0000", "")
         .replace(/\p{Surrogate}/gu, "�")
         .slice(0, 256);
-    const describe = async (id: string) => {
+    const describe = async (id: string, skippable: (error: unknown) => boolean) => {
       const url = new URL(
         `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(requiredId(id, "messageId"))}`,
       );
@@ -579,7 +580,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       try {
         message = await this.request<GmailMessage>("get_message", url, {}, true);
       } catch (error) {
-        if (error instanceof GmailRestProviderError && error.status === 404) return null;
+        if (skippable(error)) return null;
         throw error;
       }
       if (message.id !== id)
@@ -594,11 +595,28 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         provenance: "provider_metadata" as const,
       };
     };
-    // The card's samples are required review facts and fail closed.
-    const samples = await Promise.all(selected.slice(0, SAMPLE_LABELS).map(describe));
+    // Samples only enrich the review card. A message Gmail cannot read for
+    // the card (missing, malformed id, rate limit, outage, transport) is
+    // left out, and the action itself reports any real problem when it
+    // runs. Authentication and access refusals still fail closed: the
+    // grant cannot act on this message either.
+    const samples = await Promise.all(
+      selected
+        .slice(0, SAMPLE_LABELS)
+        .map((id) =>
+          describe(
+            id,
+            (error) =>
+              error instanceof GmailRestProviderError &&
+              error.status !== 401 &&
+              error.status !== 403,
+          ),
+        ),
+    );
     // The rest only label the full list in details, so they are best effort:
-    // bounded concurrency and time, and the first failure (often a rate
-    // limit) stops further reads and leaves the remaining rows as ids.
+    // bounded concurrency and time. A missing message is skipped; any other
+    // failure (often a rate limit) stops further reads and leaves the
+    // remaining rows as ids.
     const rest: Array<Awaited<ReturnType<typeof describe>>> = [];
     const queue = selected.slice(SAMPLE_LABELS);
     const deadline = Date.now() + SELECTION_LABELS_BUDGET_MS;
@@ -609,7 +627,10 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         while (!stopped && next < queue.length && Date.now() < deadline) {
           const index = next++;
           try {
-            rest[index] = await describe(queue[index]!);
+            rest[index] = await describe(
+              queue[index]!,
+              (error) => error instanceof GmailRestProviderError && error.status === 404,
+            );
           } catch {
             stopped = true;
           }
@@ -1774,6 +1795,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         );
       throw new GmailRestProviderError(
         `Gmail returned an unreadable response (${response.status}): ${safeErrorMessage(error)}`,
+        // Keep a refusal's status even when its body is not JSON, so 401/403
+        // are still recognized as authentication and access refusals.
+        response.ok ? undefined : response.status,
       );
     });
     if (!response.ok) {
@@ -2314,21 +2338,7 @@ function isTextBody(part: GmailPart): boolean {
     ["text/plain", "text/html"].includes(part.mimeType ?? "")
   );
 }
-function safeFileName(value: string): string {
-  let name = value
-    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/gu, "_")
-    .replace(/[ .]+$/u, "")
-    .trim();
-  if (
-    !name ||
-    name === "." ||
-    name === ".." ||
-    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)
-  )
-    name = "attachment.bin";
-  while (Buffer.byteLength(name) > 240) name = [...name].slice(0, -1).join("");
-  return name;
-}
+const safeFileName = (value: string): string => connectorAttachmentFileName(value);
 function mailboxAddress(value: string): string {
   if (/[\r\n\u0000]/u.test(value))
     throw new GmailRestInputError("Email address contains an invalid header character");

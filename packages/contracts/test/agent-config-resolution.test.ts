@@ -333,7 +333,8 @@ describe("write-through", () => {
         (tool) =>
           !tool.startsWith("browser_") &&
           !tool.startsWith("computer_") &&
-          !tool.startsWith("interaction_"),
+          !tool.startsWith("interaction_") &&
+          !tool.startsWith("excel_"),
       ),
     );
     expect(Object.keys(limits.unavailable)).toEqual(["browser"]);

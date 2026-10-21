@@ -71,6 +71,7 @@ function coreFixture() {
         return [];
       }
       if (/set local/.test(query.sql)) return [];
+      if (query.sql.includes("append_subscription_usage_reading")) return [];
       if (/select id,/.test(query.sql)) {
         expect(query.sql).toContain("disconnected_at is null");
         const result = disconnected ? [] : [{ ...row }];

@@ -16,6 +16,7 @@ import {
   pierreDiffsRevision,
   subscribePierreDiffs,
 } from "../lib/pierre-diffs-loader";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Pierre `PatchDiff` props subset we drive. */
 type PatchDiffComponent = ComponentType<{
@@ -208,7 +209,8 @@ export function PierreDiff({
 }
 
 function DiffSkeleton() {
-  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading diff…</div>;
+  const t = useOpenGeniText();
+  return <div className="p-3 text-og-sm text-og-fg-subtle">{t("pierreDiff.loadingDiff")}</div>;
 }
 
 /**
@@ -217,15 +219,16 @@ function DiffSkeleton() {
  * structured hunk renderer — the workbench keeps exactly one of those (Pierre).
  */
 function PlainPatch({ diff }: { diff: GitFileDiff[] }) {
+  const t = useOpenGeniText();
   if (diff.length === 0) {
-    return <div className="p-3 text-og-sm text-og-fg-subtle">No changes</div>;
+    return <div className="p-3 text-og-sm text-og-fg-subtle">{t("pierreDiff.noChanges")}</div>;
   }
   return (
     <div className="min-w-0">
       {diff.map((file) => (
         <pre
           key={file.path}
-          aria-label={`Diff for ${file.path}`}
+          aria-label={t("pierreDiff.diffForPath", { path: file.path })}
           className="mb-2 overflow-auto whitespace-pre rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-og-xs leading-5"
           role="region"
           tabIndex={0}

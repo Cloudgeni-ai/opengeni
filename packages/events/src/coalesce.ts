@@ -10,6 +10,19 @@ const COALESCIBLE_DELTA_TYPES = new Set([
 export const SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES = 48 * 1024;
 const encoder = new TextEncoder();
 
+/**
+ * Some providers stream each reasoning summary part as its own delta
+ * ("**Checking the workspace**", then "**Inspecting guidance**"). Readers join
+ * reasoning fragments with this separator, so a part that opens bold right
+ * after one that closed bold starts a new paragraph instead of colliding
+ * ("****"). Every place that merges reasoning fragments (the worker's
+ * write-time merge, this read-side coalescer, the React projection) must use
+ * the same rule, so the rendered text never depends on fragment boundaries.
+ */
+export function reasoningDeltaSeparator(previous: string, next: string): string {
+  return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";
+}
+
 export type CoalescedSessionEventPage = {
   events: SessionEvent[];
   /** Durable raw sequence covered by each returned synthetic event sequence. */
@@ -99,12 +112,15 @@ export function coalesceSessionEventDeltasWithCoverage(
       run.messageId === messageId &&
       run.phase === phase
     ) {
-      const textBytes = encoder.encode(text).byteLength;
+      const piece =
+        (event.type === "agent.reasoning.delta" ? reasoningDeltaSeparator(run.text, text) : "") +
+        text;
+      const textBytes = encoder.encode(piece).byteLength;
       if (
         (run.textBytes === 0 && textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES) ||
         run.textBytes + textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
       ) {
-        run.text += text;
+        run.text += piece;
         run.textBytes += textBytes;
         run.lastSequence = storedCoverageEnd(event);
         continue;

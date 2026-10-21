@@ -82,7 +82,10 @@ describe("Slack API-backed MCP pilot", () => {
       authority: "connection",
       toolSurface: "static_reviewed",
       mutationReplay: "safe_reads_only",
-      destinations: [{ origin: "https://slack.com", pathPrefix: "/api/" }],
+      destinations: [
+        { origin: "https://slack.com", pathPrefix: "/api/" },
+        { origin: "https://files.slack.com", pathPrefix: "/files-pri/" },
+      ],
     });
   });
 
@@ -113,6 +116,7 @@ describe("Slack API-backed MCP pilot", () => {
       "slack_get_user_info",
       "slack_read_channel",
       "slack_read_thread",
+      "slack_download_file",
       "slack_open_dm",
       "slack_send_message",
     ]);
@@ -621,5 +625,258 @@ describe("Slack API-backed MCP pilot", () => {
     await expect(
       slack.callToolResult("slack_send_message", { channel: "C123", text: "hello" }),
     ).rejects.toMatchObject({ outcome: "unknown", retryable: false });
+  });
+});
+
+describe("Slack file download", () => {
+  const operationId = "6f1c1f5e-2f4b-4c7a-9a7e-1d2c3b4a5f60";
+  const meta = { opengeniOperationId: operationId };
+  const fileUrl = "https://files.slack.com/files-pri/T123-F0ABC/download/report.pdf";
+  const pdf = new TextEncoder().encode("%PDF-1.7 exact bytes");
+  const fileInfo = (overrides: Record<string, unknown> = {}) => ({
+    ok: true,
+    file: {
+      id: "F0ABC",
+      name: "report.pdf",
+      title: "Report",
+      mimetype: "application/pdf",
+      size: pdf.byteLength,
+      url_private: fileUrl.replace("/download", ""),
+      url_private_download: fileUrl,
+      ...overrides,
+    },
+  });
+  function downloadServer(input: {
+    info?: Record<string, unknown>;
+    file?: (url: URL, init?: RequestInit) => Response;
+    scopes?: string[];
+  }) {
+    const destinations: string[] = [];
+    const fetched: Array<{ url: string; authorization: string | null; redirect?: string }> = [];
+    const materialized: Array<Record<string, unknown>> = [];
+    const slack = server({
+      resolveCredential: async (request) => {
+        destinations.push(request.destinationUrl);
+        return {
+          status: "ok",
+          headers: { authorization: "Bearer user-token" },
+          connectionId: "conn_1",
+          grantedScopes: input.scopes ?? allScopes,
+        };
+      },
+      fetchImpl: async (raw, init) => {
+        const url = new URL(raw instanceof Request ? raw.url : raw.toString());
+        if (url.origin === "https://slack.com") {
+          if (method(url) === "auth.test") return Response.json(identity);
+          if (method(url) === "files.info") return Response.json(input.info ?? fileInfo());
+          throw new Error(`unexpected Slack method ${url}`);
+        }
+        fetched.push({
+          url: url.toString(),
+          authorization: new Headers(init?.headers).get("authorization"),
+          ...(init?.redirect ? { redirect: init.redirect } : {}),
+        });
+        return input.file
+          ? input.file(url, init)
+          : new Response(pdf, { headers: { "content-type": "application/pdf" } });
+      },
+      materializeConnectorFile: async (request) => {
+        materialized.push({ ...request, bytes: Buffer.from(request.bytes).toString() });
+        return {
+          attachments: [
+            {
+              providerAttachmentId: request.providerAttachmentId,
+              fileName: request.fileName,
+              mediaType: request.mediaType,
+              byteSize: request.bytes.byteLength,
+              contentSha256: "a".repeat(64),
+              sandboxPath: `.opengeni/connector-attachments/slack/${"b".repeat(32)}/${request.fileName}`,
+            },
+          ],
+        };
+      },
+    });
+    return { slack, destinations, fetched, materialized };
+  }
+
+  test("is offered only when Slack granted file access", () => {
+    expect(
+      slackRestMcpToolsForScopes(["channels:history"]).some(
+        (tool) => tool.name === "slack_download_file",
+      ),
+    ).toBe(false);
+    const [tool] = slackRestMcpToolsForScopes(["files:read"]);
+    expect(tool?.name).toBe("slack_download_file");
+    expect(tool?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true });
+    expect(OPENGENI_SLACK_REST_USER_SCOPES).toContain("files:read");
+  });
+
+  test("delivers a shared file into the workspace without exposing bytes or private URLs", async () => {
+    const { slack, destinations, fetched, materialized } = downloadServer({});
+    const result = await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta);
+    expect(result.isError).toBeUndefined();
+    expect(fetched).toEqual([
+      { url: fileUrl, authorization: "Bearer user-token", redirect: "manual" },
+    ]);
+    expect(destinations).toContain("https://slack.com/api/files.info");
+    expect(destinations).toContain(fileUrl);
+    expect(materialized).toEqual([
+      expect.objectContaining({
+        serverId: "slack",
+        toolName: "slack_download_file",
+        connectionId: "conn_1",
+        operationId,
+        providerAttachmentId: { provider: "slack", kind: "attachment", value: "file:T123:F0ABC" },
+        fileName: "report.pdf",
+        mediaType: "application/pdf",
+        bytes: "%PDF-1.7 exact bytes",
+      }),
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      file: { id: "F0ABC", name: "report.pdf", mimetype: "application/pdf", size: pdf.byteLength },
+      attachments: [
+        { sandboxPath: expect.stringMatching(/^\.opengeni\/connector-attachments\/slack\//u) },
+      ],
+    });
+    const visible = JSON.stringify(result);
+    expect(visible).not.toContain("files-pri");
+    expect(visible).not.toContain("user-token");
+    expect(visible).not.toContain("%PDF");
+  });
+
+  test("revalidates the same connection before materializing", async () => {
+    let calls = 0;
+    const { slack } = downloadServer({});
+    const original = (slack as unknown as { options: SlackRestMcpServerOptions }).options;
+    original.materializeConnectorFile = async (request) => {
+      calls++;
+      expect(await request.authorizeProviderRequest()).toBe(true);
+      return { attachments: [{}] };
+    };
+    await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta);
+    expect(calls).toBe(1);
+  });
+
+  test("refuses before any Slack request without a trusted operation or filesystem", async () => {
+    const { slack, fetched, materialized } = downloadServer({});
+    for (const untrusted of [undefined, {}, { opengeniOperationId: "not-a-uuid" }]) {
+      const result = await slack.callToolResult(
+        "slack_download_file",
+        { file: "F0ABC" },
+        untrusted,
+      );
+      expect(result).toMatchObject({ isError: true });
+    }
+    const withoutFilesystem = server({
+      fetchImpl: async () => {
+        throw new Error("must not reach Slack");
+      },
+    });
+    expect(
+      await withoutFilesystem.callToolResult("slack_download_file", { file: "F0ABC" }, meta),
+    ).toMatchObject({
+      isError: true,
+      content: [
+        { text: "Slack file download requires an available agent filesystem in this chat." },
+      ],
+    });
+    expect(
+      await slack.callToolResult("slack_download_file", { file: "../F0ABC" }, meta),
+    ).toMatchObject({ isError: true, content: [{ text: "file must be a Slack file ID" }] });
+    expect(fetched).toEqual([]);
+    expect(materialized).toEqual([]);
+  });
+
+  test("never sends the user token to a file URL outside Slack's private file host", async () => {
+    for (const url of [
+      "https://evil.test/files-pri/T123-F0ABC/download/report.pdf",
+      "https://files.slack.com.evil.test/files-pri/T123-F0ABC/report.pdf",
+      "https://files.slack.com/other/report.pdf",
+      "http://files.slack.com/files-pri/T123-F0ABC/report.pdf",
+    ]) {
+      const { slack, fetched } = downloadServer({
+        info: fileInfo({ url_private_download: url, url_private: url }),
+      });
+      const result = await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta);
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ text: "Slack did not provide a downloadable copy of this file." }],
+      });
+      expect(fetched).toEqual([]);
+    }
+  });
+
+  test("reports missing access instead of saving Slack's sign-in page", async () => {
+    const signIn = downloadServer({
+      file: () =>
+        new Response("<html>sign in</html>", { headers: { "content-type": "text/html" } }),
+    });
+    const redirect = downloadServer({
+      file: () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://slack.com/?redir=%2Ffiles-pri%2FT123-F0ABC" },
+        }),
+    });
+    for (const { slack, materialized } of [signIn, redirect]) {
+      expect(
+        await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta),
+      ).toMatchObject({
+        isError: true,
+        content: [
+          {
+            text: "Slack did not return the file. The connected account may not have access to it.",
+          },
+        ],
+      });
+      expect(materialized).toEqual([]);
+    }
+    expect(redirect.fetched).toHaveLength(1);
+  });
+
+  test("follows one redirect within the private file host only", async () => {
+    const next = "https://files.slack.com/files-pri/T123-F0ABC/report.pdf?origin=1";
+    const { slack, fetched, materialized } = downloadServer({
+      file: (url) =>
+        url.toString() === fileUrl
+          ? new Response(null, { status: 302, headers: { location: next } })
+          : new Response(pdf, { headers: { "content-type": "application/pdf" } }),
+    });
+    const result = await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta);
+    expect(result.isError).toBeUndefined();
+    expect(fetched.map((entry) => entry.url)).toEqual([fileUrl, next]);
+    expect(materialized).toHaveLength(1);
+  });
+
+  test("rejects external, deleted and oversized files without downloading", async () => {
+    for (const [overrides, text] of [
+      [
+        { is_external: true },
+        "This Slack file is a link to an external service, so Slack has no copy to download.",
+      ],
+      [{ mode: "tombstone" }, "This Slack file was deleted."],
+      [{ size: 50 * 1024 * 1024 + 1 }, "Slack file exceeds the 50 MiB download limit."],
+    ] as const) {
+      const { slack, fetched } = downloadServer({ info: fileInfo(overrides) });
+      expect(
+        await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta),
+      ).toMatchObject({ isError: true, content: [{ text }] });
+      expect(fetched).toEqual([]);
+    }
+  });
+
+  test("is unavailable to a grant without file access", async () => {
+    const { slack, fetched } = downloadServer({ scopes: ["channels:history"] });
+    expect(
+      await slack.callToolResult("slack_download_file", { file: "F0ABC" }, meta),
+    ).toMatchObject({
+      isError: true,
+      content: [
+        {
+          text: "Slack has not granted access to slack_download_file. Reconnect to grant the required permissions.",
+        },
+      ],
+    });
+    expect(fetched).toEqual([]);
   });
 });

@@ -17,17 +17,22 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@opengeni/react/ui/tooltip";
 import { ProblemPanel } from "@/components/common";
 import { useAppContext } from "@/context";
 import { isApiErrorStatus } from "@/api";
@@ -657,10 +662,7 @@ export function SessionTenancyControl({
           classified.retainAttempt ||
           (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
         if (!retainAttempt) operationController.settleFork(operationScope, attempt);
-        const message =
-          sourceEventId && isApiErrorStatus(error, 400)
-            ? "This message cannot be used as a fork point. Its history may have been compacted, or it may not have a unique, complete saved boundary. Choose another message or fork the whole session."
-            : classified.message;
+        const message = classified.message;
         setFailure(message);
         setAnnouncement(message);
         return sourceEventId ? false : !retainAttempt;
@@ -715,17 +717,22 @@ export function SessionTenancyControl({
   const retryingFork = pendingFork !== null;
   const stateChip = (
     // Phones show just the icon (a 44px target, no chip chrome); the labelled
-    // chip with its chevron returns from sm.
-    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full text-xs font-medium text-fg pointer-coarse:min-h-11 max-sm:min-w-8 max-sm:justify-center max-sm:pointer-coarse:min-w-11 sm:border sm:border-border sm:bg-surface/55 sm:px-2.5">
+    // chip with its chevron returns from sm. A narrow title bar (a small app
+    // window beside the sidebar) also gets just the icon, so the title keeps
+    // its room.
+    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full text-xs font-medium text-fg pointer-coarse:min-h-11 max-sm:min-w-8 max-sm:justify-center max-sm:pointer-coarse:min-w-11 sm:border sm:border-border sm:bg-surface/55 sm:px-2.5 @max-[34rem]/titlebar:min-w-8! @max-[34rem]/titlebar:justify-center @max-[34rem]/titlebar:border-0! @max-[34rem]/titlebar:bg-transparent! @max-[34rem]/titlebar:px-0!">
       {privateSession ? (
         <LockKeyholeIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
       ) : (
         <UsersIcon className="size-3.5 shrink-0 text-fg-muted" aria-hidden="true" />
       )}
-      <span className="hidden sm:inline">{stateLabel}</span>
+      <span className="hidden sm:inline @max-[34rem]/titlebar:hidden!">{stateLabel}</span>
       {failure ? <CircleAlertIcon className="size-3.5 text-status-waiting" aria-hidden /> : null}
       {mayFork ? (
-        <ChevronDownIcon className="hidden size-3.5 text-fg-muted sm:block" aria-hidden />
+        <ChevronDownIcon
+          className="hidden size-3.5 text-fg-muted sm:block @max-[34rem]/titlebar:hidden!"
+          aria-hidden
+        />
       ) : null}
     </span>
   );

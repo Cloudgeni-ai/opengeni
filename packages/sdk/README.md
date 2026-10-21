@@ -1115,6 +1115,27 @@ never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
 `MessagePort` that exposes only the retained tool allowlist intersected with the
 current viewer's live workspace catalog.
 
+Site AI can return directly into an app without any conversation UI:
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+const site = createOpenGeniSiteClient();
+const result = await site.ai.run({ initialMessage: appPrompt, idempotencyKey: actionId });
+if (result.status === "completed") renderResult(result.text);
+```
+
+The app defines the prompt, context and output presentation. This helper uses
+native sessions and events with the same permissions, approvals, model access
+and billing; it is not a second executor. New Site work is private per viewer
+and excluded from ordinary workspace discovery. `pending` and `cancelled` are
+not successful results; model failure rejects. Retain the `onSession` handle
+to observe again using `site.ai.result(id, { turnId })`, without creating work.
+An `after` cursor returns only subsequent output; omit it for full replay.
+Aborting observation does not cancel native execution. See
+[`site-conversations.md`](../../docs/site-conversations.md) and
+[`site-session-embed`](../../examples/site-session-embed) for optional chat and
+headless inline examples. Do not store private handles in shared Site Data.
+
 ```ts
 let cursor: string | undefined;
 do {
@@ -1389,8 +1410,17 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 ## Messages, the turn queue, and steering
 
 Messages sent while a turn is running **queue by default** — visible,
-editable, reorderable, and deletable until the worker claims them. Steering is
-the explicit alternative: deliver now by interrupting the running turn.
+editable, reorderable, and deletable until the worker claims them, and they run
+after the whole running turn. Steering is the explicit alternative: the running
+turn reads the message within seconds and nothing in progress is killed. A
+model answer still being written is cut short (its completed text stays), short
+tool calls finish, and long command or session waits return early while the
+work keeps running. The turn then hands over (`turn.superseded` with reason
+`steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
+and the Steer runs next with the full history. The session screens show it
+only as the person's message, and the queue snapshot does not list it.
+`steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
+returned stops the running attempt now instead, including tool calls in flight.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1399,9 +1429,17 @@ await client.sendMessage(workspaceId, sessionId, {
   clientEventId: crypto.randomUUID(),
 });
 
-// Steer: send + promote to the queue front + interrupt the running turn.
-await client.steerMessage(workspaceId, sessionId, {
+// Steer: send + promote to the queue front; read within seconds.
+const steered = await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
+  clientEventId: crypto.randomUUID(),
+});
+
+// Hard interrupt: stop the running attempt for that Steer now, including
+// tool calls in flight (rarely needed; the Steer is read within seconds).
+await client.steerQueueItem(workspaceId, sessionId, steered.turn.id, {
+  expectedTurnVersion: steered.turn.version,
+  interrupt: true,
   clientEventId: crypto.randomUUID(),
 });
 

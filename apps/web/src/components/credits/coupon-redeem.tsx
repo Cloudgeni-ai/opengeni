@@ -3,9 +3,9 @@ import { notifyCreditBalanceChanged } from "@/lib/credit-balance-events";
 import { ArrowUpRightIcon, Loader2Icon, TicketIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { userErrorTextWithoutReference } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import {
   openCheckoutTab,
   startCreditCheckout,

@@ -826,7 +826,7 @@ describe("allowance HTTP contract", () => {
     ] as const)
       expect(
         workspaceActorContextExempt(method, `/v1/workspaces/external/host/customer${suffix}`),
-      ).toBe(true);
+      ).toBe(false);
     expect(workspaceActorContextExempt("POST", "/v1/workspaces/external/host/customer/usage")).toBe(
       false,
     );

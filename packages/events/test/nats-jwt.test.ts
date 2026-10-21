@@ -32,6 +32,79 @@ function headerOf(jwt: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(jwt.split(".")[0]!, "base64url").toString("utf8"));
 }
 
+function expectLegacySignature(jwt: string, seed: string): void {
+  const [header, payload] = jwt.split(".");
+  const input = `${header}.${payload}`;
+  const signature = nkeys.fromSeed(Buffer.from(seed)).sign(Buffer.from(input));
+  // Ed25519 is deterministic: the entire JWT, not just successful verification,
+  // must equal the old pure-JS signer's output for the unchanged signing input.
+  expect(jwt).toBe(`${input}.${Buffer.from(signature).toString("base64url")}`);
+}
+
+describe("native Ed25519 signing", () => {
+  test("user, grant and denial signatures are byte-identical to nkeys across seeds and payloads", () => {
+    for (let index = 0; index < 4; index++) {
+      const accountSeed = freshAccountSeed();
+      const userPublicKey = freshUserPublicKey();
+      for (const name of ["agent", "æøå 日本語 👋", "a".repeat(2048)]) {
+        const userJwt = mintUserJwt({
+          accountSeed,
+          userPublicKey,
+          name,
+          permissions: workspaceAgentPermissions(WS),
+          audienceAccount: "APP",
+          expiresAtSeconds: 2_000_000_000,
+        });
+        expectLegacySignature(userJwt, accountSeed);
+        expectLegacySignature(
+          mintAuthResponse({ accountSeed, userPublicKey, serverId: "server", userJwt }),
+          accountSeed,
+        );
+        expectLegacySignature(
+          mintAuthResponse({ accountSeed, userPublicKey, serverId: "server", error: "denied" }),
+          accountSeed,
+        );
+      }
+    }
+  });
+
+  test("repeated and rotated seeds always use the correct signer, including after a failed import", () => {
+    const first = freshAccountSeed(),
+      second = freshAccountSeed();
+    const input = { userPublicKey: freshUserPublicKey(), serverId: "server", error: "denied" };
+    const a = mintAuthResponse({ ...input, accountSeed: first });
+    expectLegacySignature(mintAuthResponse({ ...input, accountSeed: first }), first);
+    const b = mintAuthResponse({ ...input, accountSeed: second });
+    expect(() => mintAuthResponse({ ...input, accountSeed: "invalid" })).toThrow();
+    expectLegacySignature(mintAuthResponse({ ...input, accountSeed: second }), second);
+    const aAgain = mintAuthResponse({ ...input, accountSeed: first });
+    expectLegacySignature(a, first);
+    expectLegacySignature(b, second);
+    expectLegacySignature(aAgain, first);
+    expect(payloadOf(a).iss).not.toBe(payloadOf(b).iss);
+  });
+
+  test("preserves malformed/checksum/curve-seed rejection", () => {
+    const seed = freshAccountSeed();
+    const corrupted = `${seed.slice(0, 10)}${seed[10] === "A" ? "B" : "A"}${seed.slice(11)}`;
+    for (const accountSeed of [
+      "invalid",
+      corrupted,
+      freshUserPublicKey(),
+      new TextDecoder().decode(nkeys.createCurve().getSeed()),
+    ]) {
+      expect(() =>
+        mintAuthResponse({
+          accountSeed,
+          userPublicKey: "user",
+          serverId: "server",
+          error: "denied",
+        }),
+      ).toThrow();
+    }
+  });
+});
+
 describe("nats-jwt encoding", () => {
   test("a user JWT has the canonical NATS v2 header + claims shape", () => {
     const accountSeed = freshAccountSeed();

@@ -26,6 +26,8 @@ const initialVoiceActive = params.get("voice") === "active";
 const hostBranding = params.get("branding") === "host";
 const openGeniBranding = params.get("branding") === "opengeni";
 const deploymentModelsRequested = params.get("models") === "deployment";
+// `?speed=ultrafast` adds an Ultrafast tier, so the picker shows its Speed choice.
+const ultrafastRequested = params.get("speed") === "ultrafast";
 const widths = [280, 320, 360, 390, 420, 640, 768] as const;
 const client = new MockOpenGeniClient();
 
@@ -76,6 +78,16 @@ const models: ClientModel[] = [
       latencyModes: [
         { id: "standard", upstream: "supported", runnable: true },
         { id: "fast", upstream: "supported", runnable: true },
+        ...(ultrafastRequested
+          ? [
+              {
+                id: "ultrafast" as const,
+                upstream: "supported" as const,
+                runnable: true,
+                billingMultiplierBps: 60_000,
+              },
+            ]
+          : []),
       ],
     },
   },
@@ -184,7 +196,9 @@ function ResponsiveComposerHarness() {
       : models[0]!.id,
   );
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>("fast");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>(
+    ultrafastRequested ? "ultrafast" : "fast",
+  );
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const composer = useMemo<ComposerState>(

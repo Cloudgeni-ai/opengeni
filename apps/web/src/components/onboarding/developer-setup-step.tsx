@@ -4,13 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
-import { Button } from "@/components/ui/button";
-import { useCopyToClipboard } from "@/components/ui/copy-field";
-import { Disclosure } from "@/components/ui/disclosure";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Skeleton } from "@/components/ui/skeleton";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { useCopyToClipboard } from "@opengeni/react/ui/copy-field";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   DEVELOPER_SETUP_INITIAL_MESSAGE,

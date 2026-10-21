@@ -1,26 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { FileAsset, RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
 import { PatchApplyCommand, isPatchFilename } from "@opengeni/react/artifacts";
-import { DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { DownloadIcon, LockKeyholeIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
-import { RetainedFilePreview } from "@/components/artifacts/retained-file-preview";
-import { ContentPage } from "@/components/ui/content-layout";
-import { Button } from "@/components/ui/button";
+import { ArtifactFullView } from "@/components/artifacts/artifact-full-view";
+import {
+  RetainedFilePreview,
+  retainedPreviewKind,
+} from "@/components/artifacts/retained-file-preview";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
 import { CopyableMono } from "@/components/common";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
+  useArtifactFullView,
 } from "@/components/artifacts/artifact-page-chrome";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
-import { retainedArtifactLoadErrorPresentation } from "@/lib/retained-artifact-load-error";
+import {
+  isPrivateFileLoadError,
+  retainedArtifactLoadErrorPresentation,
+} from "@/lib/retained-artifact-load-error";
+import { FILE_AUDIENCE_COPY, useArtifactAudience } from "@/components/artifacts/site-audience";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
 
 export function RetainedArtifactRoute({
   workspaceId,
@@ -68,14 +80,18 @@ function RetainedArtifactDetail({
   fromSession?: string;
   embedded: boolean;
 }) {
-  const { client, accessKeyVersion } = useAppContext();
+  const context = useAppContext();
+  const { client, accessKeyVersion } = context;
   const back = useArtifactsBackLink(workspaceId, fromSession);
+  const [fullView, setFullView] = useArtifactFullView();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
   const [state, setState] = useState<{
     key: string;
     client: typeof client;
     artifact?: RetainedArtifactReference;
     filename?: string;
+    /** The workspace file behind it, when there is one: who can open it. */
+    file?: FileAsset;
     error?: Error;
   } | null>(null);
   const [retry, setRetry] = useState(0);
@@ -95,12 +111,13 @@ function RetainedArtifactDetail({
         if (!current) return;
         if (!artifact.available || artifact.artifactId !== artifactId)
           throw new Error("This artifact is no longer available.");
+        const own = file?.id === artifactId && file.workspaceId === workspaceId ? file : undefined;
         setState({
           key,
           client,
           artifact,
-          filename:
-            file?.id === artifactId && file.workspaceId === workspaceId ? file.filename : undefined,
+          filename: own?.filename,
+          ...(own ? { file: own } : {}),
         });
       })
       .catch((error: unknown) => {
@@ -120,6 +137,42 @@ function RetainedArtifactDetail({
   const artifact = loaded?.artifact;
   const filename =
     loaded?.filename || (artifact?.contentType.startsWith("image/") ? "Image" : "Artifact");
+  // Only a file with something to look at has a full view; the rest open on
+  // their page, where Download is.
+  const expandable =
+    !embedded &&
+    artifact !== undefined &&
+    retainedPreviewKind(artifact.contentType, loaded?.filename) !== null;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  // A Personal workspace has nobody to share with, so there is no audience.
+  // Session screenshots and saved tool output stay with their chat.
+  const file = loaded?.file;
+  const showAudience =
+    file !== undefined &&
+    file.scope !== undefined &&
+    artifact?.kind !== "computer_screenshot" &&
+    artifact?.kind !== "browser_screenshot" &&
+    artifact?.kind !== "tool_result" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const audience = useArtifactAudience({
+    client,
+    workspaceId,
+    workspaceName: workspace?.name ?? "this workspace",
+    title: filename,
+    visibility: file?.scope === "personal" ? "private" : "workspace",
+    ownedByCurrentUser: Boolean(
+      showAudience &&
+      file?.ownerSubjectId &&
+      file.ownerSubjectId === context.accessContext.subjectId &&
+      hasWorkspacePermission(context.accessContext, workspaceId, "files:upload"),
+    ),
+    copy: FILE_AUDIENCE_COPY,
+    update: async (visibility) => {
+      const response = await client.updateFileVisibility(workspaceId, artifactId, { visibility });
+      setState((current) => (current?.key === key ? { ...current, file: response.file } : current));
+      invalidateArtifactCatalog(client, workspaceId);
+    },
+  });
   const patchLoader = useMemo(
     () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
     [client, workspaceId],
@@ -150,28 +203,69 @@ function RetainedArtifactDetail({
       if (generation === downloads.generation) setDownloading(false);
     }
   };
+  const downloadButton = artifact ? (
+    <RowButton onClick={() => void download()} disabled={downloading}>
+      <DownloadIcon aria-hidden="true" />
+      {downloading ? "Opening…" : artifact.kind === "generated_video" ? "Open video" : "Download"}
+    </RowButton>
+  ) : null;
+  const downloadNotice =
+    artifact && downloadError ? (
+      <Notice
+        tone="failed"
+        live="assertive"
+        className="mt-6"
+        title={
+          artifact.kind === "generated_video"
+            ? "Couldn't open the video"
+            : "Couldn't download the file"
+        }
+      >
+        {downloadError}
+      </Notice>
+    ) : null;
+  const preview = artifact ? (
+    <RetainedFilePreview
+      workspaceId={workspaceId}
+      artifact={artifact}
+      title={filename}
+      filename={loaded?.filename}
+      workbenchTextPreview={embedded}
+      fullSize
+    />
+  ) : null;
   const header = artifact ? (
     <DetailPageHeader
       leading={
         <ArtifactKindTile kind={artifact.contentType.startsWith("image/") ? "image" : "file"} />
       }
       title={filename}
+      chips={showAudience ? audience.chip : null}
       meta={[
         fileTypeLabel(artifact.contentType, loaded?.filename),
         formatBytes(artifact.originalBytes),
       ]}
       actions={
-        <RowButton onClick={() => void download()} disabled={downloading}>
-          <DownloadIcon aria-hidden="true" />
-          {downloading
-            ? "Opening…"
-            : artifact.kind === "generated_video"
-              ? "Open video"
-              : "Download"}
-        </RowButton>
+        <>
+          {showAudience ? audience.shareButton : null}
+          {expandable ? (
+            <RowButton onClick={() => setFullView(true)}>
+              <Maximize2Icon aria-hidden="true" />
+              Full screen
+            </RowButton>
+          ) : null}
+          {downloadButton}
+        </>
       }
     />
   ) : null;
+  if (expandable && fullView)
+    return (
+      <ArtifactFullView title={filename} onBack={() => setFullView(false)} actions={downloadButton}>
+        {downloadNotice ? <div className="mb-4 [&>*]:mt-0">{downloadNotice}</div> : null}
+        {preview}
+      </ArtifactFullView>
+    );
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={embedded ? undefined : back}>
@@ -198,20 +292,7 @@ function RetainedArtifactDetail({
         {artifact ? (
           <>
             {header}
-            {downloadError ? (
-              <Notice
-                tone="failed"
-                live="assertive"
-                className="mt-6"
-                title={
-                  artifact.kind === "generated_video"
-                    ? "Couldn't open the video"
-                    : "Couldn't download the file"
-                }
-              >
-                {downloadError}
-              </Notice>
-            ) : null}
+            {downloadNotice}
             {artifact.kind === "file" && loaded?.filename && isPatchFilename(loaded.filename) ? (
               <div className="mt-6">
                 <PatchApplyCommand
@@ -222,17 +303,11 @@ function RetainedArtifactDetail({
               </div>
             ) : null}
             <div className="mt-6 min-h-48 min-w-0 rounded-[14px] bg-surface-2 p-4 max-sm:p-2">
-              <RetainedFilePreview
-                workspaceId={workspaceId}
-                artifact={artifact}
-                title={filename}
-                filename={loaded?.filename}
-                workbenchTextPreview={embedded}
-                fullSizeImage
-              />
+              {preview}
             </div>
           </>
         ) : null}
+        {showAudience ? audience.dialog : null}
       </DetailPage>
     </ContentPage>
   );
@@ -265,10 +340,14 @@ function formatBytes(bytes: number): string {
 
 function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const presentation = retainedArtifactLoadErrorPresentation(error);
+  // Someone else's Only me file is not a failure: it is private, and its
+  // owner can share it. Nothing about the file itself is shown.
+  const privateFile = isPrivateFileLoadError(error);
   return (
     <Notice
-      tone="failed"
-      live="assertive"
+      tone={privateFile ? "info" : "failed"}
+      live={privateFile ? "polite" : "assertive"}
+      {...(privateFile ? { icon: <LockKeyholeIcon className="size-4" aria-hidden /> } : {})}
       title={presentation.title}
       actionLayout="responsive"
       action={

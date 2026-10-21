@@ -3,6 +3,7 @@ export type ComposerSendBlocker =
   | "repository"
   | "policy"
   | "personal_decision"
+  | "machine_permission"
   | "personal_loading";
 export function getComposerSendBlocker(input: {
   uploadPending: boolean;
@@ -10,10 +11,12 @@ export function getComposerSendBlocker(input: {
   policyValid: boolean;
   personalDecision: boolean;
   personalLoading: boolean;
+  machineAccessDenied?: boolean;
 }): ComposerSendBlocker | null {
   if (input.uploadPending) return "upload";
   if (input.repositoryError !== null) return "repository";
   if (!input.policyValid) return "policy";
+  if (input.machineAccessDenied) return "machine_permission";
   if (input.personalDecision) return "personal_decision";
   if (input.personalLoading) return "personal_loading";
   return null;

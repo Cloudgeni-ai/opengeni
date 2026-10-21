@@ -21,7 +21,7 @@ type Qa = {
   saves: Array<{ scenario: string; limitMicros: number | null; expectedVersion: number }>;
   reads: Record<string, number>;
   failNext: Record<string, string>;
-  failReads: Record<string, number>;
+  readOutage: Record<string, boolean>;
   saveOps: Array<{ scenario: string; operationId: string }>;
   saveDelayMs: number;
   sends: number;
@@ -80,7 +80,7 @@ async function load(query = "") {
 }
 
 const qa = () => page.evaluate(() => (window as unknown as { usageQa: Qa }).usageQa);
-const steer = (patch: Partial<Pick<Qa, "failNext" | "failReads" | "saveDelayMs">>) =>
+const steer = (patch: Partial<Pick<Qa, "failNext" | "readOutage" | "saveDelayMs">>) =>
   page.evaluate((next) => {
     Object.assign((window as unknown as { usageQa: Qa }).usageQa, next);
   }, patch);
@@ -122,6 +122,16 @@ async function capture(name: string, target?: Locator) {
 
 // Every axe rule runs on every scan; there is no rule waiver.
 async function expectNoAxeViolations(include = "main") {
+  // Re-enabled controls still fade out of their disabled opacity. Audit the
+  // settled state, not a transient frame whose DOM already says "enabled".
+  await page.locator(include).evaluate(async (root) => {
+    await Promise.allSettled(
+      root
+        .getAnimations({ subtree: true })
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map((animation) => animation.finished),
+    );
+  });
   const results = await new AxeBuilder({ page }).include(include).analyze();
   expect(
     results.violations.map((violation) => ({
@@ -287,6 +297,14 @@ test("the header menu opens the editor and keyboard-only saves return focus", as
 
 test("someone else's change while editing is a conflict: draft kept, theirs shown, retry is deliberate", async () => {
   await load();
+  // Make the disabled-to-enabled fade long enough to expose an early axe
+  // sample deterministically. The audit must wait, not waive contrast rules.
+  await page.addStyleTag({
+    content: `
+      [data-usage-limit-editor] button:disabled { transition-duration: 0s !important; }
+      [data-usage-limit-editor] button:not(:disabled) { transition-duration: 2s !important; }
+    `,
+  });
   const main = scenario("main");
   await main.getByRole("button", { name: "Change" }).click();
   const input = main.getByRole("textbox", { name: "Limit in US dollars" });
@@ -364,7 +382,7 @@ test("a failed refresh keeps the last amount and reached state, marked possibly 
   await load();
   const main = scenario("main");
   expect(await amount(main).innerText()).toBe("$12.34 of $50.00");
-  await steer({ failReads: { main: 1, reached: 1 } });
+  await steer({ readOutage: { main: true, reached: true } });
   await refocus();
   const staleNote = "Couldn't refresh, so this may be out of date. The limit still applies.";
   await main.getByText(staleNote).waitFor();
@@ -378,11 +396,23 @@ test("a failed refresh keeps the last amount and reached state, marked possibly 
   await chat.getByRole("button", { name: "Change limit" }).waitFor();
   await scenario("reached").getByText(staleNote).waitFor();
   await scenario("reached").getByText("Reached", { exact: true }).waitFor();
+  // Another focus refresh must not silently recover the fixture before the
+  // accessibility scan/screenshots and the explicit retry below.
+  const readsBeforeRefocus = (await qa()).reads.main!;
+  await refocus();
+  await page.waitForFunction(
+    (before) => (window as unknown as { usageQa: Qa }).usageQa.reads.main! > before,
+    readsBeforeRefocus,
+  );
   await expectNoAxeViolations();
   await capture("read-failure", main);
   await capture("read-failure-reached", chat.locator(".."));
+  await main.getByText(staleNote).waitFor();
+  await notice.getByText(staleNote, { exact: false }).waitFor();
+  await steer({ readOutage: {} });
   await main.getByRole("button", { name: "Try again" }).click();
   await main.getByText(staleNote).waitFor({ state: "detached" });
+  expect(await amount(main).innerText()).toBe("$12.34 of $50.00");
   expect(pageErrors).toEqual([]);
 }, 60_000);
 

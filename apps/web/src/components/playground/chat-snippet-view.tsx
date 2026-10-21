@@ -1,8 +1,8 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { useCopyToClipboard } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { useCopyToClipboard } from "@opengeni/react/ui/copy-field";
 
 import { changedLines } from "./chat-snippet";
 

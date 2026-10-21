@@ -74,6 +74,7 @@ import {
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
+  usesAgentTransport,
   verifySandboxExecReadiness,
   StreamPortUnavailableError,
   renewSandboxProviderExpiration,
@@ -284,7 +285,7 @@ export async function attachViewer(
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
           error.reason === "balance"
-            ? "insufficient Opengeni credits for an idle sandbox viewer"
+            ? "insufficient workspace credits for an idle sandbox viewer"
             : "workspace sandbox warm allowance exhausted",
         cause: error,
       });
@@ -971,6 +972,21 @@ export async function mintDesktopStream(
       return null;
     }
 
+    // A compute sandbox's agent owns its display and serves the framebuffer
+    // over the relay, fenced by the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: DESKTOP_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, resolution: defaultResolution(settings) } : null;
+    }
+
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
@@ -1237,6 +1253,21 @@ export async function mintTerminalStream(
       return null;
     }
 
+    // A compute sandbox's agent serves its terminal as a relay PTY, fenced by
+    // the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: TERMINAL_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, transport: "relay-pty" } : null;
+    }
+
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
     try {
@@ -1380,6 +1411,8 @@ async function tryMintActiveSelfhostedStream(
       if (!enrollment.workspaceRoot) return null;
       const client = new SelfhostedSandboxClient({
         workspaceId,
+        // Addressed where the machine is enrolled (it can serve other workspaces).
+        controlWorkspaceId: enrollment.workspaceId,
         workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => controlRpc(bus),

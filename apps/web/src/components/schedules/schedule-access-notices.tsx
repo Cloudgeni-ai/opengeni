@@ -1,7 +1,7 @@
 import { ShieldCheckIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 import { cn } from "@/lib/utils";
 import {
   scheduledTaskAccessFailuresText,

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronRightIcon } from "lucide-react";
 import type {
   ConnectorToolPermission,
@@ -7,11 +7,15 @@ import type {
   UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
 import { useAppContext } from "@/context";
-import { isPermissionDenied, userErrorText } from "@/lib/api-error";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -36,7 +40,9 @@ export function hasConnectorToolPermissionTarget(
     return false;
   if (item.connectionRef || item.authKind === "oauth2" || item.authKind === "api_key") {
     return (
-      (health.state === "connected" || health.state === "attention") && health.connection !== null
+      (health.state === "connected" || health.state === "attention") &&
+      health.connection !== null &&
+      health.connection.status === "active"
     );
   }
   return true;
@@ -94,9 +100,12 @@ export function ConnectorToolPermissions({
   workspaceId,
   capabilityId,
   bare = false,
+  connectionId,
 }: {
   workspaceId: string;
   capabilityId: string;
+  /** Lock this view to one explicitly selected account. */
+  connectionId?: string;
   /** Inside a page section that already names it: drop the frame and heading. */
   bare?: boolean;
 }) {
@@ -114,7 +123,11 @@ export function ConnectorToolPermissions({
     connectionId: string;
     instanceKey?: string;
   } | null>(null);
-  const selectedAccount = account?.path === basePath ? account : null;
+  const selectedAccount = useMemo<typeof account>(
+    () =>
+      connectionId ? { path: basePath, connectionId } : account?.path === basePath ? account : null,
+    [connectionId, basePath, account],
+  );
   const path = `${basePath}:${selectedAccount?.connectionId ?? ""}:${selectedAccount?.instanceKey ?? ""}`;
   const scope = useRef({ path, epoch: 0 });
   const mutationController = useRef<AbortController | null>(null);
@@ -146,13 +159,27 @@ export function ConnectorToolPermissions({
       })
       .catch((failure) => {
         if (controller.signal.aborted) return;
+        const connectionRequired =
+          failure &&
+          typeof failure === "object" &&
+          "details" in failure &&
+          (failure.details as { code?: string } | undefined)?.code ===
+            "connector_connection_required";
         setError(
-          isPermissionDenied(failure)
+          connectionRequired
             ? {
-                text: "You can't see this connector's tool permissions. Ask a workspace admin for access.",
+                text: "Connect or reconnect an account above to manage its approvals.",
                 denied: true,
               }
-            : { text: `Couldn't load tool permissions. ${userErrorText(failure)}`, denied: false },
+            : isPermissionDenied(failure)
+              ? {
+                  text: "You can't see this connector's tool permissions. Ask a workspace admin for access.",
+                  denied: true,
+                }
+              : {
+                  text: `Couldn't load tool permissions. ${userErrorText(failure)}`,
+                  denied: false,
+                },
         );
       });
     return () => controller.abort();
@@ -232,7 +259,7 @@ export function ConnectorToolPermissions({
       ) : null}
       {data ? (
         <>
-          {(data.accounts?.length ?? 0) > 1 ? (
+          {!connectionId && (data.accounts?.length ?? 0) > 1 ? (
             <div className="space-y-2">
               <p className="text-sm font-medium text-fg">Account</p>
               <SelectMenu

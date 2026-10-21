@@ -3,6 +3,7 @@
 // chats. `?state=` picks data, truncated (private list capped), empty, error
 // or loading.
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
+import { fixtureUsage } from "../src/components/insights/usage-fixtures";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const accountId = "99999999-9999-4999-8999-999999999999";
@@ -394,6 +395,144 @@ async function respond<T>(value: () => T): Promise<T> {
 
 const empty = state === "empty";
 const client = {
+  requestJson: (_method: string, path: string) =>
+    respond(() => {
+      if (path.endsWith("/allowance/state"))
+        return {
+          version: 1,
+          config: {
+            includedCredits: 500_000_000,
+            period: "monthly",
+            anchorDay: 1,
+            memberDefault: "equal_share",
+          },
+        };
+      if (path.endsWith("/usage") && !path.includes("/insights/"))
+        return {
+          period: { start: "2026-10-01T00:00:00Z", end: "2026-11-01T00:00:00Z" },
+          workspace: {
+            limit: 500_000_000,
+            used: 120_000_000,
+            remaining: 380_000_000,
+            fraction: 0.24,
+            status: "ok",
+            resetsAt: "2026-11-01T00:00:00Z",
+            includedCredits: 500_000_000,
+            grantsRemaining: 0,
+          },
+          members: [
+            {
+              subjectId: "user:viewer",
+              externalIdentity: null,
+              rule: { share: 0.5 },
+              version: 1,
+              limit: 250_000_000,
+              used: 70_000_000,
+              remaining: 180_000_000,
+              fraction: 0.28,
+              status: "ok",
+              resetsAt: "2026-11-01T00:00:00Z",
+            },
+          ],
+          nextCursor: null,
+        };
+      if (path.endsWith("/calls")) return { calls: [], nextCursor: null };
+      return fixtureUsage();
+    }),
+  listWorkspaceMembers: async () => [{ subjectId: "user:viewer", subjectLabel: "Alex Morgan" }],
+  getWorkspaceModelCatalog: async () => ({ models: [] }),
+  getWorkspaceInsightsSiteUsage: () =>
+    respond(() => ({
+      workspaceId,
+      range: "week",
+      windowStart: "2026-10-12T00:00:00Z",
+      windowEnd: "2026-10-16T12:00:00Z",
+      rows: empty
+        ? []
+        : [
+            {
+              siteId: marketingId,
+              title: "Customer research",
+              kind: "site",
+              calls: 318,
+              pricedCalls: 318,
+              chargedMicros: 12_480_000,
+              apiEquivalentMicros: 37_120_000,
+              subscriptionApiEquivalentMicros: 19_600_000,
+              ownKeyApiEquivalentMicros: 5_040_000,
+            },
+            {
+              siteId: productId,
+              title: "Operations workspace",
+              kind: "site",
+              calls: 126,
+              pricedCalls: 121,
+              chargedMicros: 4_230_000,
+              apiEquivalentMicros: 14_770_000,
+              subscriptionApiEquivalentMicros: 9_820_000,
+              ownKeyApiEquivalentMicros: 720_000,
+            },
+            {
+              siteId: null,
+              title: "Private or unavailable Sites",
+              kind: "restricted",
+              calls: 42,
+              pricedCalls: 42,
+              chargedMicros: 0,
+              apiEquivalentMicros: 3_160_000,
+              subscriptionApiEquivalentMicros: 3_160_000,
+              ownKeyApiEquivalentMicros: 0,
+            },
+          ],
+    })),
+  getSitePlatformUsage: () =>
+    respond(() => ({
+      workspaceId,
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [
+        {
+          meter: "requests",
+          used: 127_840,
+          peak: 127_840,
+          allowance: 1_000_000,
+          priceMicros: 1,
+          priceUnit: 1_000_000,
+          estimatedMicros: 0,
+        },
+        {
+          meter: "sql_rows_read",
+          used: 642_180,
+          peak: 642_180,
+          allowance: 10_000_000,
+          priceMicros: 1,
+          priceUnit: 1_000_000,
+          estimatedMicros: 0,
+        },
+        {
+          meter: "sql_rows_written",
+          used: 2_431,
+          peak: 2_431,
+          allowance: 100_000,
+          priceMicros: 1,
+          priceUnit: 1_000_000,
+          estimatedMicros: 0,
+        },
+        {
+          meter: "storage_bytes",
+          used: 36_700_000,
+          peak: 36_700_000,
+          allowance: 1_000_000_000,
+          priceMicros: 1,
+          priceUnit: 1_000_000,
+          estimatedMicros: 0,
+        },
+      ],
+      estimatedMicros: 0,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    })),
   getWorkspaceInsights: () => respond(() => ({ snapshot: workspaceSnapshot(empty) })),
   getOrganizationUsageSummary: () => respond(() => organizationSummary(empty)),
   getOrganizationUsageWorkspacePage: () => respond(() => organizationSummary(empty)),
@@ -411,6 +550,8 @@ const context = {
     { id: marketingId, name: "Marketing" },
   ],
   accessContext: {
+    subjectId: "user:viewer",
+    accountGrants: [{ accountId, permissions: ["account:admin"] }],
     workspaceGrants: [
       { workspaceId, permissions: ["workspace:admin"] },
       { workspaceId: marketingId, permissions: ["workspace:admin"] },

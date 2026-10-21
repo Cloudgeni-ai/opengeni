@@ -24,7 +24,7 @@ import { creationInitiatorForGrant } from "./sessions";
 export const SITE_PRIVATE_OWNER_MESSAGE = "Only a person can have an Only me Site.";
 export const SITE_PRIVATE_DISABLED_MESSAGE = "Only me is turned off for this organization.";
 export const SITE_AUDIENCE_HUMAN_MESSAGE =
-  "Only the Site's owner can change who can see it, from Opengeni.";
+  "Only the Site's owner can change who can see it, from the app.";
 
 /**
  * The person a request reads Sites as: the human caller, or the human an exact

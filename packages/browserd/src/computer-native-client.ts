@@ -239,7 +239,9 @@ export class ComputerNativeClient implements ComputerBackend {
     if (await waitForProcessClose(this.process, 3_000)) {
       await this.cleanupExecutable();
       if (this.process.exitCode !== 0 || this.process.signalCode !== null)
-        throw new UnsettledCleanupError([], "native computer helper cleanup was not confirmed");
+        throw new UnsettledCleanupError([], "native computer helper cleanup was not confirmed", {
+          processExited: true,
+        });
       return;
     }
     this.process.kill("SIGKILL");
@@ -247,7 +249,9 @@ export class ComputerNativeClient implements ComputerBackend {
       throw new Error("native computer helper did not exit after SIGKILL");
     }
     await this.cleanupExecutable();
-    throw new UnsettledCleanupError([], "native computer helper required forced termination");
+    throw new UnsettledCleanupError([], "native computer helper required forced termination", {
+      processExited: true,
+    });
   }
 
   private bindProcess(): void {

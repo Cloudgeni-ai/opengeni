@@ -15,6 +15,8 @@ export function formatMoneyMicros(amountMicros: number, currency: string): strin
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency: currency.toUpperCase(),
+    // "$10.00", never "US$10.00" in non-US locales.
+    currencyDisplay: "narrowSymbol",
   }).format(amountMicros / 1_000_000);
 }
 

@@ -3,11 +3,14 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
+  copyFile,
+  link,
   mkdtemp,
   mkdir,
   open,
   readFile,
   readdir,
+  readlink,
   rm,
   stat,
   writeFile,
@@ -16,25 +19,148 @@ import {
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
+  assertManagedBrowserProfileUnused,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  browserScopeEntry,
+  linuxHeadlessChromeArguments,
+  macosOffscreenChromeArguments,
+  MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
+  parseMacosDisplayGeometry,
   reapManagedBrowserProcesses,
+  reapOrphanedAgentBrowserDaemons,
+  stopEndedManagedBrowserProcess,
   inspectOwnedManagedBrowserProcess,
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
+  test("a browser scope is requested from the user manager, and Chrome keeps the launch's own bus", async () => {
+    const root = await mkdtemp("/tmp/og-scope-entry-");
+    try {
+      const record = join(root, "systemd-run.env");
+      const systemdRun = join(root, "systemd-run");
+      // Records the bus it was asked to use, then execs the command after `--`
+      // in place, as `systemd-run --scope` does.
+      await writeFile(
+        systemdRun,
+        `#!/bin/sh\nprintf '%s|%s\\n' "\${DBUS_SESSION_BUS_ADDRESS-unset}" "\${XDG_RUNTIME_DIR-unset}" > '${record}'\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`,
+        { mode: 0o700 },
+      );
+      const wrapper = join(root, "wrapper.sh");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\n${browserScopeEntry(
+          {
+            systemdRun,
+            busctl: "/usr/bin/busctl",
+            managerEnvironment: {
+              DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+              XDG_RUNTIME_DIR: "/run/user/1000",
+            },
+          },
+          "opengeni-browser-fixture.scope",
+          wrapper,
+        )}printf '%s|%s|%s|%s\\n' "\${DBUS_SESSION_BUS_ADDRESS-unset}" "\${XDG_RUNTIME_DIR-unset}" "\${OPENGENI_BROWSER_SCOPE-unset}" "$1"\n`,
+        { mode: 0o700 },
+      );
+      const linked = spawnSync(wrapper, ["operand with space"], {
+        env: {
+          PATH: process.env.PATH,
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/desktop/bus",
+          XDG_RUNTIME_DIR: "/tmp/desktop",
+        },
+        encoding: "utf8",
+      });
+      expect(linked.status).toBe(0);
+      expect(await readFile(record, "utf8")).toBe("unix:path=/run/user/1000/bus|/run/user/1000\n");
+      expect(linked.stdout).toBe(
+        "unix:path=/tmp/desktop/bus|/tmp/desktop|unset|operand with space\n",
+      );
+
+      const unsetBus = spawnSync(wrapper, ["x"], {
+        env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: "/tmp/desktop" },
+        encoding: "utf8",
+      });
+      expect(unsetBus.status).toBe(0);
+      expect(unsetBus.stdout).toBe("unset|/tmp/desktop|unset|x\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("offscreen macOS browsers present the host display and an ordinary User-Agent", async () => {
+    const geometry = parseMacosDisplayGeometry(
+      JSON.stringify({ w: 1920, h: 1080, x: 0, y: 88, vw: 1920, vh: 962, scale: 1 }),
+    );
+    expect(geometry).toEqual({
+      width: 1920,
+      height: 1080,
+      scale: 1,
+      insets: { left: 0, right: 0, top: 30, bottom: 88 },
+    });
+    expect(parseMacosDisplayGeometry("")).toBeNull();
+    expect(parseMacosDisplayGeometry(JSON.stringify({ w: 1920, h: 1080 }))).toBeNull();
+    expect(
+      parseMacosDisplayGeometry(
+        JSON.stringify({ w: 1920, h: 1080, x: 0, y: -5, vw: 1920, vh: 962, scale: 1 }),
+      ),
+    ).toBeNull();
+    expect(
+      await macosOffscreenChromeArguments("/Applications/Fixture", {
+        chromeMajorVersion: async () => 155,
+        mainDisplay: async () => geometry!,
+      }),
+    ).toEqual([
+      "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "--screen-info={1920x1080 devicePixelRatio=1 workAreaLeft=0 workAreaRight=0 workAreaTop=30 workAreaBottom=88}",
+    ]);
+    // Chrome reads --screen-info in device pixels: a Retina display measured
+    // in points is passed at its pixel size so pages see its point size.
+    expect(
+      await macosOffscreenChromeArguments("/Applications/Fixture", {
+        chromeMajorVersion: async () => 155,
+        mainDisplay: async () => ({
+          width: 1728,
+          height: 1117,
+          scale: 2,
+          insets: { left: 0, right: 0, top: 33, bottom: 0 },
+        }),
+      }),
+    ).toContain(
+      "--screen-info={3456x2234 devicePixelRatio=2 workAreaLeft=0 workAreaRight=0 workAreaTop=66 workAreaBottom=0}",
+    );
+  });
+
+  test("headless Linux browsers present an ordinary desktop User-Agent and screen", async () => {
+    expect(
+      await linuxHeadlessChromeArguments("/usr/bin/fixture-chrome", {
+        chromeMajorVersion: async () => 155,
+      }),
+    ).toEqual([
+      "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "--screen-info={1920x1080 devicePixelRatio=1 workAreaTop=32}",
+    ]);
+    expect(
+      await linuxHeadlessChromeArguments("/usr/bin/fixture-chrome", {
+        chromeMajorVersion: async () => {
+          throw new Error("managed browser version is unavailable");
+        },
+      }),
+    ).toEqual(["--screen-info={1920x1080 devicePixelRatio=1 workAreaTop=32}"]);
+  });
+
   test("declares only explicitly pinned portable policies", () => {
     expect(browserProfileCryptoPolicy("linux")).toBe("chromium_basic");
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--test-type,--password-store=basic",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--ignore-gpu-blocklist,--enable-unsafe-swiftshader,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--use-mock-keychain",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--use-mock-keychain",
     );
     expect(browserLaunchArguments("win32")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled",
     );
   });
 
@@ -45,6 +171,70 @@ describe("managed browser profile cryptography", () => {
     expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
     expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
   });
+
+  test.skipIf(process.platform !== "darwin")(
+    "launches an offscreen managed browser as the real browser without a window",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-offscreen-");
+      const contents = join(root, "Fixture Browser.app", "Contents");
+      const browserPath = join(contents, "MacOS", "Fixture Browser");
+      const helperPath = join(root, "opengeni-computer-native");
+      const binaryPath = join(root, "fixture-agent-browser");
+      await mkdir(join(contents, "MacOS"), { recursive: true });
+      await writeFile(browserPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        join(contents, "Info.plist"),
+        "<plist><dict><key>CFBundleShortVersionString</key>\n\t<string>155.0.8059.82</string></dict></plist>",
+      );
+      await writeFile(helperPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, headed: process.env.AGENT_BROWSER_HEADED, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ?? null }, error: null }));\n`,
+        { mode: 0o700 },
+      );
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "offscreen",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: true,
+        offscreen: true,
+        browserExecutablePath: browserPath,
+        browserLaunchHelperPath: helperPath,
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{
+          executable: string;
+          headed: string;
+          backgroundExecutable: string | null;
+        }>(["open", "about:blank"]);
+        expect(result.headed).toBe("0");
+        expect(result.backgroundExecutable).toBeNull();
+        expect(result.executable).toStartWith(join(root, "chrome-launch"));
+        const wrapper = await readFile(result.executable, "utf8");
+        expect(wrapper).toContain(`exec '${browserPath}' '--user-agent=Mozilla/5.0 (Macintosh;`);
+        expect(wrapper).toContain("Chrome/155.0.0.0 Safari/537.36'");
+        expect(wrapper).toMatch(/'--screen-info=\{\d+x\d+ devicePixelRatio=\d+ /u);
+        expect(wrapper).not.toContain("HeadlessChrome");
+        // Chromium honors only the last --disable-features switch, so the
+        // complete list follows agent-browser's own arguments.
+        expect(wrapper).toContain(`"$@" '${MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT}' 2>`);
+        expect(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT).toBe(
+          "--disable-features=Translate,OptimizationGuideOnDeviceModel,WebUIOmniboxPopup,WebUIOmniboxAimPopup,PassageEmbedder",
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.skipIf(process.platform !== "darwin")(
     "launches a managed browser through the lifecycle-preserving background helper",
@@ -150,7 +340,8 @@ describe("managed browser profile cryptography", () => {
         const unreadStderr = await open(unreadStderrPath, constants.O_RDWR);
         await writeFile(
           browserPath,
-          '#!/bin/sh\nset -e\ni=0\nwhile [ "$i" -lt 256 ]; do\n  printf "%01024d" 0 >&2\n  i=$((i + 1))\ndone\nprintf "END_MARKER\\n" >&2\nprintf "%s\\n" "$1"\n',
+          // Echo the forwarded operand, skipping the launch's own switches.
+          '#!/bin/sh\nset -e\ni=0\nwhile [ "$i" -lt 256 ]; do\n  printf "%01024d" 0 >&2\n  i=$((i + 1))\ndone\nprintf "END_MARKER\\n" >&2\nfor argument; do\n  case "$argument" in --*) ;; *) printf "%s\\n" "$argument" ;; esac\ndone\n',
           { mode: 0o700 },
         );
         await writeFile(
@@ -438,7 +629,52 @@ console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2),
   );
 });
 
-test("Linux directory relaunch requires complete absence of verified and unverified profile processes", async () => {
+test.skipIf(process.platform !== "linux" || process.getuid?.() === 0)(
+  "an unused profile is proven unused on a real host whose other-user processes hide their executables",
+  async () => {
+    // An unprivileged agent can't read the executable link of root's or other
+    // users' processes. Hosts without any such process can't exercise this.
+    let unreadableExecutables = 0;
+    for (const name of await readdir("/proc")) {
+      if (!/^[1-9][0-9]*$/u.test(name)) continue;
+      try {
+        await readlink(`/proc/${name}/exe`);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "";
+        if (code === "EACCES" || code === "EPERM") unreadableExecutables += 1;
+      }
+    }
+    if (unreadableExecutables === 0) return;
+    const directory = await mkdtemp("/tmp/og-profile-unused-");
+    const profileDirectory = join(directory, "profile");
+    await mkdir(profileDirectory, { mode: 0o700 });
+    try {
+      await expect(assertManagedBrowserProfileUnused(profileDirectory)).resolves.toBeUndefined();
+      const holder = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          "setInterval(()=>{},60000)",
+          `--user-data-dir=${profileDirectory}`,
+        ],
+        { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+      );
+      try {
+        // A process naming the exact profile still refuses.
+        await expect(assertManagedBrowserProfileUnused(profileDirectory)).rejects.toMatchObject({
+          code: "process_failed",
+        });
+      } finally {
+        holder.kill();
+        await holder.exited;
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("Linux directory relaunch requires complete absence of verified and unverified profile processes, judged by command lines", async () => {
   const directory = await mkdtemp("/tmp/og-inventory-proof-");
   const profileDirectory = join(directory, "profile");
   await mkdir(profileDirectory);
@@ -462,12 +698,12 @@ test("Linux directory relaunch requires complete absence of verified and unverif
         if (scenario === "inaccessible") throw missing("EACCES");
         if (scenario === "forbidden") throw missing("EPERM");
         if (scenario === "exiting") throw missing("ENOENT");
-        const profile = ["rewritten", "unknown-executable"].includes(scenario) ? profileDirectory : "/synthetic/other";
+        const profile = ["rewritten", "unknown-executable", "inaccessible-executable-naming-profile"].includes(scenario) ? profileDirectory : "/synthetic/other";
         return Buffer.from("/synthetic/chromium --user-data-dir=" + profile + "\\0");
       },
       async readlink(path) {
         if (path !== "/proc/2002/exe") return await native.readlink(path);
-        if (scenario === "inaccessible-executable") throw missing("EACCES");
+        if (["inaccessible-executable", "inaccessible-executable-naming-profile"].includes(scenario)) throw missing("EACCES");
         if (scenario === "forbidden-executable") throw missing("EPERM");
         return scenario === "unknown-executable" ? "/synthetic/unrecognized" : "/synthetic/chromium";
       },
@@ -486,17 +722,19 @@ test("Linux directory relaunch requires complete absence of verified and unverif
       recoverOwnedProcess: receipt,
     };
     const results = [];
-    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "forbidden", "inaccessible-executable", "forbidden-executable", "exiting"]) {
+    const proven = ["absent", "exiting", "inaccessible-executable", "forbidden-executable"];
+    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "forbidden", "inaccessible-executable", "forbidden-executable", "inaccessible-executable-naming-profile", "exiting"]) {
       try { results.push({ scenario, result: await inspectOwnedManagedBrowserProcess(receipt) }); }
       catch (error) { results.push({ scenario, code: error.code, message: error.message }); }
-      if (["absent", "exiting"].includes(scenario)) {
+      if (proven.includes(scenario)) {
         await expect(AgentBrowserJsonRunner.create(options)).rejects.toThrow("outcome is unknown");
         await fs.mkdir(${JSON.stringify(join(directory, "socket", "namespaces", "og", "run"))}, { recursive: true });
         const permitted = await AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true });
         expect(permitted.reattachedOwnedProcess).toBeNull();
       } else {
-        // Explicit launch permission cannot bypass a successor or any denied
-        // observation, including an unrelated process's executable.
+        // Explicit launch permission cannot bypass a successor or a denied
+        // command line. An unrelated process's unreadable executable (any
+        // root or other-user process) is not evidence about the profile.
         await expect(AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true })).rejects.toThrow(results.at(-1).message);
       }
     }
@@ -531,11 +769,18 @@ test("Linux directory relaunch requires complete absence of verified and unverif
         code: "process_failed",
         message: "exact profile process inventory is incomplete",
       },
-      ...["forbidden", "inaccessible-executable", "forbidden-executable"].map((scenario) => ({
-        scenario,
+      {
+        scenario: "forbidden",
         code: "process_failed",
         message: "exact profile process inventory is incomplete",
-      })),
+      },
+      { scenario: "inaccessible-executable", result: "exited" },
+      { scenario: "forbidden-executable", result: "exited" },
+      {
+        scenario: "inaccessible-executable-naming-profile",
+        code: "process_failed",
+        message: "exact directory launch absence is unproven",
+      },
       { scenario: "exiting", result: "exited" },
     ]);
   } finally {
@@ -616,10 +861,9 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       expect(() => process.kill(child.pid, 0)).toThrow();
       // Complete Linux absence/relaunch proof belongs to the isolated inventory
       // fixture above: a CI host may have unrelated, unreadable procfs entries.
+      // On macOS one full process listing proves nothing runs the profile.
       if (process.platform === "darwin") {
-        await expect(inspectOwnedManagedBrowserProcess(receipt!)).rejects.toThrow(
-          "absence is unproven",
-        );
+        expect(await inspectOwnedManagedBrowserProcess(receipt!)).toBe("exited");
       }
     } finally {
       if (child.exitCode === null) {
@@ -630,4 +874,87 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
     }
   },
   20_000,
+);
+
+test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
+  "agent-browser daemons whose browser is gone are found by the profile they serve and stopped",
+  async () => {
+    const directory = await mkdtemp("/tmp/og-orphaned-daemon-");
+    // A daemon is recognized by its executable name and its own environment,
+    // so the fixture runs this Bun under the agent-browser name.
+    const executable = join(directory, "agent-browser");
+    await link(process.execPath, executable).catch(
+      async () => await copyFile(process.execPath, executable),
+    );
+    await chmod(executable, 0o700);
+    const sessions = join(directory, "root", "sessions");
+    const profile = (name: string) =>
+      join(sessions, `00000000-0000-4000-8000-00000000000${name}`, "profile");
+    const children: ReturnType<typeof Bun.spawn>[] = [];
+    const daemon = (profileDirectory: string, script: string) => {
+      const child = Bun.spawn([executable, "-e", script], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          AGENT_BROWSER_DAEMON: "1",
+          AGENT_BROWSER_PROFILE: profileDirectory,
+          AGENT_BROWSER_SOCKET_DIR: join(directory, "socket"),
+        },
+      });
+      children.push(child);
+      return child;
+    };
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      for (const name of ["1", "2"]) await mkdir(profile(name), { recursive: true });
+      const idle = "setInterval(() => {}, 60000)";
+      const ended = daemon(profile("1"), idle);
+      // A daemon whose browser still runs is never stopped.
+      const serving = daemon(
+        profile("2"),
+        `const c = require("node:child_process").spawn("/bin/sh", ["-c", "exec sleep 60"], { stdio: "ignore" }); console.log(c.pid); ${idle}`,
+      );
+      const outside = daemon(join(directory, "elsewhere", "profile"), idle);
+      const reader = serving.stdout!.getReader();
+      const servingChild = Number(new TextDecoder().decode((await reader.read()).value).trim());
+      reader.releaseLock();
+      expect(servingChild).toBeGreaterThan(1);
+
+      // Ending a session whose browser already exited stops its daemon too.
+      await stopEndedManagedBrowserProcess(profile("1"), null);
+      await ended.exited;
+      expect(alive(serving.pid)).toBe(true);
+      expect(alive(outside.pid)).toBe(true);
+
+      // Startup reconciliation leaves a daemon with a running child and one
+      // that serves a profile outside this controller's sessions.
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"), { minAgeMs: 0 })).toBe(
+        0,
+      );
+      expect(alive(serving.pid)).toBe(true);
+      process.kill(servingChild, "SIGKILL");
+      for (let attempt = 0; attempt < 50 && alive(servingChild); attempt++) await Bun.sleep(20);
+      // A daemon too young to have started its browser is left as well.
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"))).toBe(0);
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"), { minAgeMs: 0 })).toBe(
+        1,
+      );
+      await serving.exited;
+      expect(alive(outside.pid)).toBe(true);
+    } finally {
+      for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
+      await Promise.all(children.map(async (child) => await child.exited));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
 );

@@ -18,6 +18,7 @@ import type {
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 import { HTTPException } from "hono/http-exception";
 import {
   checkWorkspaceAllowance,
@@ -163,7 +164,7 @@ function agentActor(context: AgentSessionCommandContext) {
  */
 async function assertFreshAgentCommandAllowance(
   tx: SessionActivityDatabase,
-  deps: { settings?: Settings },
+  deps: { settings?: Settings; catalogSourceSettings?: Settings },
   context: AgentSessionCommandContext,
   targetSessionId: string,
 ): Promise<void> {
@@ -173,8 +174,13 @@ async function assertFreshAgentCommandAllowance(
   }
   let fundedWithoutCredits = false;
   const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
-  if (deps.settings) {
-    const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
+  // Request adapters may hand over settings already resolved for the caller's
+  // workspace, with synthetic workspace providers overlaid. Resolve the
+  // target's catalog from the unoverlaid source; feeding the overlay back
+  // through deployment validation rejects its reserved provider kinds.
+  const catalogSource = deps.catalogSourceSettings ?? deps.settings;
+  if (catalogSource) {
+    const { settings } = await resolveWorkspaceCatalogSettings(tx, catalogSource, {
       accountId: target.accountId,
       workspaceId: context.workspaceId,
       retainedProductModelId: target.model,
@@ -401,6 +407,7 @@ export async function sendAgentSessionMessage(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -470,6 +477,7 @@ export async function steerAgentSession(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -857,6 +865,7 @@ export async function steerHumanQueuePrompt(
           turnId,
           expectedTurnVersion: input.expectedTurnVersion,
           controlEtag: input.controlEtag ?? null,
+          ...(input.interrupt === true ? { interrupt: true } : {}),
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
@@ -1109,7 +1118,7 @@ export async function getHumanComposerDraft(
 }
 
 export async function saveHumanComposerDraft(
-  deps: SessionAuthorizationCommandDeps,
+  deps: SessionAuthorizationCommandDeps & { settings?: Settings },
   context: HumanSessionCommandContext,
   input: SaveComposerDraftRequest,
 ): Promise<ComposerDraft> {
@@ -1136,7 +1145,9 @@ export async function saveHumanComposerDraft(
         }),
       ),
   );
-  return composerDraft(row)!;
+  const saved = composerDraft(row)!;
+  if (deps.settings) prepareDraftModel({ db: deps.db, settings: deps.settings }, context, saved);
+  return saved;
 }
 
 export async function controlHumanWorkspaceTimer(

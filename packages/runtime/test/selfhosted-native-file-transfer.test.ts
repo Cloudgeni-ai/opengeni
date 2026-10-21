@@ -7,7 +7,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { applyDiff } from "@openai/agents";
-import { SelfhostedSession, setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
+import {
+  buildSelfhostedBackendSession,
+  setSelfhostedApplyDiff,
+} from "../src/sandbox/selfhosted/session";
 import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 
 const binary =
@@ -17,7 +20,7 @@ if (process.env.OPENGENI_REQUIRE_NATIVE_FS_TEST === "1" && !existsSync(binary)) 
   throw new Error("Required native transactional filesystem fixture was not built");
 }
 
-for (const [lines, interrupt, raw = false] of [
+for (const [lines, interrupt, raw = false, epoch = 1, create = false] of [
   [1, false],
   [1, true],
   [1000, false],
@@ -26,16 +29,25 @@ for (const [lines, interrupt, raw = false] of [
   [80000, true],
   [80000, false, true],
   [80000, true, true],
+  [80000, false, true, 0],
+  [80000, true, true, 0],
+  [80000, false, false, 0],
+  [80000, true, false, 0],
+  [1, false, false, 1, true],
+  [1, true, false, 1, true],
+  [1, false, false, 0, true],
+  [1, true, false, 0, true],
 ] as const) {
   test.skipIf(!["linux", "darwin"].includes(process.platform) || !existsSync(binary))(
-    `TypeScript ${raw ? "raw writer" : "editor"} drives native transactional files (${lines} lines): ${interrupt ? "abandoned staging cleanup" : "verified replacement"}`,
+    `TypeScript ${raw ? "raw writer" : "editor"} drives native transactional files (${lines} lines, epoch ${epoch}): ${create ? "nested create " : ""}${interrupt ? "abandoned staging cleanup" : "verified publication"}`,
     async () => {
       setSelfhostedApplyDiff(applyDiff);
       const root = await realpath(await mkdtemp(join(tmpdir(), "opengeni-native-write-")));
-      const path = join(root, "synthetic.md");
+      const parent = create ? join(root, "new", "nested") : root;
+      const path = join(parent, "synthetic.md");
       const original = "# Before\n" + "Synthetic cross-language fixture.\n".repeat(lines);
-      await writeFile(path, original, { mode: 0o640 });
-      const child = Bun.spawn([binary, root, "1"], {
+      if (!create) await writeFile(path, original, { mode: 0o640 });
+      const child = Bun.spawn([binary, root, String(epoch)], {
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
@@ -65,6 +77,7 @@ for (const [lines, interrupt, raw = false] of [
               code: "MAX_PAYLOAD_EXCEEDED",
             });
           const request = ControlRequest.decode(payload);
+          expect(request.epoch).toBe(epoch);
           if (request.op?.$case === "writeChunk") {
             chunks += 1;
             if (interrupt && chunks === (lines === 80000 ? 2 : 1))
@@ -86,35 +99,44 @@ for (const [lines, interrupt, raw = false] of [
         },
       }));
       try {
-        const session = new SelfhostedSession({
+        const { session } = await buildSelfhostedBackendSession({
           workspaceId: "11111111-1111-4111-8111-111111111111",
           agentId: "synthetic-agent",
           connectionInstanceId: "22222222-2222-4222-8222-222222222222",
           workspaceRoot: root,
           relay: { host: "relay.test", port: 443, tls: true },
-          epoch: 1,
-          controlRpc: rpc,
+          epoch,
+          controlRpcFactory: () => rpc,
           transactionalFsWriteSupported: true,
+          transactionalFsWriteMachineSupported: epoch === 0,
         });
-        const update = raw
-          ? session.writeFile({
+        const update = create
+          ? session.createEditor().createFile({
               path,
-              content: original.replace("# Before", "# After"),
-              createParents: false,
+              diff: "+# After\n+Synthetic cross-language fixture.\n+\n",
             })
-          : session.createEditor().updateFile({
-              path,
-              diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
-            });
+          : raw
+            ? session.writeFile({
+                path,
+                content: original.replace("# Before", "# After"),
+                createParents: false,
+              })
+            : session.createEditor().updateFile({
+                path,
+                diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
+              });
         if (interrupt) await expect(update).rejects.toThrow("Cancellation");
         else await update;
-        expect(await readFile(path, "utf8")).toBe(
-          interrupt ? original : original.replace("# Before", "# After"),
-        );
-        expect((await stat(path)).mode & 0o777).toBe(0o640);
+        if (create && interrupt) expect(existsSync(path)).toBe(false);
+        else
+          expect(await readFile(path, "utf8")).toBe(
+            interrupt ? original : original.replace("# Before", "# After"),
+          );
+        if (!create) expect((await stat(path)).mode & 0o777).toBe(0o640);
         // Check while the native registry is still alive: process exit must not
         // conceal a caller-side failure to cancel an abandoned live transfer.
-        expect(await readdir(root)).toEqual(["synthetic.md"]);
+        expect(await readdir(parent)).toEqual(create && interrupt ? [] : ["synthetic.md"]);
+        if (create) expect(await readdir(root)).toEqual(["new"]);
         expect(cancels).toBe(interrupt ? 1 : 0);
         expect(chunks).toBeGreaterThanOrEqual(lines === 80000 ? 2 : 1);
         child.stdin.end();

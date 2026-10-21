@@ -291,6 +291,222 @@ describe("attached browser endpoint registry", () => {
     }
   });
 
+  test("unchanged profiles keep their physical row while cursor liveness advances and freezes on explicit disconnect", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const id = crypto.randomUUID();
+    const snapshot = {
+      bridgeGeneration: "bridge-1",
+      revision: 1,
+      devices: [device(id, "Primary Chrome")],
+    };
+    await reconcileAttachedBrowserInventory(client.db, { ...scope, snapshot });
+    const physical = async () =>
+      (
+        await admin!`
+      select ctid::text as tuple, xmin::text as version, last_seen_at::text as last_seen_at,
+        updated_at::text as updated_at from attached_browser_devices
+      where workspace_id = ${scope.workspaceId} and id = ${id}`
+      )[0]!;
+    const before = await physical();
+    const observation = new Date(Date.now() + 60_000);
+    await admin!`update attached_browser_inventories set observed_at = ${observation}
+      where workspace_id = ${scope.workspaceId} and enrollment_id = ${scope.enrollmentId}`;
+    const replay = await reconcileAttachedBrowserInventory(client.db, { ...scope, snapshot });
+    expect(replay.changed).toBe(false);
+    expect(await physical()).toEqual(before);
+    // The cursor cannot go backwards when another API replica has an older clock.
+    expect((await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id })).lastSeenAt).toBe(
+      observation.toISOString(),
+    );
+    expect((await listAttachedBrowserDevices(client.db, scope)).devices[0]!.lastSeenAt).toBe(
+      observation.toISOString(),
+    );
+    await disconnectAttachedBrowserDevices(client.db, scope);
+    const disconnected = await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id });
+    expect(disconnected.state).toBe("disconnected");
+    expect(disconnected.lastSeenAt).toBe(observation.toISOString());
+    const later = new Date(observation.getTime() + 60_000);
+    await admin!`update attached_browser_inventories set observed_at = ${later}
+      where workspace_id = ${scope.workspaceId} and enrollment_id = ${scope.enrollmentId}`;
+    expect((await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id })).lastSeenAt).toBe(
+      disconnected.lastSeenAt,
+    );
+    expect(
+      (await listAttachedBrowserDevices(client.db, { ...scope, includeDisconnected: true }))
+        .devices[0]!.lastSeenAt,
+    ).toBe(disconnected.lastSeenAt);
+    // An equal-revision reconnect is still a material state change, not a digest hit.
+    expect(
+      (await reconcileAttachedBrowserInventory(client.db, { ...scope, snapshot })).changed,
+    ).toBe(true);
+    const reconnected = await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id });
+    expect(reconnected.state).toBe("connected");
+    expect(reconnected.lastSeenAt).toBe(later.toISOString());
+    expect(
+      (
+        await reconcileAttachedBrowserInventory(client.db, {
+          ...scope,
+          snapshot: { ...snapshot, devices: [device(id, "Renamed Chrome")] },
+        })
+      ).changed,
+    ).toBe(true);
+    expect((await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id })).name).toBe(
+      "Renamed Chrome",
+    );
+  });
+
+  test("unchanged snapshots do not queue behind controller device locks; changes still take those locks", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const id = crypto.randomUUID();
+    const snapshot = {
+      bridgeGeneration: "bridge-1",
+      revision: 1,
+      devices: [device(id, "Primary Chrome")],
+    };
+    await reconcileAttachedBrowserInventory(client.db, { ...scope, snapshot });
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const controller = admin!.begin(async (tx) => {
+      await tx`select id from attached_browser_devices where workspace_id = ${scope.workspaceId} and id = ${id} for update`;
+      acquired();
+      await finish;
+    });
+    let unchanged: ReturnType<typeof reconcileAttachedBrowserInventory> | undefined;
+    let changed: ReturnType<typeof reconcileAttachedBrowserInventory> | undefined;
+    try {
+      await held;
+      unchanged = reconcileAttachedBrowserInventory(client.db, { ...scope, snapshot });
+      expect(
+        await Promise.race([unchanged.then(() => true), Bun.sleep(1_000).then(() => false)]),
+      ).toBe(true);
+      expect((await unchanged).changed).toBe(false);
+      let completed = false;
+      changed = reconcileAttachedBrowserInventory(client.db, {
+        ...scope,
+        snapshot: { ...snapshot, revision: 2, devices: [device(id, "New Chrome")] },
+      });
+      void changed.then(
+        () => {
+          completed = true;
+        },
+        () => undefined,
+      );
+      const deadline = Date.now() + 1_000;
+      let waiting = false;
+      while (Date.now() < deadline) {
+        const [row] = await admin!`select exists(select 1 from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock'
+            and query like '%attached_browser_devices%') as waiting`;
+        if (row!.waiting) {
+          waiting = true;
+          break;
+        }
+        await Bun.sleep(5);
+      }
+      expect(waiting).toBe(true);
+      expect(completed).toBe(false);
+      release();
+      await controller;
+      expect((await changed).changed).toBe(true);
+      expect((await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id })).name).toBe(
+        "New Chrome",
+      );
+    } finally {
+      release();
+      await controller;
+      await Promise.allSettled([unchanged, changed]);
+    }
+  });
+
+  test("disconnect waits for an accepted snapshot before freezing its observation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const id = crypto.randomUUID();
+    await announceDevice(scope, id, "extension-1", 1);
+    const observation = new Date(Date.now() + 60_000);
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const snapshot = admin!.begin(async (tx) => {
+      await tx`select id from enrollments where id = ${scope.enrollmentId} for update`;
+      await tx`update attached_browser_inventories set observed_at = ${observation}
+        where workspace_id = ${scope.workspaceId} and enrollment_id = ${scope.enrollmentId}`;
+      acquired();
+      await finish;
+    });
+    let disconnect: ReturnType<typeof disconnectAttachedBrowserDevices> | undefined;
+    try {
+      await held;
+      let completed = false;
+      disconnect = disconnectAttachedBrowserDevices(client.db, scope);
+      void disconnect.then(
+        () => {
+          completed = true;
+        },
+        () => undefined,
+      );
+      let waiting = false;
+      const deadline = Date.now() + 1_000;
+      while (Date.now() < deadline) {
+        const [row] = await admin!`select exists(select 1 from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock'
+            and query like '%enrollments%') as waiting`;
+        if (row!.waiting) {
+          waiting = true;
+          break;
+        }
+        await Bun.sleep(5);
+      }
+      expect(waiting).toBe(true);
+      expect(completed).toBe(false);
+      release();
+      await snapshot;
+      expect((await disconnect).changed).toBe(true);
+      const result = await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id });
+      expect(result.state).toBe("disconnected");
+      expect(result.lastSeenAt).toBe(observation.toISOString());
+    } finally {
+      release();
+      await snapshot;
+      await Promise.allSettled([disconnect]);
+    }
+  });
+
+  test("a profile omitted from a later snapshot freezes the preceding full-snapshot observation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const id = crypto.randomUUID();
+    await announceDevice(scope, id, "extension-1", 1);
+    const observation = new Date(Date.now() + 60_000);
+    await admin!`update attached_browser_inventories set observed_at = ${observation}
+      where workspace_id = ${scope.workspaceId} and enrollment_id = ${scope.enrollmentId}`;
+    await reconcileAttachedBrowserInventory(client.db, {
+      ...scope,
+      snapshot: { bridgeGeneration: "bridge-1", revision: 2, devices: [] },
+    });
+    const disconnected = await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id });
+    expect(disconnected.state).toBe("disconnected");
+    expect(disconnected.lastSeenAt).toBe(observation.toISOString());
+    await admin!`update attached_browser_inventories set observed_at = ${new Date(observation.getTime() + 60_000)}
+      where workspace_id = ${scope.workspaceId} and enrollment_id = ${scope.enrollmentId}`;
+    expect((await getAttachedBrowserDevice(client.db, { ...scope, deviceId: id })).lastSeenAt).toBe(
+      disconnected.lastSeenAt,
+    );
+  });
+
   test("reconciles full snapshots, ignores stale revisions, and preserves offline history", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -602,6 +818,7 @@ describe("attached browser endpoint registry", () => {
       await getAttachedBrowserDevice(client.db, {
         accountId: scope.accountId,
         workspaceId: scope.workspaceId,
+        subjectId: scope.subjectId,
         deviceId,
       }),
     ).toMatchObject({

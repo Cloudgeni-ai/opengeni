@@ -375,6 +375,9 @@ describe("the owner-only routines' predicates (0735)", () => {
   // subscription-shared-personal-choice-postgres.test.ts pins its restricted
   // human/session/connection and mixed-runtime behavior. Administered routines
   // retain the exact original fingerprints and Personal-workspace-only rules.
+  // 0846 adds an exact independently leased title-operation branch to the
+  // credential target only; session-title-operations-postgres.test.ts exercises
+  // source settlement, holder reclamation and live personal-authority denial.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
       "ae583ca6bf31f1ef2ac97f8be27bfde5daec12c7cd16fba9d5e5d2507926585d",
@@ -393,7 +396,7 @@ describe("the owner-only routines' predicates (0735)", () => {
     "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
       "9765ac89bbe2cb5a403999d7bd1494787fb9e502a36ceb790a136d99d7c6058b",
     "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
-      "91fd89de0908ef747007c9213dfc9e7939ece79261527e03e4176b8a9e8c1235",
+      "03c3db42c92513e7452ba8eedc570bcfe53b38d0cbc605111d0532fb39e66aba",
   };
   type Routine = { identity: string; name: string; body: string };
   const liveRoutines = () => shared.admin<Routine[]>`
@@ -433,16 +436,24 @@ describe("the owner-only routines' predicates (0735)", () => {
     expect(drift(rows)).toEqual([]);
     const targets = rows.filter(
       (row) =>
-        row.name.includes("owned_connection") || row.name === "connect_subscription_core_personal",
+        row.name.includes("owned_connection") ||
+        row.name === "connect_subscription_core_personal" ||
+        row.name === "subscription_core_connection_target",
     );
-    expect(targets).toHaveLength(5);
+    expect(targets).toHaveLength(6);
     for (const target of targets) {
-      const body = target.name.includes("owned_connection")
-        ? target.body.replace("owned := FOUND AND", "owned := FOUND OR")
-        : target.body.replace(
-            "membership.status = 'active' AND",
-            "membership.status = 'active' OR",
-          );
+      const body =
+        target.name === "subscription_core_connection_target"
+          ? target.body.replace(
+              "AND title.holder_id = operation_lease.holder_id",
+              "OR title.holder_id = operation_lease.holder_id",
+            )
+          : target.name.includes("owned_connection")
+            ? target.body.replace("owned := FOUND AND", "owned := FOUND OR")
+            : target.body.replace(
+                "membership.status = 'active' AND",
+                "membership.status = 'active' OR",
+              );
       expect(body).not.toBe(target.body);
       expect(
         drift(rows.map((row) => (row.identity === target.identity ? { ...row, body } : row))),

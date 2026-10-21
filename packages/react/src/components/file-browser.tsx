@@ -33,6 +33,7 @@ import {
 import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 import { visibleFileTree, type FileNodeVisibilityPredicate } from "../file-node-visibility";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type FileBrowserProps = {
   /** From `useSandboxFiles(...)`. */
@@ -196,6 +197,7 @@ export function FileBrowser({
   confirmDelete,
   className,
 }: FileBrowserProps) {
+  const t = useOpenGeniText();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [active, setActive] = useState<string | null>(null);
@@ -840,7 +842,7 @@ export function FileBrowser({
               <span
                 role="button"
                 tabIndex={-1}
-                aria-label="More actions"
+                aria-label={t("fileBrowser.moreActions")}
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -898,7 +900,7 @@ export function FileBrowser({
             className="flex items-center gap-1.5 py-0.5 pr-1 text-og-xs italic text-og-fg-subtle"
           >
             <span className="inline-block w-3 shrink-0" />
-            <span className="min-w-0 truncate">contents on machine — open when live</span>
+            <span className="min-w-0 truncate">{t("fileBrowser.contentsOnMachineOpenWhen")}</span>
           </div>
         );
     }
@@ -934,19 +936,27 @@ export function FileBrowser({
       {showToolbar && (
         <div
           role="toolbar"
-          aria-label="File actions"
+          aria-label={t("fileBrowser.fileActions")}
           className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-og-border px-1 py-1"
         >
           {supportsMutation ? (
             <>
-              <ToolbarButton label="New file" onClick={() => startCreate("file")} disabled={busy}>
+              <ToolbarButton
+                label={t("fileBrowser.newFile")}
+                onClick={() => startCreate("file")}
+                disabled={busy}
+              >
                 <FilePlusIcon className="size-3.5" />
               </ToolbarButton>
-              <ToolbarButton label="New folder" onClick={() => startCreate("dir")} disabled={busy}>
+              <ToolbarButton
+                label={t("fileBrowser.newFolder")}
+                onClick={() => startCreate("dir")}
+                disabled={busy}
+              >
                 <FolderPlusIcon className="size-3.5" />
               </ToolbarButton>
               <ToolbarButton
-                label="Rename"
+                label={t("fileBrowser.rename")}
                 onClick={() => {
                   const node = cursor ? findNode(visibleTree, cursor) : undefined;
                   if (node) startRename(node);
@@ -956,7 +966,7 @@ export function FileBrowser({
                 <PencilIcon className="size-3.5" />
               </ToolbarButton>
               <ToolbarButton
-                label="Delete"
+                label={t("fileBrowser.delete")}
                 onClick={(event) => {
                   const node = cursor ? findNode(visibleTree, cursor) : undefined;
                   if (node) void runDelete(node, event.currentTarget);
@@ -969,7 +979,7 @@ export function FileBrowser({
           ) : null}
           <span className="ml-auto" />
           <ToolbarButton
-            label="Refresh"
+            label={t("fileBrowser.refresh")}
             onClick={() => void result.refresh()}
             disabled={busy || result.loading}
           >
@@ -988,8 +998,8 @@ export function FileBrowser({
           <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
           <span className="min-w-0 flex-1">
             {result.source === "capture"
-              ? "Live files are temporarily unavailable. Showing the latest captured revision."
-              : "Live refresh failed. Showing the last loaded files."}
+              ? t("fileBrowser.liveFilesAreTemporarilyUnavailable")
+              : t("fileBrowser.liveRefreshFailedShowingThe")}
           </span>
           <button
             type="button"
@@ -1001,7 +1011,7 @@ export function FileBrowser({
               className={cn("size-3", result.loading && "animate-spin motion-reduce:animate-none")}
               aria-hidden
             />
-            Retry
+            {t("fileBrowser.retry")}
           </button>
         </div>
       ) : null}
@@ -1045,7 +1055,9 @@ export function FileBrowser({
           <div className="flex flex-col items-start gap-2 p-2 text-og-sm text-og-fg-subtle">
             <div>
               {fallback ??
-                `Could not load files: ${result.error?.message ?? "refresh the file list to try again"}`}
+                t("fileBrowser.couldNotLoadFilesMessage", {
+                  message: result.error?.message ?? t("fileBrowser.refreshTheFileListTo"),
+                })}
             </div>
             <button
               type="button"
@@ -1057,18 +1069,18 @@ export function FileBrowser({
                 className={cn("size-3.5", result.loading && "animate-spin")}
                 aria-hidden
               />
-              Retry
+              {t("fileBrowser.retry")}
             </button>
           </div>
         ) : showEmpty ? (
           <div className="p-2 text-og-sm text-og-fg-subtle">
-            {emptyState ?? "This directory is empty"}
+            {emptyState ?? t("fileBrowser.thisDirectoryIsEmpty")}
           </div>
         ) : !usesVirtualTree ? (
           <div
             id={treeId}
             role="tree"
-            aria-label="Workspace files"
+            aria-label={t("fileBrowser.workspaceFiles")}
             aria-activedescendant={activeDescendantId}
             aria-multiselectable={false}
             tabIndex={0}
@@ -1088,7 +1100,7 @@ export function FileBrowser({
             ref={vlistRef}
             id={treeId}
             role="tree"
-            aria-label="Workspace files"
+            aria-label={t("fileBrowser.workspaceFiles")}
             aria-activedescendant={activeDescendantId}
             aria-multiselectable={false}
             tabIndex={0}
@@ -1150,6 +1162,7 @@ function DeleteDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const t = useOpenGeniText();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(true);
   const closeIntentRef = useRef<"cancel" | "confirm">("cancel");
@@ -1219,7 +1232,8 @@ function DeleteDialog({
             </span>
             <div className="min-w-0">
               <AlertDialog.Title className="text-og-sm font-semibold">
-                Delete {node.kind === "dir" ? "folder" : "file"}?
+                {t("fileBrowser.delete")}{" "}
+                {node.kind === "dir" ? t("fileBrowser.folder") : t("fileBrowser.file")}?
               </AlertDialog.Title>
               <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
                 <span className="break-all font-og-mono text-og-fg">{node.path}</span>
@@ -1240,7 +1254,7 @@ function DeleteDialog({
                 disabled={busy}
                 className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
               >
-                Cancel
+                {t("fileBrowser.cancel")}
               </button>
             </AlertDialog.Cancel>
             <AlertDialog.Action asChild>
@@ -1252,7 +1266,7 @@ function DeleteDialog({
                 disabled={busy}
                 className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
               >
-                Delete permanently
+                {t("fileBrowser.deletePermanently")}
               </button>
             </AlertDialog.Action>
           </div>
@@ -1305,6 +1319,7 @@ function InlineInput({
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
+  const t = useOpenGeniText();
   const [value, setValue] = useState(initialValue);
   const ref = useRef<HTMLInputElement | null>(null);
   // Track whether we've already resolved so a blur after Enter/Escape is a no-op.
@@ -1343,7 +1358,7 @@ function InlineInput({
         value={value}
         spellCheck={false}
         autoComplete="off"
-        aria-label={kind === "dir" ? "Folder name" : "File name"}
+        aria-label={kind === "dir" ? t("fileBrowser.folderName") : t("fileBrowser.fileName")}
         onChange={(e) => setValue(e.target.value)}
         onBlur={() => finish(true)}
         onKeyDown={(e) => {
@@ -1386,6 +1401,7 @@ function ContextMenu({
   onNewFolder: () => void;
   onClose: () => void;
 }) {
+  const t = useOpenGeniText();
   const isDir = node.kind === "dir";
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Keep the menu on-screen when opened near the viewport edge.
@@ -1443,7 +1459,7 @@ function ContextMenu({
     <div
       ref={menuRef}
       role="menu"
-      aria-label={`Actions for ${node.name}`}
+      aria-label={t("fileBrowser.actionsForName", { name: node.name })}
       onKeyDown={onKeyDown}
       onClick={(e) => e.stopPropagation()}
       style={{ left, top }}
@@ -1451,12 +1467,12 @@ function ContextMenu({
     >
       {isDir && (
         <>
-          {item("New file", <FilePlusIcon />, onNewFile)}
-          {item("New folder", <FolderPlusIcon />, onNewFolder)}
+          {item(t("fileBrowser.newFile"), <FilePlusIcon />, onNewFile)}
+          {item(t("fileBrowser.newFolder"), <FolderPlusIcon />, onNewFolder)}
           <div role="separator" className={MENU_SEPARATOR_CLASS} />
         </>
       )}
-      {item("Rename", <PencilIcon />, onRename)}
+      {item(t("fileBrowser.rename"), <PencilIcon />, onRename)}
       {item("Delete", <Trash2Icon />, onDelete, true)}
     </div>
   );

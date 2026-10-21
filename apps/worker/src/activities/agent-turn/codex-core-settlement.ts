@@ -10,6 +10,7 @@ import {
   quarantineSubscriptionCoreCodexConnection,
   recordSubscriptionCoreCodexModelCooldown,
   recordSubscriptionCoreCodexQuotaObservation,
+  recordSubscriptionCoreCodexTurnUsageReading,
   recordSubscriptionCoreCodexTurnFailure,
   SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,
   touchSubscriptionCoreCodexBinding,
@@ -106,6 +107,27 @@ function leaseRef(
   };
 }
 
+/** Persist each response's original observation while its serving lease is held. */
+export async function recordCoreCodexUsageReading(input: {
+  db: Database;
+  core: CodexSubscriptionCoreTurn;
+  lease: Pick<CodexTurnLease, "holderId" | "generation">;
+  usage: CodexUsageHeaderSnapshot;
+  credentialVersion: number | null;
+}): Promise<void> {
+  const ref = leaseRef(input.core, input.lease);
+  if (!ref) return;
+  await recordSubscriptionCoreCodexTurnUsageReading(
+    input.db,
+    input.core.identity,
+    ref,
+    codexUsageHeadersQuotaObservation(
+      input.usage,
+      input.credentialVersion ?? input.core.placedRefreshGeneration,
+    ),
+  );
+}
+
 /**
  * Record a definitive Codex refusal against the leased connection: always a
  * (turn, connection) failure receipt, which also counts toward the per-turn
@@ -143,19 +165,16 @@ export async function recordCoreCodexRefusal(input: {
   const now = input.now ?? new Date();
   const generation = input.credentialVersion ?? input.core.placedRefreshGeneration;
   if (input.failure.origin) {
-    const unknown = input.failure.origin === "usage_verification_policy";
     const until = now.getTime() + Math.max(60, input.failure.cooldownSeconds ?? 60) * 1000;
     const health = await recordSubscriptionCoreCodexQuotaObservation(
       input.db,
       input.core.identity,
       ref,
       {
-        windows: unknown
-          ? []
-          : [{ id: "included_usage", usedPercent: 100, resetsAt: until, status: "exhausted" }],
+        windows: [{ id: "included_usage", usedPercent: 100, resetsAt: until, status: "exhausted" }],
         modelCooldowns: {},
-        exhaustedUntil: unknown ? until : null,
-        exhaustedKind: unknown ? "rate_limit" : null,
+        exhaustedUntil: null,
+        exhaustedKind: null,
         revision: 0,
         observedAt: now.getTime(),
         observedRefreshGeneration: generation,

@@ -361,8 +361,12 @@ beforeAll(async () => {
   migrationText = await readFile(join(import.meta.dir, "../drizzle", FENCES), "utf8");
   // A provisioned database without 0717, as a deployment is before it: 0717
   // and every later migration (which may require 0717) are held back.
+  // Current session writers need the real additive activity xid column and
+  // trigger, which are independent of this fixture's historical lock topology.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= FENCES)
+    .filter(
+      (file) => file.endsWith(".sql") && file >= FENCES && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -371,6 +375,14 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    // Current adapters project the immutable Site audience. This fixture never
+    // advances through 0793: expose nullable columns only, without installing
+    // later audience triggers or changing the historical lock topology.
+    await owner`alter table sessions
+      add column site_id uuid,
+      add column site_access_root_id uuid,
+      add column site_viewer_principal text,
+      add column site_owner_subject_id text`;
     await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

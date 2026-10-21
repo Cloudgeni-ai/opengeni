@@ -101,7 +101,7 @@ describe("API helpers", () => {
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
-    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
+    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/docs`)).toBe(true);
@@ -601,8 +601,13 @@ describe("API helpers", () => {
       workflowClient: {} as never,
       managedAuth: null,
     });
-    // The bridge marks every bridged request as framed and pins the Site.
-    const bridgeHeaders = [SITE_FRAME_HEADER, "x-opengeni-site-id", "x-opengeni-site-version"];
+    // The bridge marks every bridged request as framed, names the frame and pins the Site.
+    const bridgeHeaders = [
+      SITE_FRAME_HEADER,
+      "x-opengeni-site-frame-id",
+      "x-opengeni-site-id",
+      "x-opengeni-site-version",
+    ];
     for (const origin of ["https://product.example", "http://localhost:5173"]) {
       const preflight = await app.request(
         "http://localhost/v1/workspaces/00000000-0000-4000-8000-000000000001/published-artifacts/current/data/query",
@@ -924,7 +929,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -949,7 +954,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("Opengeni could not complete the request.");
+    expect(body.error.message).toBe("The workspace could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1681,7 +1686,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("Opengeni could not initialize configured.example");
+    expect(message).toContain("the workspace could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1707,7 +1712,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because Opengeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because the workspace could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -2207,7 +2212,10 @@ describe("GET /v1/config/client", () => {
     expect(
       (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
     ).toBe(200);
-    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect(
+      (await app.request("/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111"))
+        .status,
+    ).toBe(401);
     expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
   });
 
@@ -2233,7 +2241,10 @@ describe("GET /v1/config/client", () => {
     expect(bootstrap.status).toBe(200);
     expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
     expect(authReads).toBe(0);
-    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    const scoped = await app.request(
+      "/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111",
+      { headers },
+    );
     expect(scoped.status).toBe(409);
     expect(authReads).toBe(1);
   });
@@ -2303,6 +2314,13 @@ describe("GET /v1/config/client", () => {
       config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
     ).not.toHaveProperty("source");
     expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
+  });
+
+  test("tells clients whether this deployment accepts connected machines", async () => {
+    const enabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: true }));
+    expect(enabled.connectedMachines).toBe(true);
+    const disabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: false }));
+    expect(disabled.connectedMachines).toBe(false);
   });
 });
 

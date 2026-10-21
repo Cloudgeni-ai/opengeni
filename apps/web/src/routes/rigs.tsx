@@ -3,6 +3,7 @@
 // image, versioned and verified. This page lists
 // them and creates new ones (?view=new); each environment's own page owns
 // versions, changes and promotion.
+import { t } from "@/lib/console-text";
 import { useOpenGeni } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import { ContainerIcon, PlusIcon } from "lucide-react";
@@ -16,22 +17,22 @@ import {
   type RigDefinitionDraft,
 } from "@/components/rigs/rig-definition-fields";
 import { rigHealth } from "@/components/rigs/rig-health";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { Disclosure } from "@/components/ui/disclosure";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusDot } from "@/components/ui/status-dot";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { resourceScopeLabel, type ResourceScope } from "@/components/resource-scope-picker";
-import { userFacingError } from "@/lib/api-error";
-import { LoadFailure } from "@/components/ui/load-failure";
+import { userFacingError } from "@opengeni/react/ui/api-error";
+import { LoadFailure } from "@opengeni/react/ui/load-failure";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -66,7 +67,7 @@ export function RigsRoute({ workspaceId, view }: { workspaceId: string; view?: "
     ),
   );
   const organizationName = workspace
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, workspace.accountId, context.accessContext.accountGrants)
     : "your organization";
   const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId = workspace?.defaultRigId ?? null;

@@ -8,8 +8,8 @@ import {
   PlusIcon,
 } from "lucide-react";
 
-import { EmptyState } from "@/components/ui/empty-state";
-import { LogoTile } from "@/components/ui/logo-tile";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { cn } from "@/lib/utils";
 import { schedules, variableSetById } from "../fixtures";
 import { Alternative, Fork, KitSection, UsageNotes, useKitPane } from "../kit";

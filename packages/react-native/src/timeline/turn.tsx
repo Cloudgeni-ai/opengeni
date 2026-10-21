@@ -6,8 +6,10 @@ import {
   rollingActivityItem,
   selectTurnSummaryFacets,
   toolDisplayName,
+  turnSummaryFallbackLabel,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { nativeLoadingPhrases } from "./composer-state";
 import {
   createContext,
@@ -86,13 +88,14 @@ export function useLiveNow(active: boolean): number {
 }
 
 function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
+  const t = useOpenGeniText();
   const startedAt = Date.parse(since);
   const now = useLiveNow(true);
   if (!Number.isFinite(startedAt)) return null;
   return (
     <Text
       style={[style, { fontVariant: ["tabular-nums"] }]}
-    >{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</Text>
+    >{` · ${formatElapsed(t, Math.max(0, now - startedAt))}`}</Text>
   );
 }
 
@@ -108,6 +111,8 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /** The turn has steps that are not loaded yet (opening the row reads them). */
+  unloadedSteps?: boolean | undefined;
   /**
    * Reports the disclosure's open state: once on mount when it starts open,
    * then on every change, in the same update as the change itself.
@@ -128,11 +133,13 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  unloadedSteps,
   onOpenStateChange,
   children,
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const foldMemory = useContext(FoldMemoryContext);
   const registerSticky = useContext(StickyWorkHeaderContext);
   const releaseFollow = useReleaseFollow();
@@ -173,13 +180,14 @@ export function TurnSummary({
   const context = useMemo(
     () =>
       createTurnSummaryContext(
+        t,
         items,
         outcome,
         failureText,
         durationMs,
         contextCompactionCount ?? 0,
       ),
-    [items, outcome, failureText, durationMs, contextCompactionCount],
+    [t, items, outcome, failureText, durationMs, contextCompactionCount],
   );
   const definitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -221,7 +229,7 @@ export function TurnSummary({
       statusNode = (
         <Text
           style={text}
-        >{`${status.label ?? m.workedFor} ${formatElapsed(status.durationMs)}`}</Text>
+        >{`${status.label ?? m.workedFor} ${formatElapsed(t, status.durationMs)}`}</Text>
       );
     }
   } else if (status) {
@@ -237,12 +245,15 @@ export function TurnSummary({
     );
   }
   const showLive = Boolean(liveHeader) && !open && !status;
-  const tail =
-    (showLive
-      ? ""
+  const tail = showLive
+    ? ""
+    : !hasStatusText && facetText.length === 0 && outcome !== "failed" && outcome !== "cancelled"
+      ? // Steps are not counted; an otherwise empty row still names what
+        // opening it reveals.
+        turnSummaryFallbackLabel(t, items, unloadedSteps)
       : facetText
           .map((value, index) => (index > 0 || hasStatusText ? ` · ${value}` : value))
-          .join("")) + "";
+          .join("");
 
   const renderHeader = (pinned: boolean) => (
     <Pressable
@@ -486,7 +497,11 @@ export function PreparingState({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
-  const phrases = nativeLoadingPhrases(m.loadingPhrases, phase);
+  const t = useOpenGeniText();
+  const phrases = useMemo(
+    () => nativeLoadingPhrases(t, m.loadingPhrases, phase),
+    [t, m.loadingPhrases, phase],
+  );
   const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
   useEffect(() => {
@@ -542,6 +557,7 @@ export function RollingActivity({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const selected = rollingActivityItem(items, previousItem, mounted);
@@ -552,7 +568,7 @@ export function RollingActivity({
       style={{ flexDirection: "row", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}
       accessibilityLabel={
         item.kind === "tool-call"
-          ? toolDisplayName(item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display)
           : item.kind === "reasoning"
             ? m.thinking
             : m.working

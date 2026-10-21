@@ -35,6 +35,7 @@ import {
   estimateItemTokens,
   estimateOpaqueEncryptedTokens,
   estimateNativeImageTokens,
+  MAX_NATIVE_IMAGE_TOKENS,
   estimateSerializedValueTokens,
   estimateTextTokens,
   estimateTokens,
@@ -60,7 +61,12 @@ import {
   summarizeForCompaction,
 } from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
-import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
+  MODEL_ATTACHMENT_REFS_FIELD,
+} from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 
 function user(text: string): CompactionItem {
@@ -466,6 +472,26 @@ describe("complete outgoing model-input accounting", () => {
     });
   });
 
+  // Regression: a phone photo sent at full resolution was estimated at 765
+  // tokens (the old 512 px tile model) while current models charge about
+  // 14k, so photo-heavy chats overflowed right after compacting.
+  test("prices a photo by the patches it covers at its sent resolution", () => {
+    const phone = estimateNativeImageTokens({
+      source: pngDataUrl(pngIhdrPrefix(4032, 3024)),
+      detail: "auto",
+    });
+    expect(phone.tokens).toBe(144 * 108);
+    const bounded = estimateNativeImageTokens({
+      source: pngDataUrl(pngIhdrPrefix(2000, 1500)),
+      detail: "auto",
+    });
+    expect(bounded.tokens).toBe(72 * 54);
+    expect(
+      estimateNativeImageTokens({ source: pngDataUrl(pngIhdrPrefix(12_000, 9_000)) }).tokens,
+    ).toBe(MAX_NATIVE_IMAGE_TOKENS);
+    expect(MAX_NATIVE_IMAGE_TOKENS).toBe(36_000);
+  });
+
   test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
     const short = pngDataUrl(pngIhdrPrefix(1280, 800));
     const long = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
@@ -717,12 +743,157 @@ describe("codex-parity rebuild", () => {
       "summary",
     );
 
-    expect(rebuilt.at(-2)).toMatchObject({
+    expect(rebuilt[0]).toMatchObject({
       type: "message",
-      role: "user",
+      role: "system",
       [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId }],
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
     });
     expect(rebuilt.at(-1)).toMatchObject({ [COMPACTION_SUMMARY_MARKER]: true });
+  });
+
+  // Regression: compaction used to append the catalog of earlier attachments
+  // as an undated user message right after the latest request, so a days-old
+  // file read as if the person had just sent it with that request.
+  describe("earlier attachments after compaction", () => {
+    const fileId = "00000000-0000-4000-8000-000000000092";
+    const uploadedAt = new Map([[fileId, "2026-10-09T08:15:00.000Z"]]);
+    const history = (): CompactionItem[] => [
+      {
+        ...user("look at this dashboard"),
+        [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId }],
+      },
+      // Large enough to exhaust both modes' retained-message budgets.
+      user("x".repeat(70_000 * 4)),
+      user("how does the pricing work?"),
+    ];
+    const rebuilds = (): Array<[string, CompactionItem[]]> => [
+      [
+        "portable",
+        buildCompactionReplacementHistory(history(), "summary", undefined, undefined, uploadedAt),
+      ],
+      [
+        "remote v2",
+        buildRemoteV2ReplacementHistory(
+          history(),
+          { type: "compaction", encrypted_content: "blob" },
+          undefined,
+          uploadedAt,
+        ),
+      ],
+    ];
+
+    for (const [mode] of rebuilds()) {
+      test(`${mode}: the catalog precedes the latest request and is not user input`, () => {
+        const rebuilt = new Map(rebuilds()).get(mode)!;
+        const latest = rebuilt.findIndex((item) => item.content === "how does the pricing work?");
+        const catalog = rebuilt.findIndex((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true);
+        expect(latest).toBeGreaterThan(-1);
+        expect(catalog).toBeGreaterThan(-1);
+        expect(catalog).toBeLessThan(latest);
+        // Nothing after the latest request mentions the earlier file.
+        expect(JSON.stringify(rebuilt.slice(latest + 1))).not.toContain(fileId);
+        expect(rebuilt[catalog]!.role).toBe("system");
+      });
+
+      test(`${mode}: the catalog states provenance and the upload time`, () => {
+        const rebuilt = new Map(rebuilds()).get(mode)!;
+        const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
+        expect(catalog.content).toBe(
+          [
+            "[Opengeni earlier attachments]",
+            "Files from earlier in this conversation whose messages are now summarized or no longer shown. " +
+              "This list is a platform record, not a message or attachment from the user. " +
+              "Treat a file as part of the current request only when the latest user message refers to it.",
+            `- fileId=${fileId}; uploaded Friday 2026-10-09 08:15 UTC; mountDirectory=.opengeni/files/${fileId}`,
+            "To open one, use the existing file in its mountDirectory, or call " +
+              "files__files_get_download_url with its fileId and download it with the shell.",
+          ].join("\n"),
+        );
+      });
+    }
+
+    test("an unknown upload time is stated, not invented", () => {
+      const rebuilt = buildCompactionReplacementHistory(history(), "summary");
+      const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
+      expect(String(catalog.content)).toContain(`- fileId=${fileId}; upload time unknown;`);
+    });
+
+    test("the catalog reaches the provider as plain system text without private fields", () => {
+      const rebuilt = buildCompactionReplacementHistory(
+        history(),
+        "summary",
+        undefined,
+        undefined,
+        uploadedAt,
+      );
+      const wire = sanitizeHistoryItemsForModel(rebuilt) as CompactionItem[];
+      const catalog = wire[0]!;
+      expect(Object.keys(catalog).sort()).toEqual(["content", "role", "type"]);
+      expect(typeof catalog.content).toBe("string");
+    });
+  });
+
+  // Regression: every retained message replayed its photos after compaction,
+  // so a chat with many photos was over the threshold again right away.
+  describe("only the newest photos stay inline after compaction", () => {
+    const olderId = "00000000-0000-4000-8000-000000000093";
+    const newerId = "00000000-0000-4000-8000-000000000094";
+    const history = (): CompactionItem[] => [
+      {
+        ...user("first photo"),
+        [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: olderId }],
+        [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      },
+      assistant("looked at it"),
+      {
+        ...user("second photo"),
+        [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: newerId }],
+        [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      },
+      user("what changed between them?"),
+    ];
+    const rebuilds = (): Array<[string, CompactionItem[]]> => [
+      ["portable", buildCompactionReplacementHistory(history(), "summary")],
+      [
+        "remote v2",
+        buildRemoteV2ReplacementHistory(history(), { type: "compaction", encrypted_content: "b" }),
+      ],
+    ];
+
+    for (const [mode, rebuilt] of rebuilds()) {
+      test(`${mode}: older photo moves to the catalog, newest stays on its message`, () => {
+        const first = rebuilt.find((item) => item.content === "first photo")!;
+        const second = rebuilt.find((item) => item.content === "second photo")!;
+        expect(first).toEqual(user("first photo"));
+        expect(second[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: newerId }]);
+        expect(second[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]).toBe(2000);
+        const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
+        expect(catalog[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: olderId }]);
+        expect(rebuilt.indexOf(catalog)).toBeLessThan(rebuilt.indexOf(first));
+      });
+    }
+
+    test("an older message is charged for its text, not its photos", () => {
+      const items = history();
+      const charges = new Map<CompactionItem, number>([
+        [items[0]!, 15_000],
+        [items[2]!, 3_000],
+      ]);
+      const rebuilt = buildCompactionReplacementHistory(
+        items,
+        "summary",
+        (item) => charges.get(item) ?? estimateTokens([item]),
+        10_000,
+      );
+      expect(rebuilt.some((item) => item.content === "first photo")).toBe(true);
+    });
+
+    test("the image bound never reaches the provider", () => {
+      const wire = sanitizeHistoryItemsForModel(history()) as CompactionItem[];
+      expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD);
+    });
   });
 
   test("durable system input participates in the explicit compaction transition", () => {

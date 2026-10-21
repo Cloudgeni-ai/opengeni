@@ -328,6 +328,8 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /** Resolved once per distinct model in this response page, using its catalog settings. */
+  modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
 
 /**
@@ -407,6 +409,12 @@ export async function workspaceSessionEffectiveToolsContext(
     routerHistorySessionIds: new Set(
       routerHistory.filter(([, present]) => present).map(([id]) => id),
     ),
+    modelProviders: new Map(
+      [...new Set(configured.map((session) => session.model))].map((modelId) => [
+        modelId,
+        resolveModelProviderForTurn(catalog.settings, modelId),
+      ]),
+    ),
   };
 }
 
@@ -425,22 +433,16 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
     ),
   );
   return bundledSkillIds.some((id) => {
-    if (
-      [
-        "builtin:opengeni-documents",
-        "builtin:opengeni-spreadsheets",
-        "builtin:opengeni-presentations",
-      ].includes(id)
-    ) {
+    if (["builtin:documents", "builtin:spreadsheets", "builtin:presentations"].includes(id)) {
       return tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
     }
-    if (id === "builtin:opengeni-sites") {
+    if (id === "builtin:sites") {
       return tools.has("artifacts_create") && tools.has("artifacts_publish");
     }
-    if (id === "builtin:opengeni-video-generation") {
+    if (id === "builtin:video-generation") {
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
-    if (id === "builtin:opengeni-secrets") return tools.has("secret_search");
+    if (id === "builtin:secrets") return tools.has("secret_search");
     return true;
   });
 }
@@ -451,7 +453,11 @@ export function sessionEffectiveToolProjectionInput(
   toolRefs: readonly ToolRef[],
   context?: SessionEffectiveToolsContext,
 ) {
-  const model = context ? resolveModelProviderForTurn(context.settings, session.model) : undefined;
+  const model = context?.modelProviders?.has(session.model)
+    ? context.modelProviders.get(session.model)
+    : context
+      ? resolveModelProviderForTurn(context.settings, session.model)
+      : undefined;
   const sandboxBackend =
     (session.activeSandboxId
       ? context?.activeSandboxBackends?.get(session.activeSandboxId)
@@ -542,7 +548,8 @@ export function sessionEffectiveToolProjectionInput(
       ].includes(name);
       if (
         permissionAllowed(readOnly ? "sessions:read" : "sessions:control") &&
-        (name !== "browser_download_save" || permissionAllowed("files:upload"))
+        ((name !== "browser_download_save" && name !== "browser_record") ||
+          permissionAllowed("files:upload"))
       ) {
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
@@ -589,6 +596,9 @@ export function sessionEffectiveToolProjectionInput(
     "request_human_input",
     "list_models",
     ...webSearchPlan.providerTools,
+    // Interaction entry tools stay visible even with progressive disclosure;
+    // the remaining authorized family tools are disclosed after opening.
+    ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)

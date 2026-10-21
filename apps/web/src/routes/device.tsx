@@ -21,10 +21,10 @@ import { Link } from "@tanstack/react-router";
 import { LaptopIcon, LogInIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasAccountPermission } from "@/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact

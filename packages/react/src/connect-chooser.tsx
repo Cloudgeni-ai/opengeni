@@ -4,6 +4,7 @@ import { ConnectionLogo } from "./connection-logo";
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type ConnectChooserProps = {
   controller: ConnectController;
@@ -44,6 +45,7 @@ function ScopedChooser({
   compact = false,
   initialProviderId = "",
 }: ConnectChooserProps) {
+  const t = useOpenGeniText();
   const view = useConnect(controller);
   const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
@@ -132,36 +134,36 @@ function ScopedChooser({
   return (
     <section
       className={className}
-      aria-label="Choose a connection"
+      aria-label={t("connectChooser.chooseAConnection")}
       aria-busy={view.busy || (!catalog && !failed)}
     >
-      {failed && (
-        <p role="alert">
-          Connections could not be loaded or started. Check setup status before retrying.
-        </p>
+      {failed && <p role="alert">{t("connectChooser.connectionsCouldNotBeLoaded")}</p>}
+      {!catalog && !failed && <p role="status">{t("connectChooser.loadingConnections")}</p>}
+      {catalog?.length === 0 && (
+        <p role="status">{t("connectChooser.noConnectionsAreAvailable")}</p>
       )}
-      {!catalog && !failed && <p role="status">Loading connections…</p>}
-      {catalog?.length === 0 && <p role="status">No connections are available.</p>}
       {Boolean(catalog?.length) && (
         <form onSubmit={submit}>
           <fieldset disabled={view.busy}>
             <legend hidden={customOnly || compact}>
-              {presentation === "catalog" ? "Add a connection" : "Provider and ownership"}
+              {presentation === "catalog"
+                ? t("connectChooser.addAConnection")
+                : t("connectChooser.providerAndOwnership")}
             </legend>
             {presentation === "catalog" && !provider ? (
               <>
                 <label hidden={customOnly || compact}>
-                  Search connections
+                  {t("connectChooser.searchConnections")}
                   <input
                     type="search"
-                    placeholder="Find a service…"
+                    placeholder={t("connectChooser.findAService")}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
                 </label>
                 {[
                   {
-                    name: "Services",
+                    name: t("connectChooser.services"),
                     entries: catalog!.filter(
                       (entry) =>
                         entry.readiness === "available" &&
@@ -173,7 +175,7 @@ function ScopedChooser({
                     secondary: false,
                   },
                   {
-                    name: "Custom connections",
+                    name: t("connectChooser.customConnections"),
                     entries: catalog!.filter(
                       (entry) =>
                         entry.readiness === "available" &&
@@ -210,10 +212,10 @@ function ScopedChooser({
                               id: entry.id,
                               name: entry.label,
                               status: connected
-                                ? "Connected"
+                                ? t("connectChooser.connected")
                                 : entry.readiness === "available"
-                                  ? "Connect"
-                                  : "Unavailable",
+                                  ? t("connectChooser.connect")
+                                  : t("connectChooser.unavailable"),
                               state: connected
                                 ? "added"
                                 : entry.readiness === "available"
@@ -252,7 +254,7 @@ function ScopedChooser({
                 })}
                 {!catalog!.some((entry) =>
                   entry.label.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim()),
-                ) && <p role="status">No services match your search.</p>}
+                ) && <p role="status">{t("connectChooser.noServicesMatchYourSearch")}</p>}
               </>
             ) : null}
             {presentation === "catalog" && provider && !initialProviderId ? (
@@ -263,11 +265,11 @@ function ScopedChooser({
                   setOwnership("");
                 }}
               >
-                Back to connections
+                {t("connectChooser.backToConnections")}
               </button>
             ) : null}
             <label hidden={presentation === "catalog"}>
-              Provider
+              {t("connectChooser.provider")}
               <select
                 required
                 value={providerId}
@@ -277,7 +279,7 @@ function ScopedChooser({
                 }}
               >
                 <option value="" disabled>
-                  Choose a provider
+                  {t("connectChooser.chooseAProvider")}
                 </option>
                 {catalog!.map((entry) => (
                   <option
@@ -295,23 +297,24 @@ function ScopedChooser({
                 <strong>{presentation === "catalog" ? provider.label : null}</strong>
                 {provider.readiness !== "available" && (
                   <p role="status">
-                    {provider.reason ??
-                      "This service is not available in this environment. Contact your administrator to enable it."}
+                    {provider.reason ?? t("connectChooser.thisServiceIsNotAvailable")}
                   </p>
                 )}
                 <label>
-                  Who can use this connection?
+                  {t("connectChooser.whoCanUseThisConnection")}
                   <select
                     required
                     value={ownership}
                     onChange={(event) => setOwnership(event.target.value)}
                   >
                     <option value="" disabled>
-                      Choose ownership
+                      {t("connectChooser.chooseOwnership")}
                     </option>
                     {provider.ownership.map((choice) => (
                       <option key={choice} value={choice}>
-                        {choice === "personal" ? "Only me" : "Everyone in this workspace"}
+                        {choice === "personal"
+                          ? t("connectChooser.onlyMe")
+                          : t("connectChooser.everyoneInThisWorkspace")}
                       </option>
                     ))}
                   </select>
@@ -323,13 +326,13 @@ function ScopedChooser({
               type="submit"
               disabled={!canBegin}
             >
-              Continue
+              {t("connectChooser.continue")}
             </button>
           </fieldset>
         </form>
       )}
       <button hidden={!failed} type="button" disabled={view.busy} onClick={() => setLoad(load + 1)}>
-        Reload providers
+        {t("connectChooser.reloadProviders")}
       </button>
     </section>
   );

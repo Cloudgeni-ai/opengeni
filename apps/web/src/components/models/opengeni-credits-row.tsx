@@ -1,13 +1,15 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-import { ListRow } from "@/components/ui/list-row";
+import { ListRow } from "@opengeni/react/ui/list-row";
 import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
 import { useAppContext } from "@/context";
 import { formatMoneyMicros } from "@/lib/format";
 import { modelUsesCredits } from "@/lib/model-policy";
 import { hasAccountPermission } from "@/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
+import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
 import type { ClientConfig } from "@/types";
 
 /* ----------------------------------------------------------------------------
@@ -38,29 +40,41 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
   const canManage = visible && hasAccountPermission(accessContext, accountId, "billing:manage");
   const canRead =
     visible && (canManage || hasAccountPermission(accessContext, accountId, "billing:read"));
-  const [balanceLabel, setBalanceLabel] = useState<string | null>(null);
+  const balance = useSharedQuery(
+    client,
+    ["model-settings", "credits", accountId],
+    async () => {
+      const billing = await client.getBilling({ accountId });
+      if (billing.mode !== "stripe") return { label: null };
+      const { balanceMicros, currency } = billing.balance;
+      let label =
+        balanceMicros > 0
+          ? `${formatMoneyMicros(balanceMicros, currency)} left`
+          : "No credits left";
+      if (billing.balance.plan) {
+        const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
+        if (catalog?.plan) {
+          const remaining = billing.balance.plan.creditRemainingMicros;
+          label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(balanceMicros - remaining, currency)} other credit`;
+        }
+      }
+      return { label };
+    },
+    { enabled: canRead, staleTimeMs: 300_000 },
+  );
   useEffect(() => {
-    setBalanceLabel(null);
-    if (!canRead) return;
-    let current = true;
-    void client
-      .getBilling({ accountId })
-      .then((billing) => {
-        if (!current || billing.mode !== "stripe") return;
-        const { balanceMicros, currency } = billing.balance;
-        setBalanceLabel(
-          balanceMicros > 0
-            ? `${formatMoneyMicros(balanceMicros, currency)} left`
-            : "No credits left",
-        );
-      })
-      // The balance is a detail: without it the row still says how credits pay.
-      .catch(() => undefined);
-    return () => {
-      current = false;
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        void invalidateSharedQueries(client, ["model-settings", "credits", accountId]);
     };
-  }, [client, accountId, canRead]);
-  return { visible, balanceLabel, canOpenBilling: canManage };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [client, accountId]);
+  return {
+    visible,
+    balanceLabel: balance.error ? null : (balance.data?.label ?? null),
+    canOpenBilling: canManage,
+  };
 }
 
 export function OpenGeniCreditsRow({

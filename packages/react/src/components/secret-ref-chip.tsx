@@ -4,6 +4,7 @@ import { Fragment, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { useSecretsUi, type SecretReferenceLike, type SecretsUi } from "../secrets-ui";
 import { secretReferenceLabel } from "../secret-reference-label";
+import { useOpenGeniText } from "../messages/runtime";
 
 export {
   secretReferenceLabel,
@@ -96,7 +97,8 @@ function SecretRefChipView({
   linkable: boolean;
   className?: string | undefined;
 }) {
-  const label = secretReferenceLabel(reference);
+  const t = useOpenGeniText();
+  const label = secretReferenceLabel(t, reference);
   const href = linkable ? (ui?.hrefForReference?.(reference) ?? null) : null;
   return (
     <SecretChipFrame
@@ -104,7 +106,7 @@ function SecretRefChipView({
       primary={label.primary}
       suffix={label.suffix}
       title={reference.raw}
-      srPrefix={reference.kind === "secretfile" ? "Secret file: " : "Secret: "}
+      srPrefix={`${reference.kind === "secretfile" ? t("secretRefChip.secretFile") : t("secretRefChip.secret")} `}
       href={href}
       className={className}
       dataAttributes={{ "data-og-secret-ref": reference.raw }}

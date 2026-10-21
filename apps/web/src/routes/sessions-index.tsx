@@ -1,3 +1,6 @@
+import { voiceRealtimeClient } from "@/api";
+import { initialWorkspaceMachineCompute } from "@/lib/workspace-default-machine";
+import { t } from "@/lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
@@ -36,7 +39,11 @@ import {
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults, stableJson } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
-import { NewSessionRealtimeControl, useRealtimeModelSelection } from "@opengeni/react/realtime";
+import {
+  NewSessionRealtimeControl,
+  prestartSessionRealtime,
+  useRealtimeModelSelection,
+} from "@opengeni/react/realtime";
 import {
   OpenGeniApiError,
   type NewSessionSelectionHistory,
@@ -88,7 +95,7 @@ import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
@@ -97,11 +104,11 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { StatusDot } from "@/components/ui/status-dot";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
@@ -190,7 +197,7 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
@@ -377,7 +384,9 @@ function SessionsIndexRouteContent({
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
-  const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
+  const rigs = useWorkspaceRigs({
+    enabled: fixedResourceCatalogEnabled && canUseRigs,
+  });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -625,7 +634,19 @@ function SessionsIndexRouteContent({
   });
   const setExplicitComputeDraft = useLatestCallback((nextDraft: SessionDraft) => {
     setProjectProvenancePresent(true);
-    setDraft(nextDraft);
+    setDraft(
+      nextDraft.compute.kind === "sandbox" &&
+        !nextDraft.compute.backend &&
+        defaultSandboxBackend !== "selfhosted"
+        ? {
+            ...nextDraft,
+            compute: {
+              ...nextDraft.compute,
+              backend: defaultSandboxBackend ?? "",
+            },
+          }
+        : nextDraft,
+    );
   });
 
   useEffect(() => {
@@ -701,7 +722,10 @@ function SessionsIndexRouteContent({
 
   const computeReady =
     isSessionDraftComputeReady(draft) &&
-    (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
+    (draft.compute.kind !== "machine" ||
+      (!fleet.loading &&
+        selectedMachine !== null &&
+        isMachineComputeSelectable(selectedMachine.state)));
   const persistedToolPolicy = useMemo(
     () =>
       fitToolPolicyToAgentCapabilities(
@@ -824,7 +848,13 @@ function SessionsIndexRouteContent({
         hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote),
       );
       setSelectedProjectChannelId(projectSelection.channelId);
-      setDraft({ ...restored, compute: projectSelection.compute });
+      const compute = initialWorkspaceMachineCompute({
+        settings: workspace?.settings,
+        options: remote.options,
+        fallback: projectSelection.compute,
+        backend: defaultSandboxBackend,
+      });
+      setDraft({ ...restored, compute });
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
@@ -868,6 +898,7 @@ function SessionsIndexRouteContent({
       defaultSandboxBackend,
       setSelectedProjectChannelId,
       workspaceDefaultToolIdsForHydration,
+      workspace?.settings,
     ],
   );
   const newSessionDraft = useNewSessionDraft({
@@ -1020,7 +1051,7 @@ function SessionsIndexRouteContent({
       const text = hasTypedText
         ? message
         : attachments.readyResources.length > 0
-          ? FILE_ONLY_MESSAGE_TEXT
+          ? FILE_ONLY_MESSAGE_TEXT(t)
           : "";
       if (
         busy ||
@@ -1180,7 +1211,9 @@ function SessionsIndexRouteContent({
               }
               await preserveNewerLocalDraft();
               newSessionDraft.clearError();
-              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
+              toast.error("Couldn't start voice", {
+                description: DRAFT_CHANGED_DURING_SEND_TEXT,
+              });
               return null;
             }
 
@@ -1300,11 +1333,32 @@ function SessionsIndexRouteContent({
             return null;
           },
           navigate: async (sessionId) => {
-            await navigate({
-              to: "/workspaces/$workspaceId/sessions/$sessionId",
-              params: { workspaceId, sessionId },
-              search: realtimeModel ? { realtime: realtimeModel } : {},
-            });
+            // Voice connects while the session page loads; the page adopts
+            // the running call (`?realtime=` still selects its model there).
+            const sessionPath = `/workspaces/${workspaceId}/sessions/${sessionId}`;
+            const abandonVoice = realtimeModel
+              ? prestartSessionRealtime({
+                  client: voiceRealtimeClient(
+                    context.client,
+                    () => new URL(sessionPath, window.location.origin).href,
+                  ),
+                  workspaceId,
+                  sessionId,
+                  model: realtimeModel,
+                  language: voiceSelection.languageFor(realtimeModel),
+                  voiceSettings: voiceSelection.voiceSettingsFor(realtimeModel),
+                })
+              : null;
+            try {
+              await navigate({
+                to: "/workspaces/$workspaceId/sessions/$sessionId",
+                params: { workspaceId, sessionId },
+                search: realtimeModel ? { realtime: realtimeModel } : {},
+              });
+            } catch (error) {
+              abandonVoice?.();
+              throw error;
+            }
           },
         });
       } finally {
@@ -1463,7 +1517,7 @@ function SessionsIndexRouteContent({
     send: async () => await submitNewSession(null),
     steer: async () => {
       const text =
-        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT(t) : "");
       if (!text || busy || attachments.hasUnresolved || !computeReady || !newSessionPolicyValid) {
         return false;
       }
@@ -1502,7 +1556,11 @@ function SessionsIndexRouteContent({
     null,
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
-    <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
+    <div
+      data-workspace-scroll-owner="self-managed"
+      data-window-top-page
+      className="min-h-0 flex-1 overflow-y-auto"
+    >
       {githubAppConnect.element}
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
@@ -1654,7 +1712,10 @@ function SessionsIndexRouteContent({
                               disabled={busy || newSessionDraft.loading}
                               onChange={(visibility) => {
                                 visibilityChosenRef.current = true;
-                                setDraft((current) => ({ ...current, visibility }));
+                                setDraft((current) => ({
+                                  ...current,
+                                  visibility,
+                                }));
                               }}
                             />
                           ),
@@ -1818,7 +1879,7 @@ function SessionsIndexRouteContent({
               hooks reconnect on their own so Send works again. */}
           {newSessionDraft.unavailable || connectionAccounts.unavailable ? (
             <div role="status" className="mt-3">
-              <Notice tone="info">{OPENGENI_UPDATING_NOTICE}</Notice>
+              <Notice tone="info">{OPENGENI_UPDATING_NOTICE(t)}</Notice>
             </div>
           ) : null}
 
@@ -1937,7 +1998,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(sessions, pinned, 6), [pinned, sessions]);
+  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -2006,7 +2067,7 @@ function RecentSessionRow({
           ) : null}
         </span>
         <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
-          {relativeTimeLabel(session.updatedAt)}
+          {relativeTimeLabel(t, session.updatedAt)}
         </span>
       </Link>
     </li>
@@ -2262,7 +2323,10 @@ function workspaceRepositoryPickerProps(
             next.add(matched.id);
             return next;
           });
-          context.setSelectedRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+          context.setSelectedRepoRefs((current) => ({
+            ...current,
+            [matched.id]: ref,
+          }));
           context.setSelectedPersonalGitHubRepoIds(
             (current) =>
               new Set(
@@ -2389,118 +2453,43 @@ function ComputeTargetControl(props: {
 }) {
   const { draft, onChange } = props;
   const { fleet, machines } = props;
-  const fleetEmpty = machines.length === 0;
   const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
   // Managed-primary deployments keep Connected Machine opt-in and hide the
   // chooser when the fleet is empty. Selfhosted-primary deployments always show
   // the required machine path, including its honest unavailable state.
-  const showComputeTarget = selfhostedPrimary || fleet.loading || !fleetEmpty;
   const machineAvailabilityKey = machines
     .map((machine) => `${machine.sandboxId}:${machine.state}`)
     .join("\u0000");
 
-  const sandboxBackendOverride = draft.compute.kind === "sandbox" ? draft.compute.backend : "";
   const selectedMachineSandboxId =
     draft.compute.kind === "machine" ? draft.compute.sandboxId : null;
 
-  // Defensive: if the segmented control is hidden (clean flow) while a stale draft
-  // still points at a machine (e.g. the last machine just left the fleet), fall
-  // back to the managed sandbox so a hidden machine target can never be submitted.
-  // Also drop any leftover managed-backend override — that control is gone from
-  // the composer, so a stale draft must not keep forcing a sandbox type.
+  // A named machine stays selected when it disconnects or is removed. The
+  // unavailable notice and submission gate require an explicit replacement.
   useEffect(() => {
-    if (selfhostedPrimary && draft.compute.kind === "sandbox") {
-      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
-      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
-      onChange({
-        ...draft,
-        compute: {
-          kind: "machine",
-          sandboxId: firstSelectable?.sandboxId ?? null,
-          folder: firstSelectable
-            ? rememberedMachineFolder(
-                props.selectionHistory,
-                props.selectedChannelId,
-                firstSelectable.sandboxId,
-              )
-            : { kind: "root" },
-        },
-      });
-      return;
-    }
-    if (!showComputeTarget && draft.compute.kind === "machine") {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
-      return;
-    }
     if (
       selfhostedPrimary &&
-      !fleet.loading &&
       draft.compute.kind === "machine" &&
-      selectedMachineSandboxId === null
+      selectedMachineSandboxId === null &&
+      !fleet.loading
     ) {
       const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
-      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
-      if (firstSelectable) {
+      if (firstSelectableId)
         onChange({
           ...draft,
           compute: {
             kind: "machine",
-            sandboxId: firstSelectable.sandboxId,
+            sandboxId: firstSelectableId,
             folder: rememberedMachineFolder(
               props.selectionHistory,
               props.selectedChannelId,
-              firstSelectable.sandboxId,
+              firstSelectableId,
             ),
           },
         });
-      }
-      return;
-    }
-    if (
-      !fleet.loading &&
-      draft.compute.kind === "machine" &&
-      selectedMachineSandboxId !== null &&
-      !machines.some(
-        (machine) =>
-          machine.sandboxId === selectedMachineSandboxId &&
-          isMachineComputeSelectable(machine.state),
-      )
-    ) {
-      const fallbackId = resolveSelectableMachineSandboxId(machines, selectedMachineSandboxId);
-      const fallback = machines.find((machine) => machine.sandboxId === fallbackId);
-      onChange({
-        ...draft,
-        compute: fallback
-          ? {
-              kind: "machine",
-              sandboxId: fallback.sandboxId,
-              folder: rememberedMachineFolder(
-                props.selectionHistory,
-                props.selectedChannelId,
-                fallback.sandboxId,
-              ),
-            }
-          : selfhostedPrimary
-            ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
-            : { kind: "sandbox", backend: "" },
-      });
-      return;
-    }
-    if (draft.compute.kind === "sandbox" && sandboxBackendOverride) {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    showComputeTarget,
-    selfhostedPrimary,
-    fleet.loading,
-    machineAvailabilityKey,
-    draft.compute.kind,
-    selectedMachineSandboxId,
-    sandboxBackendOverride,
-    props.selectedChannelId,
-    props.selectionHistory,
-  ]);
+  }, [selfhostedPrimary, fleet.loading, machineAvailabilityKey, selectedMachineSandboxId]);
 
   // A 404 means Connected Machines are off here, not a failure.
   const fleetLoadFailed =

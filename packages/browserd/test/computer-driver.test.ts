@@ -14,6 +14,7 @@ import {
   type ComputerBackendActionCommand,
   type NativeComputerHandshake,
 } from "../src";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 
 const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -488,7 +489,7 @@ describe("ComputerDriver", () => {
     }
   });
 
-  test("retains failed retired-helper cleanup and does not create a replacement", async () => {
+  test("fails clearly and does not create a replacement when a failed helper may still run", async () => {
     const poisoned = new FixtureNativeTransport();
     poisoned.targetsError = new Error("fixture transport failed");
     poisoned.close = async () => {
@@ -504,12 +505,57 @@ describe("ComputerDriver", () => {
         return new FixtureNativeTransport();
       },
     });
-    await expect(driver.listTargets()).rejects.toThrow(
-      "retired native computer helper cleanup failed",
-    );
+    await expect(driver.listTargets()).rejects.toMatchObject({
+      name: "InteractionControllerError",
+      code: "controller_lost",
+    });
+    await expect(driver.listTargets()).rejects.toMatchObject({ code: "controller_lost" });
     expect(factories).toBe(0);
     await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
     await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
+  });
+
+  test("replaces a crashed helper whose process already exited", async () => {
+    const crashed = new FixtureNativeTransport();
+    crashed.targetsError = new Error("native computer helper exited");
+    crashed.close = async () => {
+      throw new UnsettledCleanupError([], "native computer helper cleanup was not confirmed", {
+        processExited: true,
+      });
+    };
+    let factories = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: crashed,
+      clientFactory: async () => {
+        factories++;
+        return new FixtureNativeTransport();
+      },
+    });
+    await expect(driver.listTargets()).resolves.toMatchObject([{ id: "window-1" }]);
+    await expect(driver.listTargets()).resolves.toMatchObject([{ id: "window-1" }]);
+    expect(factories).toBe(1);
+    await driver.close();
+  });
+
+  test("reports a retryable unavailable helper when its replacement cannot start", async () => {
+    const crashed = new FixtureNativeTransport();
+    crashed.targetsError = new Error("native computer helper exited");
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: crashed,
+      clientFactory: async () => {
+        throw new Error("fixture helper failed to start");
+      },
+    });
+    await expect(driver.listTargets()).rejects.toMatchObject({
+      name: "InteractionControllerError",
+      code: "resource_unavailable",
+      retryable: true,
+    });
+    await driver.close();
   });
 
   test("fans one native source out to independent concurrent frame profiles", async () => {
@@ -638,6 +684,68 @@ describe("ComputerDriver", () => {
     }
   });
 
+  test("a backend's failure text is redacted in full before it is bounded", async () => {
+    const raw = ["{{", "secret:Desk/token", "}}"].join("");
+    for (const secret of [
+      "line-one\nline-two-secret",
+      `long-${"x".repeat(3_000)}-secret`,
+      "trailing-secret \n",
+    ]) {
+      const transport = new FixtureNativeTransport();
+      transport.dispatchError = new ComputerBackendError(
+        "driver_failed",
+        `CUA type_text refused the operation: could not type ${secret} into the field`,
+        false,
+        false,
+      );
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      const error = await driver
+        .dispatch({
+          ...typeCommand(raw),
+          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught as Error,
+        );
+      expect(error?.message).toBe(
+        "CUA type_text refused the operation: could not type [secret] into the field",
+      );
+    }
+  });
+
+  test("a read failure's backend text is redacted against typed secrets", async () => {
+    const raw = ["{{", "secret:Desk/read token", "}}"].join("");
+    const secret = "read-path-secret-0123456789";
+    const transport = new FixtureNativeTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    await driver.dispatch({
+      ...typeCommand(raw),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+    });
+    transport.targetsError = new ComputerBackendError(
+      "driver_failed",
+      `CUA list_windows did not return a valid result: window ${secret} is gone`,
+      false,
+      false,
+    );
+    const error = await driver.listTargets().then(
+      () => null,
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toBe(
+      "CUA list_windows did not return a valid result: window [secret] is gone",
+    );
+  });
+
   test("never pastes text that carries a resolved secret", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
@@ -659,6 +767,31 @@ describe("ComputerDriver", () => {
     expect(transport.calls).toEqual([
       ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
     ]);
+  });
+  test("redacts a typed secret from later observations of the field that holds it", async () => {
+    const transport = new EchoingFieldTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const raw = ["{{", "secret:Desk/api key", "}}"].join("");
+    const secret = "sk-live-0123456789abcdef";
+    const typed = await driver.dispatch({
+      ...typeCommand(raw),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+    });
+    expect(JSON.stringify(typed)).not.toContain(secret);
+    expect(transport.typed).toBe(secret);
+    // A later observation carries no secret of its own, yet the desktop
+    // still shows the field's value: it stays redacted.
+    const later = await driver.observe("window-1");
+    expect(JSON.stringify(later)).not.toContain(secret);
+    expect(later.semantic?.kind === "snapshot" && later.semantic.roots[0]).toMatchObject({
+      role: "textbox",
+      value: "[secret]",
+    });
+    expect(JSON.stringify(await driver.listTargets())).not.toContain(secret);
   });
 });
 
@@ -846,4 +979,32 @@ class UntypeableTextTransport extends FixtureNativeTransport {
 
 function typeCommand(value: string): ComputerActionCommand {
   return { ...command(), action: { type: "keyboard", action: "type", value } };
+}
+
+/** A desktop whose text field (and window title) shows what was typed into it. */
+class EchoingFieldTransport extends FixtureNativeTransport {
+  typed = "";
+
+  private field(observationId: string) {
+    return {
+      ...observation(observationId),
+      roots: [
+        { ref: "e1", role: "textbox", name: "API key", value: this.typed, states: [], actions: [] },
+      ],
+    };
+  }
+
+  override async observe() {
+    return { ...this.field("observation-1"), frameId: this.observationFrameId };
+  }
+
+  override async targets() {
+    return (await super.targets()).map((entry) => ({ ...entry, title: `Settings ${this.typed}` }));
+  }
+
+  override async dispatch(nativeCommand: ComputerBackendActionCommand) {
+    if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
+      this.typed = nativeCommand.action.value;
+    return this.field("observation-2");
+  }
 }

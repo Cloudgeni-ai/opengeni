@@ -160,6 +160,8 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
         ALTER CONSTRAINT preference_registry_events_related_fk DEFERRABLE INITIALLY DEFERRED,
         ALTER CONSTRAINT preference_registry_events_old_revision_fk DEFERRABLE INITIALLY DEFERRED,
         ALTER CONSTRAINT preference_registry_events_new_revision_fk DEFERRABLE INITIALLY DEFERRED;
+      -- The deletion adapter ends a workspace's compute groups (0861's column).
+      ALTER TABLE sandbox_leases ADD COLUMN group_end_requested_at timestamptz;
     `);
     expect(
       await deleteWorkspaceIfQuiescent(client.db, {

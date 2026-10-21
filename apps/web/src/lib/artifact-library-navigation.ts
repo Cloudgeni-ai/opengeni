@@ -4,7 +4,9 @@ import { defaultArtifactFilters } from "./artifact-catalog";
 import type { ArtifactReturnSearch } from "./routes";
 
 /** The same query travels with the library and every type-specific viewer. */
-export function artifactLibraryFilters(search: ArtifactReturnSearch): ArtifactCatalogFilters {
+export function artifactLibraryFilters(
+  search: Pick<ArtifactReturnSearch, "q" | "kind" | "sort" | "status">,
+): ArtifactCatalogFilters {
   return {
     q: search.q ?? defaultArtifactFilters.q,
     kind: search.kind ?? defaultArtifactFilters.kind,

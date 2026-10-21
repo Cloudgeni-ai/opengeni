@@ -186,6 +186,57 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     ).toBe(true);
   });
 
+  test("AC01: one multi-row insert seeds every new root once per statement and leaves no capability open", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const count = 2_000;
+    const started = performance.now();
+    const inserted = await withWorkspaceSubjectSessionActivityRls(
+      app.db,
+      scope.workspaceId,
+      scope.subjectId,
+      (db) =>
+        db.execute<{ id: string }>(sql`
+          insert into sessions (
+            account_id, workspace_id, initial_message, resources, tools, metadata,
+            model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy
+          )
+          select ${scope.accountId}, ${scope.workspaceId}, 'bulk-' || n::text,
+            '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'medium', 'standard', 'none',
+            gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          from generate_series(1, ${count}) as generated(n)
+          returning id
+        `),
+    );
+    const elapsedMs = performance.now() - started;
+    expect(inserted).toHaveLength(count);
+    const [seeded] = await shared.admin<Array<{ complete: number; other: number }>>`
+      select count(*) filter (where history_state = 'complete')::int as complete,
+        count(*) filter (where history_state <> 'complete')::int as other
+      from opengeni_private.session_usage_limit_roots where workspace_id = ${scope.workspaceId}`;
+    expect(seeded).toEqual({ complete: count, other: 0 });
+    const [open] = await shared.admin<Array<{ open: number }>>`
+      select count(*)::int as open from opengeni_private.session_usage_limit_capabilities
+      where workspace_id = ${scope.workspaceId}`;
+    expect(open!.open).toBe(0);
+    // Seeding is per statement: a per-row seed reopens one capability key per
+    // row and makes a bulk insert quadratic in the number of new roots.
+    const [trigger] = await shared.admin<
+      Array<{ perRow: boolean; transitionTable: string | null }>
+    >`
+      select (t.tgtype & 1) = 1 as "perRow", t.tgnewtable::text as "transitionTable"
+      from pg_trigger t join pg_class c on c.oid = t.tgrelid
+      where c.relname = 'sessions' and t.tgname = 'session_usage_limit_root_seed'`;
+    expect(trigger).toEqual({ perRow: false, transitionTable: "inserted_sessions" });
+    expect(elapsedMs).toBeLessThan(30_000);
+    expect(await read(scope, inserted[0]!.id)).toMatchObject({
+      rootSessionId: inserted[0]!.id,
+      history: "complete",
+      coverage: "complete",
+      usedMicros: 0,
+    });
+  });
+
   test("AC10/AC21: CAS, exact replay, operation conflict, root-only writes, producer gate and the durable event", async () => {
     if (!shared) return;
     const scope = await fixture();

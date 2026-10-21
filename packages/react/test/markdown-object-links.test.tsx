@@ -8,6 +8,9 @@ import {
   type OpenGeniLinkTarget,
 } from "../src/components/open-geni-links";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -67,7 +70,7 @@ describe("Opengeni object links inside an embedding host", () => {
   });
 
   test("disabled sandbox defaults leave path references unavailable but retain file downloads", () => {
-    const resolve = sessionLinkResolver({
+    const resolve = sessionLinkResolver(englishText, {
       client: {
         fsRead: (() => Promise.reject(new Error("must not read"))) as never,
         createFileDownloadUrl: (() => Promise.resolve({ url: "https://file.test" })) as never,
@@ -175,7 +178,7 @@ describe("Opengeni object links inside an embedding host", () => {
 
   test("the session default downloads files and sandbox files through the client", async () => {
     const calls: unknown[] = [];
-    const resolve = sessionLinkResolver({
+    const resolve = sessionLinkResolver(englishText, {
       workspaceId: WORKSPACE,
       sessionId: "session-1",
       client: {

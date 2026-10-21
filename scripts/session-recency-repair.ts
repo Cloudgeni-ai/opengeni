@@ -10,6 +10,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { withRestoredSessionActivityRlsContext } from "../packages/db/src/database";
+import { encodeActivityXid } from "../packages/db/src/session-activity-xid";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 
@@ -48,7 +49,7 @@ async function evidence(
   const rows = await db.execute(sql`
     select s.id as "sessionId", s.status, s.active_turn_id as "activeTurnId",
       to_char(s.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expectedUpdatedAt",
-      s.activity_revision::text as "expectedRevision",
+      s.activity_xid::text as "expectedRevision",
       coalesce(c.last_sequence, s.last_sequence) as "expectedSequence",
       to_char(greatest(s.created_at,
         (select max(e.occurred_at) from session_events e
@@ -64,7 +65,10 @@ async function evidence(
       on c.workspace_id = s.workspace_id and c.session_id = s.id
     where s.workspace_id = ${workspaceId}::uuid and s.id = ${sessionId}::uuid
   `);
-  return (rows as unknown as EvidenceRow[])[0] ?? null;
+  const row = (rows as unknown as EvidenceRow[])[0];
+  // Disjoint decimal namespace makes a pre-expansion reviewed manifest stale
+  // rather than accidentally matching an unrelated transaction ID.
+  return row ? { ...row, expectedRevision: encodeActivityXid(row.expectedRevision) } : null;
 }
 
 export async function previewSessionRecencyRepair(
@@ -140,7 +144,7 @@ export async function applySessionRecencyRepair(db: Database, input: RecencyRepa
           return "stale";
         await tx.execute(sql`update sessions set updated_at = ${candidate.proposedUpdatedAt}::timestamptz
         where workspace_id = ${plan.workspaceId}::uuid and id = ${candidate.sessionId}::uuid`);
-        // The normal outer activity gate advances the revision; never rewind it.
+        // The row trigger stamps this writing transaction; never restore an old xid.
         return "applied";
       });
     });

@@ -3,9 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { SearchIcon } from "lucide-react";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Button } from "@opengeni/react/ui/button";
 import {
   useCommittedSearchQuery,
   useConversationSearch,

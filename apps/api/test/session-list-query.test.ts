@@ -17,6 +17,19 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ needsYouOnly: "true" }, false)).toThrow();
   });
 
+  test("accepts Only mine as a page filter", () => {
+    expect(sessionListQuery({ parentSessionId: "null", mineOnly: "true" })).toMatchObject({
+      mineOnly: true,
+      hasPageFilters: true,
+    });
+    expect(sessionListQuery({ mineOnly: "false" })).toMatchObject({
+      mineOnly: false,
+      hasPageFilters: false,
+    });
+    expect(() => sessionListQuery({ mineOnly: "yes" })).toThrow();
+    expect(() => sessionListQuery({ mineOnly: "true" }, false)).toThrow();
+  });
+
   test("accepts each sorting/archive mode and retains legacy defaults", () => {
     for (const sortBy of ["name", "createdAt", "updatedAt"]) {
       for (const archiveStatus of ["active", "archived", "all"]) {

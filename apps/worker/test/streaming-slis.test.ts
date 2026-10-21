@@ -9,6 +9,7 @@ import {
   recordContextCompactionStarted,
   recordCompanyBrainContributions,
   recordModelInputTokens,
+  codexRequestTransportLabel,
   recordModelRequestPhase,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
@@ -234,6 +235,75 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).toMatch(/opengeni_stream_ttft_seconds_sum\{[^}]*\} 10\b/);
   });
 
+  test("transport admission after native dispatch cannot time the previous response as preparation", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "codex-subscription",
+      now: () => now,
+    });
+
+    now = 1_000;
+    timing.onModelRequestEntry("model_entry");
+    now = 1_200;
+    timing.onProviderDispatch();
+    // Native dispatch admission runs outside instrumentedModelFetch. Its inner
+    // transport admission therefore follows the dispatch notification.
+    timing.onModelRequestEntry("transport");
+    now = 6_200;
+    expect(timing.completeResponse()?.preDispatchMs).toBe(200);
+
+    // One second of tool work is not preparation for the next model call.
+    now = 7_200;
+    timing.onModelRequestEntry("model_entry");
+    now = 7_400;
+    timing.onProviderDispatch();
+    timing.onModelRequestEntry("transport");
+    now = 8_400;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 200,
+      timeToFirstTokenMs: null,
+      timeToFirstTextMs: null,
+      durationMs: 1_000,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_sum\{[^}]*provider="codex-subscription"[^}]*\} 0\.4\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_count\{[^}]*provider="codex-subscription"[^}]*\} 2\b/,
+    );
+  });
+
+  test("transport rechecks before dispatch and on retries do not create model-entry samples", async () => {
+    const observability = worker();
+    let now = 1_000;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    timing.onModelRequestEntry("model_entry");
+    now = 1_100;
+    timing.onModelRequestEntry("transport");
+    now = 1_200;
+    timing.onProviderDispatch();
+    now = 2_000;
+    timing.onModelRequestEntry("transport");
+    now = 2_100;
+    timing.onProviderDispatch();
+    now = 2_300;
+    timing.onEvent("agent.message.delta");
+    now = 3_000;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 200,
+      timeToFirstTokenMs: 1_100,
+      timeToFirstTextMs: 1_100,
+      durationMs: 1_800,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_count\{[^}]*provider="openai"[^}]*\} 1\b/,
+    );
+  });
+
   test("provider TTFT survives a lagging structural event and follows the latest dispatch", async () => {
     const observability = worker();
     let now = 0;
@@ -280,9 +350,125 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).not.toContain("opengeni_model_provider_ttft_seconds_count{");
     expect(metrics).not.toContain("opengeni_model_request_pre_dispatch_seconds_count{");
   });
+
+  test("completeResponse returns each dispatched call's timing exactly once", () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
+
+    // No dispatch observed: no timing.
+    expect(timing.completeResponse()).toBeNull();
+
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_040;
+    timing.onProviderDispatch();
+    now = 1_300;
+    timing.onEvent("agent.reasoning.delta");
+    now = 1_900;
+    timing.onEvent("agent.message.delta");
+    now = 2_000;
+    timing.onEvent("agent.message.delta");
+    now = 3_040;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 40,
+      timeToFirstTokenMs: 260,
+      timeToFirstTextMs: 860,
+      durationMs: 2_000,
+    });
+    // A mirrored terminal event for the same call gets nothing.
+    expect(timing.completeResponse()).toBeNull();
+
+    // A tool-call-only response has no first text. A transport retry goes
+    // through admission again (a second model entry) and re-dispatches; the
+    // call keeps its first request's pre-dispatch work and is measured from
+    // its first dispatch.
+    now = 5_000;
+    timing.onModelRequestEntry();
+    now = 5_040;
+    timing.onProviderDispatch();
+    now = 5_495;
+    timing.onModelRequestEntry();
+    now = 5_500;
+    timing.onProviderDispatch();
+    now = 5_700;
+    timing.onEvent("agent.toolCall.output");
+    now = 6_000;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 40,
+      timeToFirstTokenMs: null,
+      timeToFirstTextMs: null,
+      durationMs: 960,
+    });
+  });
+
+  test("a provider continuation (Claude pause_turn) is timed as one call from its first dispatch", () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "claude-subscription",
+      now: () => now,
+    });
+    timing.onModelRequestEntry();
+    now = 20;
+    timing.onProviderDispatch();
+    now = 120;
+    timing.onEvent("agent.reasoning.delta");
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_010;
+    timing.onProviderDispatch(); // continuation request, same logical response
+    now = 1_400;
+    timing.onEvent("agent.message.delta");
+    now = 2_020;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 20,
+      timeToFirstTokenMs: 100,
+      timeToFirstTextMs: 1_380,
+      durationMs: 2_000,
+    });
+    expect(timing.completeResponse()).toBeNull();
+  });
 });
 
 describe("provider request lifecycle diagnostics", () => {
+  test("labels Codex request phases with how the request was carried", async () => {
+    const observability = worker();
+    expect(
+      codexRequestTransportLabel({ kind: "websocket", connection: "new", input: "full" }),
+    ).toBe("websocket_new");
+    expect(
+      codexRequestTransportLabel({ kind: "websocket", connection: "reused", input: "incremental" }),
+    ).toBe("websocket_incremental");
+    expect(codexRequestTransportLabel({ kind: "http" })).toBe("http");
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "first_byte",
+      durationSeconds: 0.2,
+      transport: codexRequestTransportLabel({
+        kind: "websocket",
+        connection: "reused",
+        input: "full",
+      }),
+    });
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "handshake",
+      durationSeconds: 0.12,
+      transport: "websocket_new",
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*transport="websocket_reused"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="handshake"[^}]*transport="websocket_new"[^}]*\} 1\b/,
+    );
+  });
+
   test("records bounded phase/outcome labels and monotonic duration", async () => {
     const observability = worker();
     recordModelRequestPhase(observability, {

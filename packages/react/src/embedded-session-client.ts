@@ -38,6 +38,12 @@ const requiredMethods = [
   "sendApprovalDecision",
 ] as const satisfies readonly (keyof EmbeddedSessionClientLike)[];
 
+/** Bound when the base or an override provides them; the session works without. */
+const optionalMethods = [
+  "setWorkspaceInferenceState",
+  "updateSessionAttention",
+] as const satisfies readonly (keyof EmbeddedSessionClientLike)[];
+
 /**
  * Build the exact client required by `@opengeni/react/session` from a full SDK
  * client or host proxy. The constructor binds every delegated method once,
@@ -59,13 +65,12 @@ export function createEmbeddedSessionClient(
     client[key] = method.bind(override === undefined ? base : overrides) as never;
   }
 
-  const inferenceOverride = overrides.setWorkspaceInferenceState;
-  const inferenceBase = base.setWorkspaceInferenceState;
-  const inferenceMethod = inferenceOverride ?? inferenceBase;
-  if (typeof inferenceMethod === "function") {
-    client.setWorkspaceInferenceState = inferenceMethod.bind(
-      inferenceOverride === undefined ? base : overrides,
-    );
+  for (const key of optionalMethods) {
+    const override = overrides[key];
+    const method = override ?? base[key];
+    if (typeof method === "function") {
+      client[key] = method.bind(override === undefined ? base : overrides) as never;
+    }
   }
 
   const mapDraft = options.mapComposerDraft;

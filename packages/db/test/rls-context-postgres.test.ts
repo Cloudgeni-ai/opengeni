@@ -8,6 +8,7 @@ import {
   rawRows,
   withRlsContext,
   withSessionRlsActorContext,
+  withSiteViewerRlsContext,
   type Database,
 } from "../src/database";
 
@@ -125,6 +126,51 @@ async function expectScope(db: Database, settings: Scope, label: string): Promis
 }
 
 describe("nested RLS actor restoration on PostgreSQL", () => {
+  test.each([false, true])(
+    "Site viewer and verified agent-root proof restore after nested dispatch (throw=%s)",
+    async (fails) => {
+      const tenant = scope();
+      const siteId = crypto.randomUUID();
+      const root = crypto.randomUUID();
+      const read = async (db: Database) =>
+        (
+          await rawRows(
+            db,
+            sql`select
+      current_setting('opengeni.site_id',true) as site,
+      current_setting('opengeni.site_viewer_principal',true) as viewer,
+      current_setting('opengeni.agent_root_session_id',true) as root`,
+          )
+        )[0];
+      await withSessionRlsActorContext(
+        { subjectId: `site:${siteId}`, agentRootSessionId: root },
+        () =>
+          withSiteViewerRlsContext({ siteId, principal: "guest:outer" }, async () => {
+            const identity = currentSessionRlsActorIdentityKey();
+            await withRlsContext(client.db, tenant, async (outer) => {
+              const expected = { site: siteId, viewer: "guest:outer", root };
+              expect(await read(outer)).toEqual(expected);
+              const nested = () =>
+                withSiteViewerRlsContext({ siteId, principal: "guest:inner" }, async () => {
+                  expect(currentSessionRlsActorIdentityKey()).not.toBe(identity);
+                  await withRlsContext(outer, tenant, async (inner) => {
+                    expect(await read(inner)).toEqual({ ...expected, viewer: "guest:inner" });
+                    if (fails) throw new Error("nested viewer refused");
+                  });
+                });
+              if (fails) await expect(nested()).rejects.toThrow("nested viewer refused");
+              else await nested();
+              expect(currentSessionRlsActorIdentityKey()).toBe(identity);
+              expect(await read(outer)).toEqual(expected);
+            });
+          }),
+      );
+      await withRlsContext(client.db, tenant, async (tx) => {
+        expect(await read(tx)).toEqual({ site: "", viewer: "", root: "" });
+      });
+    },
+  );
+
   test("executes under a non-owner role with forced RLS and no bypass", async () => {
     const [posture] = await rawRows<{
       superuser: boolean;
