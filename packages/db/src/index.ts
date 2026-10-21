@@ -33015,22 +33015,6 @@ async function sessionListTotalsInScope(
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
       where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
-    ), visible_children as materialized (
-      -- Keep the recursive join off the base table: a hash-join plan otherwise
-      -- scans the whole workspace and rechecks RLS at every tree depth. This
-      -- narrow projection uses the same caller's RLS in the same statement.
-      -- Pin state is static for this statement. Join it once here, not once
-      -- per recursive depth (which repeatedly sorts/joins the same rows).
-      select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
-        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
-        child.direct_control_state, child.direct_pause_revision,
-        coalesce(personal.pinned, false) as pinned,
-        coalesce(case when personal.manually_unread_through is not null then -1
-          else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
-        coalesce(personal.actively_working, false) as actively_working
-      from ${schema.sessions} child
-      left join personal_state personal on personal.session_id = child.id
-      where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
     ), roots as materialized (
       select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
         ${schema.sessions.accountId} as account_id,
@@ -33051,6 +33035,21 @@ async function sessionListTotalsInScope(
       left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
       left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
       where ${rootFilters}
+    ), visible_children as materialized (
+      -- Immutable root lineage excludes trees that cannot enter this recursion.
+      -- Retain each child's RLS check and materialize once, so depth cannot
+      -- multiply base-table or personal-state scans.
+      select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
+        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
+        child.direct_control_state, child.direct_pause_revision,
+        coalesce(personal.pinned, false) as pinned,
+        coalesce(case when personal.manually_unread_through is not null then -1
+          else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
+        coalesce(personal.actively_working, false) as actively_working
+      from ${schema.sessions} child
+      left join personal_state personal on personal.session_id = child.id
+      where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
+        and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
         acknowledged_sequence, actively_working) as (
