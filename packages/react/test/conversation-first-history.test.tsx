@@ -106,10 +106,7 @@ function serverRead(store: readonly SessionEvent[], options: SessionEventListOpt
     if (event.sequence <= after || event.sequence >= before) return false;
     if (include && !include.has(event.type)) return false;
     if (!exclude.has(event.type)) return true;
-    const retains =
-      options.presentedToolCalls === "include" && exclude.has("agent.toolCall.created");
-    // Turnless rows (PTY output) belong to no turn's step read.
-    if (retains && !event.turnId) return true;
+    // Turnless step rows (PTY output) stay excluded: the sandbox dock reads them.
     const name = (event.payload as { name?: unknown }).name;
     return (
       options.presentedToolCalls === "include" &&
@@ -744,9 +741,13 @@ describe("conversation-first session history", () => {
           await settle();
           const window = hook.result.current.events;
           expect(window.some((event) => event.type === "turn.started")).toBe(false);
-          expect(window[0]!.turnId).toBeNull();
-          // Turnless rows are history too: PTY output shows after a reload.
-          expect(window.filter((event) => event.type === turnless).length).toBeGreaterThan(100);
+          if (turnless === "session.queue.changed") {
+            expect(window[0]!.turnId).toBeNull();
+            expect(window.filter((event) => event.type === turnless).length).toBeGreaterThan(100);
+          } else {
+            // PTY output is no conversation: only the sandbox dock reads it.
+            expect(window.some((event) => event.type === turnless)).toBe(false);
+          }
           for (let page = 0; page < 60; page += 1) {
             const marker = stepMarkers(hook.result.current.timeline).find(
               (item) => item.turnId === "T1",
@@ -840,6 +841,113 @@ describe("conversation-first session history", () => {
     },
     HEAVY_TEST_TIMEOUT_MS,
   );
+
+  test(
+    "thousands of PTY rows stay out of the conversation window, read and live",
+    async () => {
+      // Three turns, then an interactive terminal that wrote 6,000 rows
+      // between and after them: more than the 1,000-row first page.
+      const pty = (sequence: number) =>
+        at(
+          sequence,
+          "terminal.pty.output.delta",
+          { ptyId: "p1", stream: "stdout", chunk: `line ${sequence}\r\n`, seq: sequence },
+          null,
+        );
+      const store: SessionEvent[] = [];
+      let sequence = 1;
+      for (const turnId of ["T1", "T2", "T3"]) {
+        const turn = longTurn({ start: sequence, turnId, steps: 3 });
+        store.push(...turn);
+        sequence = turn.at(-1)!.sequence + 1;
+        for (let index = 0; index < 2000; index += 1) store.push(pty(sequence++));
+      }
+      // A live text-only turn while the terminal keeps writing.
+      const live: SessionEvent[] = [
+        at(sequence, "user.message", { text: "status?", routing: "accepted_for_execution" }, null),
+        at(sequence + 1, "turn.started", { turnId: "T4" }, "T4"),
+      ];
+      let liveSequence = sequence + 2;
+      for (let index = 0; index < 600; index += 1) live.push(pty(liveSequence++));
+      live.push(at(liveSequence, "agent.message.completed", { text: "all good" }, "T4"));
+      live.push(at(liveSequence + 1, "turn.completed", { turnId: "T4" }, "T4"));
+      const { client, reads } = historyClient({
+        store: () => store,
+        live: () => live,
+        withPages: true,
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await settle(60);
+        const conversationReads = reads.filter((read) => read.excludeTypes);
+        expect(conversationReads.length).toBeGreaterThan(0);
+        for (const read of conversationReads) {
+          expect(read.excludeTypes).toContain("terminal.pty.output.delta");
+        }
+        const result = hook.result.current;
+        // Every question and answer is in the window; no PTY row is.
+        const questions = result.events.filter((event) => event.type === "user.message");
+        expect(questions.map((event) => (event.payload as { text: string }).text)).toEqual([
+          "question T1",
+          "question T2",
+          "question T3",
+          "status?",
+        ]);
+        expect(
+          result.events.filter((event) => event.type === "agent.message.completed"),
+        ).toHaveLength(4);
+        expect(result.hasOlder).toBe(false);
+        // Live PTY rows reach `events` (the sandbox dock's live feed) as a
+        // short tail outside the window.
+        const ptyRows = result.events.filter((event) => event.type === "terminal.pty.output.delta");
+        expect(ptyRows.length).toBeGreaterThan(0);
+        expect(ptyRows.length).toBeLessThanOrEqual(SESSION_TURN_LIVE_STEP_TAIL);
+        expect(ptyRows.every((event) => event.sequence > sequence)).toBe(true);
+        expect(result.windowBytes).toBeLessThan(64 * 1024);
+        // The text-only live turn has no hidden steps: PTY rows are not its.
+        expect(stepMarkers(result.timeline).find((item) => item.turnId === "T4")).toBeUndefined();
+      } finally {
+        await hook.unmount();
+      }
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  test("terminal output written after the last turn is not replayed when the chat opens", async () => {
+    const store = longTurn({ start: 1, turnId: "T1", steps: 3 });
+    const settled = store.at(-1)!.sequence;
+    for (let sequence = settled + 1; sequence <= settled + 3000; sequence += 1) {
+      store.push(
+        at(
+          sequence,
+          "terminal.pty.output.delta",
+          { ptyId: "p1", stream: "stdout", chunk: `line ${sequence}\r\n`, seq: sequence },
+          null,
+        ),
+      );
+    }
+    const head = store.at(-1)!.sequence;
+    const { client, reads, streamCalls } = historyClient({ store: () => store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      // The conversation is caught up to the head, and the live stream joins
+      // there: the 3,000 PTY rows are left to the sandbox dock's own read.
+      expect(reads.at(-1)).toMatchObject({ after: settled, before: head + 1 });
+      expect(streamCalls).toEqual([head]);
+      expect(
+        hook.result.current.events.some((event) => event.type === "terminal.pty.output.delta"),
+      ).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
 
   test("presented results are read at most eight at a time", async () => {
     const store: SessionEvent[] = [
@@ -975,10 +1083,17 @@ describe("conversation-first session history", () => {
     expect(
       isConversationHistoryEvent(at(6, "agent.toolCall.output", { id: "x" }, "T"), presented),
     ).toBe(false);
-    // Steps outside a turn are conversation: nothing could load them later.
+    // Steps outside a turn (PTY and background command output) are no
+    // conversation: the sandbox dock reads them itself.
     expect(isConversationHistoryEvent(at(7, "agent.reasoning.delta", {}, null), presented)).toBe(
-      true,
+      false,
     );
+    expect(
+      isConversationHistoryEvent(
+        at(8, "terminal.pty.output.delta", { ptyId: "p", chunk: "$ ls" }, null),
+        presented,
+      ),
+    ).toBe(false);
 
     const window = [
       at(1, "user.message", {}, null),

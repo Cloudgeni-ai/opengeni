@@ -108,6 +108,8 @@ type XtermLike = {
   focus: () => void;
   write: (data: string) => void;
   clear: () => void;
+  /** Full reset (screen, scrollback and modes); optional for test doubles. */
+  reset?: () => void;
   onData: (cb: (data: string) => void) => { dispose: () => void };
   onResize: (cb: (size: { cols: number; rows: number }) => void) => { dispose: () => void };
   loadAddon: (addon: unknown) => void;
@@ -180,6 +182,16 @@ export function subscribeTerminalInput(
  * which lets the first PTY frame append to the old wake message. */
 export function clearTerminalBootStatus(term: Pick<XtermLike, "write">): void {
   term.write("\r\x1b[2K\x1b[2J\x1b[H");
+}
+
+/** Empty the screen and scrollback before the transcript is written again. */
+function resetTerminal(term: Pick<XtermLike, "write" | "clear" | "reset">): void {
+  if (term.reset) {
+    term.reset();
+    return;
+  }
+  term.clear();
+  term.write("\x1b[2J\x1b[3J\x1b[H");
 }
 
 /** Debug seam (dev/evidence only, never a typed public API): a global hook the
@@ -257,6 +269,9 @@ export function SandboxTerminal({
   const fitRef = useRef<FitAddonLike | null>(null);
   const rendererRef = useRef<RendererTier | null>(null);
   const writtenRef = useRef<Set<string>>(new Set());
+  // Newest written chunk, and the newest one a Clear removed.
+  const writtenThroughRef = useRef(0);
+  const clearedThroughRef = useRef(0);
   const wroteFirehoseRef = useRef(false);
   const bootActiveRef = useRef(false);
   const [ready, setReady] = useState(false);
@@ -501,6 +516,7 @@ export function SandboxTerminal({
       fitRef.current = null;
       rendererRef.current = null;
       writtenRef.current = new Set();
+      writtenThroughRef.current = 0;
       wroteFirehoseRef.current = false;
       bootActiveRef.current = false;
       setReady(false);
@@ -559,13 +575,23 @@ export function SandboxTerminal({
 
   // Write new firehose chunks incrementally — ONLY in firehose mode. In PTY mode
   // the ttyd socket owns the screen. Records that a real transcript exists so the
-  // boot cleanup never wipes it.
+  // boot cleanup never wipes it. History read after live output arrives below
+  // what is on screen: then the transcript is written again, in order.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || ptyMode) return;
-    for (const chunk of result.chunks) {
-      if (writtenRef.current.has(chunk.id)) continue;
+    const shown = result.chunks.filter((chunk) => chunk.seq > clearedThroughRef.current);
+    const fresh = shown.filter((chunk) => !writtenRef.current.has(chunk.id));
+    if (fresh.length === 0) return;
+    let pending = fresh;
+    if (fresh[0]!.seq < writtenThroughRef.current) {
+      resetTerminal(term);
+      writtenRef.current = new Set();
+      pending = shown;
+    }
+    for (const chunk of pending) {
       writtenRef.current.add(chunk.id);
+      writtenThroughRef.current = Math.max(writtenThroughRef.current, chunk.seq);
       wroteFirehoseRef.current = true;
       term.write(chunk.text);
     }
@@ -655,7 +681,12 @@ export function SandboxTerminal({
               type="button"
               onClick={() => {
                 termRef.current?.clear();
-                writtenRef.current = new Set();
+                // Cleared output stays cleared, even when the transcript is
+                // written again.
+                clearedThroughRef.current = Math.max(
+                  clearedThroughRef.current,
+                  writtenThroughRef.current,
+                );
                 wroteFirehoseRef.current = false;
               }}
               className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-11"

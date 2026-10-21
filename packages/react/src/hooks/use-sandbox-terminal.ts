@@ -1,13 +1,25 @@
 import type {
   SandboxCommandOutputDeltaPayload,
   SessionEvent,
+  SessionEventPage,
+  SessionEventType,
   TerminalPtyExitedPayload,
   TerminalPtyOutputDeltaPayload,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SessionClientLike } from "../client";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+
+/**
+ * Newest terminal output rows read when the terminal opens: one page, which
+ * the server also bounds to 1 MB. xterm keeps 1,000 lines of scrollback, so
+ * older pages would scroll straight out of it.
+ */
+export const SANDBOX_TERMINAL_HISTORY_ROWS = 1000;
+/** Output rows the terminal keeps (history and live) for a rewrite. */
+export const SANDBOX_TERMINAL_MAX_ROWS = 4000;
 
 export type TerminalChunk = {
   /** Stable key (the source event id) so the xterm writer tracks a written-cursor. */
@@ -42,6 +54,14 @@ export type UseSandboxTerminalOptions = ClientOverride & {
    *  opened once the box is warm — opening on a cold box (ptyCapable is advertised
    *  cold too) races the box and leaves a dead read-only terminal. */
   liveness?: string | undefined;
+  /**
+   * Read this session's terminal history when true: the newest
+   * {@link SANDBOX_TERMINAL_HISTORY_ROWS} PTY output rows (and agent command
+   * output rows with `includeAgentFirehose`). Conversation reads carry none of
+   * these rows, so this read restores the scrollback after a reload. Default
+   * true; the dock enables it when its Terminal opens.
+   */
+  history?: boolean | undefined;
 };
 
 export type UseSandboxTerminalResult = {
@@ -147,12 +167,57 @@ export function useSandboxTerminal(
     };
   }, [interactive, client, workspaceId, sessionId, ptyFilter, boxWarm, reopenNonce]);
 
+  // Terminal history: conversation reads carry no PTY output and only the
+  // turns a reader opened carry command output, so the terminal reads its own
+  // newest page once it is enabled (the dock enables it when its Terminal
+  // opens). Live rows keep arriving through `events`.
+  const outputTypes: SessionEventType[] =
+    includeAgentFirehose && !ptyFilter
+      ? ["terminal.pty.output.delta", "sandbox.command.output.delta"]
+      : ["terminal.pty.output.delta"];
+  const historyKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${outputTypes.join(",")}`;
+  const historyEnabled = (options.history ?? true) && Boolean(sessionId);
+  const [history, setHistory] = useState<TerminalHistory | null>(null);
+  // The history read asked for (its key) and not cancelled; a failed read is
+  // asked again the next time the terminal is enabled.
+  const requestedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!historyEnabled || !sessionId || requestedRef.current === historyKey) return;
+    requestedRef.current = historyKey;
+    let cancelled = false;
+    let answered = false;
+    const types = historyKey.split("\u0000")[2]!.split(",") as SessionEventType[];
+    void readTerminalHistory(client, workspaceId, sessionId, types).then(
+      (page) => {
+        answered = true;
+        if (cancelled) return;
+        setHistory({ key: historyKey, events: page.events, complete: page.complete });
+      },
+      () => {
+        answered = true;
+        if (cancelled) return;
+        if (requestedRef.current === historyKey) requestedRef.current = null;
+      },
+    );
+    return () => {
+      cancelled = true;
+      // A read cancelled before its answer is asked again.
+      if (!answered && requestedRef.current === historyKey) requestedRef.current = null;
+    };
+  }, [historyEnabled, historyKey, client, workspaceId, sessionId]);
+
+  // Live output rows seen in `events`, kept after they leave it (a host's
+  // event window keeps only a short tail of them).
+  const liveRef = useRef<LiveTerminalRows>({ key: historyKey, rows: new Map() });
+
   const { chunks, openPty, supportsInput } = useMemo(() => {
-    const out: TerminalChunk[] = [];
     // Track PTY lifecycle so `running`/`write` reflect the latest state.
     const open = new Map<string, { supportsInput: boolean }>();
     let lastOpened: string | null = null;
     let lastSupportsInput = false;
+    if (liveRef.current.key !== historyKey) liveRef.current = { key: historyKey, rows: new Map() };
+    const live = liveRef.current.rows;
+    const types = new Set<string>(outputTypes);
 
     for (const event of options.events) {
       // The hook is session-scoped even if a host accidentally retains the old
@@ -174,35 +239,37 @@ export function useSandboxTerminal(
         }
         continue;
       }
-      if (event.type === "terminal.pty.output.delta") {
-        const payload = event.payload as TerminalPtyOutputDeltaPayload | null;
-        if (!payload || (ptyFilter && payload.ptyId !== ptyFilter)) continue;
-        out.push({
-          id: event.id,
-          text: payload.chunk,
-          stream: payload.stream === "stderr" ? "stderr" : "stdout",
-          seq: event.sequence,
-        });
-        continue;
-      }
-      if (includeAgentFirehose && !ptyFilter && event.type === "sandbox.command.output.delta") {
-        const payload = event.payload as SandboxCommandOutputDeltaPayload | null;
-        if (!payload?.chunk) continue;
-        out.push({
-          id: event.id,
-          text: payload.chunk,
-          stream: payload.stream === "stderr" ? "stderr" : "stdout",
-          seq: event.sequence,
-        });
-      }
+      if (types.has(event.type) && !live.has(event.id)) live.set(event.id, event);
     }
+    trimLiveRows(live);
+
+    const loaded = history?.key === historyKey ? history : null;
+    // Rows older than an incomplete history page are outside what the
+    // terminal shows (for example the steps of an old turn a reader opened).
+    const floor = loaded && !loaded.complete ? (loaded.events[0]?.sequence ?? 0) : 0;
+    const seen = new Set<string>();
+    const out: TerminalChunk[] = [];
+    const add = (event: SessionEvent) => {
+      if (seen.has(event.id) || event.sequence < floor) return;
+      seen.add(event.id);
+      const chunk = terminalChunk(event, ptyFilter);
+      if (chunk) out.push(chunk);
+    };
+    loaded?.events.forEach(add);
+    live.forEach(add);
 
     // Stable order: by sequence (the SSE spine guarantees per-session ordering).
     out.sort((a, b) => a.seq - b.seq);
     const activePty = ptyFilter && open.has(ptyFilter) ? ptyFilter : lastOpened;
     lastSupportsInput = activePty ? (open.get(activePty)?.supportsInput ?? false) : false;
-    return { chunks: out, openPty: activePty, supportsInput: lastSupportsInput };
-  }, [options.events, ptyFilter, includeAgentFirehose, workspaceId, sessionId]);
+    return {
+      chunks: out.length > SANDBOX_TERMINAL_MAX_ROWS ? out.slice(-SANDBOX_TERMINAL_MAX_ROWS) : out,
+      openPty: activePty,
+      supportsInput: lastSupportsInput,
+    };
+    // `outputTypes` is derived from `historyKey`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.events, history, historyKey, ptyFilter, workspaceId, sessionId]);
 
   // The PTY this hook actively drives: the one it opened (interactive) wins so
   // `write` is live the instant the open resolves — even before the
@@ -249,5 +316,90 @@ export function useSandboxTerminal(
     activePtyId,
     close,
     error: identityMatches ? openError : null,
+  };
+}
+
+/** The terminal's history page for one session and set of output types. */
+type TerminalHistory = {
+  key: string;
+  /** Ascending. */
+  events: SessionEvent[];
+  /** No older output rows exist. */
+  complete: boolean;
+};
+
+type LiveTerminalRows = { key: string; rows: Map<string, SessionEvent> };
+
+/** Keep the newest {@link SANDBOX_TERMINAL_MAX_ROWS} live rows. */
+function trimLiveRows(rows: Map<string, SessionEvent>): void {
+  if (rows.size <= SANDBOX_TERMINAL_MAX_ROWS) return;
+  const oldest = [...rows.values()]
+    .sort((left, right) => left.sequence - right.sequence)
+    .slice(0, rows.size - SANDBOX_TERMINAL_MAX_ROWS);
+  for (const event of oldest) rows.delete(event.id);
+}
+
+function terminalChunk(event: SessionEvent, ptyFilter: string | undefined): TerminalChunk | null {
+  if (event.type === "terminal.pty.output.delta") {
+    const payload = event.payload as TerminalPtyOutputDeltaPayload | null;
+    if (!payload || typeof payload.chunk !== "string") return null;
+    if (ptyFilter && payload.ptyId !== ptyFilter) return null;
+    return {
+      id: event.id,
+      text: payload.chunk,
+      stream: payload.stream === "stderr" ? "stderr" : "stdout",
+      seq: event.sequence,
+    };
+  }
+  if (event.type === "sandbox.command.output.delta" && !ptyFilter) {
+    const payload = event.payload as SandboxCommandOutputDeltaPayload | null;
+    if (!payload?.chunk) return null;
+    return {
+      id: event.id,
+      text: payload.chunk,
+      stream: payload.stream === "stderr" ? "stderr" : "stdout",
+      seq: event.sequence,
+    };
+  }
+  return null;
+}
+
+type EventPageClient = {
+  listEventPage?: (
+    workspaceId: string,
+    sessionId: string,
+    options: Parameters<SessionClientLike["listEvents"]>[2],
+  ) => Promise<SessionEventPage>;
+};
+
+/**
+ * The newest page of terminal output rows, ascending. Uses the SDK's page read
+ * when the client has it (it says whether older rows remain).
+ */
+async function readTerminalHistory(
+  client: SessionClientLike,
+  workspaceId: string,
+  sessionId: string,
+  includeTypes: SessionEventType[],
+): Promise<{ events: SessionEvent[]; complete: boolean }> {
+  const options = {
+    includeTypes,
+    direction: "before" as const,
+    // Explicit: a cursorless read otherwise defaults to the monitoring tail,
+    // which drops raw output deltas.
+    mode: "forensic" as const,
+    payloadMode: "full" as const,
+    limit: SANDBOX_TERMINAL_HISTORY_ROWS,
+  };
+  const pageClient = client as SessionClientLike & EventPageClient;
+  const page =
+    typeof pageClient.listEventPage === "function"
+      ? await pageClient.listEventPage(workspaceId, sessionId, options)
+      : null;
+  const events = page ? page.events : await client.listEvents(workspaceId, sessionId, options);
+  const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
+  return {
+    events: sorted,
+    complete: page ? !page.hasMore : sorted.length < SANDBOX_TERMINAL_HISTORY_ROWS,
   };
 }

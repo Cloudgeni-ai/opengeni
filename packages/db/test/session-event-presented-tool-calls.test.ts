@@ -59,7 +59,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
     [8, "agent.toolCall.created", { id: "c4", name: "my_skill_save", arguments: {} }],
     [9, "agent.toolCall.created", { id: "c5", name: "mcp__knowledge_save", arguments: {} }],
     [10, "agent.message.completed", { text: "answer" }],
-    // A step row without a turn (PTY output): no turn's step read finds it.
+    // A step row without a turn (PTY output): only the sandbox dock reads it.
     [11, "terminal.pty.output.delta", { data: "$ ls" }],
   ];
   const turnId = crypto.randomUUID();
@@ -89,7 +89,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
         retainPresentedToolCalls: true,
       }),
   );
-  expect(conversation.map((event) => event.sequence)).toEqual([1, 5, 7, 9, 10, 11]);
+  expect(conversation.map((event) => event.sequence)).toEqual([1, 5, 7, 9, 10]);
 
   const page = await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
     listSessionEventPage(tx, grant.workspaceId, session.id, {
@@ -100,7 +100,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
       payloadMode: "full",
     }),
   );
-  expect(page.events.map((event) => event.sequence)).toEqual([9, 10, 11]);
+  expect(page.events.map((event) => event.sequence)).toEqual([7, 9, 10]);
   expect(page.hasMore).toBe(true);
 
   // Without excluding created rows the option changes nothing.
@@ -113,4 +113,96 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
     }),
   );
   expect(steps.map((event) => event.sequence)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 11]);
+}, 120_000);
+
+test("thousands of PTY rows never reach a conversation read; the dock reads them by type", async () => {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: "Terminal history",
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: "Terminal",
+    subjectId: `terminal-reader-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const turnId = crypto.randomUUID();
+  // A turn with command output, then 3,000 rows of interactive terminal
+  // output and a background command's turnless output, then a question.
+  await shared.admin`
+    insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+    values
+      (${grant.accountId},${grant.workspaceId},${session.id},null,1,'user.message',${shared.admin.json({ text: "run tests" })}),
+      (${grant.accountId},${grant.workspaceId},${session.id},${turnId},2,'sandbox.command.output.delta',${shared.admin.json({ stream: "stdout", chunk: "412 pass" })}),
+      (${grant.accountId},${grant.workspaceId},${session.id},${turnId},3,'agent.message.completed',${shared.admin.json({ text: "green" })})`;
+  await shared.admin`
+    insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+    select ${grant.accountId}, ${grant.workspaceId}, ${session.id}, null, 3 + n,
+      case when n % 100 = 0 then 'sandbox.command.output.delta' else 'terminal.pty.output.delta' end,
+      jsonb_build_object('ptyId', 'p1', 'stream', 'stdout', 'chunk', 'line ' || n)
+    from generate_series(1, 3000) as n`;
+  await shared.admin`
+    insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+    values (${grant.accountId},${grant.workspaceId},${session.id},null,3004,'user.message',${shared.admin.json({ text: "deploy" })})`;
+
+  // The conversation's first page: newest first, 1,000 rows.
+  const conversation = await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    (tx) =>
+      listSessionEventPage(tx, grant.workspaceId, session.id, {
+        before: Number.MAX_SAFE_INTEGER,
+        direction: "before",
+        limit: 1000,
+        excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+        retainPresentedToolCalls: true,
+        payloadMode: "full",
+      }),
+  );
+  expect(conversation.events.map((event) => event.sequence)).toEqual([1, 3, 3004]);
+  expect(conversation.hasMore).toBe(false);
+
+  // The dock's read: the newest output rows of every kind, turn or not.
+  const terminal = await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    (tx) =>
+      listSessionEventPage(tx, grant.workspaceId, session.id, {
+        direction: "before",
+        limit: 1000,
+        includeTypes: ["terminal.pty.output.delta", "sandbox.command.output.delta"],
+        payloadMode: "full",
+      }),
+  );
+  expect(terminal.events).toHaveLength(1000);
+  expect(terminal.events.at(-1)!.sequence).toBe(3003);
+  expect(terminal.hasMore).toBe(true);
+  const older = await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
+    listSessionEventPage(tx, grant.workspaceId, session.id, {
+      before: 100,
+      direction: "before",
+      limit: 1000,
+      includeTypes: ["terminal.pty.output.delta", "sandbox.command.output.delta"],
+      payloadMode: "full",
+    }),
+  );
+  // The turn's command output is in the dock's read too.
+  expect(older.events[0]).toMatchObject({ sequence: 2, turnId });
+  expect(older.events).toHaveLength(97);
+  expect(older.hasMore).toBe(false);
 }, 120_000);
