@@ -97,6 +97,8 @@ beforeAll(async () => {
     "0884_subscription_core_personal_quarantine_expiry.sql",
     // Rewrites 0707's disconnect writer and 0777's policies.
     "0897_workspace_owner_administers_subscriptions.sql",
+    // Restricts the predicate 0897 creates.
+    "0900_workspace_admin_predicate_privileges.sql",
   ];
   // The drained SuperGrok and Claude cutovers and the retirement after them
   // are maintenance-only: a rolling deployment of 0707 never applies them, so

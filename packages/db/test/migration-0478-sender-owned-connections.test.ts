@@ -133,6 +133,8 @@ const withheldMigrations = [
   "0884_subscription_core_personal_quarantine_expiry.sql",
   // Rewrites the subscription and vault routines and 0777's policies.
   "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
   // The schedule list trigger reads the audience column of 0720, withheld
   // with the allowance tail below; replay after it.
   "0888_session_list_invalidation.sql",

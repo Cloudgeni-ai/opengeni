@@ -369,4 +369,6 @@ export const embeddingMigrationTail = [
   // Rewrites the subscription and vault routines and 0777's policies; replay
   // after all of them.
   "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
 ];

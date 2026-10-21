@@ -124,4 +124,17 @@ describe("workspace subscription administration", () => {
             like '%workspace_membership_administers(%') as policies`;
     expect(rewritten).toEqual({ routines: 6, policies: 4 });
   });
+
+  test("the administrator predicate is executable by the application, not by every role", async () => {
+    const [acl] = await shared.admin<{ publicExecute: boolean; appExecute: boolean }[]>`
+      select
+        exists (
+          select 1 from aclexplode(coalesce(proacl, acldefault('f', proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        has_function_privilege('opengeni_app', oid, 'EXECUTE') as "appExecute"
+      from pg_proc
+      where oid = 'opengeni_private.workspace_membership_administers(text,jsonb)'::regprocedure`;
+    expect(acl).toEqual({ publicExecute: false, appExecute: true });
+  });
 });
