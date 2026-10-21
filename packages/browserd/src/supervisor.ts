@@ -379,7 +379,8 @@ export type BrowserSupervisorOptions = {
   socketRootDirectory?: string;
   maxSessions?: number;
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
-  lightpandaBinary?: ResolvedLightpandaBinary;
+  /** Resolves the verified Lightpanda binary when a Lightpanda session first needs it. */
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>;
   headlessShell?: VerifiedHeadlessShell;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -3119,7 +3120,7 @@ export async function managedChromiumLaunchExecutable(
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
-  lightpandaBinary?: ResolvedLightpandaBinary,
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>,
   headlessShell?: VerifiedHeadlessShell,
   networkIsolation = true,
 ): Promise<BrowserSupervisorDriver> {
@@ -3143,7 +3144,7 @@ async function createBrowserDriver(
       );
     }
     const runner = await LightpandaRunner.create({
-      binary: lightpandaBinary,
+      binary: await lightpandaBinary(),
       sessionDirectory: join(context.sessionDirectory, "lightpanda"),
     });
     return new AgentBrowserDriver({

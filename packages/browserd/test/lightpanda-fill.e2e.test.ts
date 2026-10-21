@@ -53,7 +53,7 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
     socketRootDirectory: socketDirectory,
-    lightpandaBinary: binary,
+    lightpandaBinary: async () => binary,
   });
   const reference = {
     browserSessionId: randomUUID(),

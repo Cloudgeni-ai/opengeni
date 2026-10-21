@@ -33,7 +33,7 @@ e2e("runs Lightpanda as an exact capability-scoped managed browser", async () =>
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
     socketRootDirectory: socketDirectory,
-    lightpandaBinary: binary,
+    lightpandaBinary: async () => binary,
   });
   const reference = {
     browserSessionId: randomUUID(),
