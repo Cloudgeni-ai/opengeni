@@ -1191,7 +1191,7 @@ export class CuaComputerBackend implements ComputerBackend {
             name: "click",
             args: {
               ...args,
-              element_token: node.ref,
+              element_token: this.elementToken(command.targetId, node.ref),
               action: "focus",
               delivery_mode: "background",
             },

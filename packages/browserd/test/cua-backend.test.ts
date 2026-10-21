@@ -636,9 +636,10 @@ describe("CUA desktop boundary", () => {
         action: "focus",
       };
       await backend.dispatch(focus);
+      // The ref is Opengeni's; CUA gets its own token of the latest snapshot.
       expect(focused).toEqual([
         expect.objectContaining({
-          element_token: observed.roots[0]!.ref,
+          element_token: `${observed.observationId.split(":").pop()}:0`,
           action: "focus",
           delivery_mode: "background",
         }),
