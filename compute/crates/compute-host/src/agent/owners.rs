@@ -38,6 +38,7 @@ use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
 use super::disk::{AfterReading, Room};
 use super::requests::first_wake_by_ms;
+use super::steps::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 
@@ -297,9 +298,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         if self.preparing.contains(&id.0) {
-            // Perhaps this very adopt's earlier attempt, whose record may
-            // be written before its copy's disk is admitted: retrying once
-            // it is done tells.
+            // Perhaps this very adopt's earlier attempt, still claiming its
+            // copy or making its files, which may yet be refused: retrying
+            // once it is done tells.
             let _ = reply.send(Err(HostError::Busy(id)));
             return;
         }
@@ -396,9 +397,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Claims the store's copy of the sandbox `record` is the new record
-    /// of, under `owner`, and makes it this host's at Remote; with
-    /// `from_files`, without the copy's memory image. Its files are made
-    /// here, its record only once [`Self::copy_claimed`] admitted it.
+    /// of, under `owner`; with `from_files`, without the copy's memory
+    /// image. Nothing of it is made on this host until
+    /// [`Self::copy_claimed`] admits it.
     fn claim_copy(
         &mut self,
         id: Id,
@@ -408,13 +409,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         reply: Reply<()>,
     ) {
         let ordinal = record.ordinal;
-        let link = Images::link(&record);
-        let paths = Paths::new(&self.root, id);
-        let (store, net) = (Arc::clone(&self.store), self.net.clone());
+        let store = Arc::clone(&self.store);
         let events = self.events_tx.clone();
         let observer = self.observer.clone();
         tokio::spawn(async move {
-            let made = match store.claim(id, owner).await {
+            let claimed = match store.claim(id, owner).await {
                 Err(error) => Err(HostError::Io(error.to_string())),
                 Ok(Owned::Fenced { by }) => Err(HostError::Superseded {
                     id,
@@ -423,62 +422,82 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    match files_only(&*store, &observer, id, owner, claimed, from_files).await {
-                        Err(error) => Err(error),
-                        Ok(claimed) => {
-                            let made = adopted_files(&paths, &claimed, net.clone(), link).await;
-                            remote_record(&mut record, owner, &claimed);
-                            made.map_err(|error| HostError::Io(error.to_string()))
-                        }
-                    }
+                    files_only(&*store, &observer, id, owner, claimed, from_files).await
                 }
             };
-            let event = match made {
-                Ok(()) => Event::CopyClaimed {
-                    record: Box::new(record),
-                    reply,
-                },
-                Err(error) => {
-                    unmake(id, ordinal, &paths, net).await;
-                    Event::Prepared {
-                        id,
-                        ordinal,
-                        result: Err(error),
+            let event = match claimed {
+                Ok(claimed) => {
+                    remote_record(&mut record, owner, &claimed);
+                    Event::CopyClaimed {
+                        record: Box::new(record),
+                        claimed: Box::new(claimed),
                         reply,
-                        stale: None,
                     }
                 }
+                Err(error) => Event::Prepared {
+                    id,
+                    ordinal,
+                    result: Err(error),
+                    reply,
+                    stale: None,
+                    left: None,
+                },
             };
             let _ = events.send(event);
         });
     }
 
     /// Admits the first wake of adopted sandbox `record`, whose copy is
-    /// claimed and whose files are made, with the copy's own disk, then
-    /// records it: nothing of it is durable before, so neither the same
-    /// adopt asked again nor an agent that starts meanwhile takes it as
-    /// adopted. One this host cannot wake now goes again, leaving the
-    /// store's copy for another host.
-    pub(super) fn copy_claimed(&mut self, record: Record, reply: Reply<()>) {
+    /// claimed as `claimed`, with the copy's own disk, then makes its
+    /// files and records it. One this host cannot wake now is refused
+    /// before anything of it is made here, leaving the store's copy for
+    /// another host. Its record is written last, so neither the same adopt
+    /// asked again nor an agent that starts meanwhile takes it as adopted
+    /// before it is admitted and its files are whole.
+    pub(super) fn copy_claimed(&mut self, record: Record, claimed: Claimed, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
-        let refused = self.adopted_room(&record).err();
+        if let Err(refused) = self.adopted_room(&record) {
+            self.prepared(id, ordinal, Err(refused), reply, None, None);
+            return;
+        }
+        let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let (records, net) = (Arc::clone(&self.records), self.net.clone());
         let events = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = match refused {
-                Some(error) => Err(error),
-                None => records.insert(record).await.map_err(HostError::from),
+            let (result, left) = match adopted_files(&paths, &claimed, net.clone(), link).await {
+                // A directory already there belongs to a sandbox this
+                // agent does not know, and is left alone.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::error!(%id, "a directory for an adopted sandbox already exists; refusing it");
+                    (Err(HostError::Exists(id)), None)
+                }
+                made => {
+                    let result = match made {
+                        Ok(()) => records
+                            .insert(record)
+                            .await
+                            .map(Box::new)
+                            .map_err(HostError::from),
+                        Err(error) => Err(HostError::Io(error.to_string())),
+                    };
+                    let left = match &result {
+                        Ok(_) => None,
+                        Err(_) => unmake(id, Some(ordinal), &paths.dir, net)
+                            .await
+                            .err()
+                            .map(|error| error.to_string()),
+                    };
+                    (result, left)
+                }
             };
-            if result.is_err() {
-                unmake(id, ordinal, &paths, net).await;
-            }
             let _ = events.send(Event::Prepared {
                 id,
                 ordinal,
                 result,
                 reply,
                 stale: None,
+                left,
             });
         });
     }
@@ -766,20 +785,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
 /// Makes an adopted sandbox's directory, network and archive receipt, all
 /// durable before its record vouches for them. Blocks in the background.
-/// Deletes what an adopt of `id` that failed made: its network and its
-/// files at `paths`. The id stays reserved until this is done, so it
-/// cannot remove a newer sandbox's files or network.
-async fn unmake(id: Id, ordinal: u32, paths: &Paths, net: Option<Arc<crate::net::Networks>>) {
-    if let Some(net) = net {
-        let _ = tokio::task::spawn_blocking(move || net.remove(id, Some(ordinal))).await;
-    }
-    if let Err(error) = tokio::fs::remove_dir_all(&paths.dir).await
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(%id, %error, "an adopt that failed left files behind");
-    }
-}
-
+/// Fails with [`io::ErrorKind::AlreadyExists`], having made nothing, when
+/// the sandbox's directory is already there.
 async fn adopted_files(
     paths: &Paths,
     claimed: &Claimed,

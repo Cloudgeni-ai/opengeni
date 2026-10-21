@@ -40,11 +40,14 @@ pick a VM.
   - An adoption is first checked without its copy's disk, since only
     claiming the copy shows how long that is, never by this host's base
     image. Once claimed, it is checked with the copy's disk and refused with
-    `host_full` if that does not fit, leaving nothing on the host and the
-    store's copy for another host. Its record is written only after that
-    check, so an agent that restarts meanwhile finds no adopted sandbox,
-    only files it tidies, and a repeat of the adopt meanwhile is answered
-    busy, never done.
+    `host_full` if that does not fit, before anything of it is made on the
+    host, leaving the store's copy for another host. Its files are made
+    only after that check and its record last, so an agent that restarts
+    meanwhile finds no adopted sandbox, at most files it tidies, and a
+    repeat of the adopt meanwhile is answered busy, never done. A create or
+    adopt that fails after making files or a network deletes them; what it
+    cannot delete keeps its id blocked and its ordinal taken, and removing
+    the id again retries, as after a removal that stopped part way.
   - A claimed ready sandbox's VM already holds memory. Its first wake books
     that memory up to the request, and only what the VM holds beyond the
     request stays counted apart until the sandbox joins the core, so claims

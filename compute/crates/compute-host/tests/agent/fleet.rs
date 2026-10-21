@@ -472,8 +472,8 @@ async fn handed_to_a_gauged_host(sandboxes: &[Id]) -> (Lab, Lab, DiskGauge, Path
 
 /// An adopt books the first wake without the copy's disk before it claims
 /// the store's copy, then books it again with the copy's own disk: a copy
-/// this host has no disk for is refused there, leaving nothing here and
-/// the store's copy whole for another host.
+/// this host has no disk for is refused there, before anything of it is
+/// made here, leaving the store's copy whole for another host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_the_copy() {
     const GROWN: u64 = 64 << 20;
@@ -502,20 +502,18 @@ async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_
 
     let reply = adopt(&two, grown, 2).await;
     assert_eq!(code(&reply), Some(ErrorCode::HostFull), "{reply:?}");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while two.sandbox_dir(grown).exists()
-        || two
-            .status()
-            .await
-            .sandboxes
-            .iter()
-            .any(|sandbox| sandbox.id == grown)
-    {
-        assert!(Instant::now() < deadline, "the refused adopt left its copy");
-        sleep(Duration::from_millis(10)).await;
-    }
-    let disk = two.status().await.disk.unwrap();
-    assert_eq!(disk.free, first + (16 << 20), "its booking ended");
+    assert!(
+        !two.sandbox_dir(grown).exists(),
+        "the refused adopt made files"
+    );
+    let status = two.status().await;
+    assert!(status.sandboxes.iter().all(|sandbox| sandbox.id != grown));
+    assert!(status.blocked.is_empty(), "{:?}", status.blocked);
+    assert_eq!(
+        status.disk.unwrap().free,
+        first + (16 << 20),
+        "its booking ended"
+    );
     assert!(shelf.join(grown.to_string()).exists(), "the store keeps it");
 
     // With room, a later ownership adopts the very copy.
@@ -529,6 +527,33 @@ async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_
         "its files moved"
     );
     assert_eq!(two.run(small, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt never takes over or deletes a directory already there for its
+/// sandbox, which belongs to a sandbox this agent does not know: it is
+/// refused as existing and leaves the directory as it was, and the same
+/// adopt goes through once the directory is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_leaves_an_unknown_directory_of_its_sandbox_alone() {
+    let sandbox = id(4);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    read_disk(&two, &gauge, 1 << 40).await;
+    let unknown = two.sandbox_dir(sandbox);
+    std::fs::create_dir_all(&unknown).unwrap();
+    std::fs::write(unknown.join("theirs"), b"kept").unwrap();
+
+    let reply = adopt(&two, sandbox, 2).await;
+    assert_eq!(code(&reply), Some(ErrorCode::Exists), "{reply:?}");
+    assert_eq!(std::fs::read(unknown.join("theirs")).unwrap(), b"kept");
+    let status = two.status().await;
+    assert!(status.sandboxes.is_empty() && status.blocked.is_empty());
+
+    std::fs::remove_dir_all(&unknown).unwrap();
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
     one.assert_clean();
     two.assert_clean();
 }

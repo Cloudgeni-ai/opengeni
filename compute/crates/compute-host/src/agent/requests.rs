@@ -25,6 +25,7 @@ use crate::store::{OwnerEpoch, Store};
 use super::disk::{AfterReading, Room};
 use super::holds::{Write, hold_id};
 use super::observe::{By, Why};
+use super::steps::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
 /// How long a new sandbox's first wake stays booked if it is not woken:
@@ -721,6 +722,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             result: Err(missing.into()),
                             reply,
                             stale: None,
+                            left: None,
                         });
                         return;
                     };
@@ -759,7 +761,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         record.image = true;
                         record.identity = Identity::Pending;
                     }
-                    records.insert(record).await.map_err(HostError::from)
+                    records
+                        .insert(record)
+                        .await
+                        .map(Box::new)
+                        .map_err(HostError::from)
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
@@ -769,26 +775,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         result: Err(HostError::Exists(id)),
                         reply,
                         stale,
+                        left: None,
                     });
                     return;
                 }
                 Err(error) => Err(HostError::Io(error.to_string())),
             };
-            if result.is_err() {
-                // The id stays reserved until this is done, so it cannot
-                // remove a newer sandbox's files or network.
-                if let Some(net) = net {
-                    let _ =
-                        tokio::task::spawn_blocking(move || net.remove(id, Some(ordinal))).await;
-                }
-                let _ = tokio::fs::remove_dir_all(&dir).await;
-            }
+            let left = match &result {
+                Ok(_) => None,
+                Err(_) => unmake(id, Some(ordinal), &dir, net)
+                    .await
+                    .err()
+                    .map(|error| error.to_string()),
+            };
             let _ = events.send(Event::Prepared {
                 id,
                 ordinal,
                 result,
                 reply,
                 stale,
+                left,
             });
         });
     }

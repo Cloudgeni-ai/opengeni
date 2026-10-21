@@ -38,7 +38,7 @@ use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
 use crate::rootfs::{Cache, Missing};
 use crate::state::{Ownership, Record, Records, StateError, Stray, claim_host, unix_ms_now};
 use crate::step::{After, Live, Reading, Report};
-use crate::store::{OwnerEpoch, Store};
+use crate::store::{Claimed, OwnerEpoch, Store};
 use compute_protocol::fleet::Ruling;
 
 mod config;
@@ -372,17 +372,22 @@ enum Event<V> {
     Prepared {
         id: Id,
         ordinal: u32,
-        result: Result<Record, HostError>,
+        result: Result<Box<Record>, HostError>,
         reply: Reply<()>,
         /// The template the sandbox could not start from because it no
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
+        /// Why a create or adopt that failed could not delete all it had
+        /// made (see [`steps::unmake`]): its id stays blocked, and its
+        /// ordinal taken, until removing it again deletes the rest.
+        left: Option<String>,
     },
-    /// An adopt claimed the store's copy of `record`'s sandbox and made
-    /// its files; its record is written once its first wake is admitted
-    /// (see [`HostAgent::copy_claimed`]).
+    /// An adopt claimed the store's copy of `record`'s sandbox, as
+    /// `claimed`; its files and record are made only once its first wake
+    /// is admitted with the copy's disk (see [`HostAgent::copy_claimed`]).
     CopyClaimed {
         record: Box<Record>,
+        claimed: Box<Claimed>,
         reply: Reply<()>,
     },
     /// A sandbox about to sleep only for being idle told whether a command

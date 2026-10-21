@@ -42,8 +42,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 result,
                 reply,
                 stale,
-            } => self.prepared(id, ordinal, result, reply, stale.as_ref()),
-            Event::CopyClaimed { record, reply } => self.copy_claimed(*record, reply),
+                left,
+            } => self.prepared(id, ordinal, result, reply, stale.as_ref(), left),
+            Event::CopyClaimed {
+                record,
+                claimed,
+                reply,
+            } => self.copy_claimed(*record, *claimed, reply),
             Event::OwnerTaken { id, result, reply } => self.owner_taken(id, result, reply),
             Event::StepDone {
                 id,
@@ -129,13 +134,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// A create prepared its sandbox's files, or failed to.
-    fn prepared(
+    /// A create or adopt of `id` ended; with `left`, one that failed also
+    /// left some of what it made behind.
+    pub(super) fn prepared(
         &mut self,
         id: Id,
         ordinal: u32,
-        result: Result<Record, HostError>,
+        result: Result<Box<Record>, HostError>,
         reply: Reply<()>,
         stale: Option<&Arc<Template>>,
+        left: Option<String>,
     ) {
         self.preparing.remove(&id.0);
         // What its first files took shows in the next reading.
@@ -147,9 +155,30 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.template_stale(template);
         }
         let record = match result {
-            Ok(record) => record,
+            Ok(record) => *record,
             Err(error) => {
-                self.ordinals.remove(&ordinal);
+                match left {
+                    None => {
+                        self.ordinals.remove(&ordinal);
+                    }
+                    // Its network may still hold its ordinal's link: the
+                    // ordinal stays taken, and removing the id again
+                    // retries.
+                    Some(problem) => {
+                        tracing::warn!(%id, %problem, "a create or adopt that failed left files or a network behind");
+                        self.block(
+                            id,
+                            format!("a failed create or adopt left this behind: {problem}"),
+                        );
+                        self.leftovers.insert(
+                            id.0,
+                            Leftover {
+                                host: id,
+                                ordinal: Some(ordinal),
+                            },
+                        );
+                    }
+                }
                 self.first_wake_unbooked(id);
                 let _ = reply.send(Err(error));
                 return;
@@ -890,20 +919,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         tokio::spawn(async move {
             // Keeps the state root, and the host, locked until it is done.
             let _records = records;
-            let failed = |error: &dyn std::fmt::Display| HostError::Io(error.to_string());
-            let result = async {
-                if let Some(net) = net {
-                    tokio::task::spawn_blocking(move || net.remove(host, ordinal))
-                        .await
-                        .map_err(|error| failed(&error))?
-                        .map_err(|error| failed(&error))?;
-                }
-                match tokio::fs::remove_dir_all(&dir).await {
-                    Err(error) if error.kind() != io::ErrorKind::NotFound => Err(failed(&error)),
-                    _ => Ok(()),
-                }
-            }
-            .await;
+            let result = unmake(host, ordinal, &dir, net).await;
             let _ = events.send(Event::Destroyed {
                 id,
                 host,
@@ -1106,6 +1122,31 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
     }
 }
 
+/// Deletes what is left of a sandbox that has no record, never had one or
+/// lost it to a removal: its network, made under `host` with `ordinal`,
+/// then its directory `dir`. The directory goes only once the network is
+/// gone, so whatever a failure leaves is found again on recovery. Its id
+/// stays reserved until this is done, so it cannot delete a newer
+/// sandbox's files or network.
+pub(super) async fn unmake(
+    host: Id,
+    ordinal: Option<u32>,
+    dir: &Path,
+    net: Option<Arc<Networks>>,
+) -> Result<(), HostError> {
+    let failed = |error: &dyn std::fmt::Display| HostError::Io(error.to_string());
+    if let Some(net) = net {
+        tokio::task::spawn_blocking(move || net.remove(host, ordinal))
+            .await
+            .map_err(|error| failed(&error))?
+            .map_err(|error| failed(&error))?;
+    }
+    match tokio::fs::remove_dir_all(dir).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(failed(&error)),
+        _ => Ok(()),
+    }
+}
+
 /// Counts how the step `running` of `id` ended in its kind's `stats`, and
 /// keeps a failure's error for the sandbox's status, or clears an earlier
 /// failure of the same kind once one is done.
@@ -1144,5 +1185,49 @@ fn count_step<V>(
                     .unwrap_or_else(|| "no error recorded".to_owned()),
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use compute_core::SandboxId;
+
+    use super::*;
+
+    /// What [`unmake`] cannot delete it says, keeping the rest for a later
+    /// try, which deletes it; a directory already gone is deleted.
+    #[tokio::test]
+    async fn unmaking_says_what_it_could_not_delete_and_a_later_try_deletes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, stuck) = (
+            root.path().join("sandbox"),
+            root.path().join("sandbox/stuck"),
+        );
+        std::fs::create_dir_all(&stuck).unwrap();
+        std::fs::write(stuck.join("file"), b"").unwrap();
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(&stuck, 0o555);
+        if std::fs::write(stuck.join("probe"), b"").is_ok() {
+            // Root deletes it anyway; nothing to test.
+            mode(&stuck, 0o755);
+            return;
+        }
+        let id = Id(SandboxId(7));
+
+        let failed = unmake(id, Some(0), &dir, None).await;
+        assert!(matches!(failed, Err(HostError::Io(_))), "{failed:?}");
+        assert!(
+            stuck.join("file").exists(),
+            "what it could not delete stays"
+        );
+
+        mode(&stuck, 0o755);
+        assert_eq!(unmake(id, Some(0), &dir, None).await, Ok(()));
+        assert!(!dir.exists());
+        assert_eq!(unmake(id, Some(0), &dir, None).await, Ok(()));
     }
 }
