@@ -25,8 +25,10 @@ import {
   Windows,
   WindowState,
   type CuaDesktopRuntime,
+  type ListedWindow,
 } from "./wire";
 import { locate, projectElements, unindexedTextByElement } from "./projection";
+import type { MacWindowPresence, MacWindows } from "./macos-windows";
 
 type Target = {
   native: ComputerBackendTarget;
@@ -37,6 +39,9 @@ type Target = {
   appName: string;
   /** False when CUA lists the window as not on screen. */
   onScreen: boolean;
+  /** A macOS window that is minimized or whose app is hidden: reading it
+   * first brings it back on screen, behind the person's front window. */
+  restorable: boolean;
 };
 type Frame = {
   targetId: string;
@@ -80,6 +85,9 @@ export class CuaComputerBackend implements ComputerBackend {
   private nativeObservations = false;
   /** Windows CUA could not read because they are sheets of another window. */
   private readonly unreadableSheets = new Set<string>();
+  /** macOS windows on the current Space that their app never shows. A window
+   * stays this way until it comes on screen or goes away. */
+  private readonly neverShown = new Set<string>();
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -88,6 +96,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly parentPid: (pid: number) => number | null,
     actionBatches: boolean,
     private readonly launchWindowWaitMs: number,
+    private readonly macWindows: MacWindows | null,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -119,6 +128,9 @@ export class CuaComputerBackend implements ComputerBackend {
       parentPid?: (pid: number) => number | null;
       /** How long a launch waits for the launched app's first window. */
       launchWindowWaitMs?: number;
+      /** Native macOS window presence and restore; without it, a window that
+       * is not on screen stays unreadable. */
+      macWindows?: MacWindows | null;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -131,6 +143,7 @@ export class CuaComputerBackend implements ComputerBackend {
         await runStepsStopsAtStaleTokens(runtime),
         options.launchWindowWaitMs ??
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
+        platform === "macos" ? (options.macWindows ?? null) : null,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -449,25 +462,37 @@ export class CuaComputerBackend implements ComputerBackend {
 
   private async discover(): Promise<ComputerBackendTarget[]> {
     const { data } = await callDesktop(this.runtime, "list_windows", {});
-    const windows = Windows.parse(data).windows;
+    const macos = this.identity.platform === "macos";
+    const windows = Windows.parse(data).windows.filter(
+      (window) =>
+        // Another CUA worker's cursor overlay (another computer session, or
+        // another agent on this desktop) spans the screen above every app. It
+        // is never a window a person or an agent works in.
+        window.app_name !== CUA_WORKER_APP &&
+        // macOS keeps windows ordered out that no person ever sees, on no
+        // Space at all: a headless browser's page windows (the browser from
+        // browser_open among them), a closed popover kept for reuse.
+        !(macos && window.is_on_screen === false && window.space_ids === null),
+    );
+    const presences = await this.offScreenPresences(windows);
     const live = new Set<string>();
     for (const window of windows) {
-      // Another CUA worker's cursor overlay (another computer session, or
-      // another agent on this desktop) spans the screen above every app. It
-      // is never a window a person or an agent works in.
-      if (window.app_name === CUA_WORKER_APP) continue;
       const id = `cua:window:${window.pid}:${window.window_id}`;
+      const presence = presences.get(id);
+      if (presence === "not_shown") continue;
       live.add(id);
       const old = this.targetsById.get(id);
       // Only macOS cannot read a window that is off screen; Windows and
       // Linux read minimized or covered windows through their trees.
-      const onScreen = this.identity.platform !== "macos" || window.is_on_screen !== false;
+      const onScreen = !macos || window.is_on_screen !== false;
+      const restorable = presence === "minimized" || presence === "application_hidden";
       this.targetsById.set(id, {
         pid: window.pid,
         windowId: window.window_id,
         title: window.title,
         appName: window.app_name,
         onScreen,
+        restorable,
         native: {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
@@ -477,7 +502,7 @@ export class CuaComputerBackend implements ComputerBackend {
           title: window.title || window.app_name,
           bounds: window.bounds,
           focused: false,
-          ...(onScreen ? {} : { offScreen: true as const }),
+          ...(onScreen || restorable ? {} : { offScreen: true as const }),
         },
       });
     }
@@ -490,6 +515,43 @@ export class CuaComputerBackend implements ComputerBackend {
           if (frame.targetId === id) this.frames.delete(frameId);
       }
     return [...this.targetsById.values()].map((target) => target.native);
+  }
+
+  /** Why each macOS window on the current Space that is not on screen is not
+   * shown. A window on another Space is left as it is: reading it would mean
+   * switching the person's screen to that Space. */
+  private async offScreenPresences(
+    windows: readonly ListedWindow[],
+  ): Promise<Map<string, MacWindowPresence>> {
+    const presences = new Map<string, MacWindowPresence>();
+    if (!this.macWindows) return presences;
+    const listed = new Set<string>();
+    const asked: Array<{ id: string; window: ListedWindow }> = [];
+    for (const window of windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      listed.add(id);
+      if (window.is_on_screen !== false) this.neverShown.delete(id);
+      else if (this.neverShown.has(id)) presences.set(id, "not_shown");
+      else if (window.on_current_space === true) asked.push({ id, window });
+    }
+    for (const id of this.neverShown) if (!listed.has(id)) this.neverShown.delete(id);
+    if (asked.length === 0) return presences;
+    // Without an answer every window keeps its listing: off screen.
+    const answers = await this.macWindows
+      .presence(
+        asked.map(({ window }) => ({
+          processId: window.pid,
+          title: window.title,
+          bounds: window.bounds,
+        })),
+      )
+      .catch(() => asked.map(() => "unknown" as const));
+    asked.forEach(({ id }, index) => {
+      const presence = answers[index]!;
+      presences.set(id, presence);
+      if (presence === "not_shown") this.neverShown.add(id);
+    });
+    return presences;
   }
 
   private async target(targetId: string): Promise<Target> {
@@ -506,9 +568,11 @@ export class CuaComputerBackend implements ComputerBackend {
 
   /** A window that is not on screen (minimized, hidden, on another Space or
    * beyond every display) has neither pixels nor, often, controls CUA can
-   * read, and CUA can take half a minute to find that out. A window listed
-   * off screen is refused at once, and a failed read of a window that left
-   * the screen since says so instead of reporting a driver failure. */
+   * read, and CUA can take half a minute to find that out. A minimized window
+   * or a hidden app's window is first brought back on screen, behind the
+   * person's front window and without activating its app. Any other window
+   * listed off screen is refused at once, and a failed read of a window that
+   * left the screen since says so instead of reporting a driver failure. */
   private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
     const offScreen = () =>
       new ComputerBackendError(
@@ -520,7 +584,8 @@ export class CuaComputerBackend implements ComputerBackend {
     if (!(await this.target(targetId)).onScreen) {
       // The listing may predate the window coming back on screen.
       await this.discover();
-      if (!(await this.target(targetId)).onScreen) throw offScreen();
+      const target = await this.target(targetId);
+      if (!target.onScreen && !(await this.restore(target))) throw offScreen();
     }
     try {
       return await read();
@@ -544,6 +609,22 @@ export class CuaComputerBackend implements ComputerBackend {
       if (target.onScreen) throw error;
       throw offScreen();
     }
+  }
+
+  /** Brings a minimized window or a hidden app's window back on screen.
+   * Restoring takes effect at once, but the window server reports the window
+   * on screen only a moment later, so the read that follows is trusted to
+   * find it there and a failed read is checked against a fresh listing. */
+  private async restore(target: Target): Promise<boolean> {
+    const bounds = target.native.bounds;
+    if (!target.restorable || !this.macWindows || !bounds) return false;
+    const before = await this.macWindows
+      .restore({ processId: target.pid, title: target.title, bounds })
+      .catch(() => null);
+    if (before !== "minimized" && before !== "application_hidden") return false;
+    target.onScreen = true;
+    target.restorable = false;
+    return true;
   }
 
   private args(target: Target): Record<string, unknown> {

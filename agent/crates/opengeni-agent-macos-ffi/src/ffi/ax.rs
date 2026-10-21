@@ -46,10 +46,11 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSError, NSString, NSURL};
 
 use super::{ax_element::AxElement, ShareableWindow};
+use crate::window_presence::{classify_window, AxWindowFacts};
 use crate::{
     MacAxAction, MacAxActionValue, MacAxElementSelector, MacAxFingerprint, MacAxNode,
     MacAxObservedState, MacAxPathStep, MacAxSnapshot, MacAxValue, MacAxWindowSelector, MacFfiError,
-    MacRect, MacTargetInfo, MacTargetKind,
+    MacRect, MacTargetInfo, MacTargetKind, MacWindowPresence, MacWindowQuery,
 };
 
 const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.5;
@@ -1293,6 +1294,99 @@ pub(super) fn current_target_bounds(target: &MacTargetInfo) -> Result<MacRect, M
         })
 }
 
+pub(super) fn window_presence(query: &MacWindowQuery) -> Result<MacWindowPresence, MacFfiError> {
+    locate_window(query).map(|(presence, _, _)| presence)
+}
+
+pub(super) fn restore_window_behind(
+    query: &MacWindowQuery,
+) -> Result<MacWindowPresence, MacFfiError> {
+    let (presence, window, application) = locate_window(query)?;
+    let (MacWindowPresence::Minimized | MacWindowPresence::ApplicationHidden, Some(window)) =
+        (presence, window)
+    else {
+        return Ok(presence);
+    };
+    // A restored window is ordered in front of every other window, but it
+    // must not cover what the person is working in. Note their front window
+    // first and raise it again afterwards: its app is already active, so this
+    // reorders windows without activating anything.
+    let front_window = focused_window_of_frontmost_application().filter(|front| *front != window);
+    if application.isHidden() {
+        // Unhiding orders the app's windows back behind the active app's
+        // without activating it. AppKit reports false even when it succeeds.
+        let _ = application.unhide();
+    }
+    if presence == MacWindowPresence::Minimized {
+        set_bool_attribute(&window, kAXMinimizedAttribute, false)?;
+    }
+    if let Some(front) = front_window {
+        // The window is back either way; a front window that cannot be raised
+        // only leaves it in front.
+        let _ = front.raise_if_supported();
+    }
+    Ok(presence)
+}
+
+/// Finds a window the window server lists among its application's
+/// Accessibility windows, and says why it is not on screen.
+fn locate_window(
+    query: &MacWindowQuery,
+) -> Result<
+    (
+        MacWindowPresence,
+        Option<AxElement>,
+        objc2::rc::Retained<NSRunningApplication>,
+    ),
+    MacFfiError,
+> {
+    require_accessibility()?;
+    let pid = i32::try_from(query.process_id).map_err(|_| {
+        MacFfiError::Invalid("window process id exceeds the macOS pid range".to_string())
+    })?;
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .filter(|application| !application.isTerminated())
+        .ok_or_else(|| MacFfiError::TargetStale("application is no longer running".to_string()))?;
+    let element = AxElement::application(pid);
+    let _ = element.set_messaging_timeout(AX_MESSAGE_TIMEOUT_SECONDS);
+    let Ok((windows, truncated)) = element.windows_bounded(MAX_AX_WINDOWS_PER_APP) else {
+        return Ok((MacWindowPresence::Unknown, None, application));
+    };
+    let facts: Vec<AxWindowFacts> = windows
+        .iter()
+        .map(|window| AxWindowFacts {
+            bounds: ax_bounds(window),
+            title: window
+                .string_attribute(kAXTitleAttribute)
+                .ok()
+                .map(|title| title.to_string()),
+            minimized: optional_bool(window, kAXMinimizedAttribute).unwrap_or(false),
+        })
+        .collect();
+    let (presence, index) = classify_window(query, &facts, application.isHidden());
+    // A truncated list cannot show that a window is absent from it.
+    let presence = if truncated && presence == MacWindowPresence::NotShown {
+        MacWindowPresence::Unknown
+    } else {
+        presence
+    };
+    Ok((
+        presence,
+        index.map(|index| windows[index].clone()),
+        application,
+    ))
+}
+
+fn focused_window_of_frontmost_application() -> Option<AxElement> {
+    let front = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let application = AxElement::application(front.processIdentifier());
+    let _ = application.set_messaging_timeout(AX_MESSAGE_TIMEOUT_SECONDS);
+    application
+        .attribute(kAXFocusedWindowAttribute)
+        .ok()?
+        .downcast::<AxElement>()
+}
+
 pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
     if application_id.trim().is_empty() {
         return Err(MacFfiError::Invalid(
@@ -1461,6 +1555,18 @@ pub(super) fn run_background_application(
                 || Instant::now() >= guard_until)
         {
             guarding_startup = false;
+            // A window opened without activation is still ordered in front of
+            // every other window. Raise the person's front window again so the
+            // browser lies behind it; that app is active, so nothing activates.
+            if first_window_seen_at.is_some()
+                && prior_frontmost.as_ref().is_some_and(|prior| {
+                    prior.isActive() && prior.processIdentifier() != process_id
+                })
+            {
+                if let Some(front) = focused_window_of_frontmost_application() {
+                    let _ = front.raise_if_supported();
+                }
+            }
         }
         thread::sleep(if guarding_startup {
             Duration::from_millis(20)
