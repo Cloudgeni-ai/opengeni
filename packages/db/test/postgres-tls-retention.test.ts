@@ -366,11 +366,13 @@ describe("postgres-js real-driver TLS socket retention", () => {
         assertResult(await query(client));
         // A failed transaction sends its rollback from the rejection: after the
         // socket error, before the separately delivered close.
+        let pending: ReturnType<postgres.Sql["unsafe"]> | undefined;
         let queued: Promise<unknown> | undefined;
         const reset = await query(client).then(
           () => null,
           (error: unknown) => {
-            queued = Promise.resolve(client.unsafe("select fixture_payload").simple()).then(
+            pending = client.unsafe("select fixture_payload").simple();
+            queued = Promise.resolve(pending).then(
               () => null,
               (failure: unknown) => failure,
             );
@@ -380,6 +382,8 @@ describe("postgres-js real-driver TLS socket retention", () => {
         expect((reset as NodeJS.ErrnoException).code).toBe("ECONNRESET");
         const late = await bounded(queued!, "query queued before close");
         expect((late as NodeJS.ErrnoException).code).toBe("CONNECTION_CLOSED");
+        // Settled, so cancelling it opens no cancel connection to a dead backend.
+        await bounded(pending!.cancel(), "cancel after close");
         // The replacement connection answers only its own queries, in order.
         assertResult(await query(client));
         assertResult(await query(client));
