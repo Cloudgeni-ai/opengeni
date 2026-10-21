@@ -35,6 +35,7 @@ import {
 } from "../src";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 import * as schema from "../src/schema";
+import { reconcileModelCallFactPage } from "../src/model-call-fact-reconciliation";
 
 setDefaultTimeout(120_000);
 
@@ -393,12 +394,85 @@ function sessionRelationLoops(value: unknown, loops: number[] = []): number[] {
 }
 
 describe("Workspace Insights model bundle", () => {
+  test("one-row ledger and event pages preserve PostgreSQL microseconds and frozen windows", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const turnId = crypto.randomUUID();
+    await shared.admin`insert into session_turns (id, account_id, workspace_id, session_id,
+      trigger_event_id, temporal_workflow_id, status, position, prompt, model,
+      reasoning_effort, latency_mode, sandbox_backend, resources, tools, metadata)
+      values (${turnId},${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},
+        ${crypto.randomUUID()},${`session-${seeded.sharedSessionId}`},'completed',100,
+        'cursor fixture','fixture','medium','standard','none','[]','[]','{}')`;
+    await shared.admin`insert into usage_events (account_id,workspace_id,event_type,quantity,unit,
+      source_resource_type,source_resource_id,session_id,turn_id,idempotency_key,occurred_at)
+      select ${seeded.accountId},${seeded.workspaceId},'model.cost',n,'usd_micros',
+        'model_response',${turnId}||':micro-'||n,${seeded.sharedSessionId},${turnId},
+        ${turnId}||':micro-'||n,'2026-08-15'::timestamptz+n*interval '1 microsecond'
+      from generate_series(1,3) g(n)`;
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into session_events (account_id,workspace_id,session_id,turn_id,
+      turn_association,sequence,type,payload,occurred_at)
+      select ${seeded.accountId},${seeded.workspaceId},${seeded.sharedSessionId},${turnId},
+        'current',100+n,'agent.model.usage',jsonb_build_object('sourceKey','micro-'||n,
+          'model','fixture','provider','openai','providerApi','responses','billingPath','opengeni_credits'),
+        '2026-08-15'::timestamptz+n*interval '1 microsecond'
+      from generate_series(1,3) g(n)`;
+    });
+    const window = {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-15"),
+      until: new Date("2026-08-16"),
+      limit: 1,
+    };
+    const first = await reconcileModelCallFacts(client.db, window);
+    expect(first).toMatchObject({ repaired: 0, truncated: true });
+    let repaired = 0;
+    let complete = false;
+    for (let page = 0; page < 10; page++) {
+      // A later scheduled run must finish the persisted window, even after
+      // its original lookback interval has elapsed.
+      const next = await reconcileModelCallFacts(client.db, {
+        ...window,
+        since: new Date("2026-08-18"),
+        until: new Date("2026-08-19"),
+      });
+      repaired += next.repaired;
+      if (!next.truncated) {
+        complete = true;
+        break;
+      }
+    }
+    expect(complete).toBe(true);
+    expect(repaired).toBe(3);
+    const [progress] =
+      await shared.admin`select checkpoint from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`;
+    expect(progress?.checkpoint).toMatchObject({
+      since: "2026-08-15T00:00:00.000Z",
+      until: "2026-08-16T00:00:00.000Z",
+      complete: true,
+    });
+    await reconcileModelCallFacts(client.db, {
+      ...window,
+      since: new Date("2026-08-18"),
+      until: new Date("2026-08-19"),
+    });
+    const [bridged] =
+      await shared.admin`select checkpoint from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`;
+    expect(bridged?.checkpoint).toMatchObject({
+      since: "2026-08-16T00:00:00.000Z",
+      until: "2026-08-19T00:00:00.000Z",
+    });
+  });
+
   test("reconciliation scales with ledger history under application RLS", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
     const size = Number(process.env.INSIGHTS_PLAN_ROWS ?? 10000);
     const gaps = Number(process.env.INSIGHTS_PLAN_MISSING ?? 100);
     const backgroundSize = Number(process.env.INSIGHTS_PLAN_BACKGROUND ?? size * 4);
+    const pageSize = 500; // The control worker's input-page budget.
     const turnId = crypto.randomUUID();
     const unrelatedTurnId = crypto.randomUUID();
     await shared.admin`
@@ -433,19 +507,25 @@ describe("Workspace Insights model bundle", () => {
     const captured = instrumentedDb(statements);
     const started = performance.now();
     try {
-      expect(
-        await reconcileModelCallFacts(captured.db, {
+      let result;
+      let pages = 0;
+      do {
+        result = await reconcileModelCallFacts(captured.db, {
+          limit: pageSize,
           workspaceId: seeded.workspaceId,
           since: new Date("2026-08-15"),
           until: new Date("2026-08-16"),
-        }),
-      ).toEqual({ missing: 0, repaired: 0, unrepaired: 0, truncated: false });
+        });
+        expect(result).toMatchObject({ missing: 0, repaired: 0, unrepaired: 0 });
+        if (++pages > Math.ceil(size / pageSize) + 1)
+          throw new Error("Ledger page did not advance");
+      } while (result.truncated);
     } finally {
       await captured.close();
     }
     if (process.env.INSIGHTS_EXPLAIN === "1")
       console.log("reconcile wall ms", performance.now() - started, "rows", size);
-    const statement = statements.find((s) => s.query.includes("with usage_row"))!;
+    const statement = statements.find((s) => s.query.includes("-- model-fact-ledger-page"))!;
     await shared.admin.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
       await tx`delete from model_call_facts where turn_id = ${turnId} and source_key in
@@ -455,7 +535,8 @@ describe("Workspace Insights model bundle", () => {
         sequence, type, payload, usage_source_key, occurred_at)
       select ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${turnId},
         'current', 100 + n, 'agent.model.usage',
-        jsonb_build_object('sourceKey', 'scale-' || n, 'model', 'fixture', 'inputTokens', 10),
+        jsonb_build_object('sourceKey', 'scale-' || n, 'model', 'fixture', 'provider', 'openai',
+          'providerApi', 'responses', 'billingPath', 'opengeni_credits', 'inputTokens', 10),
         case when n % 2 = 0 then null else 'scale-' || n end,
         '2026-08-15'::timestamptz from generate_series(1, ${size}::integer) g(n)`;
       // Old events in other turns must not be read just to rank current gaps.
@@ -484,19 +565,134 @@ describe("Workspace Insights model bundle", () => {
         if (process.env.INSIGHTS_EXPLAIN === "1")
           console.log(JSON.stringify(rows[0]?.["QUERY PLAN"], null, 2));
         const plan = rows[0]!["QUERY PLAN"][0]!.Plan;
-        expect(plan["Actual Rows"]).toBe(gaps);
+        expect(plan["Actual Rows"]).toBe(1);
         const eventReads = planNodes(plan).filter(
           (node) => node["Relation Name"] === "session_events",
         );
-        expect(eventReads).toHaveLength(1);
-        // Assert work, not a noisy wall-clock deadline: once per missing turn,
-        // never once per missing call or across unrelated historical turns.
-        expect(eventReads[0]!["Actual Loops"]).toBe(1);
-        expect(eventReads[0]!["Actual Rows"]).toBe(size);
-        expect(eventReads[0]!["Rows Removed by Filter"] ?? 0).toBeLessThanOrEqual(1);
+        expect(eventReads).toHaveLength(0);
+        const ledgerReads = planNodes(plan).filter(
+          (node) => node["Relation Name"] === "usage_events",
+        );
+        expect(ledgerReads).toHaveLength(1);
+        expect(ledgerReads[0]!["Actual Rows"]).toBeLessThanOrEqual(pageSize + 1);
+        const factReads = planNodes(plan).filter(
+          (node) => node["Relation Name"] === "model_call_facts",
+        );
+        expect(factReads).toHaveLength(1);
+        expect(factReads[0]!["Actual Rows"]).toBeLessThanOrEqual(1);
+        expect(factReads[0]!["Actual Loops"]).toBeLessThanOrEqual(pageSize);
+        expect(factReads[0]!["Rows Removed by Filter"] ?? 0).toBeLessThanOrEqual(1);
       });
     } finally {
       await app.end();
+    }
+    const repairStatements: CapturedStatement[] = [];
+    const repairClient = instrumentedDb(repairStatements);
+    const repairStart = performance.now();
+    let pages = 0,
+      repaired = 0,
+      missing = 0;
+    const pageTimes: number[] = [];
+    try {
+      while (true) {
+        const pageStart = performance.now();
+        const result = await reconcileModelCallFacts(repairClient.db, {
+          limit: pageSize,
+          workspaceId: seeded.workspaceId,
+          since: new Date("2026-08-15"),
+          until: new Date("2026-08-16"),
+        });
+        pageTimes.push(performance.now() - pageStart);
+        pages++;
+        repaired += result.repaired;
+        missing += result.missing;
+        if (!result.truncated) break;
+        if (pages > Math.ceil(size / pageSize) * 2 + 2)
+          throw new Error("Event page did not advance");
+      }
+    } finally {
+      await repairClient.close();
+    }
+    expect(missing).toBe(gaps);
+    expect(repaired).toBe(gaps);
+    const eventPages = repairStatements.filter((s) =>
+      s.query.includes("payload->>'sourceKey' as source_key,turn_association"),
+    );
+    expect(eventPages.length).toBeLessThanOrEqual(Math.ceil(size / pageSize));
+    expect(eventPages.length).toBeGreaterThan(0);
+    if (process.env.INSIGHTS_EXPLAIN === "1")
+      console.log("paged reconciliation", {
+        rows: size,
+        gaps,
+        pages,
+        eventPages: eventPages.length,
+        repaired,
+        wallMs: performance.now() - repairStart,
+        maxPageMs: Math.max(...pageTimes),
+        p95PageMs: [...pageTimes].sort((a, b) => a - b)[Math.floor(pageTimes.length * 0.95)],
+        statements: repairStatements.length,
+        indexes: Array.from(
+          await shared.admin`select relname,pg_relation_size(oid)::text bytes from pg_class
+          where relname in ('usage_events_workspace_metric_page_idx','usage_events_workspace_metric_source_idx','session_events_model_fact_page_idx')`,
+          (row) => ({ name: row.relname, bytes: row.bytes }),
+        ),
+      });
+    if (process.env.INSIGHTS_EXPLAIN === "1") {
+      await shared.admin`delete from model_call_facts where turn_id=${turnId} and source_key in
+        (select 'scale-' || n from generate_series(${size - gaps + 1}::integer,${size}::integer) g(n))`;
+      const start = performance.now();
+      const times: number[] = [];
+      let total = 0;
+      const signal = new AbortController().signal;
+      const deadlineAtMs = Date.now() + 180000;
+      for (;;) {
+        const pageStart = performance.now();
+        const result = await reconcileModelCallFacts(client.db, {
+          limit: pageSize,
+          workspaceId: seeded.workspaceId,
+          since: new Date("2026-08-15"),
+          until: new Date("2026-08-16"),
+          signal,
+          deadlineAtMs,
+        });
+        times.push(performance.now() - pageStart);
+        total += result.repaired;
+        if (!result.truncated) break;
+        if (times.length > Math.ceil(size / pageSize) * 2 + 2)
+          throw new Error("Lifetime scan did not advance");
+      }
+      expect(total).toBe(gaps);
+      console.log("production-adapter full repair", {
+        rows: size,
+        gaps,
+        repaired: total,
+        pages: times.length,
+        wallMs: performance.now() - start,
+        maxPageMs: Math.max(...times),
+        p95PageMs: [...times].sort((a, b) => a - b)[Math.floor(times.length * 0.95)],
+      });
+      const completeStart = performance.now();
+      let completePages = 0;
+      for (;;) {
+        const result = await reconcileModelCallFacts(client.db, {
+          limit: pageSize,
+          workspaceId: seeded.workspaceId,
+          since: new Date("2026-08-15"),
+          until: new Date("2026-08-16"),
+          signal,
+          deadlineAtMs,
+        });
+        expect(result.repaired).toBe(0);
+        completePages++;
+        if (!result.truncated) break;
+        if (completePages > Math.ceil(size / pageSize) + 1)
+          throw new Error("Complete ledger did not advance");
+      }
+      console.log("production-adapter no-gap sweep", {
+        rows: size,
+        pages: completePages,
+        wallMs: performance.now() - completeStart,
+      });
     }
   }, 180_000);
 
@@ -979,8 +1175,8 @@ describe("Workspace Insights model bundle", () => {
       turnId: crypto.randomUUID(),
       sourceKey: `reconcile-${label}-${crypto.randomUUID()}`,
       costMicros: [1200, 800, 500][index]!,
-      // The unrepairable call is the oldest, so a bounded pass must still reach
-      // the repairable one behind it.
+      // The unrepairable call is oldest. Durable page progress must reach the
+      // repairable call behind it without ranking the entire window first.
       position: [2, 1, 3][index]!,
     }));
     for (const call of calls) {
@@ -1073,19 +1269,84 @@ describe("Workspace Insights model bundle", () => {
       limit: 1,
     });
     expect(bounded).toEqual({
-      missing: 1,
-      repaired: 1,
+      missing: 0,
+      repaired: 0,
       unrepaired: 0,
       truncated: true,
     });
 
-    const first = await reconcileModelCallFacts(client.db, window);
-    expect(first).toEqual({
-      missing: 1,
-      repaired: 0,
-      unrepaired: 1,
-      truncated: false,
-    });
+    const stop = new AbortController();
+    const stopped = new Error("stop this reconciliation page");
+    let settledBeforeStop = 0;
+    let interrupted = false;
+    for (let attempt = 0; attempt < 10 && !interrupted; attempt++) {
+      const before =
+        await shared.admin`select checkpoint from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`;
+      try {
+        const result = await reconcileModelCallFactPage(
+          client.db,
+          { ...window, signal: stop.signal },
+          async (scoped, _workspace, event) => {
+            await scoped.insert(schema.modelCallFacts).values({
+              accountId: event.accountId,
+              workspaceId: event.workspaceId,
+              sessionId: event.sessionId,
+              turnId: event.turnId!,
+              sourceKey: (event.payload as { sourceKey: string }).sourceKey,
+              provider: "openai",
+              providerApi: "responses",
+              model: "fixture",
+              billingPath: "opengeni_credits",
+              pricedCostMicros: 0,
+              occurredAt: event.occurredAt,
+            });
+            stop.abort(stopped);
+            return true;
+          },
+        );
+        settledBeforeStop += result.missing;
+      } catch (error) {
+        expect(error).toBe(stopped);
+        interrupted = true;
+        expect(
+          await shared.admin`select checkpoint from model_call_fact_reconciliation_progress where workspace_id=${seeded.workspaceId}`,
+        ).toEqual(before);
+      }
+    }
+    expect(interrupted).toBe(true);
+    expect(
+      (
+        await shared.admin`select id from model_call_facts where workspace_id=${seeded.workspaceId} and turn_id=${calls[0]!.turnId}`
+      ).length,
+    ).toBe(0);
+
+    const finishSweep = async (db: Database = client!.db) => {
+      const total = { missing: 0, repaired: 0, unrepaired: 0, truncated: false };
+      for (let page = 0; page < 50; page++) {
+        const result = await reconcileModelCallFacts(db, {
+          ...window,
+          signal: new AbortController().signal,
+          deadlineAtMs: Date.now() + 5000,
+        });
+        total.missing += result.missing;
+        total.repaired += result.repaired;
+        total.unrepaired += result.unrepaired;
+        if (!result.truncated) return total;
+      }
+      throw new Error("Reconciliation failed to advance");
+    };
+    // No process-local cursor: a new pool must resume the committed page.
+    const restarted = createDb(shared.appUrl, { max: 2 });
+    try {
+      expect(await finishSweep(restarted.db)).toEqual({
+        missing: 2 - settledBeforeStop,
+        repaired: 1,
+        unrepaired: 1 - settledBeforeStop,
+        truncated: false,
+      });
+    } finally {
+      await restarted.close();
+    }
     const rebuilt = await shared.admin`
       select priced_cost_micros::text, billing_path, total_tokens::text
       from model_call_facts
@@ -1098,7 +1359,7 @@ describe("Workspace Insights model bundle", () => {
       },
     ]);
 
-    const again = await reconcileModelCallFacts(client.db, window);
+    const again = await finishSweep();
     expect(again).toEqual({
       missing: 1,
       repaired: 0,
@@ -1126,7 +1387,7 @@ describe("Workspace Insights model bundle", () => {
             where workspace_id = ${seeded.workspaceId} and session_id = ${seeded.sharedSessionId}),
           'agent.model.usage', '{"sourceKey":""}'::jsonb, ${occurredAt})`;
     }
-    expect(await reconcileModelCallFacts(client.db, window)).toEqual({
+    expect(await finishSweep()).toEqual({
       missing: 2,
       repaired: 0,
       unrepaired: 2,

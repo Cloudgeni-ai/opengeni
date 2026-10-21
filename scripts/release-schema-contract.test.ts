@@ -37,6 +37,20 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
+    const contract = await buildCompleteSchemaContract();
+    for (const path of [
+      "0890_model_fact_reconciliation_progress.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0892_model_fact_event_pages.sql",
+      "0893_model_fact_ledger_source.sql",
+    ]) {
+      expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
+        path,
+        deploymentMode: "rolling",
+      });
+    }
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2325,6 +2339,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0893_model_fact_ledger_source.sql",
+      "0892_model_fact_event_pages.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0890_model_fact_reconciliation_progress.sql",
       "0889_session_events_tool_name.sql",
       "0888_session_list_invalidation.sql",
       "0887_session_events_attempt_reference_index.sql",

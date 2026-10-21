@@ -84,6 +84,54 @@ fixture compares complete raw and rollup-backed responses over all supported
 ranges, groupings, filters and privacy kinds; it also covers additive maintenance,
 recorded-at maximum repair, rollback, idempotent rebuild and concurrent writers.
 
+## Missing model-fact reconciliation
+
+The control worker's existing three-minute maintenance run advances persisted
+workspace scans, rather than limiting the result of an unbounded history join.
+`reconcileModelCallFacts` advances one input page (500 rows in the worker).
+Its `truncated` result means more scan work remains, even when this page found
+no missing facts. Callers must continue until it is false. Counts describe only
+the missing keys resolved by that page, not an estimate of the remaining scan.
+
+The discovery phase reads ledger `(occurred_at, id)` pages and queues missing
+`(turn_id, source_key)` keys. The repair phase reads each queued turn's usage
+history once in timestamp/id order, including historical payload keys without a
+backfilled `usage_source_key`. It fetches full payloads only for matching keys.
+Unrepairable keys are drained in bounded pages; they cannot starve later rows.
+The two workspace-scoped FORCE-RLS tables retain the cursor and candidates.
+Queue changes, fact inserts and cursor advancement share one transaction. An
+aborted page rolls back; another process resumes the last committed page. A slow
+sweep completes its captured window before advancing to a new window, bridging
+the elapsed interval instead of skipping it. Recent overlapping windows still
+recheck late events. The existing historical backfill remains separate.
+
+Repair preserves first-event selection, durable billing annotations and existing
+facts. It never charges or rewrites the usage/credit ledger. Concurrent sweepers
+serialize only on their workspace's progress row. Each workspace gets a page
+before the activity revisits unfinished work round-robin.
+
+The activity passes its cancellation signal and **existing** run deadline to
+each database page and workspace enumeration. On the postgres.js adapter,
+`withDatabaseMaintenanceLifetime` reserves a transaction, preserves any shorter
+configured statement timeout, and uses a transaction-local disconnect check.
+Abort sends the protocol cancellation and joins both its acknowledgement and
+the query before rollback/release, so a late cancel cannot be sent to a later
+pool borrower. Abrupt process death is detected by PostgreSQL after the socket
+closes; a network partition still depends on TCP failure detection and the
+server-side deadline. Pool acquisition and an already-sent COMMIT are joined,
+not abandoned: an acknowledged commit is retained, not reported as rolled back.
+No deployment-wide timeout or resource setting is changed. Externally injected
+drivers lacking this cancellation capability fail explicitly for this activity;
+hosts can use `createDb` for the maintenance connection.
+
+Migrations 0890–0893 are rolling: new FORCE-RLS state plus concurrently built
+indexes. Run them before new worker code. Old workers ignore the new state and
+may duplicate repair attempts during a rollout; the existing unique fact key
+keeps insertion idempotent. They retain their old query until drained. The event
+index covers only `agent.model.usage`, not every streamed session event. The
+ledger paging/source indexes add write and storage cost; measure their size and
+the full sweep, not just its first page, when evaluating this change.
+
 ## Hourly rollup lifecycle
 
 `opengeni_private.insights_usage_hourly_rollups` retains the exact additive
