@@ -87,7 +87,7 @@ Twelve recent successful runs give a planner + max(source, unit shards) estimate
 of 6.53–21.52 minutes (median about 18.8). This is an estimate from existing jobs,
 not an end-to-end queue benchmark; it excludes new runner waits and retries.
 
-Initial settings:
+Prepared settings (disabled; **not yet a capacity-qualified activation choice**):
 
 | Setting | Value |
 | --- | --- |
@@ -120,6 +120,77 @@ measured setup/critical-path costs or obtain an explicit runner/vendor decision.
 Do not disable checks. Alert/investigate if full completion age exceeds 120 minutes
 or queue waiting age exceeds 30 minutes. These are operator thresholds, not a
 new unattended paging service.
+
+### Thirty-day replay and runner budget
+
+The September 21, 2026 10:00 UTC through October 21, 2026 10:00 UTC collection
+contains 2,630 created PRs, 2,487 merged PRs and 5,747 CI runs. The longer-window
+rolling-hour peak is **27**, so twice that peak is **54/hour**. The busiest creation
+day, October 3, has 200 arrivals; the replay duplicates its arrival timestamps to
+400/600 for 2×/3×, preserving bursts and idle gaps, rather than pretending arrivals
+are uniformly distributed. Of the CI runs, 2,299 cancellations are excluded from
+failure calibration. There were no native merge-group runs in this window.
+
+Only 231 PRs have ready-for-review events, and these are not verified merge
+readiness. Replay uses explicit creation and ready-for-review/creation proxies.
+Created-to-merged median/p95 is 4.20/683.63 minutes, **not queue latency**. In 119
+sampled runs, workflow-created to first actual job start is 0.13/16.63 minutes;
+candidate construction, native admission and removal times are unavailable.
+The continuously emitted report below will replace these unknowns after rollout.
+
+`scripts/ci/queue-replay.ts` takes JSON arrivals and paired duration/job-work samples.
+It models an in-order speculative window, failures, one retry, and restart of
+successors, including already-green candidates. Its comparison batcher drains all
+ready PRs, retries once, then bisects serially. That is a conservative generic model,
+not a vendor's optimized parallel bisection. Cancelled speculative work is charged;
+cancelled historical runs are never counted as failing PRs. No runner scheduler,
+merge conflicts or correlated failure model is inferred.
+
+The original 360-scenario sensitivity matrix uses two arrival proxies, three timing
+distributions and four calibrations. Historical first-attempt core red fraction
+42.142% is a **stress calibration, not a measured merge-ready PR failure rate**:
+historical edits, repeat runs, policy changes and incomplete PR/run attribution
+prevent that inference. The illustrative mixed case below assumes 1% permanent
+and 4% once-flaky failures. Whole-candidate retry invalidates successors in this
+baseline model; the implemented in-job retry can avoid those invalidations.
+
+Baseline creation-proxy replay, minutes (wait means **first CI start**, not landing):
+
+| Model | Current 18.8-minute median: 2× p95 wait / completion | Projected ≤10 minutes: 2× p95 wait / completion | Projected ≤10 minutes: 3× p95 completion |
+| --- | ---: | ---: | ---: |
+| Native C6 | 623.58 / 642.50 | 87.38 / 99.60 | 382.55 |
+| Native C8 | 329.00 / 357.37 | 26.57 / 39.43 | 182.13 |
+| Native C12 | 140.48 / 170.20 | 13.02 / 31.55 | 69.42 |
+| Native C16 | 60.78 / 93.15 | 4.65 / 28.07 | 47.48 |
+| Serial true batch | 699.48 / 1101.43 | 93.00 / 116.70 | 1060.65 |
+
+At projected ≤10 minutes, the 30-day p95 completion is about 20 minutes for native
+and 33.73 for serial batching. This does not establish peak capacity: the projection
+artificially caps historical duration samples and proportionally reduces work.
+The serial batch 2× case uses 102 builds versus native C16's 637, but serialized
+bisection makes its tail worse; do not advertise its work savings as a latency win.
+
+GitHub API confirms the **Team** plan and zero registered self-hosted/larger
+runners. The standard Team documented default is **60 concurrent jobs**; the
+available API only exposes a public-IP limit, not the actual/custom standard-job
+quota. Sampled job history proves at least 42 simultaneous runners, not spare
+capacity. Duplicate historical successful jobs copied into rerun attempts were
+deduplicated before that count. No reserved full-CI runner pool exists.
+
+The new 16-unit + source layout can request 17 jobs per candidate: C6/8/12/16
+means 102/136/204/272 peak jobs, **plus full CI and other organization work**.
+Sharding improves the critical path only when runners are available; it does not
+divide total work. The older eight-shard samples average 120.48 runner-minutes per
+build: at 50 PRs/hour, that needs **100.4 average runner slots even without failures**.
+The unverified ≤10-minute projection needs 53.79 before failures; the baseline
+mixed-failure replay increases this to roughly 67–74 before full CI. At the
+longer-window 54/hour target, work demand is still higher.
+
+**Activation gate:** do not enable if the failure-aware 2× replay exceeds 30-minute
+p95 first-start wait at capacity supported by measured runner availability. Current
+evidence does not pass that gate. First demonstrate the optimized real critical
+path, aggregate failures after in-job retry, actual runner quota and full-CI capacity
+reserve; then rerun the model. Merely configuring C16 does not create runners.
 
 ## Continuous timing and post-land watch
 
@@ -248,4 +319,62 @@ discovery in place unless they themselves caused the incident.
 
 - [GitHub queue documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue): coupled PR/merge-group checks, merge-limit semantics, failure removal and rebuilds.
 - [GitHub's April incident update](https://github.blog/news-insights/company-news/an-update-on-github-availability/): April 23, 2026 affected 658 repositories and 2,092 PRs using **squash** groups of more than one PR. The corrected April 28 report says **merge and rebase were unaffected**, contrary to the initial task summary. We still select MERGE to avoid rewritten queue commits and independently check landed content. The incident was resolved; this is not a claim that future provider regressions are impossible.
-- Native queue is available for organization-owned public repositories; this repo is public. No external vendor is installed. Mergify/Trunk/Aviator/Graphite require separate write-access and commercial decisions; no measured blocker currently justifies that commitment.
+- Native queue is available for organization-owned public repositories; this repo is public. No external vendor is installed. Mergify/Trunk/Aviator/Graphite require separate write-access and commercial decisions; capacity findings justify evaluation, not an unauthorized installation.
+
+### Option B: true batching, design only
+
+Native remains the first implementation, but current runner-work demand is a
+concrete reason to evaluate batching if optimization/capacity cannot satisfy the
+gate. Do not install a vendor or self-hosted writer without the owner's decision.
+
+At 174 merges/day (5,220/month), current seat-based prices are **Mergify Max
+$21 × N/month** ($17.85 × N annual-billing monthly equivalent) and **Trunk Team
+$18 × N/month**. N is the vendor-defined active contributor/committer count, not
+the repository's merge count or automatically the organization's seven GitHub
+seats. Mergify's current free Open Source tier does not include Batch; Free
+small-team eligibility is unverified. Trunk public-repository counting also needs
+confirmation. Its billing documentation still says 50 Team committers while the
+current pricing page says unlimited; confirm that discrepancy before purchase.
+
+Trunk is the stronger commercial candidate to evaluate here: its documented
+batching includes configurable parallel bisection and the lower published monthly
+seat price. An illustrative batch size 4, two concurrent builds, 10-minute checks
+has ideal capacity `4 × 2 × 60 / 10 = 48 PRs/hour`; three builds give 72/hour,
+before failures, coordination and runner limits. This is design math, not a vendor
+benchmark. Our serial simulator is not evidence of Trunk's actual latency.
+
+Core Trunk App permissions: repository read/write Actions, Checks, Contents,
+Issues, Pull requests and Workflows; read-only Administration, Commit statuses,
+Metadata; organization Events and Members read-only. Optional Direct-to-Queue
+needs a separate Sudo app; it is not required by this proposal. Mergify requests
+repository read/write Actions, Checks, Contents, Deployments, Issues, Pages,
+Pull requests and Workflows; read-only Administration, Commit statuses, Metadata,
+Merge queues; organization Administration/Members and dashboard email read-only.
+These are documented permissions, **not grants made by this workstream**.
+
+A self-hosted alternative would use one GitHub App/controller lease per main
+branch, collect ready PRs, construct a deterministic combined candidate with
+`git merge-tree`, test its tip once, and fast-forward main only if both the tested
+tree and expected old main SHA still match. A new run includes arrivals since the
+previous snapshot and never cancels a valid active run. On red, retry once then
+bisect bounded subsets; preserve independent-review/head evidence and retain every
+stage/candidate receipt. Changes to base/head invalidate only the affected
+candidate. Version commits still need their exact full-CI release evidence.
+
+Estimated engineering effort: 5–10 engineer-days for a shadow-only prototype and
+another 5–10 for race recovery, durable ownership, bisection, release admission,
+audit/rollback and production hardening, followed by at least a week's shadow
+comparison. This is an estimate, not a commitment. Main risks are stale-head races,
+partial/uncertain writes, merge conflicts, cross-PR interaction failures, flake
+attribution, accidental content loss, privileged writer scope and breaking exact
+Version-SHA admission. Do not replace native enforcement with an unreviewed
+fast-forward bot. A ready-to-merge PR is still independently reviewed and tested.
+
+Sources checked October 21, 2026:
+
+- [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
+- [Mergify pricing](https://mergify.com/pricing), [batching](https://docs.mergify.com/merge-queue/batches), [permissions](https://docs.mergify.com/security/)
+- [Trunk pricing](https://www.trunk.io/pricing), [billing](https://docs.trunk.io/setup-and-administration/billing), [batching](https://docs.trunk.io/merge-queue/optimizations/batching), [App permissions](https://docs.trunk.io/setup/integrations/github/trunk-app)
+
+The supplied Super Merge anecdote (600/day, 79-second CI, 124-second coordination)
+could not be independently sourced and is not used as measured evidence here.
