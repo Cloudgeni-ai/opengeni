@@ -56,7 +56,7 @@ describe("migration plan", () => {
     const plan = await planMigrations(blank.databaseUrl, "plan_rolling");
     expect(plan).toEqual({
       phaseProtocol: 1,
-      phases: { pre: [ROLLING], maintenance: [], post: [] },
+      phases: { pre: [], maintenance: [ROLLING], post: [] },
       pending: [{ name: ROLLING, deploymentMode: "rolling" }],
       requiresDrain: false,
     });

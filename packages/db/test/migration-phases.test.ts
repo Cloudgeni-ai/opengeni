@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
+  isPreReleaseEligible,
   isPostReleaseEligible,
   parseBatchedBackfillMigration,
   parseConcurrentIndexMigration,
@@ -19,6 +22,67 @@ const backfill = (marker = "") => `-- deployment-mode: rolling
 -- opengeni:batched-backfill batch-size=100 lock-timeout=1s statement-timeout=10s
 ${marker ? `-- opengeni:${marker}\n` : ""}WITH batch AS (SELECT id FROM records WHERE value IS NULL LIMIT 100)
 UPDATE records SET value = 1 FROM batch WHERE records.id = batch.id RETURNING records.id;`;
+
+describe("posture-inert pre eligibility", () => {
+  test("specialized indexes and backfills are inert; historical and unknown modes are not", () => {
+    for (const source of [index(), index(true), index(false, "pre-release"), backfill()]) {
+      expect(isPreReleaseEligible(file, source)).toBe(true);
+    }
+    expect(isPreReleaseEligible("0010_historical.sql", "SELECT 1;")).toBe(false);
+    expect(isPreReleaseEligible(file, index().replace("rolling", "maintenance"))).toBe(false);
+  });
+  test("ordinary posture-changing and uncertain statements stop pre, despite rolling headers", () => {
+    for (const sql of [
+      "CREATE TABLE t (id int);",
+      "CREATE UNLOGGED TABLE t (id int);",
+      "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';",
+      "CREATE PROCEDURE p() LANGUAGE sql AS 'SELECT 1';",
+      "GRANT SELECT ON t TO app;",
+      "REVOKE SELECT ON t FROM app;",
+      "ALTER TABLE t OWNER TO app;",
+      "ALTER TABLE t ENABLE ROW LEVEL SECURITY;",
+      'ALTER TABLE "a--b" FORCE ROW LEVEL SECURITY;',
+      "CREATE POLICY p ON t USING (true);",
+      "ALTER POLICY p ON t USING (true);",
+      "DROP POLICY p ON t;",
+      "CREATE SCHEMA s;",
+      "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO app;",
+      "CREATE VIEW v AS SELECT 1;",
+      "CREATE MATERIALIZED VIEW v AS SELECT 1;",
+      "ALTER FUNCTION f() SECURITY DEFINER;",
+      "DROP FUNCTION f();",
+      "DROP TABLE t;",
+      "DO $$ BEGIN EXECUTE 'CREATE ' || 'TABLE t (id int)'; END $$;",
+      "CALL opaque();",
+      "CREATE EXTENSION opaque;",
+    ])
+      expect(isPreReleaseEligible(file, `-- deployment-mode: rolling\n${sql}`)).toBe(false);
+    expect(
+      isPreReleaseEligible(
+        file,
+        "-- deployment-mode: rolling\n-- GRANT and ROW LEVEL SECURITY are just comments\n/* CREATE TABLE */ ALTER TABLE t ADD COLUMN value text;",
+      ),
+    ).toBe(true);
+  });
+  test("real production migrations cannot run pre until old-binary readiness tolerates their posture", () => {
+    const directory = join(import.meta.dir, "../drizzle");
+    for (const [ordinal, expected] of [
+      ["0842", false],
+      ["0846", false],
+      ["0847", false],
+      ["0866", true],
+      ["0867", true],
+      ["0874", true],
+      ["0875", true],
+      ["0879", true],
+    ] as const) {
+      const name = readdirSync(directory).find((candidate) => candidate.startsWith(`${ordinal}_`))!;
+      expect(isPreReleaseEligible(name, readFileSync(join(directory, name), "utf8"))).toBe(
+        expected,
+      );
+    }
+  });
+});
 
 describe("post-release eligibility", () => {
   test("only non-unique concurrent indexes are automatically eligible", () => {
@@ -84,7 +148,10 @@ describe("pending migration partition", () => {
     partitionMigrationPhases(
       modes.map((mode, i) => ({
         name: String(i),
-        deploymentMode: (mode === "post" ? "rolling" : mode) as MigrationDeploymentMode,
+        deploymentMode: (mode === "post" || mode === "posture"
+          ? "rolling"
+          : mode) as MigrationDeploymentMode,
+        preReleaseEligible: mode === "rolling" || mode === "post",
         postReleaseEligible: mode === "post",
       })),
     );
@@ -96,22 +163,33 @@ describe("pending migration partition", () => {
     [["post", "rolling", "post"], ["0", "1"], [], ["2"]],
     [
       ["historical", "rolling", "maintenance", "rolling", "post", "post"],
-      ["0", "1"],
-      ["2", "3"],
+      [],
+      ["0", "1", "2", "3"],
       ["4", "5"],
     ],
     [["maintenance", "post", "rolling", "post"], [], ["0", "1", "2"], ["3"]],
     [["rolling", "unclassified", "post"], ["0"], ["1"], ["2"]],
     [["maintenance", "maintenance"], [], ["0", "1"], []],
     [["post", "maintenance"], ["0"], ["1"], []],
-    [["historical"], ["0"], [], []],
+    [["historical"], [], ["0"], []],
+    [["rolling", "posture", "rolling", "post"], ["0"], ["1", "2"], ["3"]],
   ])("partitions %j", (modes, pre, maintenance, post) => {
     expect(partition(modes)).toEqual({ pre, maintenance, post });
   });
   test("applied gaps are absent before partitioning and every pending file stays in order", () => {
     const pending = [
-      { name: "0001.sql", deploymentMode: "rolling" as const, postReleaseEligible: false },
-      { name: "0003.sql", deploymentMode: "rolling" as const, postReleaseEligible: true },
+      {
+        name: "0001.sql",
+        deploymentMode: "rolling" as const,
+        preReleaseEligible: true,
+        postReleaseEligible: false,
+      },
+      {
+        name: "0003.sql",
+        deploymentMode: "rolling" as const,
+        preReleaseEligible: true,
+        postReleaseEligible: true,
+      },
     ];
     expect(partitionMigrationPhases(pending)).toEqual({
       pre: ["0001.sql"],
@@ -133,14 +211,14 @@ describe("pending migration partition", () => {
         "3",
         "4",
       ]);
-      expect(
-        phases.pre.every((name) =>
-          ["rolling", "historical", "post"].includes(modes[Number(name)]!),
-        ),
-      ).toBe(true);
+      expect(phases.pre.every((name) => ["rolling", "post"].includes(modes[Number(name)]!))).toBe(
+        true,
+      );
       expect(phases.post.every((name) => modes[Number(name)] === "post")).toBe(true);
       if (phases.maintenance.length)
-        expect(["maintenance", "unclassified"]).toContain(modes[Number(phases.maintenance[0])]!);
+        expect(["maintenance", "unclassified", "historical"]).toContain(
+          modes[Number(phases.maintenance[0])]!,
+        );
       const beforePost = [...phases.pre, ...phases.maintenance].at(-1);
       if (beforePost !== undefined) expect(modes[Number(beforePost)]).not.toBe("post");
     }

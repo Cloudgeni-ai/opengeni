@@ -15,6 +15,7 @@ import {
   migrationDeploymentMode,
   migrationPhaseFromArgs,
   migrationReleaseDirectives,
+  ordinaryMigrationIsPostureInert,
   parseMigrationPhase,
   partitionMigrationPhases,
   type MigrationDeploymentMode,
@@ -843,11 +844,23 @@ export function isPostReleaseEligible(file: string, sqlText: string): boolean {
   }
 }
 
+export function isPreReleaseEligible(file: string, sqlText: string): boolean {
+  if (migrationDeploymentMode(file, sqlText) !== "rolling") return false;
+  try {
+    if (parseBatchedBackfillMigration(file, sqlText)) return true;
+    if (parseConcurrentIndexMigration(file, sqlText)) return true;
+    return ordinaryMigrationIsPostureInert(sqlText);
+  } catch {
+    return false;
+  }
+}
+
 function phasesForMigrationSources(sources: ReadonlyMap<string, string>): MigrationPhases {
   return partitionMigrationPhases(
     [...sources].map(([name, source]) => ({
       name,
       deploymentMode: migrationDeploymentMode(name, source),
+      preReleaseEligible: isPreReleaseEligible(name, source),
       postReleaseEligible: isPostReleaseEligible(name, source),
     })),
   );

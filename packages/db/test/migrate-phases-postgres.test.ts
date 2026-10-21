@@ -215,7 +215,7 @@ describe("database-backed cumulative migration phases", () => {
     }
   }, 60_000);
 
-  test("an all-rolling release has no maintenance span", async () => {
+  test("an all-posture-inert rolling release has no maintenance span", async () => {
     const schema = "phase_rolling";
     const sql = await fixture(schema);
     try {
@@ -228,6 +228,56 @@ describe("database-backed cumulative migration phases", () => {
       expect(await run(schema, "pre")).toMatchObject({ applied: [PRE, MIDDLE], remaining: [POST] });
       expect(await run(schema, "maintenance")).toMatchObject({ applied: [], remaining: [POST] });
     } finally {
+      await sql.end();
+    }
+  }, 60_000);
+
+  test("0874 RESET restores URL startup timeout before 0875/0879, in one run or fresh phases", async () => {
+    const chain = [
+      "0867_member_teammate_permissions_backfill.sql",
+      "0874_elevenlabs_realtime_models.sql",
+      "0875_realtime_history_reference_index.sql",
+      "0879_unsettled_admissions_session_index.sql",
+    ];
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    const url = new URL(blank.databaseUrl);
+    url.searchParams.set("options", "-c statement_timeout=35min -c lock_timeout=9s");
+    try {
+      await sql.unsafe(`CREATE TABLE public.phase_index_settings (schema_name text, statement_timeout text, lock_timeout text);
+        CREATE FUNCTION public.capture_phase_index_settings() RETURNS event_trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO public.phase_index_settings VALUES
+            (current_schema(), current_setting('statement_timeout'), current_setting('lock_timeout'));
+        END $$;
+        CREATE EVENT TRIGGER phase_index_settings ON ddl_command_start WHEN TAG IN ('CREATE INDEX')
+          EXECUTE FUNCTION public.capture_phase_index_settings();`);
+      for (const split of [false, true]) {
+        const schema = split ? "timeout_split" : "timeout_single";
+        await sql.unsafe(`CREATE SCHEMA ${schema}; SET search_path = ${schema};
+          CREATE TABLE schema_migrations (name text PRIMARY KEY);
+          CREATE TABLE workspace_memberships (id int, role text, subject_id text, permissions jsonb, updated_at timestamptz);
+          CREATE TABLE session_realtime_modes (model text CONSTRAINT session_realtime_modes_model_check CHECK (model IS NOT NULL));
+          CREATE TABLE session_realtime_entries (history_item_id int);
+          CREATE TABLE sandbox_workspace_mutation_admissions (workspace_id int, session_id int, settled_at timestamptz);`);
+        await sql`INSERT INTO schema_migrations ${sql(shipped.filter((name) => !chain.includes(name)).map((name) => ({ name })))}`;
+        // Discard implicit CREATE INDEX events from fixture primary keys.
+        await sql`DELETE FROM public.phase_index_settings WHERE schema_name = ${schema}`;
+        expect((await planMigrations(url.toString(), schema)).phases).toEqual({
+          pre: chain.slice(0, 2),
+          maintenance: [],
+          post: chain.slice(2),
+        });
+        if (split) await migrate(url.toString(), schema, { phase: "pre" });
+        await migrate(url.toString(), schema, { phase: "post" });
+        expect([
+          ...(await sql`SELECT statement_timeout, lock_timeout FROM public.phase_index_settings WHERE schema_name = ${schema}`),
+        ]).toEqual([
+          { statement_timeout: "35min", lock_timeout: "0" },
+          { statement_timeout: "35min", lock_timeout: "0" },
+        ]);
+      }
+    } finally {
+      await sql`DROP EVENT TRIGGER IF EXISTS phase_index_settings`;
       await sql.end();
     }
   }, 60_000);

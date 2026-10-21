@@ -20,7 +20,7 @@ the previous release is unaffected:
 -- contract-step: since migration 0790 (PR #4500) no binary reads legacy_color
 ```
 
-Phase-aware releases run the rolling prefix before parking, the maintenance
+Phase-aware releases run the posture-inert rolling prefix before parking, the maintenance
 span while parked, and the eligible suffix after traffic returns. Non-unique
 concurrent indexes are automatically eligible for post. Most authors need no
 annotation. Mark a unique concurrent index or batched backfill with
@@ -28,6 +28,11 @@ annotation. Mark a unique concurrent index or batched backfill with
 incomplete; `-- opengeni:pre-release` opts an automatic index out. Keep the
 execution directive on line 2 and place the release marker below it. File order
 always wins: a later non-eligible migration keeps earlier work out of post.
+Rolling table/function/grant/RLS and other posture-changing SQL stays out of
+pre until old production binaries have forward-compatible readiness. Even
+all-rolling plans can have a maintenance span; run `--phase=maintenance` before
+a rolling rollout to apply all required non-post work. See the guide for the
+conservative classification and the unchanged `requiresDrain` contract.
 
 Maintenance drains every API, control and turn worker for its migration span.
 Use it only when no expand/contract sequence works, and say why. An

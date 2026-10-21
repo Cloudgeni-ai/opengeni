@@ -43,16 +43,34 @@ release must keep reading, writing and passing readiness after it commits.**
 
 ## Release phases
 
-Most authors need no new annotations: rolling migrations run before parking,
+Most authors need no new annotations: posture-inert rolling migrations run before parking,
 and non-unique concurrent indexes run after traffic returns, subject to file
 order. The runner never skips dependencies by moving files across each other.
 From the database's currently pending files, in file order, it partitions:
 
 1. **post**: the maximal suffix of post-release-eligible migrations.
-2. **pre**: the longest prefix of the rest that is rolling or historical,
-   stopping at the first maintenance or unclassified file.
+2. **pre**: the longest prefix of the rest that is both rolling and
+   posture-inert, stopping at the first other file.
 3. **maintenance**: everything between them, including any intervening rolling
-   work. It is empty for an all-rolling release.
+   work. Even an all-rolling release can have a nonempty maintenance span.
+
+These phase names describe safety classes, not deployment-mode headers. Until
+the old production binary has forward-compatible readiness, a rolling header
+alone cannot prove its continuously checked posture stays ready. Concurrent
+indexes and batched backfills are inert. Ordinary SQL is admitted only when it
+has no table/function/procedure creation, grants/revokes, ownership changes,
+row-level security or policies, schema creation, default privileges, views,
+`SECURITY DEFINER`, or table/function drops. Unknown/dynamic statement forms
+(including `DO` and `CALL`) stay out of pre. Historical/unclassified files also
+stay out. Comments do not count as SQL; uncertainty conservatively moves work
+into the middle span rather than rejecting execution.
+
+For a maintenance deployment, run pre while live, then run maintenance while
+parked. For a rolling deployment, run **maintenance**, not just pre, before
+rolling the fleet, as the legacy workflow did; `requiresDrain` retains its
+existing meaning and is not recomputed from the phase name. Post always follows
+the rollout. TODO(OPE-834): relax the inert prefix only after forward-compatible
+readiness is already running in production, not when first deploying that fix.
 
 Only rolling migrations accepted by the concurrent-index or batched-backfill
 parser can be eligible. Non-unique concurrent indexes are eligible automatically.
@@ -81,7 +99,7 @@ From `packages/db`, the ops contract is:
 | Command | Work applied |
 | --- | --- |
 | `bun src/migrate.ts --phase=pre` | pre only, before parking |
-| `bun src/migrate.ts --phase=maintenance` | pre + maintenance, while parked if necessary |
+| `bun src/migrate.ts --phase=maintenance` | pre + maintenance, parked for maintenance releases or before a rolling rollout |
 | `bun src/migrate.ts --phase=post` | all remaining work, after restoring traffic |
 | `bun src/migrate.ts` | all remaining work, unchanged default |
 
@@ -92,6 +110,11 @@ options; without it they continue applying everything, independent of the CLI
 phase environment variable. Every invocation recomputes from committed receipts
 under the existing advisory lock, preserves depth-policy reconciliation, and is
 safe to retry after partial progress. A later phase catches up earlier work.
+Each phase opens a fresh connection with the database URL's startup settings.
+For example, 0874's `RESET statement_timeout` restores a URL-configured 35-minute
+timeout after 0867's backfill, and 0875/0879 inherit it whether executed in that
+same invocation or a fresh post phase. Concurrent builds temporarily use
+`lock_timeout=0` and do not override `statement_timeout`.
 
 `--plan` / `planMigrations` retain `pending` and `requiresDrain` unchanged and
 add `phaseProtocol: 1` and `phases: {pre: string[], maintenance: string[], post:
