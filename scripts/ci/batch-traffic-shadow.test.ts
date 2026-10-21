@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AtomicGitWriter, GitStore } from "../merge-batcher/git";
 import { GitHubAuth, GitHubReader } from "../merge-batcher/github";
-import { QueueOnlyPublisher } from "../merge-batcher/shadow-ci";
 import { type Run } from "../merge-batcher/model";
 import { verifyResult } from "../merge-batcher/result";
 import {
@@ -15,7 +14,13 @@ import {
   compareOutcome,
   fifoCohorts,
   proxyPull,
-  publishOneTraffic,
+  publishOneTraffic as publishRaw,
+  TrafficPublisher,
+  TrafficCache,
+  TrafficReadControl,
+  TrafficBackoff,
+  CachedTrafficReader,
+  readHeadroom,
   replayTraffic,
   trafficConfig,
   type MainCI,
@@ -24,6 +29,18 @@ import {
 } from "./batch-traffic-shadow";
 
 const roots: string[] = [];
+const goodHeadroom = {
+  allowed: true,
+  reason: "fixture reservation",
+  occupied: 0,
+  reservedMain: 40,
+  candidateSlots: 18,
+  budget: 60,
+};
+function publishOneTraffic(...args: Parameters<typeof publishRaw>) {
+  args[6] = { headroom: async () => goodHeadroom, ...args[6] };
+  return publishRaw(...args);
+}
 afterAll(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
@@ -121,7 +138,7 @@ async function fixture(options: { conflict?: boolean; adapter?: boolean; gap?: b
     omittedByCap: 0,
   };
   const settings = trafficConfig({}, "shadow-ci", git.dir, root);
-  const publisher = new QueueOnlyPublisher(
+  const publisher = new TrafficPublisher(
     settings,
     new AtomicGitWriter(git, origin.dir, TRAFFIC_STATE, "refs/heads/main"),
   );
@@ -190,7 +207,13 @@ describe("merged traffic replay", () => {
       report = await replayTraffic(f.git, f.origin.dir, f.input);
     expect(report.counts.conflicts).toBe(1);
     expect(report.cohorts[0]!.conflictAt).toBe(2);
-    expect(report.cohorts[0]!.reason).toContain("not proof");
+    expect(report.counts.rebuiltRemainders).toBe(1);
+    expect(report.cohorts[0]!.exclusions[0]).toMatchObject({
+      number: 2,
+      headSha: f.pulls[1]!.headSha,
+    });
+    expect(report.cohorts[0]!.manifest!.pulls.map((p) => p.number)).toEqual([1]);
+    expect(report.cohorts[0]!.equivalent).toBe(false);
     expect(compareOutcome(report.cohorts[0]!, undefined).uniqueCulprit).toBeNull();
   });
   test("gaps and unretained older projections are not silently equivalent", async () => {
@@ -267,6 +290,418 @@ describe("merged traffic replay", () => {
   });
 });
 
+describe("traffic recovery and bounded reads", () => {
+  test("quarantines malformed refs and rebuilds a conflicting remainder without claiming equivalence", async () => {
+    const f = await fixture({ adapter: true, conflict: true });
+    await f.origin.exec(["update-ref", `refs/heads/${TRAFFIC_PREFIX}bad-name`, f.base]);
+    await f.origin.exec(["update-ref", `refs/heads/${TRAFFIC_PREFIX}${"a".repeat(64)}`, f.base]);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const result = await publishOneTraffic(
+      f.settings,
+      f.git,
+      { runs: async () => [] },
+      f.origin.dir,
+      report,
+      f.publisher,
+    );
+    expect(result.action).toBe("published");
+    expect(result.quarantineCount).toBe(2);
+    expect(result.reason).toContain("NOT equivalent");
+    expect(
+      compareOutcome(
+        report.cohorts[0]!,
+        run(report.cohorts[0]!.manifest!.tipSha, `${TRAFFIC_PREFIX}${result.batchId}`),
+      ).comparable,
+    ).toBe(false);
+    expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(f.merge2);
+  });
+  test("no-run deadline survives restart, requires explicit recovery and never recovers active CI", async () => {
+    const f = await fixture({ adapter: true });
+    const report = await replayTraffic(f.git, f.origin.dir, f.input, 1);
+    const reader = { runs: async () => [] };
+    const first = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(10), noRunHoldSeconds: 60 },
+    );
+    const id = first.batchId!;
+    const early = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(10), noRunHoldSeconds: 60 },
+    );
+    expect(early.recoveryRequired).toEqual([]);
+    const expired = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(12), noRunHoldSeconds: 60 },
+    );
+    expect(expired.action).toBe("wait");
+    expect(expired.recoveryRequired).toEqual([id]);
+    const recovery = { batchId: id, reason: "Operator verified infrastructure idle" };
+    const active = await publishOneTraffic(
+      f.settings,
+      f.git,
+      { runs: async (m, b) => [run(m.tipSha, b, { status: "in_progress", outcome: "unknown" })] },
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(13), noRunHoldSeconds: 60, recoverNoRun: recovery },
+    );
+    expect(active.action).toBe("wait");
+    const denied = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      {
+        now: date(14),
+        noRunHoldSeconds: 60,
+        recoverNoRun: recovery,
+        headroom: async () => ({ ...goodHeadroom, allowed: false }),
+      },
+    );
+    expect(denied.action).toBe("wait");
+    const recovered = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(15), noRunHoldSeconds: 60, recoverNoRun: recovery },
+    );
+    expect(recovered.action).toBe("recovered");
+    expect(
+      [...(await f.git.remoteRefs(f.origin.dir)).keys()].filter((r) =>
+        r.startsWith(`refs/heads/${TRAFFIC_PREFIX}`),
+      ),
+    ).toHaveLength(1);
+    const next = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { now: date(16) },
+    );
+    expect(next.action).toBe("published");
+    expect(next.batchId).not.toBe(id);
+  });
+  test("ambiguous successful push reconciles without a second candidate; transport errors never cancel", async () => {
+    const f = await fixture({ adapter: true });
+    const report = await replayTraffic(f.git, f.origin.dir, f.input, 1);
+    await expect(
+      publishOneTraffic(f.settings, f.git, { runs: async () => [] }, f.origin.dir, report, {
+        publish: async (...args) => {
+          await f.publisher.publish(...args);
+          throw new Error("lost acknowledgement");
+        },
+      }),
+    ).rejects.toThrow("lost acknowledgement");
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    const result = await publishOneTraffic(
+      f.settings,
+      f.git,
+      { runs: async () => [] },
+      f.origin.dir,
+      report,
+      f.publisher,
+    );
+    expect(result.action).toBe("wait");
+    await expect(
+      publishOneTraffic(
+        f.settings,
+        f.git,
+        {
+          runs: async () => {
+            throw new Error("provider unavailable");
+          },
+        },
+        f.origin.dir,
+        report,
+        f.publisher,
+      ),
+    ).rejects.toThrow("provider unavailable");
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(refs);
+  });
+  test("bounded scans make durable progress and settled history consumes no run queries", async () => {
+    const f = await fixture({ adapter: true });
+    const report = await replayTraffic(f.git, f.origin.dir, f.input, 1);
+    for (const c of report.cohorts) {
+      await f.origin.fetch(f.git.dir, [c.manifest!.tipSha]);
+      await f.origin.exec([
+        "update-ref",
+        `refs/heads/${TRAFFIC_PREFIX}${c.manifest!.batchId}`,
+        c.manifest!.tipSha,
+      ]);
+    }
+    let queries = 0;
+    const reader = {
+      runs: async (m: Parameters<GitHubReader["runs"]>[0], b: string) => {
+        queries++;
+        return [run(m.tipSha, b)];
+      },
+    };
+    const first = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { maxScans: 1, historyLimit: 1 },
+    );
+    expect(first.reason).toContain("Bounded ref scan");
+    expect(queries).toBe(1);
+    const second = await publishOneTraffic(
+      f.settings,
+      f.git,
+      reader,
+      f.origin.dir,
+      report,
+      f.publisher,
+      { maxScans: 1, historyLimit: 1 },
+    );
+    expect(second.reason).toContain("deduplication");
+    expect(queries).toBe(2);
+    await publishOneTraffic(f.settings, f.git, reader, f.origin.dir, report, f.publisher, {
+      maxScans: 1,
+      historyLimit: 1,
+    });
+    expect(queries).toBe(2);
+  });
+  test("missing known candidate ref holds publication rather than assuming CI stopped", async () => {
+    const f = await fixture({ adapter: true });
+    const report = await replayTraffic(f.git, f.origin.dir, f.input, 1);
+    const first = await publishOneTraffic(
+      f.settings,
+      f.git,
+      { runs: async () => [] },
+      f.origin.dir,
+      report,
+      f.publisher,
+    );
+    await f.origin.exec(["update-ref", "-d", `refs/heads/${TRAFFIC_PREFIX}${first.batchId}`]);
+    const result = await publishOneTraffic(
+      f.settings,
+      f.git,
+      { runs: async () => [] },
+      f.origin.dir,
+      report,
+      f.publisher,
+    );
+    expect(result.action).toBe("wait");
+    expect(result.recoveryRequired).toEqual([first.batchId!]);
+  });
+  test("publication defaults to no headroom and reserves main before allocating a candidate", async () => {
+    const f = await fixture({ adapter: true });
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const before = await f.git.remoteRefs(f.origin.dir);
+    const result = await publishRaw(
+      f.settings,
+      f.git,
+      { runs: async () => [] },
+      f.origin.dir,
+      report,
+      f.publisher,
+    );
+    expect(result.action).toBe("wait");
+    expect(result.headroom?.allowed).toBe(false);
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
+    const reader = {
+      fresh: async (path: string) =>
+        path.includes("/jobs?")
+          ? { total_count: 2, jobs: [{ status: "in_progress" }, { status: "queued" }] }
+          : {
+              total_count: 1,
+              workflow_runs: [
+                { id: 1, path: ".github/workflows/ci.yml", event: "push", head_branch: "main" },
+              ],
+            },
+    };
+    expect((await readHeadroom(reader, undefined, undefined)).allowed).toBe(false);
+    expect((await readHeadroom(reader, 57, 40)).allowed).toBe(false);
+    expect(await readHeadroom(reader, 58, 40)).toMatchObject({
+      allowed: true,
+      occupied: 2,
+      reservedMain: 40,
+    });
+    expect(
+      (
+        await readHeadroom(
+          { fresh: async () => ({ total_count: 101, workflow_runs: [] }) },
+          100,
+          40,
+        )
+      ).allowed,
+    ).toBe(false);
+    expect(
+      (
+        await readHeadroom(
+          {
+            fresh: async () => ({
+              total_count: 1,
+              workflow_runs: [{ id: 1, path: ".github/workflows/batch-ci.yml" }],
+            }),
+          },
+          100,
+          40,
+        )
+      ).allowed,
+    ).toBe(false);
+  });
+  test("persistent rate backoff and hourly budget prevent restart storms", async () => {
+    const f = await fixture();
+    let now = 100000,
+      calls = 0;
+    const cache = new TrafficCache(join(f.root, "rate"), () => now);
+    const control = new TrafficReadControl(cache, 2, 2, 1000);
+    const transport = control.wrap((async () => {
+      calls++;
+      return new Response("limited", { status: 429, headers: { "retry-after": "120" } });
+    }) as unknown as typeof fetch);
+    await expect(transport("https://api.github.com/test")).rejects.toBeInstanceOf(TrafficBackoff);
+    const next = new TrafficReadControl(cache, 2, 2, 1000).wrap((async () => {
+      calls++;
+      return Response.json({});
+    }) as unknown as typeof fetch);
+    await expect(next("https://api.github.com/test")).rejects.toBeInstanceOf(TrafficBackoff);
+    expect(calls).toBe(1);
+    now += 120001;
+    await next("https://api.github.com/test");
+    await expect(next("https://api.github.com/test")).rejects.toBeInstanceOf(TrafficBackoff);
+    expect(calls).toBe(2);
+    now += 3600000;
+    await next("https://api.github.com/test");
+    expect(calls).toBe(3);
+  });
+  test("low shared quota blocks the next read; completed-attempt cache is immutable and fresh bypasses TTL", async () => {
+    const f = await fixture();
+    let now = 100000,
+      calls = 0;
+    const cache = new TrafficCache(join(f.root, "cache"), () => now);
+    const transport = (async (url: string | URL | Request) => {
+      calls++;
+      return Response.json(
+        String(url).endsWith("/attempts/1")
+          ? { id: 1, run_attempt: 1, status: "completed" }
+          : { jobs: [{ status: "completed" }] },
+      );
+    }) as typeof fetch;
+    const reader = new CachedTrafficReader(f.settings, new GitHubAuth({}), transport, cache);
+    await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
+    now += 3600000;
+    await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
+    expect(calls).toBe(2);
+    await reader.get("pulls?page=1");
+    await reader.get("pulls?page=1");
+    expect(calls).toBe(3);
+    await reader.fresh("pulls?page=1");
+    expect(calls).toBe(4);
+    now += 300001;
+    await reader.get("pulls?page=1");
+    expect(calls).toBe(5);
+    const wrapped = new TrafficReadControl(cache).wrap((async () =>
+      Response.json(
+        {},
+        { headers: { "x-ratelimit-remaining": "999" } },
+      )) as unknown as typeof fetch);
+    await wrapped("https://api.github.com/test");
+    await expect(wrapped("https://api.github.com/test")).rejects.toBeInstanceOf(TrafficBackoff);
+  });
+  test("completed jobs from a still-active attempt expire instead of freezing incomplete evidence", async () => {
+    const f = await fixture();
+    let now = 100000,
+      calls = 0;
+    const cache = new TrafficCache(join(f.root, "active-attempt"), () => now);
+    const reader = new CachedTrafficReader(
+      f.settings,
+      new GitHubAuth({}),
+      (async (url: string | URL | Request) => {
+        calls++;
+        return Response.json(
+          String(url).endsWith("/attempts/1")
+            ? { id: 1, run_attempt: 1, status: "in_progress" }
+            : { jobs: [{ status: "completed" }] },
+        );
+      }) as typeof fetch,
+      cache,
+    );
+    await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
+    now += 300001;
+    await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
+    expect(calls).toBe(4);
+  });
+  test("parallel rate-limited callers serialize backoff and transport failures consume budget", async () => {
+    const f = await fixture();
+    let calls = 0;
+    const cache = new TrafficCache(join(f.root, "parallel-rate"));
+    const control = new TrafficReadControl(cache);
+    const transport = control.wrap((async () => {
+      calls++;
+      return new Response("limited", { status: 429 });
+    }) as unknown as typeof fetch);
+    const results = await Promise.allSettled([
+      transport("https://api.github.com/a"),
+      transport("https://api.github.com/b"),
+    ]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(calls).toBe(1);
+    const otherCache = new TrafficCache(join(f.root, "network-failure"));
+    const failure = new TrafficReadControl(otherCache, 1).wrap((async () => {
+      calls++;
+      throw new Error("network");
+    }) as unknown as typeof fetch);
+    await expect(failure("https://api.github.com/a")).rejects.toBeInstanceOf(TrafficBackoff);
+    await expect(failure("https://api.github.com/a")).rejects.toThrow("Hourly");
+    expect(calls).toBe(2);
+  });
+  test("immutable verified receipt cache is bound to the exact batch, tip, run and attempt", async () => {
+    const f = await fixture();
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const manifest = report.cohorts[0]!.manifest!;
+    const cache = new TrafficCache(join(f.root, "receipts"));
+    const verified = { outcome: "success" as const, retryable: false, reason: "verified fixture" };
+    await cache.put(
+      `result:${f.settings.repository}:${manifest.batchId}:${manifest.tipSha}:10:1`,
+      verified,
+      null,
+    );
+    let calls = 0;
+    const reader = new CachedTrafficReader(
+      f.settings,
+      new GitHubAuth({}),
+      (async (url: string | URL | Request) => {
+        expect(String(url)).toContain("/actions/runs/10/artifacts");
+        calls++;
+        return Response.json({ artifacts: [] });
+      }) as typeof fetch,
+      cache,
+    );
+    expect(await reader.resultArtifact(manifest, 10, 1)).toEqual(verified);
+    expect(calls).toBe(0);
+    expect(await reader.resultArtifact(manifest, 10, 2)).toBeNull();
+    expect(await reader.resultArtifact({ ...manifest, tipSha: f.base }, 10, 1)).toBeNull();
+    expect(calls).toBeGreaterThan(0);
+  });
+});
+
 describe("restricted optional traffic CI", () => {
   test("old base waits with zero publications, never overlays the adapter", async () => {
     const f = await fixture(),
@@ -307,7 +742,7 @@ describe("restricted optional traffic CI", () => {
     expect(refs.has(TRAFFIC_STATE)).toBe(true);
     const restart = new GitStore(join(f.root, "restart.git"));
     await restart.init();
-    const publisher = new QueueOnlyPublisher(
+    const publisher = new TrafficPublisher(
       f.settings,
       new AtomicGitWriter(restart, f.origin.dir, TRAFFIC_STATE, "refs/heads/main"),
     );
@@ -330,7 +765,11 @@ describe("restricted optional traffic CI", () => {
       publisher,
     );
     expect(done.reason).toContain("deduplication");
-    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(refs);
+    const afterDone = await f.git.remoteRefs(f.origin.dir);
+    expect(afterDone.get("refs/heads/main")).toBe(f.merge2);
+    expect([...afterDone].filter(([r]) => r !== TRAFFIC_STATE)).toEqual(
+      [...refs].filter(([r]) => r !== TRAFFIC_STATE),
+    );
     const regrouped = await replayTraffic(restart, f.origin.dir, f.input, 1);
     const noRepeat = await publishOneTraffic(
       f.settings,
@@ -341,7 +780,7 @@ describe("restricted optional traffic CI", () => {
       publisher,
     );
     expect(noRepeat.reason).toContain("deduplication");
-    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(refs);
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(afterDone);
   });
   test("concurrent publishers cannot consume two hosted slots", async () => {
     const f = await fixture({ adapter: true }),

@@ -18,7 +18,7 @@ existing `GH_TOKEN`/`GITHUB_TOKEN` or GitHub App authentication works through
 Default execution is read-only even when `BATCHER_MODE=active` is inherited. The
 explicit `--ci-shadow` switch is the only publication opt-in.
 
-Without `--once`, poll at `BATCHER_POLL_SECONDS` (default 30). SIGINT/SIGTERM stop
+Without `--once`, poll at `max(60, BATCHER_POLL_SECONDS)` seconds. SIGINT/SIGTERM stop
 polling without cancelling hosted runs. Options have environment equivalents:
 
 | Option | Environment | Default |
@@ -59,7 +59,11 @@ occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
   conflict or differing tree is reported, never called equivalent. Synthetic
   commit identities are deliberately different from historical landings.
 - The conflict step identifies where composition failed, **not a unique culprit**.
-  No bisection/code attribution is invented. Historical CI cancellation and
+  Record that exact PR/head as an excluded direct member, then rebuild the viable
+  remainder from the original pre-cohort base, repeating if another conflict
+  occurs. This is not proof that an excluded PR's changes are absent from later
+  dependent heads. Any exclusion makes historical composition non-equivalent,
+  even if the final tree happens to match. No bisection/code attribution is invented. Historical CI cancellation and
   infrastructure failures are never treated as a failing PR verdict.
 - Query main `ci.yml` push runs by each exact historical merge SHA. Missing runs
   remain missing (including coalesced intermediate tips). Read current-attempt
@@ -72,6 +76,18 @@ input/proxy metadata, candidates/manifests, per-member/tree comparisons, main CI
 runs, actual build/collection durations, stage counts, disagreements and optional
 publication comparisons. No readiness-to-CI latency is claimed from `mergedAt`.
 
+`traffic-cache` retains checksummed local GET snapshots (five-minute TTL), completed
+attempt job pages only after the exact attempt is terminal, and exact verified
+result receipts by batch/tip/run/attempt. These observations can lag; current
+capacity checks bypass the cache. At most 200 GitHub API requests per cycle and
+600 per hour per controller/cache are allowed, with a shared-token remaining
+quota floor of 1,000. Rate/permission responses honor Retry-After and bounded
+exponential backoff. The budget persists across restarts. General observation
+failures also back off and write `observation-failure.json`; the previous report
+then remains historical, not a current green observation. The cache is pruned to
+2,048 data entries. Run one polling process per cache; these are not organization-
+wide quota reservations. Other shared-token users can still exhaust quota.
+
 Core manifests currently allow only `auto-merge` or `queue-ready` binding enums.
 Traffic replay uses `queue-ready` **only as a synthetic transport placeholder**:
 its event ID begins `traffic-shadow:merged-at-proxy:`, evidence ID is explicitly
@@ -82,6 +98,8 @@ not feed these manifests into live admission or represent them as ready labels.
 
 ```sh
 # This command WRITES queue/state refs. It was not run against GitHub in this task.
+# Set TRAFFIC_SHADOW_RUNNER_BUDGET and TRAFFIC_SHADOW_MAIN_RESERVE to measured,
+# operator-allocated repository capacity and full-main demand, respectively.
 bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --once --lookback-hours 24 \
   --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
 ```
@@ -90,20 +108,52 @@ The existing `QueueOnlyPublisher` and `AtomicGitWriter` perform one atomic updat
 
 - Create-only `refs/heads/queue/shadow-traffic/<batchId>`.
 - Append-only CAS-fenced `refs/heads/batcher-shadow-traffic-state` ledger recording
-  published batch IDs and proxy bindings. This is separate from queue/live and
+published batch IDs, proxy bindings, discovery deadlines and terminal records. This is separate from queue/live and
   the normal shadow-ci state ref. An inherited branch-prefix override is ignored.
 
 No main, PR comments, labels, readiness, cancellations, deletions or reruns are
 exposed by this path. There is one hosted traffic slot, including the time between
-publication and workflow discovery. Every existing traffic candidate is inspected;
-absent runs or any nonterminal attempt hold the slot. CAS handles concurrent
+publication and workflow discovery. At most 32 unsettled refs are inspected per
+observation; deferred scans prevent publication. Immutable settled SHA tombstones
+skip historical API queries; only 32 detailed terminal records/comparisons are
+retained. Tombstones and binding deduplication remain in the Git ledger. Ref names
+and manifests that cannot be parsed are quarantined/reported rather than blocking
+all viable cohorts forever. Known unresolved publications still hold the slot
+when inspection fails or their refs disappear/change. Absent runs or any
+nonterminal attempt hold the slot. CAS handles concurrent
 publishers. Failed/ambiguous pushes are reconciled on the next observation from
 remote refs/state; do not blindly retry an external mutation.
 
+After 600 seconds without a discovered run, a publication becomes an explicit
+infrastructure block, not an automatic retry/cancellation. An operator must
+verify infrastructure is idle, restore a missing/retargeted known ref if needed,
+then separately authorize this one-shot recovery (which records CAS state only):
+
+```sh
+bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --recover-no-run <batchId> \
+  --recovery-reason 'Verified infrastructure idle; workflow never started' \
+  --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
+```
+
+Recovery requires an expired no-run hold, an explicit reason, and fresh headroom;
+it cannot recover a nonterminal run or publish another candidate in the same
+observation. A later observation may publish new traffic, never resubmit the same
+proxy bindings. This acknowledgement is not proof that GitHub cannot deliver a
+delayed workflow; investigate the infrastructure before recovery. State-only CAS
+updates also persist terminal observations and scan progress.
+
+Publication is disabled unless both runner-budget variables are positive integers.
+Fresh bounded run/job queries must show room for the full-main reserve plus current
+other workflow demand and 18 conservative candidate slots. Any active Batch CI or
+incomplete capacity scan blocks publication. The budget is an operator allocation,
+not a discovered GitHub/custom quota; reserve for other organization consumers
+outside this repository separately. Actions scheduling is not transactionally
+fenced by the Git CAS, so this observation is not a provider capacity reservation.
+
 The candidate's **pre-cohort base must already contain the Batch CI adapter**,
 and the adapter paths must be unchanged in the candidate. The program never
-overlays today's verifier on a historical tree. Only equivalent cohorts may
-publish. Before the adapter lands on main, this intentionally reports a wait;
+overlays today's verifier on a historical tree. Viable rebuilt remainders may
+publish, but their historical outcomes remain explicitly non-comparable. Before the adapter lands on main, this intentionally reports a wait;
 read-only historical replay still produces useful candidates. The shipped
 `.github/workflows/batch-ci.yml` `queue/**` trigger handles this namespace.
 
@@ -132,3 +182,9 @@ Real bare-Git fixtures cover squash/true-merge replay, conflicts, gaps, FIFO/pro
 semantics, provider pagination/CI job timing, immutable read-only refs, restart
 deduplication, CAS races, namespace restrictions, old-adapter waits and exact
 outcome comparison. All publication tests use local bare remotes, never GitHub.
+Additional regressions cover exact-head exclusion/rebuild, quarantine, durable
+no-run deadlines and recovery, active-run preservation, lost push acknowledgements,
+bounded scan progress, missing refs, full-main headroom, persistent rate backoff,
+and terminal-attempt versus mutable observation caching. Compare cap16 (default)
+with an explicit cap8 replay of the same retained input and frozen main snapshot;
+do not interpret different sampling windows as batching improvements.

@@ -1,4 +1,5 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { performance } from "node:perf_hooks";
@@ -17,6 +18,7 @@ import {
   type Run,
 } from "../merge-batcher/model";
 import { QueueOnlyPublisher, type CandidatePublisher } from "../merge-batcher/shadow-ci";
+import type { VerifiedResult } from "../merge-batcher/result";
 
 export const TRAFFIC_PREFIX = "queue/shadow-traffic/";
 export const TRAFFIC_STATE = "refs/heads/batcher-shadow-traffic-state";
@@ -72,6 +74,7 @@ export interface Cohort {
   status: "built" | "conflict" | "unavailable";
   reason: string | null;
   conflictAt: number | null;
+  exclusions: { number: number; headSha: string; reason: string }[];
   candidateTree: string | null;
   actualTree: string | null;
   treeEqual: boolean;
@@ -333,6 +336,7 @@ export async function replayTraffic(
       status: "unavailable",
       reason: null,
       conflictAt: null,
+      exclusions: [],
       candidateTree: null,
       actualTree: null,
       treeEqual: false,
@@ -369,17 +373,46 @@ export async function replayTraffic(
           await git.fetch(remote, [p.headSha]);
         }
       }
-      const manifest = await git.build({
-        schemaVersion: 1,
-        baseSha: cohort.baseSha,
-        predecessor: null,
-        recoveryOf: null,
-        createdAt: pulls.at(-1)!.mergedAt,
-        pulls: pulls.map(proxyPull),
-      });
+      let viable = pulls;
+      let manifest: Manifest | null = null;
+      while (viable.length) {
+        try {
+          manifest = await git.build({
+            schemaVersion: 1,
+            baseSha: cohort.baseSha,
+            predecessor: null,
+            recoveryOf: null,
+            createdAt: pulls.at(-1)!.mergedAt,
+            pulls: viable.map(proxyPull),
+          });
+          break;
+        } catch (e) {
+          if (!(e instanceof MergeConflict)) throw e;
+          const excluded = viable.find((p) => p.number === e.number);
+          if (!excluded)
+            throw new Error("Conflict does not identify a candidate member", { cause: e });
+          cohort.conflictAt ??= excluded.number;
+          cohort.exclusions.push({
+            number: excluded.number,
+            headSha: excluded.headSha,
+            reason:
+              "Exact-head composition conflict: excluded as a direct member, not a unique culprit or proof its changes are absent from later heads",
+          });
+          viable = viable.filter(
+            (p) => p.number !== excluded.number || p.headSha !== excluded.headSha,
+          );
+        }
+      }
+      if (!manifest) {
+        cohort.status = "conflict";
+        cohort.reason = "No viable direct members remain after exact-head conflict exclusions";
+        continue;
+      }
+      if (cohort.exclusions.length) cohort.compositionComplete = false;
       cohort.manifest = manifest;
-      for (const [i, member] of manifest.pulls.entries()) {
-        const actual = await commitInfo(git, pulls[i]!.mergeSha),
+      for (const member of manifest.pulls) {
+        const original = pulls.find((p) => p.number === member.number)!;
+        const actual = await commitInfo(git, original.mergeSha),
           candidate = await commitInfo(git, member.mergeSha);
         cohort.members.push({
           number: member.number,
@@ -430,7 +463,10 @@ export async function replayTraffic(
       pulls: input.pulls.length,
       cohorts: cohorts.length,
       built: cohorts.filter((c) => c.status === "built").length,
-      conflicts: cohorts.filter((c) => c.status === "conflict").length,
+      conflicts: cohorts.filter((c) => c.exclusions.length > 0 || c.status === "conflict").length,
+      excludedHeads: cohorts.reduce((sum, c) => sum + c.exclusions.length, 0),
+      rebuiltRemainders: cohorts.filter((c) => c.status === "built" && c.exclusions.length > 0)
+        .length,
       unavailable: cohorts.filter((c) => c.status === "unavailable").length,
       equivalent: cohorts.filter((c) => c.equivalent).length,
       disagreements: cohorts.filter((c) => c.status === "built" && !c.equivalent).length,
@@ -470,11 +506,310 @@ export function compareOutcome(cohort: Cohort, run: Run | undefined) {
       "Same trees do not imply identical workflow coverage. Failure is an aggregate observation; cancellation, infrastructure and absent receipts never identify a culprit.",
   };
 }
+/** Local evidence cache only, never credentials. Checksums detect torn/corrupt entries. */
+export class TrafficCache {
+  constructor(
+    readonly dir: string,
+    readonly clock = Date.now,
+  ) {}
+  async get<T>(key: string): Promise<T | null> {
+    try {
+      const envelope = JSON.parse(await readFile(join(this.dir, `${digest(key)}.json`), "utf8"));
+      if (
+        !envelope ||
+        typeof envelope !== "object" ||
+        !("value" in envelope) ||
+        envelope.key !== key ||
+        envelope.hash !== digest(envelope.value) ||
+        (envelope.expiresAt !== null && envelope.expiresAt <= this.clock())
+      )
+        return null;
+      return envelope.value as T;
+    } catch (error) {
+      if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT")
+        return null;
+      throw error;
+    }
+  }
+  async put(key: string, value: unknown, ttlSeconds: number | null): Promise<void> {
+    await mkdir(this.dir, { recursive: true });
+    const target = join(this.dir, `${digest(key)}.json`),
+      temp = `${target}.${randomUUID()}.tmp`;
+    await writeFile(
+      temp,
+      canonical({
+        key,
+        value,
+        hash: digest(value),
+        expiresAt: ttlSeconds === null ? null : this.clock() + ttlSeconds * 1000,
+      }),
+      { mode: 0o600 },
+    );
+    await rename(temp, target);
+  }
+  async prune(maximum = 2048): Promise<void> {
+    await mkdir(this.dir, { recursive: true });
+    const files = (await readdir(this.dir, { withFileTypes: true })).filter(
+      (f) =>
+        f.isFile() &&
+        /^[a-f0-9]{64}\.json$/.test(f.name) &&
+        f.name !== `${digest("read-budget")}.json`,
+    );
+    if (files.length <= maximum) return;
+    const times = await Promise.all(
+      files.map(async (f) => ({
+        file: join(this.dir, f.name),
+        at: (await stat(join(this.dir, f.name))).mtimeMs,
+      })),
+    );
+    times.sort((a, b) => a.at - b.at);
+    for (const item of times.slice(0, files.length - maximum)) await unlink(item.file);
+  }
+}
+export class TrafficBackoff extends Error {
+  constructor(
+    readonly retryAt: number,
+    reason: string,
+  ) {
+    super(reason);
+  }
+}
+interface ReadBudget {
+  windowAt: number;
+  used: number;
+  blockedUntil: number;
+  failures: number;
+}
+export class TrafficReadControl {
+  private cycle = 0;
+  private tail: Promise<void> = Promise.resolve();
+  constructor(
+    readonly cache: TrafficCache,
+    readonly perHour = 600,
+    readonly perCycle = 200,
+    readonly remainingFloor = 1000,
+  ) {}
+  beginCycle() {
+    this.cycle = 0;
+  }
+  private async budget(): Promise<ReadBudget> {
+    const now = this.cache.clock();
+    const saved = await this.cache.get<ReadBudget>("read-budget");
+    return !saved || now - saved.windowAt >= 3600000
+      ? {
+          windowAt: now,
+          used: 0,
+          blockedUntil: saved?.blockedUntil ?? 0,
+          failures: saved?.failures ?? 0,
+        }
+      : saved;
+  }
+  wrap(transport: typeof fetch): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname !== "api.github.com") return transport(input, init);
+      // Serialize the budget and response backoff updates, including parallel callers.
+      const operation = this.tail.then(async () => {
+        const budget = await this.budget();
+        const now = this.cache.clock();
+        if (budget.blockedUntil > now)
+          throw new TrafficBackoff(budget.blockedUntil, "GitHub traffic reads backed off");
+        if (budget.used >= this.perHour)
+          throw new TrafficBackoff(
+            budget.windowAt + 3600000,
+            "Hourly traffic read budget exhausted",
+          );
+        if (this.cycle >= this.perCycle)
+          throw new TrafficBackoff(now + 60000, "Per-cycle traffic read budget exhausted");
+        budget.used++;
+        this.cycle++;
+        await this.cache.put("read-budget", budget, null);
+        let response: Response;
+        try {
+          response = await transport(input, init);
+        } catch {
+          throw new TrafficBackoff(
+            this.cache.clock() + 60000,
+            "GitHub traffic read transport unavailable",
+          );
+        }
+        const responseAt = this.cache.clock();
+        const remaining = response.headers.get("x-ratelimit-remaining");
+        if (
+          response.status === 429 ||
+          response.status === 403 ||
+          (remaining !== null && Number(remaining) < this.remainingFloor)
+        ) {
+          const latest = await this.budget();
+          const retry = Number(response.headers.get("retry-after"));
+          const reset = Number(response.headers.get("x-ratelimit-reset")) * 1000;
+          latest.failures++;
+          latest.blockedUntil = Math.max(
+            responseAt + Math.min(3600, 60 * 2 ** Math.min(6, latest.failures - 1)) * 1000,
+            Number.isFinite(retry) ? responseAt + Math.max(0, retry) * 1000 : 0,
+            Number.isFinite(reset) ? Math.min(responseAt + 3600000, reset) : 0,
+          );
+          await this.cache.put("read-budget", latest, null);
+          if (!response.ok)
+            throw new TrafficBackoff(
+              latest.blockedUntil,
+              "GitHub rate/permission response; bounded backoff",
+            );
+        }
+        return response;
+      });
+      this.tail = operation.then(
+        () => {},
+        () => {},
+      );
+      return operation;
+    }) as typeof fetch;
+  }
+}
+export class CachedTrafficReader extends GitHubReader {
+  constructor(
+    settings: Config,
+    auth: GitHubAuth,
+    transport: typeof fetch,
+    readonly cache: TrafficCache,
+  ) {
+    super(settings, auth, transport);
+  }
+  override async get(path: string): ReturnType<GitHubReader["get"]> {
+    const key = `get:${this.config.repository}:${path}`;
+    const cached = await this.cache.get<Awaited<ReturnType<GitHubReader["get"]>>>(key);
+    if (cached !== null) return cached;
+    const value = await super.get(path);
+    const jobs = !Array.isArray(value) && Array.isArray(value.jobs) ? value.jobs : null;
+    const attemptPath = /^(actions\/runs\/(\d+)\/attempts\/(\d+))\/jobs\?/.exec(path);
+    let immutable = false;
+    if (
+      attemptPath &&
+      jobs !== null &&
+      jobs.length > 0 &&
+      jobs.every((j) => j.status === "completed")
+    ) {
+      // Completed jobs alone do not prove later jobs cannot appear in this attempt.
+      const attempt = await this.get(attemptPath[1]!);
+      immutable =
+        !Array.isArray(attempt) &&
+        attempt.status === "completed" &&
+        attempt.id === Number(attemptPath[2]) &&
+        attempt.run_attempt === Number(attemptPath[3]);
+    } else if (/^actions\/runs\/\d+\/attempts\/\d+$/.test(path) && !Array.isArray(value)) {
+      immutable = value.status === "completed";
+    }
+    await this.cache.put(key, value, immutable ? null : 300);
+    return value;
+  }
+  async fresh(path: string) {
+    return super.get(path);
+  }
+  override async resultArtifact(
+    manifest: Manifest,
+    runId: number,
+    attempt: number,
+  ): Promise<VerifiedResult | null> {
+    const key = `result:${this.config.repository}:${manifest.batchId}:${manifest.tipSha}:${runId}:${attempt}`;
+    const cached = await this.cache.get<VerifiedResult>(key);
+    if (cached) return cached;
+    const result = await super.resultArtifact(manifest, runId, attempt);
+    if (result && result.outcome !== "infrastructure" && result.outcome !== "unknown")
+      await this.cache.put(key, result, null);
+    return result;
+  }
+}
+export interface Headroom {
+  allowed: boolean;
+  reason: string;
+  occupied: number;
+  reservedMain: number;
+  candidateSlots: number;
+  budget: number | null;
+}
+export async function readHeadroom(
+  reader: Pick<CachedTrafficReader, "fresh">,
+  runnerBudget: number | undefined,
+  mainReserve: number | undefined,
+): Promise<Headroom> {
+  const result: Headroom = {
+    allowed: false,
+    reason: "Configure an allocated repository runner budget and full-main reserve",
+    occupied: 0,
+    reservedMain: mainReserve ?? 0,
+    candidateSlots: 18,
+    budget: runnerBudget ?? null,
+  };
+  if (
+    !runnerBudget ||
+    !mainReserve ||
+    !Number.isSafeInteger(runnerBudget) ||
+    !Number.isSafeInteger(mainReserve) ||
+    mainReserve < 1
+  )
+    return result;
+  const runs = new Map<number, Record<string, any>>();
+  for (const status of ["in_progress", "queued", "waiting", "pending", "requested"]) {
+    const page = await reader.fresh(`actions/runs?status=${status}&per_page=100&page=1`);
+    if (
+      Array.isArray(page) ||
+      !Array.isArray(page.workflow_runs) ||
+      !Number.isSafeInteger(page.total_count) ||
+      page.total_count > 100 ||
+      page.workflow_runs.length !== page.total_count
+    )
+      return { ...result, reason: "Runner observation exceeds bounded scan or is incomplete" };
+    for (const run of page.workflow_runs) runs.set(positive(run.id), run);
+  }
+  if ([...runs.values()].some((run) => run.path === ".github/workflows/batch-ci.yml"))
+    return { ...result, reason: "Another Batch CI run already occupies hosted headroom" };
+  if (runs.size > 32)
+    return { ...result, reason: "Too many active workflows for bounded runner observation" };
+  let mainBusy = 0,
+    otherBusy = 0;
+  for (const run of runs.values()) {
+    const page = await reader.fresh(
+      `actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=1`,
+    );
+    if (
+      Array.isArray(page) ||
+      !Array.isArray(page.jobs) ||
+      !Number.isSafeInteger(page.total_count) ||
+      page.total_count > 100 ||
+      page.jobs.length !== page.total_count
+    )
+      return { ...result, reason: "Active job scan incomplete; no publication" };
+    const demand = Math.max(1, page.jobs.filter((job) => job.status !== "completed").length);
+    if (
+      run.path === ".github/workflows/ci.yml" &&
+      run.head_branch === "main" &&
+      run.event === "push"
+    )
+      mainBusy += demand;
+    else otherBusy += demand;
+  }
+  result.occupied = mainBusy + otherBusy;
+  result.reservedMain = Math.max(mainReserve, mainBusy);
+  result.allowed = otherBusy + result.reservedMain + result.candidateSlots <= runnerBudget;
+  result.reason = result.allowed
+    ? "Configured full-main reserve fits after current repository demand and 18 candidate slots"
+    : "Insufficient full-main runner headroom";
+  return result;
+}
+interface PublicationRecord {
+  tipSha: string;
+  publishedAt: string;
+  status: "pending" | "terminal" | "blocked" | "recovered";
+  run?: Run;
+  recoveryReason?: string;
+}
 interface TrafficLedger extends Ledger {
   trafficShadow: {
     kind: "merged-traffic-shadow";
     published: string[];
     publishedBindings: string[];
+    records?: Record<string, PublicationRecord>;
+    settled?: Record<string, string>;
   };
 }
 export function trafficConfig(
@@ -497,10 +832,30 @@ export function trafficConfig(
   };
 }
 export interface TrafficPublication {
-  action: "published" | "wait";
+  action: "published" | "wait" | "recovered";
   reason: string;
   batchId: string | null;
   comparisons: ReturnType<typeof compareOutcome>[];
+  quarantined: { ref: string; sha: string; reason: string }[];
+  quarantineCount: number;
+  recoveryRequired: string[];
+  headroom: Headroom | null;
+}
+export class TrafficPublisher extends QueueOnlyPublisher {
+  async saveState(expected: string | null, next: string): Promise<void> {
+    if (this.config.stateRef !== TRAFFIC_STATE || this.config.branchPrefix !== TRAFFIC_PREFIX)
+      throw new Error("Traffic state namespace required");
+    await this.writer.transaction([{ ref: TRAFFIC_STATE, expected, next }]);
+  }
+}
+export interface PublicationOptions {
+  now?: string;
+  noRunHoldSeconds?: number;
+  maxScans?: number;
+  historyLimit?: number;
+  cache?: TrafficCache;
+  headroom?: () => Promise<Headroom>;
+  recoverNoRun?: { batchId: string; reason: string };
 }
 /** Only this optional adapter receives a publisher. Read-only replay cannot push. */
 export async function publishOneTraffic(
@@ -509,7 +864,10 @@ export async function publishOneTraffic(
   reader: Pick<GitHubReader, "runs">,
   remote: string,
   report: TrafficReport,
-  publisher: CandidatePublisher,
+  publisher: CandidatePublisher & {
+    saveState?: (expected: string | null, next: string) => Promise<void>;
+  },
+  options: PublicationOptions = {},
 ): Promise<TrafficPublication> {
   if (
     settings.mode !== "shadow-ci" ||
@@ -519,8 +877,24 @@ export async function publishOneTraffic(
     settings.maxInflight !== 1
   )
     throw new Error("Restricted traffic publication configuration required");
-  const refs = await git.remoteRefs(remote),
-    stateSha = refs.get(TRAFFIC_STATE) ?? null;
+  const refs = await git.remoteRefs(remote);
+  const stateSha = refs.get(TRAFFIC_STATE) ?? null;
+  const now = timestamp(options.now ?? new Date().toISOString());
+  const holdSeconds = options.noRunHoldSeconds ?? 600,
+    maxScans = options.maxScans ?? 32,
+    historyLimit = options.historyLimit ?? 32;
+  if (
+    !Number.isSafeInteger(holdSeconds) ||
+    holdSeconds < 1 ||
+    !Number.isSafeInteger(maxScans) ||
+    maxScans < 1 ||
+    maxScans > 100 ||
+    !Number.isSafeInteger(historyLimit) ||
+    historyLimit < 1 ||
+    historyLimit > 100
+  )
+    throw new Error("Invalid traffic hold/scan policy");
+  const cache = options.cache ?? new TrafficCache(join(settings.outputDir, "traffic-cache"));
   let ledger: TrafficLedger = {
     ...emptyLedger(),
     trafficShadow: { kind: "merged-traffic-shadow", published: [], publishedBindings: [] },
@@ -538,35 +912,191 @@ export async function publishOneTraffic(
     )
       throw new Error("Not a traffic-shadow CAS ledger");
   }
+  const records = (ledger.trafficShadow.records ??= {});
+  const settled = (ledger.trafficShadow.settled ??= {});
+  for (const [id, record] of Object.entries(records)) {
+    if (
+      !/^[a-f0-9]{64}$/.test(id) ||
+      !record ||
+      !["pending", "blocked", "terminal", "recovered"].includes(record.status)
+    )
+      throw new Error("Malformed traffic publication record");
+    assertSha(record.tipSha);
+    timestamp(record.publishedAt);
+  }
+  for (const [id, sha] of Object.entries(settled)) {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error("Malformed traffic settled identity");
+    assertSha(sha);
+  }
+  const original = canonical(ledger);
   const seen = new Set(ledger.trafficShadow.published),
     comparisons: ReturnType<typeof compareOutcome>[] = [];
   const seenBindings = new Set(ledger.trafficShadow.publishedBindings);
-  let occupied = false;
+  const quarantined: TrafficPublication["quarantined"] = [],
+    recoveryRequired: string[] = [];
+  let occupied = false,
+    scans = 0,
+    deferred = 0,
+    quarantineCount = 0;
+  const observed = new Set<string>();
+  let headroom: Headroom | null = null;
+  const quarantine = (ref: string, sha: string, reason: string) => {
+    quarantineCount++;
+    if (quarantined.length < historyLimit) quarantined.push({ ref, sha, reason });
+  };
+  const getHeadroom = async () =>
+    (headroom ??= options.headroom
+      ? await options.headroom()
+      : {
+          allowed: false,
+          reason: "Full-main headroom observation not configured",
+          occupied: 0,
+          reservedMain: 0,
+          candidateSlots: 18,
+          budget: null,
+        });
+  let recovered: string | null = null;
   for (const [ref, sha] of refs) {
     if (!ref.startsWith(`refs/heads/${TRAFFIC_PREFIX}`)) continue;
-    await git.fetch(remote, [sha]);
-    const manifest = await git.inspect(sha);
-    if (ref !== `refs/heads/${TRAFFIC_PREFIX}${manifest.batchId}`)
-      throw new Error("Traffic candidate ref/manifest mismatch");
+    const id = ref.slice(`refs/heads/${TRAFFIC_PREFIX}`.length);
+    if (!/^[a-f0-9]{64}$/.test(id)) {
+      quarantine(ref, sha, "Malformed traffic ref name");
+      continue;
+    }
+    if (settled[id]) {
+      if (settled[id] !== sha) quarantine(ref, sha, "Settled ref changed SHA; excluded");
+      const cohort = report.cohorts.find((c) => c.manifest?.batchId === id);
+      if (cohort && records[id]?.run && comparisons.length < historyLimit)
+        comparisons.push(compareOutcome(cohort, records[id]!.run));
+      continue;
+    }
+    const badKey = `quarantine:${settings.repository}:${ref}:${sha}`;
+    const bad = await cache.get<string>(badKey);
+    if (bad) {
+      quarantine(ref, sha, bad);
+      continue;
+    }
+    if (scans >= maxScans) {
+      deferred++;
+      continue;
+    }
+    scans++;
+    let manifest: Manifest;
+    try {
+      const key = `manifest:${sha}`;
+      const cached = await cache.get<Manifest>(key);
+      if (cached) manifest = cached;
+      else {
+        await git.fetch(remote, [sha]);
+        manifest = await git.inspect(sha);
+        await cache.put(key, manifest, null);
+      }
+      if (ref !== `refs/heads/${TRAFFIC_PREFIX}${manifest.batchId}` || manifest.tipSha !== sha)
+        throw new Error("Traffic candidate ref/manifest mismatch");
+    } catch (error) {
+      const reason =
+        error instanceof GitFailure
+          ? "Traffic ref Git inspection unavailable; quarantined"
+          : "Malformed traffic manifest; quarantined";
+      await cache.put(badKey, reason, error instanceof GitFailure ? 300 : null);
+      quarantine(ref, sha, reason);
+      continue;
+    }
     seen.add(manifest.batchId);
     for (const pull of manifest.pulls) seenBindings.add(pull.binding.evidenceDigest);
+    const record = (records[id] ??= { tipSha: sha, publishedAt: now, status: "pending" });
+    if (record.tipSha !== sha) {
+      quarantine(ref, sha, "Publication record SHA mismatch");
+      continue;
+    }
     const runs = await reader.runs(manifest, ref.slice("refs/heads/".length));
-    if (!runs.length || runs.some((r) => r.status !== "completed")) occupied = true;
+    observed.add(id);
+    if (!runs.length) {
+      if (Date.parse(now) - Date.parse(record.publishedAt) >= holdSeconds * 1000) {
+        record.status = "blocked";
+        recoveryRequired.push(id);
+        if (
+          options.recoverNoRun?.batchId === id &&
+          options.recoverNoRun.reason.trim().length >= 8 &&
+          (await getHeadroom()).allowed
+        ) {
+          record.status = "recovered";
+          record.recoveryReason = options.recoverNoRun.reason.trim().slice(0, 2000);
+          settled[id] = sha;
+          recovered = id;
+        } else occupied = true;
+      } else occupied = true;
+    } else if (runs.some((r) => r.status !== "completed")) occupied = true;
+    else {
+      record.status = "terminal";
+      record.run = [...runs].sort((a, b) => b.id - a.id || b.attempt - a.attempt)[0]!;
+      settled[id] = sha;
+    }
     const cohort = report.cohorts.find((c) => c.manifest?.batchId === manifest.batchId);
-    if (cohort)
+    if (cohort && comparisons.length < historyLimit)
       comparisons.push(
         compareOutcome(cohort, [...runs].sort((a, b) => b.id - a.id || b.attempt - a.attempt)[0]),
       );
   }
-  const wait = (reason: string): TrafficPublication => ({
-    action: "wait",
+  for (const [id, record] of Object.entries(records)) {
+    if (
+      settled[id] ||
+      (observed.has(id) && refs.get(`refs/heads/${TRAFFIC_PREFIX}${id}`) === record.tipSha)
+    )
+      continue;
+    record.status = "blocked";
+    if (!recoveryRequired.includes(id)) recoveryRequired.push(id);
+    // A disappeared/retargeted known publication is not proof that its CI stopped.
+    occupied = true;
+  }
+  ledger.trafficShadow.published = [...seen].sort();
+  ledger.trafficShadow.publishedBindings = [...seenBindings].sort();
+  const terminalRecords = Object.entries(records)
+    .filter(([, record]) => ["terminal", "recovered"].includes(record.status))
+    .sort((a, b) => b[1].publishedAt.localeCompare(a[1].publishedAt));
+  for (const [id] of terminalRecords.slice(historyLimit)) delete records[id];
+  const result = (
+    action: TrafficPublication["action"],
+    reason: string,
+    batchId: string | null,
+  ): TrafficPublication => ({
+    action,
     reason,
-    batchId: null,
+    batchId,
     comparisons,
+    quarantined,
+    quarantineCount,
+    recoveryRequired,
+    headroom,
   });
+  const state = async () => {
+    ledger = { ...ledger, epoch: ledger.epoch + 1, owner: "merged-traffic-shadow", expiresAt: now };
+    return git.stateCommit(ledger, stateSha, now);
+  };
+  const wait = async (reason: string): Promise<TrafficPublication> => {
+    if (canonical(ledger) !== original) {
+      if (!publisher.saveState) throw new Error("State-only traffic CAS adapter required");
+      await publisher.saveState(stateSha, await state());
+    }
+    return result(recovered ? "recovered" : "wait", reason, recovered);
+  };
+  if (recovered)
+    return wait(
+      "Explicit no-run infrastructure recovery recorded; no candidate published in this observation",
+    );
+  if (options.recoverNoRun)
+    return wait(
+      "Recovery not eligible: require expired no-run hold, explicit reason and fresh full-main headroom; never cancel a valid run",
+    );
+  if (deferred)
+    return wait(
+      `Bounded ref scan deferred ${deferred} candidates; no publication until observations complete`,
+    );
   if (occupied)
     return wait(
-      "One hosted traffic candidate slot occupied, including unpublished workflow results; no cancellation",
+      recoveryRequired.length
+        ? "No-run infrastructure hold expired; explicit recovery required, never automatic cancellation or resubmission"
+        : "One hosted traffic candidate slot occupied; bounded no-run hold and no cancellation",
     );
   const pending = report.cohorts.filter(
     (c) =>
@@ -574,11 +1104,11 @@ export async function publishOneTraffic(
       !seen.has(c.manifest.batchId) &&
       c.manifest.pulls.every((p) => !seenBindings.has(p.binding.evidenceDigest)),
   );
-  const chosen = pending.find((c) => c.adapterReady && c.equivalent);
+  const chosen = pending.find((c) => c.adapterReady);
   if (!chosen?.manifest)
     return wait(
       pending.length
-        ? "Waiting for an equivalent cohort whose pre-cohort base already contains the unchanged adapter; no overlays"
+        ? "Waiting for a viable cohort whose pre-cohort base already contains the unchanged adapter; no overlays"
         : "No unseen candidates; restart deduplication retained",
     );
   // Recompute instead of trusting a saved report and recheck refs before CAS.
@@ -587,6 +1117,7 @@ export async function publishOneTraffic(
     !(await adapterPresent(git, chosen.manifest.baseSha, chosen.manifest.tipSha))
   )
     throw new Error("Traffic manifest/adapter changed");
+  if (!(await getHeadroom()).allowed) return wait(headroom!.reason);
   const fresh = await git.remoteRefs(remote);
   if (
     (fresh.get(TRAFFIC_STATE) ?? null) !== stateSha ||
@@ -596,30 +1127,25 @@ export async function publishOneTraffic(
       canonical([...refs].filter(([ref]) => ref.startsWith(`refs/heads/${TRAFFIC_PREFIX}`)).sort())
   )
     return wait("CAS snapshot changed; re-observe");
-  const now = new Date().toISOString();
-  const next: TrafficLedger = {
-    ...ledger,
-    epoch: ledger.epoch + 1,
-    owner: "merged-traffic-shadow",
-    expiresAt: now,
-    trafficShadow: {
-      kind: "merged-traffic-shadow",
-      published: [...seen, chosen.manifest.batchId].sort(),
-      publishedBindings: [
-        ...seenBindings,
-        ...chosen.manifest.pulls.map((p) => p.binding.evidenceDigest),
-      ].sort(),
-    },
+  ledger.trafficShadow.published = [...seen, chosen.manifest.batchId].sort();
+  ledger.trafficShadow.publishedBindings = [
+    ...seenBindings,
+    ...chosen.manifest.pulls.map((p) => p.binding.evidenceDigest),
+  ].sort();
+  records[chosen.manifest.batchId] = {
+    tipSha: chosen.manifest.tipSha,
+    publishedAt: now,
+    status: "pending",
   };
-  const nextSha = await git.stateCommit(next, stateSha, now);
+  const nextSha = await state();
   await publisher.publish(stateSha, nextSha, chosen.manifest);
-  return {
-    action: "published",
-    reason:
-      "Queue-only candidate + durable CAS state; no main, PR state, cancellation or rerun writes",
-    batchId: chosen.manifest.batchId,
-    comparisons,
-  };
+  return result(
+    "published",
+    chosen.equivalent
+      ? "Queue-only candidate with reserved full-main headroom"
+      : "Queue-only viable remainder with reserved headroom; historical outcome is NOT equivalent",
+    chosen.manifest.batchId,
+  );
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env): Promise<void> {
@@ -633,6 +1159,8 @@ export async function main(argv = process.argv.slice(2), env = process.env): Pro
       "max-prs": { type: "string" },
       output: { type: "string" },
       "git-dir": { type: "string" },
+      "recover-no-run": { type: "string" },
+      "recovery-reason": { type: "string" },
     },
   });
   const hours = Number(values["lookback-hours"] ?? env.TRAFFIC_SHADOW_LOOKBACK_HOURS ?? 24);
@@ -656,10 +1184,27 @@ export async function main(argv = process.argv.slice(2), env = process.env): Pro
   );
   const mode = values["ci-shadow"] ? "shadow-ci" : "shadow";
   const settings = trafficConfig(env, mode, gitDir, output);
-  const auth = new GitHubAuth({ ...env, BATCHER_MODE: mode });
-  const reader = new GitHubReader(settings, auth),
+  const cache = new TrafficCache(join(output, "traffic-cache"));
+  const control = new TrafficReadControl(cache);
+  const transport = control.wrap(fetch);
+  const auth = new GitHubAuth({ ...env, BATCHER_MODE: mode }, transport);
+  const reader = new CachedTrafficReader(settings, auth, transport, cache),
     remote = `https://github.com/${settings.repository}.git`;
+  const recoverNoRun = values["recover-no-run"]
+    ? { batchId: values["recover-no-run"], reason: values["recovery-reason"] ?? "" }
+    : undefined;
+  if (
+    recoverNoRun &&
+    (mode !== "shadow-ci" ||
+      !/^[a-f0-9]{64}$/.test(recoverNoRun.batchId) ||
+      recoverNoRun.reason.trim().length < 8)
+  )
+    throw new Error(
+      "Explicit CI-shadow recovery requires a full batch ID and infrastructure-idle reason",
+    );
+  const once = values.once || env.TRAFFIC_SHADOW_ONCE === "true" || !!recoverNoRun;
   let stopping = false;
+  let failures = 0;
   const isStopping = () => stopping;
   const stop = () => {
     stopping = true;
@@ -668,45 +1213,93 @@ export async function main(argv = process.argv.slice(2), env = process.env): Pro
   process.on("SIGTERM", stop);
   try {
     do {
-      const at = performance.now(),
-        until = new Date().toISOString(),
-        since = new Date(Date.parse(until) - hours * 3600000).toISOString();
-      const input = await collectTraffic(reader, since, until, maxPrs);
-      const collect = performance.now() - at;
-      const git = new GitStore(gitDir, await auth.gitEnv());
-      const report = await replayTraffic(git, remote, input, cap);
-      report.timingsMilliseconds.collect = collect;
-      report.mode = mode === "shadow" ? "read-only" : "ci-shadow";
-      const publication =
-        mode === "shadow-ci"
-          ? await publishOneTraffic(
-              settings,
-              git,
-              reader,
-              remote,
-              report,
-              new QueueOnlyPublisher(
+      let sleepSeconds = Math.max(60, settings.pollSeconds);
+      control.beginCycle();
+      try {
+        const at = performance.now(),
+          until = new Date().toISOString(),
+          since = new Date(Date.parse(until) - hours * 3600000).toISOString();
+        const input = await collectTraffic(reader, since, until, maxPrs);
+        const collect = performance.now() - at;
+        const git = new GitStore(gitDir, await auth.gitEnv());
+        const report = await replayTraffic(git, remote, input, cap);
+        report.timingsMilliseconds.collect = collect;
+        report.mode = mode === "shadow" ? "read-only" : "ci-shadow";
+        const publication =
+          mode === "shadow-ci"
+            ? await publishOneTraffic(
                 settings,
-                new AtomicGitWriter(git, remote, TRAFFIC_STATE, "refs/heads/main"),
-              ),
-            )
-          : null;
-      await mkdir(output, { recursive: true });
-      const filename = join(output, `traffic-${until.replaceAll(":", "-")}.json`);
-      await writeFile(filename, canonical({ ...report, publication }) + "\n", { mode: 0o600 });
-      const temporary = join(output, `latest.${process.pid}.tmp`);
-      await writeFile(temporary, canonical({ ...report, publication }) + "\n", { mode: 0o600 });
-      await rename(temporary, join(output, "latest.json"));
-      console.log(
-        JSON.stringify({
-          file: filename,
-          counts: report.counts,
-          timingsMilliseconds: report.timingsMilliseconds,
+                git,
+                reader,
+                remote,
+                report,
+                new TrafficPublisher(
+                  settings,
+                  new AtomicGitWriter(git, remote, TRAFFIC_STATE, "refs/heads/main"),
+                ),
+                {
+                  cache,
+                  ...(recoverNoRun ? { recoverNoRun } : {}),
+                  headroom: () =>
+                    readHeadroom(
+                      reader,
+                      Number(env.TRAFFIC_SHADOW_RUNNER_BUDGET) || undefined,
+                      Number(env.TRAFFIC_SHADOW_MAIN_RESERVE) || undefined,
+                    ),
+                },
+              )
+            : null;
+        await mkdir(output, { recursive: true });
+        const filename = join(output, `traffic-${until.replaceAll(":", "-")}.json`);
+        const evidence = {
+          ...report,
           publication,
-        }),
-      );
-      if (values.once || env.TRAFFIC_SHADOW_ONCE === "true") break;
-      for (let i = 0; i < settings.pollSeconds && !isStopping(); i++) await Bun.sleep(1000);
+          readPolicy: {
+            mutableCacheSeconds: 300,
+            perCycle: 200,
+            perHour: 600,
+            sharedQuotaRemainingFloor: 1000,
+            cachedSnapshotsMayLag: true,
+          },
+        };
+        await writeFile(filename, canonical(evidence) + "\n", { mode: 0o600 });
+        const temporary = join(output, `latest.${process.pid}.tmp`);
+        await writeFile(temporary, canonical(evidence) + "\n", { mode: 0o600 });
+        await rename(temporary, join(output, "latest.json"));
+        console.log(
+          JSON.stringify({
+            file: filename,
+            counts: report.counts,
+            timingsMilliseconds: report.timingsMilliseconds,
+            publication,
+          }),
+        );
+        failures = 0;
+        await cache.prune();
+      } catch (error) {
+        if (once) throw error;
+        failures++;
+        sleepSeconds = Math.max(
+          sleepSeconds,
+          error instanceof TrafficBackoff
+            ? Math.ceil((error.retryAt - Date.now()) / 1000)
+            : Math.min(900, 30 * 2 ** Math.min(failures, 5)),
+        );
+        await mkdir(output, { recursive: true });
+        const failure = {
+          observedAt: new Date().toISOString(),
+          mode,
+          retrySeconds: sleepSeconds,
+          reason: error instanceof Error ? error.message : "Traffic observation failed",
+          previousReportIsHistorical: true,
+        };
+        await writeFile(join(output, "observation-failure.json"), canonical(failure) + "\n", {
+          mode: 0o600,
+        });
+        console.error(JSON.stringify(failure));
+      }
+      if (once) break;
+      for (let i = 0; i < sleepSeconds && !isStopping(); i++) await Bun.sleep(1000);
     } while (!isStopping());
   } finally {
     process.off("SIGINT", stop);
