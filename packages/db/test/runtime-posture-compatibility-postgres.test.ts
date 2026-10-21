@@ -195,6 +195,15 @@ realTest(
       await admin`ALTER TABLE deployment_model_catalog NO INHERIT future_parent`;
       await admin`DROP TABLE future_parent`;
 
+      for (const schema of [options.targetSchema, "opengeni_private"]) {
+        await admin.unsafe(`SET ROLE "${owner}";
+          CREATE TABLE ${schema}.future_hidden_child () INHERITS (deployment_model_catalog);
+          REVOKE ALL ON ${schema}.future_hidden_child FROM opengeni_app, PUBLIC;
+          RESET ROLE;`);
+        await expectUnready("future_hidden_child has an inheritance or partition relationship");
+        await admin.unsafe(`DROP TABLE ${schema}.future_hidden_child`);
+      }
+
       // Partition attachment has the same parent-only ACL/RLS semantics.
       await admin.unsafe(`SET ROLE "${owner}";
         CREATE TABLE future_partition_parent(id integer) PARTITION BY RANGE(id);
@@ -310,6 +319,7 @@ realTest(
       RESET ROLE;
       DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = 'deployment_model_catalog'::regclass AND inhparent = to_regclass('future_parent')) THEN ALTER TABLE deployment_model_catalog NO INHERIT future_parent; END IF; END $$;
       DROP TABLE IF EXISTS future_posture_rows, future_owner_only_rows, future_parent, future_partition_parent CASCADE;
+      DROP TABLE IF EXISTS future_hidden_child, opengeni_private.future_hidden_child;
       DROP AGGREGATE IF EXISTS opengeni_private.future_posture_aggregate(integer);
       DROP FUNCTION IF EXISTS opengeni_private.future_posture_sfunc(text, integer);
       DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer(), opengeni_private.future_posture_trigger();

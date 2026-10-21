@@ -125,7 +125,8 @@ schema or `opengeni_private` may have SELECT, INSERT, UPDATE and DELETE grants w
 forced, active for the runtime role, has at least one policy, and the runtime
 does not own it, and it has no inheritance or partition relationship. Parent
 queries use the parent's ACL/RLS rather than a known child's contract, so these
-relationships require explicit compatibility review. TRUNCATE, REFERENCES,
+relationships require explicit compatibility review, even when the unknown
+child has no direct grants (a known parent still exposes it). TRUNCATE, REFERENCES,
 TRIGGER, MAINTAIN and other non-row privileges are never tolerated on unknown
 tables. Ungranted unknown non-RLS tables are harmless; runtime grants
 (including column-only grants) on them still fail readiness. A data-schema
