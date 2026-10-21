@@ -2773,6 +2773,8 @@ describe("rejoining the live tip after a reconnect or a sleep", () => {
   });
 
   test("rows the dead connection already delivered count before the gap is measured", async () => {
+    // The delivered rows wait on a real timer for the next render batch.
+    jest.useRealTimers();
     const { store, server, hook } = await openWorkingChat();
     let unretain: (() => void) | undefined;
     try {
