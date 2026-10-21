@@ -823,17 +823,20 @@ export function useSessionEvents(
      * steps. Resolves "reload" when the missed conversation is too long to
      * append (the caller then loads the latest window).
      */
-    const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
+    // Async, so a client that throws at once still settles as a rejected read.
+    const readSessionHead = async () =>
+      await client.getSession(workspaceId, sessionId, { fresh: true, signal: controller.signal });
+    const rejoinLive = async (
+      force: boolean,
+      sessionRead?: ReturnType<typeof readSessionHead>,
+    ): Promise<"joined" | "reload"> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
       const cursor = streamResumeSequenceRef.current;
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await client.getSession(workspaceId, sessionId, {
-          fresh: true,
-          signal: controller.signal,
-        });
+        const session = await (sessionRead ?? readSessionHead());
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {
@@ -901,6 +904,11 @@ export function useSessionEvents(
           attempt += 1
         ) {
           setConnectionState("connecting");
+          // The durable head is read alongside the window, so joining the live
+          // stream at it adds no round trip before the stream opens. A head
+          // read before the window's newest row only replays a little more.
+          const headRead = readSessionHead();
+          headRead.catch(() => undefined);
           // First paint is ONE compact fetch of the conversation — the newest
           // window, revealed at the bottom in a few hundred ms. Deeper history
           // loads only when the reader scrolls up (the sentinel drives
@@ -958,7 +966,7 @@ export function useSessionEvents(
           // window's last conversation event: a working turn's steps (its
           // latest are read), or terminal output written after the last turn,
           // which only the sandbox dock reads.
-          if ((await rejoinLive(true)) === "reload" && attempt === 0) {
+          if ((await rejoinLive(true, headRead)) === "reload" && attempt === 0) {
             initialWindowLoadedRef.current = false;
           }
         }
