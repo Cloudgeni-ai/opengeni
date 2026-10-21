@@ -21,7 +21,7 @@ describe("interaction driver diagnostics", () => {
       "undefined is not an object (evaluating 'window.title')",
       "undefined is not an object (evaluating [redacted])",
     ],
-    ["open /Users/someone/Documents/plan.pdf failed", "open [redacted] failed"],
+    ["open /Users/user/Documents/plan.pdf failed", "open [redacted] failed"],
     ["fetch https://example.test/private?q=1 failed", "fetch [redacted] failed"],
     ["Fenêtre introuvable", "Fen[redacted]tre introuvable"],
   ])("redacts %s", (message, expected) => {
@@ -57,7 +57,7 @@ describe("interaction driver diagnostics", () => {
       parseInteractionDriverDiagnostic({ errorClass: "TypeError", frame: "Backend.observe" }),
     ).toEqual({ errorClass: "TypeError", frame: "Backend.observe" });
     expect(
-      parseInteractionDriverDiagnostic({ errorClass: "TypeError", frame: "/Users/a/b c" }),
+      parseInteractionDriverDiagnostic({ errorClass: "TypeError", frame: "/Users/user/b c" }),
     ).toEqual({ errorClass: "TypeError" });
     expect(parseInteractionDriverDiagnostic({ errorClass: "Secret Plans" })).toBeNull();
     expect(parseInteractionDriverDiagnostic(["TypeError"])).toBeNull();
