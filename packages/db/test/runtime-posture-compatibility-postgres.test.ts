@@ -174,7 +174,13 @@ realTest(
       RESET ROLE;
     `);
       await expectReady();
-      for (const privilege of ["TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"]) {
+      const [server] = await admin<{ version: number }[]>`
+        SELECT current_setting('server_version_num')::integer AS version
+      `;
+      // MAINTAIN is a PostgreSQL 17 table privilege; earlier servers reject the grant.
+      const excessPrivileges = ["TRUNCATE", "REFERENCES", "TRIGGER"];
+      if (server!.version >= 170000) excessPrivileges.push("MAINTAIN");
+      for (const privilege of excessPrivileges) {
         await admin.unsafe(`GRANT ${privilege} ON future_posture_rows TO opengeni_app`);
         await expectUnready(`future_posture_rows grants excess runtime privileges: ${privilege}`);
         await admin.unsafe(`REVOKE ${privilege} ON future_posture_rows FROM opengeni_app`);
