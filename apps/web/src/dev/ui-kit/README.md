@@ -61,7 +61,7 @@ shell already shows the title, purpose and
 "Used on" from the registry, so a section only renders blocks:
 
 ```tsx
-import { Switch } from "@/components/ui/switch";
+import { Switch } from "@opengeni/react/ui/switch";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import { codexWorkspaceAccounts } from "../fixtures";
 

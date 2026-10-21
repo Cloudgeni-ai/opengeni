@@ -9,10 +9,10 @@ import {
 } from "@/components/capabilities/capability-page";
 import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
 import { humanizeName } from "@/components/capabilities/skill-copy";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /* ----------------------------------------------------------------------------
    An imported skill or plugin, managed as an installation: what it is, where

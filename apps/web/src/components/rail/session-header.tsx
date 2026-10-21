@@ -48,7 +48,7 @@ import {
   type SessionAdminAccessControl,
 } from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,8 +56,8 @@ import {
   DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "@/lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";

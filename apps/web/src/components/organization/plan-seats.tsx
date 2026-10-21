@@ -1,6 +1,6 @@
 import type { BillingPlanBalance } from "@opengeni/sdk";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { planSeats } from "@/lib/subscription-plans";
 
 export function PlanSeats({ plan }: { plan: BillingPlanBalance | null }) {

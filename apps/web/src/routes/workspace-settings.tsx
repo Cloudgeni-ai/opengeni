@@ -25,23 +25,23 @@ import {
   type OrganizationWorkspaceAdministration,
 } from "@/components/settings/organization-workspace-administration";
 import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   DisabledReasonTooltip,
   SettingNavRow,
   SettingRow,
   SettingRowSkeleton,
-} from "@/components/ui/setting-row";
+} from "@opengeni/react/ui/setting-row";
 import { workspaceAgentDefaultsSummary } from "@/lib/agent-defaults-summary";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
 import { useOrganizationName } from "@/lib/use-organization-name";

@@ -27,7 +27,9 @@ import { postgresWireBudget } from "./postgres-wire-budget";
 // must never run against a deployment or a shared test server. No provider calls.
 const services = await startTestServices({ temporal: false });
 const admin = postgres(services.databaseUrl, { max: 2, onnotice: () => undefined });
-let budget: { statements: number; transactions: number; cycles: number } | undefined;
+let budget:
+  | { statements: number; transactions: number; cycles: number; responseBytes: number }
+  | undefined;
 const upstream = new URL(services.runtimeDatabaseUrl);
 const relay = createServer((frontend) => {
   const backend = createConnection({ host: upstream.hostname, port: Number(upstream.port) });
@@ -38,6 +40,9 @@ const relay = createServer((frontend) => {
     }),
   );
   frontend.pipe(backend);
+  backend.on("data", (chunk: Buffer) => {
+    if (budget) budget.responseBytes += chunk.length;
+  });
   backend.pipe(frontend);
   const close = () => {
     frontend.destroy();
@@ -230,7 +235,7 @@ async function fiveToolTurn() {
     bus: new MemoryEventBus(),
     runtime,
   });
-  budget = { statements: 0, transactions: 0, cycles: 0 };
+  budget = { statements: 0, transactions: 0, cycles: 0, responseBytes: 0 };
   const started = performance.now(),
     cpu = process.cpuUsage();
   try {

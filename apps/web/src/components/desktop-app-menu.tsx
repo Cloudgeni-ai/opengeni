@@ -8,13 +8,13 @@ import {
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
-import { copyText } from "@/components/ui/copy-field";
+import { copyText } from "@opengeni/react/ui/copy-field";
 import {
   DropdownMenuItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { detectConnectOs } from "@/lib/deployment";
 import { desktopBridge } from "@/lib/desktop";
 import {

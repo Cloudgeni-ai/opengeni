@@ -14,12 +14,12 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { ConnectorAction } from "@/components/ui/composer-menu-action";
+import { ConnectorAction } from "@opengeni/react/ui/composer-menu-action";
 import {
   ComposerMenuHeader,
   ComposerMenuRowsSkeleton,
   ComposerMenuSwitchIndicator,
-} from "@/components/ui/composer-menu";
+} from "@opengeni/react/ui/composer-menu";
 import {
   MENU_BACK_BUTTON_CLASS,
   MENU_CHECK_SLOT_CLASS,
@@ -28,7 +28,7 @@ import {
   MENU_META_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
 import { vaultErrorText } from "./vault-model";

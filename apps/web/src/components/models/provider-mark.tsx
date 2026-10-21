@@ -3,7 +3,7 @@ import type { SVGProps } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { ChatGptMark } from "@/components/chatgpt-mark";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 
 export type ModelProviderId =
   | "codex"

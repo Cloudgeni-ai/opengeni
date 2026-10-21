@@ -8,12 +8,12 @@ import {
   type ModelPolicyPickerProps,
 } from "@opengeni/react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import type { McpServerOption } from "@/lib/session-tools";
 import { capabilityGroupSelection, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,7 @@ import {
   ComposerMenuHeader,
   ComposerMenuRowsSkeleton,
   lazyComposerPanel,
-} from "@/components/ui/composer-menu";
+} from "@opengeni/react/ui/composer-menu";
 import { isComposerConnector } from "@/lib/session-tools";
 
 const loadSessionConnectorsMenu = () => import("@/components/session-connectors-menu-body");

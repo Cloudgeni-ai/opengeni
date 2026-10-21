@@ -207,6 +207,7 @@ export async function listSubscriptionCoreServingConnections(
         provider: providerId,
         kind: subscriptionCoreConnectionKind(provider),
         now,
+        health: "effective",
       });
       const shared = world.filter((connection) => {
         if (

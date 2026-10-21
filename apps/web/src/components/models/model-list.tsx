@@ -2,7 +2,7 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { SearchIcon } from "lucide-react";
 import { useId, type ReactNode } from "react";
 
-import { TextInput } from "@/components/ui/field";
+import { TextInput } from "@opengeni/react/ui/field";
 
 /* ----------------------------------------------------------------------------
    One list of a workspace's models, grouped by who serves them, for the

@@ -561,6 +561,64 @@ function activatedOwnerCapabilityTables(
   );
 }
 
+/** Recognize only the catalog-filtered, closed regclass window used by 0882.
+ * Attribute visibility to its single backfill statement, never to subsequent
+ * statements or files. Unrecognized/mutated windows retain ordinary analysis.
+ */
+function catalogOwnerWindows(statements: readonly string[]): Map<number, Set<string>> {
+  const windows = new Map<number, Set<string>>();
+  const normalized = statements.map((statement) =>
+    stripComments(statement).trim().replace(/\s+/g, " "),
+  );
+  for (let index = 0; index + 3 < statements.length; index += 1) {
+    const capture =
+      /^CREATE TEMP TABLE ([a-z_][a-z0-9_]*) ON COMMIT DROP AS SELECT class\.oid::regclass AS relation FROM pg_class class WHERE class\.oid IN \(\s*((?:'[a-z_][a-z0-9_]*'::regclass\s*,\s*)*'[a-z_][a-z0-9_]*'::regclass)\s*\) AND class\.relforcerowsecurity;$/i.exec(
+        normalized[index]!,
+      );
+    if (!capture) continue;
+    const temporary = capture[1]!;
+    const tables = new Set(
+      [...capture[2]!.matchAll(/'([a-z_][a-z0-9_]*)'::regclass/gi)].map((match) =>
+        match[1]!.toLowerCase(),
+      ),
+    );
+    if (tables.has(temporary.toLowerCase())) continue;
+    const loop = (operation: "NO FORCE" | "FORCE") =>
+      new RegExp(
+        String.raw`^DO (\$[a-z_][a-z0-9_]*\$) DECLARE forced regclass; BEGIN FOR forced IN SELECT relation FROM ${temporary} ORDER BY relation::text LOOP EXECUTE format\('ALTER TABLE %s ${operation} ROW LEVEL SECURITY', forced\); END LOOP; END \1;$`,
+        "i",
+      );
+    if (
+      !loop("NO FORCE").test(normalized[index + 1]!) ||
+      !loop("FORCE").test(normalized[index + 3]!)
+    )
+      continue;
+    const body = normalized[index + 2]!;
+    // No intervening policy/DDL changes, temp-snapshot edits, or executable DO
+    // blocks can inherit the exemption. Matching both comment views prevents
+    // quoted/comment text from manufacturing a recognized posture window.
+    if (
+      !/^(WITH|INSERT|UPDATE|DELETE)\b/i.test(body) ||
+      /\b(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|CALL)\b/i.test(body) ||
+      /\bDO\b(?!\s+(UPDATE|NOTHING)\b)/i.test(body) ||
+      writesTable(body, temporary)
+    )
+      continue;
+    if (
+      statements
+        .slice(index, index + 4)
+        .some(
+          (statement, offset) =>
+            stripAllCommentText(statement).trim().replace(/\s+/g, " ") !==
+            normalized[index + offset],
+        )
+    )
+      continue;
+    windows.set(index + 2, tables);
+  }
+  return windows;
+}
+
 /**
  * Walk the whole ordered migration ledger, tracking which tables have RLS
  * enabled + forced at each point, and report top-level writes that would match
@@ -593,8 +651,10 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
     const unforced = new Set<string>();
     let tenantGuc = false;
     let statementNumber = 0;
+    const statements = splitStatements(raw);
+    const ownerWindows = catalogOwnerWindows(statements);
 
-    for (const rawStatement of splitStatements(raw)) {
+    for (const rawStatement of statements) {
       statementNumber += 1;
       if (
         REVIEWED_ROUTINE_SOURCE_PATCH_SHA256.has(
@@ -714,6 +774,7 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
         (table) =>
           enabled.has(table) &&
           !unforced.has(table) &&
+          !ownerWindows.get(statementNumber - 1)?.has(table) &&
           !ownerVisible.has(table) &&
           // A DO block that relaxes the posture itself is protected.
           !(relaxesPosture(table, executable) && relaxesPosture(table, commentFreeExecutable)),

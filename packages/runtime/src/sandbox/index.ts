@@ -177,6 +177,7 @@ export {
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
   providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,

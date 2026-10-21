@@ -3,7 +3,7 @@ import { useLightboxOptional } from "@opengeni/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
 import type { FileAsset, ResourceRef } from "@/types";
 import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";

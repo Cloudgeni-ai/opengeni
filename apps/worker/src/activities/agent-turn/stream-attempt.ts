@@ -1222,7 +1222,7 @@ export async function runTurnStreamAttempt(
       modelCallAdmission.close();
       throw error;
     }
-    eventing.batcher = createRuntimeBatcher<SessionEventMutation>(
+    eventing.batcher = createRuntimeBatcher<SessionEventMutation<"event">>(
       async (events, mutations = []) => {
         await eventing.publish!(
           events,
@@ -1439,7 +1439,7 @@ export async function runTurnStreamAttempt(
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
-        let toolCheckpoint: SessionEventMutation | undefined;
+        let toolCheckpoint: SessionEventMutation<"event"> | undefined;
         if (pendingToolCall) {
           toolCheckpoint = async (tx, fence) => {
             if (!fence.allowed) {

@@ -16,7 +16,7 @@ mock.module("@/context", () => ({ useAppContext: () => mutableContext.current })
 
 // Radix portals do not mount under happy-dom; render the frame inline so the
 // real dialog body is exercised.
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
     open ? <div data-dialog>{children}</div> : null,
   DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,

@@ -3,7 +3,7 @@ import { SlidersHorizontalIcon, SquarePenIcon } from "lucide-react";
 
 import { WorkspaceConfigGlyph } from "@/components/rail/workspace-config-link";
 import { PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
-import { NavItem, type NavItemSize } from "@/components/ui/settings-nav";
+import { NavItem, type NavItemSize } from "@opengeni/react/ui/settings-nav";
 
 /* ----------------------------------------------------------------------------
    The main rail's destinations, as the product ships them (components/rail/

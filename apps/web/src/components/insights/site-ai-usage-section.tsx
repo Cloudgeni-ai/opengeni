@@ -4,7 +4,7 @@ import type {
   InsightsSiteUsageResponse,
 } from "@opengeni/contracts/insights-usage";
 import { useEffect, useState } from "react";
-import { Section } from "@/components/ui/section";
+import { Section } from "@opengeni/react/ui/section";
 import { formatCount, formatMoney } from "./usage-format";
 
 /** Source attribution is aggregate accounting, never private conversation discovery. */

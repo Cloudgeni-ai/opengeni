@@ -1,9 +1,9 @@
 import { LayersIcon, LockIcon } from "lucide-react";
 import { useId } from "react";
 
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { cn } from "@/lib/utils";
 import type { ModelsWorkspace } from "./organization-models-list";
 

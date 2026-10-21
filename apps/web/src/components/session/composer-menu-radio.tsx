@@ -7,13 +7,13 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { DropdownMenuRadioGroup, DropdownMenuRadioItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenuRadioGroup, DropdownMenuRadioItem } from "@opengeni/react/ui/dropdown-menu";
 import {
   MENU_BUTTON_CLASS,
   MENU_CHECK_CLASS,
   MENU_CHECK_SLOT_CLASS,
   MENU_META_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
 /** Dropdowns rove through menu items; dialogs use ordinary Tab stops. */

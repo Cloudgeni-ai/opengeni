@@ -15,7 +15,7 @@ import { Popover } from "radix-ui";
 import { useState } from "react";
 
 import { SubagentTree, SubagentsLabel } from "@/components/session/subagents";
-import { MENU_SURFACE_CLASS } from "@/components/ui/menu-styles";
+import { MENU_SURFACE_CLASS } from "@opengeni/react/ui/menu-styles";
 import { cn } from "@/lib/utils";
 import { sessionControlPaused } from "@/lib/session-rail";
 

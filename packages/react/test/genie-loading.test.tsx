@@ -422,7 +422,8 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
   expect(trigger.textContent).toContain("Working");
-  expect(trigger.textContent).toContain("1 step");
+  // Steps are not counted: a turn's steps load when it is opened.
+  expect(trigger.textContent).not.toMatch(/\d+ steps?/);
   expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
   expect(r.container.textContent).not.toContain("secret detail");
   await r.rerender(
@@ -432,8 +433,8 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
     />,
   );
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
-  expect(trigger.textContent).toContain("2 steps");
-  // The status line counts steps; the reel does not repeat the count.
+  expect(trigger.textContent).not.toMatch(/\d+ steps?/);
+  // The reel does not count earlier steps either.
   expect(r.container.textContent).not.toContain("+1 earlier");
   expect(r.container.textContent).toContain("bun test");
   expect(r.container.textContent).toContain("bun run build");

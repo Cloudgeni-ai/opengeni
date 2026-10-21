@@ -4988,6 +4988,135 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
+  test("(8a-docker) a Docker container missing at drain keeps its host workspace for the next owner", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const workspaceRootPath = "/var/lib/opengeni/docker-workspaces/drain-missing";
+    const envelope = (containerId: string, owned = true) => ({
+      backendId: "docker",
+      opengeniProviderInstanceId: containerId,
+      sessionState: {
+        providerState: {
+          containerId,
+          workspaceRootPath,
+          workspaceRootOwned: owned,
+          snapshot: null,
+        },
+      },
+    });
+    const drainMissing = async (group: string, containerId: string, owned: boolean) => {
+      await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        kind: "turn",
+        holderId: `docker-drain-${containerId}`,
+        backend: "docker",
+        leaseTtlMs: 45_000,
+      });
+      const warm = await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: 0,
+        instanceId: containerId,
+        resumeBackendId: "docker",
+        resumeState: envelope(containerId, owned),
+        leaseTtlMs: 45_000,
+      });
+      expect(warm.committed).toBe(true);
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        kind: "turn",
+        holderId: `docker-drain-${containerId}`,
+        idleGraceMs: 0,
+      });
+      const before = await readLease(db, workspaceId, group);
+      expect(before?.liveness).toBe("draining");
+      const cold = await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: before!.leaseEpoch,
+        providerMissingBeforeCapture: true,
+        providerStopped: true,
+      });
+      expect(cold.wentCold).toBe(true);
+      return (await readLease(db, workspaceId, group))!;
+    };
+
+    const lease = await drainMissing(groupId, "docker-drain-old", true);
+    expect(lease.liveness).toBe("cold");
+    expect(lease.instanceId).toBeNull();
+    expect(lease.recovery.provider).toMatchObject({
+      status: "missing",
+      instanceId: "docker-drain-old",
+      diagnostic: "provider_not_found_before_workspace_capture",
+    });
+    expect(lease.recovery.restore.status).toBe("pending");
+    expect(lease.recovery.workspace.status).toBe("not_ready");
+    const continuity = {
+      version: 1 as const,
+      backend: "docker" as const,
+      kind: "docker_workspace" as const,
+      sourceInstanceId: "docker-drain-old",
+      continuityKey: workspaceRootPath,
+    };
+    expect(lease.recovery.continuity).toEqual(continuity);
+    // The exact provider state survives so the owner can restart on that path.
+    expect(lease.resumeState).toMatchObject(envelope("docker-drain-old"));
+
+    const owner = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-drain-recovery",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(owner.role).toBe("spawner");
+    expect(owner.lease.recovery.continuity).toEqual(continuity);
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: owner.lease.leaseEpoch,
+      instanceId: "docker-drain-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-drain-new"),
+      continuityRecovery: owner.lease.recovery.continuity!,
+      leaseTtlMs: 45_000,
+    });
+    expect(recorded.recorded).toBe(true);
+    const adopted = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: owner.lease.leaseEpoch,
+      instanceId: "docker-drain-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-drain-new"),
+      continuityRecovery: owner.lease.recovery.continuity!,
+      leaseTtlMs: 45_000,
+    });
+    expect(adopted.committed).toBe(true);
+    expect(adopted.lease?.liveness).toBe("warm");
+    expect(adopted.lease?.recovery.continuity).toBeUndefined();
+
+    // A host directory Opengeni does not own carries no continuity: with no
+    // archive the missing provider is still a lost workspace.
+    const unownedGroupId = crypto.randomUUID();
+    const unowned = await drainMissing(unownedGroupId, "docker-drain-unowned", false);
+    expect(unowned.recovery.continuity).toBeUndefined();
+    expect(unowned.recovery.restore).toMatchObject({
+      status: "unrecoverable",
+      failureCode: "archive_unavailable",
+    });
+  }, 60_000);
+
   // Production 2026-10-05: a worker shutdown cancelled the spawner after Modal
   // create returned. It terminated its unpublished box but died before
   // failWarmingToCold, so the warming-death reaper drained the attributed

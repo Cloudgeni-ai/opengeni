@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 import type { ScheduledTaskBlockerFacts, ScheduledTaskBlockerRun } from "@opengeni/db";
 import {
   decideScheduledTaskBlocker,
+  scheduledTaskBlockerCadence,
   SCHEDULED_TASK_BLOCKER_STREAK,
 } from "../src/scheduled-task-blockers";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
 const chatId = "22222222-2222-4222-8222-222222222222";
 const edited = new Date("2026-10-01T00:00:00Z");
+const hourly = { type: "interval", everySeconds: 3_600 };
+const daily = { type: "calendar", hour: 7, minute: 0, timeZone: "Europe/Oslo" };
 
 let sequence = 0;
 function run(
@@ -45,6 +48,7 @@ function facts(
       runMode: "reusable_session",
       reusableSessionId: chatId,
       updatedAt: edited,
+      schedule: hourly,
       ...overrides.task,
     },
     review: overrides.review ?? null,
@@ -142,6 +146,88 @@ describe("decideScheduledTaskBlocker", () => {
     });
     if (decision.kind !== "block") throw new Error("expected a block");
     expect(decision.message).toContain("The last 3 scheduled runs were skipped");
+  });
+
+  test("a daily, weekly or one-time schedule tells the owner on its first failed run", () => {
+    for (const schedule of [
+      daily,
+      { ...daily, daysOfWeek: ["MONDAY"] },
+      { type: "interval", everySeconds: 86_400 },
+    ]) {
+      const failed = run("failed", { error: "scheduled_turn_failed" });
+      const decision = decideScheduledTaskBlocker(
+        facts([run("succeeded"), failed], { task: { schedule } }),
+      );
+      expect(decision).toMatchObject({
+        kind: "block",
+        state: "notified",
+        blockedRunId: failed.id,
+        reviewedRunId: failed.id,
+        notice: { payload: { title: "Schedule needs attention" } },
+      });
+      if (decision.kind !== "block") throw new Error("expected a block");
+      expect(decision.message).toBe(
+        "The last scheduled run failed or was skipped. Open the latest run to see why. The schedule keeps trying.",
+      );
+    }
+    const once = run("failed", { error: "scheduled_turn_failed" });
+    const decision = decideScheduledTaskBlocker(
+      facts([once], {
+        task: {
+          schedule: {
+            type: "once",
+            runAt: once.createdAt.toISOString(),
+            timeZone: "UTC",
+          },
+        },
+      }),
+    );
+    expect(decision).toMatchObject({ kind: "block", state: "notified" });
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toContain("It has no more runs scheduled.");
+  });
+
+  test("a frequent schedule's last run before its end tells the owner at once", () => {
+    const failed = run("failed", { error: "scheduled_turn_failed" });
+    const endAt = new Date(failed.createdAt.getTime() + 30_000).toISOString();
+    expect(scheduledTaskBlockerCadence({ ...hourly, endAt }, failed)).toEqual({
+      streak: 1,
+      laterRuns: false,
+    });
+    expect(
+      scheduledTaskBlockerCadence(
+        {
+          ...hourly,
+          endAt: new Date(failed.createdAt.getTime() + 3_600_000).toISOString(),
+        },
+        failed,
+      ),
+    ).toEqual({ streak: SCHEDULED_TASK_BLOCKER_STREAK, laterRuns: true });
+    expect(scheduledTaskBlockerCadence({ type: "unknown" }, failed)).toEqual({
+      streak: 1,
+      laterRuns: true,
+    });
+    expect(
+      decideScheduledTaskBlocker(facts([failed], { task: { schedule: { ...hourly, endAt } } })),
+    ).toMatchObject({
+      kind: "block",
+      state: "notified",
+      reviewedRunId: failed.id,
+    });
+  });
+
+  test("a paused workspace is told, not a self-pause: the schedule keeps its place", () => {
+    const skipped = run("skipped", { error: "scheduled_workspace_paused" });
+    const decision = decideScheduledTaskBlocker(facts([skipped], { task: { schedule: daily } }));
+    expect(decision).toMatchObject({
+      kind: "block",
+      state: "notified",
+      reason: "scheduled_workspace_paused",
+    });
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toBe(
+      "The last scheduled run was skipped because the workspace's agent activity was paused. Runs start again once the workspace is resumed.",
+    );
   });
 
   test("a streak before the last edit or resume does not count", () => {

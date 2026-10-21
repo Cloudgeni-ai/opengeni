@@ -5,7 +5,7 @@ import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
 import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
 import { ModelPicker } from "../src/components/pickers";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
   galleryFirstPartyTools,

@@ -1073,6 +1073,17 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- History is conversation-first: windowed reads exclude a turn's steps
+  (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
+  output deltas) but keep presented tool results such as images and published
+  files. Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  readable work rows render when opened. Opening a turn reads its newest
+  `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
+  Live steps go to per-turn stores outside the conversation window, so a long
+  turn never evicts the conversation. A collapsed live turn keeps its latest
+  `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
+  steps of turns nobody has open are limited to
+  `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than

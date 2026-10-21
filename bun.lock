@@ -688,6 +688,7 @@
         "@fontsource-variable/noto-sans-jp": "5.2.10",
         "@opengeni/connect": "workspace:*",
         "@opengeni/sdk": "workspace:*",
+        "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "dequal": "2.0.3",
         "lucide-react": "^1.8.0",

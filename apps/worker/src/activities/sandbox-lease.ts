@@ -155,6 +155,7 @@ import {
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
   providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   findModalProviderCreateReceipt,
@@ -277,7 +278,7 @@ type DrainSandboxClient = {
   attachWorkspaceForDrain?: (
     state: unknown,
     assertCurrentCapture: () => Promise<{ archivePublished: boolean }>,
-  ) => Promise<PersistableSession>;
+  ) => Promise<PersistableSession & { stopForCapture?: () => Promise<void> }>;
 };
 
 /**
@@ -4414,7 +4415,11 @@ async function terminateDrainableBox(
         liveness: "draining",
         captureTimeoutMs,
         minIntervalMs: 0,
-        pointInTimeCapture: providerWorkspaceCaptureIsPointInTime(backend, lease.resumeState),
+        // A drain captures a Modal native snapshot of the paused box, or a
+        // Docker host workspace after removing the exact container
+        // (terminateProviderBox), so it may capture around a request whose
+        // owner crashed. It terminates the box right after either way.
+        pointInTimeCapture: providerDrainCaptureIsPointInTime(backend, lease.resumeState),
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         // An unknown-outcome setup request of a closed attempt never settles
         // on a live box; after the idle grace it no longer pins the drain.
@@ -5138,8 +5143,27 @@ export async function terminateProviderBox(
         );
       }
       await beforeWorkspaceCapture();
-      session = await client.attachWorkspaceForDrain(resumedState, beforeWorkspaceCapture);
+      const attached = await client.attachWorkspaceForDrain(resumedState, beforeWorkspaceCapture);
+      session = attached;
       sessionState = resumedState;
+      if (
+        captureDisposition === "capture_required" &&
+        providerDrainCaptureIsPointInTime(backend, lease.resumeState)
+      ) {
+        // The capture claim may have run around a request whose owner crashed
+        // (a command that may still be writing). Remove the exact container
+        // first so the host workspace read is a point-in-time image. The
+        // drain terminates the box next anyway, so this is a stop, recorded
+        // as one for billing. A capture that fails afterwards leaves the
+        // workspace on the host: the durable receipt lets the next drain
+        // attempt re-attach to it, and a returning turn restores the lost
+        // container on the same workspace.
+        if (!attached.stopForCapture) {
+          throw new Error("Docker drain attachment cannot stop the container before capture");
+        }
+        await beforeProviderStop?.();
+        await attached.stopForCapture();
+      }
     } else {
       const resumed = await resumeExactSandboxSession(
         client,

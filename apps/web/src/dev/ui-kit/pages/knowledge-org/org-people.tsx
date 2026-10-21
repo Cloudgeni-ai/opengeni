@@ -16,39 +16,39 @@ import {
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { toast } from "sonner";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { LineTabs, LineTabsList, LineTabsTrigger } from "@/components/ui/line-tabs";
+} from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { LineTabs, LineTabsList, LineTabsTrigger } from "@opengeni/react/ui/line-tabs";
 import {
   ListRow,
   ListRowSkeleton,
   RowList,
   type RowListColumn,
   type RowListSort,
-} from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RoleSelect } from "@/components/ui/role-select";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RoleSelect } from "@opengeni/react/ui/role-select";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   Toolbar,
   ToolbarFilterMenu,
@@ -56,7 +56,7 @@ import {
   ToolbarSearch,
   ToolbarSummary,
   type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/toolbar";
 import { cn } from "@/lib/utils";
 
 import { organization, type WorkspaceRole } from "../../fixtures";

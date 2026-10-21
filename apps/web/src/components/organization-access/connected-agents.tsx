@@ -6,8 +6,8 @@ import {
   OrganizationAccessFields,
   type AccessWorkspace,
 } from "@/components/organization-access/organization-access-fields";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   DetailAside,
@@ -15,21 +15,25 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import {
   MCP_CLIENT_SETUPS,
   mcpClientHint,

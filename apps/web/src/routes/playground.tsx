@@ -18,12 +18,12 @@ import {
   defaultChatStyle,
   type ChatStyle,
 } from "@/components/playground/style-knobs";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { readyNewChat } from "@/lib/ready-new-chat";
 import { cn } from "@/lib/utils";
 

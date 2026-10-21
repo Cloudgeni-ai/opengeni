@@ -30,11 +30,11 @@ import {
   useLearningSettings,
   type LearningModes,
 } from "@/components/agent/capability-learning";
-import { Button } from "@/components/ui/button";
-import { Disclosure } from "@/components/ui/disclosure";
-import { Field, TextArea } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { Button } from "@opengeni/react/ui/button";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { KeepActiveSetting, sessionReadOnlyArchive } from "@/components/session/session-retention";
 import { SessionUsageLimitSection } from "@/components/session/session-usage-limit-section";
 import { useAppContext } from "@/context";
@@ -57,7 +57,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import { sessionUsageLimitCapability } from "@/lib/session-usage-limit";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 /** Settings > General > Agent defaults: what new chats in the workspace start with. */
 export function workspaceAgentDefaultsHref(workspaceId: string): string {

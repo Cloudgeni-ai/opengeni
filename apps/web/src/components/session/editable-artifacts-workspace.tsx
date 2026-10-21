@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { lazy, useEffect, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useAppContext } from "@/context";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
 import { ArtifactLibrary, type ArtifactPinAction } from "@/components/artifacts/artifact-library";

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { CrossSlotDeepLinkRecovery } from "@/components/cross-slot-deep-link-recovery";
 import { useAppContext } from "@/context";
 import {

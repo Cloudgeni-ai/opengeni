@@ -2,27 +2,27 @@ import { useState, type ReactNode } from "react";
 import { ChevronDownIcon, PauseIcon, PencilIcon, PlayIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm, type ConfirmDependency } from "@/components/ui/destructive-confirm";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { HelpLink } from "@/components/ui/inline-help";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { SecretInput } from "@/components/ui/secret-field";
 import {
   SettingRow,
   SettingRowLink,
   SettingRowSkeleton,
   type SettingRowControlWidth,
-} from "@/components/ui/setting-row";
-import { StatusDot } from "@/components/ui/status-dot";
-import { Switch } from "@/components/ui/switch";
-import { TimeField } from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/setting-row";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
+import { Switch } from "@opengeni/react/ui/switch";
+import { TimeField } from "@opengeni/react/ui/cadence-picker";
 import { cn } from "@/lib/utils";
 
 import {

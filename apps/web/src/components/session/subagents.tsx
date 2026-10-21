@@ -26,7 +26,7 @@ import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { STATUS_META, StatusDot, type StatusTone } from "@opengeni/react/ui/status-dot";
 import { formatWaitingSince } from "@/lib/format";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -34,7 +34,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { sessionControlPaused } from "@/lib/session-rail";
 

@@ -1054,6 +1054,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "browser_debug",
   "browser_downloads",
   "browser_download_save",
+  "browser_record",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -1200,6 +1201,7 @@ export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
   "browser_debug",
   "browser_downloads",
   "browser_download_save",
+  "browser_record",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -16561,6 +16563,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
 export * from "./session-final-reply";
+export * from "./session-history";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)

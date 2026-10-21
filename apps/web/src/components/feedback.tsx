@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { MessageSquareIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import type { CreateFeedbackRequest, FeedbackSentiment } from "@opengeni/sdk";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -11,10 +11,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/dialog";
+import { Label } from "@opengeni/react/ui/label";
+import { Textarea } from "@opengeni/react/ui/textarea";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   feedbackDialogCopy,
   feedbackSentimentLabel,

@@ -153,18 +153,29 @@ tell the model to inspect actual state before replay. Accepted Pause/Steer
 interruptions retain their independent receipt gate.
 
 **Requests a crashed worker left behind no longer pin the box.** A
-turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
-death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
-that was never adopted as a retained process and whose provider outcome is still
-unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
-and nothing reliably settles it. It used to refuse every capture, idle drain,
-idle containment and provider-deadline containment of its box, and to hold its
-attempt's quiescence open, until the provider killed the box uncaptured.
-The predicate does not prove the worker is dead; safety comes
-from what each caller does with it. Only a point-in-time (Modal native) capture
-may run around such a request: a drain, which terminates the box right after, and
-a warm capture, which records itself as having run around writers so the archive
-stays one generation behind. Tar-style captures keep it as a blocker. Containment
+request whose holder is gone, that was never adopted as a retained process and
+whose provider outcome is still unknown (`crashedWorkerOrphanAdmissionSql`) has
+no owner that can admit more work, and nothing reliably settles it. Two owners
+leave it: a turn attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), and an API-direct request
+(Files, Terminal, Browser and similar surfaces) whose API process died
+mid-operation. A live direct request heartbeats its holder throughout and
+settles before releasing it, so its admission outlives the holder only when the
+holder reaper removed a dead request's holder. Such a request used to refuse
+every capture, idle drain, idle containment and provider-deadline containment
+of its box, and to hold its attempt's quiescence open, until the provider killed
+the box uncaptured; a Docker box has no provider deadline, so its lease stayed
+draining for good. The predicate does not prove the owner is dead; safety comes
+from what each caller does with it. Only a point-in-time capture may run around
+such a request: a drain, which terminates the box right after, and a warm
+capture, which records itself as having run around writers so the archive stays
+one generation behind. A drain is point-in-time for Modal native snapshots and
+for Docker, which removes the exact container before it reads the host
+workspace (`providerDrainCaptureIsPointInTime`). The Docker stop needs the
+durable ownership receipt in the lease envelope: if the capture then fails, the
+next drain attempt re-attaches to the stopped container's workspace through that
+receipt, and a returning turn restores the container on the same workspace.
+Other tar-style captures keep the request as a blocker. Containment
 enrollment and the containment/deadline quiescence checks ignore it. The drain's
 cold commit rejects the exact request only after the reaper stopped the box (or
 proved it gone), so a late settlement by a still-running owner is fenced, and
@@ -1355,6 +1366,15 @@ regardless of a stale idle/queued session projection. Its scoped repair uses
 capacity and sandbox setup/lifecycle blockers. Current runnable recovery wakes
 cannot be acknowledged merely because Temporal accepted a signal; claim of that
 same turn consumes the obligation.
+A quiesced turn parked by Pause (direct, ancestor or workspace) is a durable
+wait for Resume, not a lost wake: migration 0880 omits it from that inventory
+once its projection is no longer `recovering`, and likewise omits quiesced
+turns behind a durable admission block or a sandbox setup outcome-unknown or
+recovery-exhausted marker. Each of those blockers commits its own wake when it
+clears, and the state-derived predicate rediscovers the session as soon as it
+does. A paused turn whose projection still says `recovering` stays
+discoverable; its repair wake (`cancellation-wait` peek) runs the DB-only
+projection settlement that parks it idle, after which it leaves the inventory.
 
 Historical retirement is an explicit operator operation, never a reaper age
 heuristic. Supply `MigrationRuntimeOptions.interruptedTurnRetirement` or a private
@@ -1438,12 +1458,17 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Skip-overlap admission distinguishes effective Pause (`session_paused`) from
-busy work (`session_not_idle`) under the same session lock. The scheduler records
-`scheduled_session_paused` on the skipped occurrence, and its detail page and
-run badge explain that the chat must be resumed for future runs. This describes
-the recorded skip, not a live assertion that the chat is still paused. Opening
-the chat does not resume it, and skipped occurrences are never replayed.
+Scheduled admission refuses an effectively paused session under every overlap
+policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
+could neither run nor settle. Under the same session lock it distinguishes a
+Pause of the chat or an ancestor (`session_paused`), a workspace Pause alone
+(`workspace_paused`) and, for skip, busy work (`session_not_idle`). The
+scheduler records `scheduled_session_paused` or `scheduled_workspace_paused` on
+the skipped occurrence, and its detail page and run badge explain what must be
+resumed. This describes the recorded skip, not a live assertion that the chat
+is still paused. Opening the chat does not resume it, and skipped occurrences
+are never replayed. A chat the run just created is never refused (it would be
+left empty); a new-chat run checks the workspace Pause before creating it.
 
 An explicit account pin whose allocator is disabled is classified as
 `pinned_account_disabled`, not temporary quota exhaustion. It remains a durable
@@ -1757,7 +1782,15 @@ waiter plus workflow-wake outbox.
 
 Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
-`signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
+`signalWithStart` wake reconstructs it. Session and workspace Resume, and a
+Steer that automatically resumes a paused branch, register that wake for
+every unblocked session with a shared-core waiter, a legacy waiter, or an
+active turn still `waiting_capacity`. While the waiter is
+effectively paused (direct, ancestor or workspace Pause under the override
+algebra), capacity changes still advance its wake revision but deliver neither
+the typed capacity wake nor a generic session wake, so a paused waiter starts
+no workflow run per capacity change; the run Resume starts sees the unobserved
+revision as an immediately due check. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
 generation supersede the waiter/turn under their durable fences. Background
 Codex rotation or pin settings do not replace the accepted snapshot. An explicit
@@ -2913,12 +2946,16 @@ resume a turn, modify session history, or claim recovery of unavailable writes.
 The managed browser exposes a separate public contract at
 `GET|POST /v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery`.
 GET is a bounded, provider-free projection. POST requires the canonical managed
-human cookie, current session-control authority, an operation UUID, explicit
-historical-checkpoint acceptance, and the exact selection returned by GET.
+human cookie or an organization key acting as one verified external user on
+that user's own behalf (`asUser`), current session-control authority, an
+operation UUID, explicit historical-checkpoint acceptance, and the exact
+selection returned by GET. The external proof is request-local: a copied grant
+or another workspace never qualifies.
 The exact built-in local human may read GET to see the system-selected Retry
 route; local mode cannot submit POST consent.
-Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
-routes, legacy/unregistered archives, and `archive.previous` are unsupported.
+Agents, delegated bearers, bare API keys, service initiators, shared groups,
+non-Modal homes, active foreign routes, legacy/unregistered archives, and
+`archive.previous` are unsupported.
 
 The selection binds session/group, tenancy and route epochs, lease identity/epoch,
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
@@ -3297,6 +3334,16 @@ retry that finds the root already absent (crash between release and the cold
 commit) completes teardown without recapture, but only when the capture is
 published, the daemon matches and the exact container is gone. Other providers
 and elected normal cold-continuity owners retain their existing rules.
+A drain that commits cold without capturing because the probe or attach
+reported the container missing (a mutation still in progress, a capture
+takeover, or a NotFound observed while the daemon was unhealthy) never released
+the host directory, so the workspace still exists. That cold commit keeps the
+lease's Docker continuity receipt (the same one a warm lost instance keeps), the
+exact provider state and a pending restore, instead of the archive-only shape
+that declared the workspace unrecoverable. The elected next owner restarts a
+container on that exact owned directory, or reattaches the one a false NotFound
+missed, and the chat continues without consent. Without an owned host root the
+commit stays unrecoverable as before.
 `bun run dev:clean` likewise removes the SDK workspace directories of the
 sandbox containers it force-removes (its database is deleted with them);
 plain `dev:down` keeps them for continuity.
@@ -3733,6 +3780,22 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `released` when holders were released without a save, `not_eligible`,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
+
+**Browsers and desktops on a retired instance.** A browser or desktop
+controller runs inside one exact provider instance (`placement_instance_id`),
+and nothing rebinds it to a successor. When its lease no longer runs that
+instance (the provider reported it missing, a drain or rotation retired it, or
+a replacement box was created) the controller is gone: it can no longer
+heartbeat, act or end there. Before migration 0883 such a resource stayed
+`active` and its interaction holder kept every later box of the sandbox warm,
+on every provider. The interaction reaper (`reap_stale_interaction_transitions`)
+now closes a live browser or desktop bound to an instance its lease no longer
+runs: prepared operations fail, dispatched ones settle `outcome_unknown`, the
+resource becomes `lost` with failure code `placement_instance_lost`, and its
+controller binding is cleared. The orphan sweep in the same transaction
+deletes its holder, so the lease drains by the ordinary idle rule. A resource
+on the lease's current instance, or not yet bound to one, is untouched; age is
+never the criterion.
 
 **Full browser controllers.** One browser controller runs per workspace and
 placement (a Connected Machine or a box). Its browser limit defaults to half

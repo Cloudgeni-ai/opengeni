@@ -1,7 +1,7 @@
 import type { SessionMachineAccess } from "@opengeni/sdk";
 import { useState, type ReactNode } from "react";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /** A machine-list response is useful only while it names the current pointer. */
 export function currentSessionMachineAccess(

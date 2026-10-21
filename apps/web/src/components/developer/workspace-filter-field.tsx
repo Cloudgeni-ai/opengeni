@@ -1,7 +1,7 @@
 import type { IntegrationWorkspaceFilter } from "@opengeni/sdk";
 
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Field, TextInput } from "@/components/ui/field";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Field, TextInput } from "@opengeni/react/ui/field";
 
 /**
  * Which shared workspaces an organization registration reaches. Personal

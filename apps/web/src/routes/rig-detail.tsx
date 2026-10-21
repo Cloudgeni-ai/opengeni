@@ -24,41 +24,41 @@ import { RigChangesQueue } from "@/components/rigs/rig-changes-queue";
 import { RigOverview } from "@/components/rigs/rig-overview";
 import { RigSetupEditPage } from "@/components/rigs/rig-setup-section";
 import { RigVersionsTimeline } from "@/components/rigs/rig-versions-timeline";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@/components/ui/flush-form-page";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/line-tabs";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
-import { userFacingError } from "@/lib/api-error";
-import { LoadFailure } from "@/components/ui/load-failure";
+import { userFacingError } from "@opengeni/react/ui/api-error";
+import { LoadFailure } from "@opengeni/react/ui/load-failure";
 import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
 import type { Rig } from "@/types";
-import { MoreMenu } from "@/components/ui/page-actions";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.

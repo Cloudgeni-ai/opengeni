@@ -12,7 +12,7 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { SessionRunsOnMenuBody, SessionMachinePickerAction } = await import("./sandbox-switcher");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
-  await import("@/components/ui/dropdown-menu");
+  await import("@opengeni/react/ui/dropdown-menu");
 
 let container: HTMLDivElement;
 let root: Root;

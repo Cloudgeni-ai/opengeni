@@ -397,6 +397,7 @@ function createClient(
   fake: FakeOpenSandbox,
   options: {
     poolRef?: string;
+    image?: string;
     baseUrl?: string;
     useServerProxy?: boolean;
     signedEndpoints?: boolean;
@@ -407,7 +408,7 @@ function createClient(
   return new OpenSandboxClient({
     baseUrl: options.baseUrl ?? "https://opensandbox.example.test",
     apiKey: "secret-test-key",
-    image: IMAGE,
+    image: options.image ?? IMAGE,
     ttlSeconds: 60,
     useServerProxy: options.useServerProxy ?? true,
     signedEndpoints: options.signedEndpoints,
@@ -1319,7 +1320,7 @@ describe("OpenSandbox adapter", () => {
     await expect(session.start()).rejects.toThrow(/pool changed for the persisted sandbox/);
   });
 
-  test("state codec rejects another provider binding or image", async () => {
+  test("state codec rejects another provider binding", async () => {
     const fake = new FakeOpenSandbox();
     const client = createClient(fake);
     const created = await client.create();
@@ -1337,6 +1338,28 @@ describe("OpenSandbox adapter", () => {
         adapterFactory: fake.adapterFactory,
       }).deserializeSessionState(serialized),
     ).rejects.toBeInstanceOf(SandboxConfigError);
+  });
+
+  test("a sandbox created before an image or pool change stays usable after the upgrade", async () => {
+    const fake = new FakeOpenSandbox();
+    const created = await createClient(fake).create();
+    const serialized = await createClient(fake).serializeSessionState(created.state);
+    const upgradedImage = `registry.example.com/opengeni@sha256:${"c".repeat(64)}`;
+    const upgraded = createClient(fake, { image: upgradedImage, poolRef: "new-pool" });
+
+    const state = await upgraded.deserializeSessionState(serialized);
+    expect(state.image).toBe(IMAGE);
+    expect(state.poolRef).toBeNull();
+    const resumed = await upgraded.resumeExact(state);
+    // The live sandbox is verified against the image it was created with.
+    await resumed.start();
+    expect(await upgraded.serializeSessionState(resumed.state)).toMatchObject({
+      image: IMAGE,
+      poolRef: null,
+    });
+    await upgraded.delete(state);
+    expect(fake.calls).toContain("deleteSandbox:sbx-1");
+    expect(fake.calls.filter((call) => call === "createSandbox")).toHaveLength(1);
   });
 
   test("foreground command preserves ordered output and retained Ctrl-C interrupts exact execution", async () => {

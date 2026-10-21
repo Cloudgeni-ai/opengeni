@@ -11,7 +11,7 @@ import type { ClientModel, Session } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../packages/react/test/fake-client";
 import { FailedSessionBanner } from "../src/components/session/failed-session-banner";
 import { ModelRecoveryNotice } from "../src/components/session/model-recovery-notice";
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { currentModelRecovery } from "../src/lib/model-recovery";
 import "../src/styles.css";
 

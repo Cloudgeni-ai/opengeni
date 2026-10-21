@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import type { Session } from "@/types";
 
 // The menu's items, rendered inline so the test reads what the person sees.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,

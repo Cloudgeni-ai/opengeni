@@ -164,7 +164,7 @@ export type RenewalState = {
 export type EventingState = {
   heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-  batcher: ReturnType<typeof createRuntimeBatcher<SessionEventMutation>> | null;
+  batcher: ReturnType<typeof createRuntimeBatcher<SessionEventMutation<"event">>> | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
   toolPreparationReady: Promise<void> | null;
   toolPreparationClosing: boolean;

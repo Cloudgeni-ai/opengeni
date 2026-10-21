@@ -11,6 +11,7 @@ import {
   withWorkspaceRls,
 } from "../src/index";
 import { submitTestHumanPrompt } from "../../../test/integration/helpers/session-control";
+import type { SessionEventMutation } from "../src/index";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -181,6 +182,56 @@ test("plain appends omit wide frozen columns but mutation callbacks retain the p
     expect(invoked).toBe(true);
     expect(result.accepted).toBe(true);
     expect(result.events[0]!.payload).toEqual({ text: "callback bytes" });
+  } finally {
+    driver.options.debug = false;
+  }
+});
+
+test("explicit checkpoint projections preserve accepted and rejected callback decisions without wide reads", async () => {
+  const input = await fixture();
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const queries: string[] = [];
+  driver.options.debug = (_connection, query) => queries.push(query);
+  try {
+    for (const type of ["agent.message.delta", "agent.message.completed"] as const) {
+      for (const stale of [false, true]) {
+        queries.length = 0;
+        let invoked = false;
+        const mutate: SessionEventMutation<"event"> = async (_tx, fence) => {
+          invoked = true;
+          expect(fence.allowed).toBe(!stale);
+          expect(fence.session).not.toHaveProperty("instructions");
+          expect(fence.turn).not.toHaveProperty("prompt");
+          expect(fence.attempt).not.toHaveProperty("mcpApprovalPolicies");
+          if (!fence.allowed) expect(fence.reason).toBe("generation_changed");
+          return fence.allowed;
+        };
+        const result = await appendSessionEventsForTurnAttempt(
+          client.db,
+          input.workspaceId,
+          input.sessionId,
+          input.turnId,
+          input.executionGeneration + (stale ? 1 : 0),
+          input.attemptId,
+          [{ type, payload: { text: "exact checkpoint bytes" } }],
+          undefined,
+          { rowProjection: "event", mutate },
+        );
+        expect(invoked).toBe(true);
+        expect(result.accepted).toBe(!stale);
+        expect(result.events).toHaveLength(stale ? 0 : 1);
+        if (!stale) expect(result.events[0]!.payload).toEqual({ text: "exact checkpoint bytes" });
+        const sessionReads = queries.filter(
+          (query) => /from "sessions"/.test(query) && /for (?:key share|no key update)/.test(query),
+        );
+        expect(sessionReads.length).toBeGreaterThan(0);
+        for (const query of sessionReads) {
+          expect(query).not.toContain('"instructions"');
+          expect(query).not.toContain('"initial_message"');
+          expect(query).toContain('"execution_authority_epoch"');
+        }
+      }
+    }
   } finally {
     driver.options.debug = false;
   }

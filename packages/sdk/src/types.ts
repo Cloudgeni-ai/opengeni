@@ -2660,6 +2660,12 @@ type SessionEventListCommonOptions = {
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
   resultMode?: "events";
+  /**
+   * With `excludeTypes` containing `agent.toolCall.created`, keep the created
+   * rows of presented tools (images, published files, Skill changes). Servers
+   * that predate this option ignore it and apply the plain type filter.
+   */
+  presentedToolCalls?: "include";
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -3958,6 +3964,7 @@ export type FirstPartyMcpToolName =
   | "browser_debug"
   | "browser_downloads"
   | "browser_download_save"
+  | "browser_record"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"

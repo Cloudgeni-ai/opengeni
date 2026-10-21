@@ -9,7 +9,7 @@ import {
   SessionRunsOnMenuBody,
   type SessionRunsOn,
 } from "../src/components/session/sandbox-switcher";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { idleComposer } from "../src/dev/composer-chrome-fixtures";
 import { emptySessionDraft } from "../src/lib/session-create";
 import "../src/styles.css";

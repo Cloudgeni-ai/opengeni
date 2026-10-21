@@ -2,7 +2,7 @@ import { directModelConnectionSpec } from "@opengeni/contracts";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useAppContext } from "@/context";
 import { DirectModelProviderForm } from "./direct-model-provider-connection";
 import { applyConnectedModelToNewSessionDraft } from "@/lib/model-access-onboarding";

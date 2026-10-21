@@ -7,18 +7,18 @@ import {
   type UpdateOrganizationIntegrationPolicyRequest,
 } from "@opengeni/sdk/organization-integration-policy";
 import { useEffect, useRef, useState } from "react";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import {
   beginOrganizationAdminOperation,
   ownsOrganizationAdminOperation,

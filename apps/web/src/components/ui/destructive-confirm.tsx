@@ -12,11 +12,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog, FormFrame, type FormFrameProps } from "@/components/ui/form-dialog";
-import { inAppClick } from "@/lib/in-app-click";
+import { Button } from "@opengeni/react/ui/button";
+import { destructiveActionFocusTarget } from "@opengeni/react/ui/confirm-dialog";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormFrame, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
+import { inAppClick } from "@opengeni/react/ui/in-app-click";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------

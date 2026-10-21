@@ -10,7 +10,7 @@ import {
   type CadencePickerVariant,
   type CadenceRule,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 import { KIT_NOW, KIT_TIME_ZONE, cadenceExamples, scheduleById, timeZones } from "../fixtures";
 import {
   Alternative,

@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import { Field } from "./field";
+import { Field } from "@opengeni/react/ui/field";
 import {
   SecretInput,
   importableEnvRows,
@@ -11,7 +11,7 @@ import {
   parseEnvText,
   summarizeEnvRows,
   variableNameIssue,
-} from "./secret-field";
+} from "@/components/ui/secret-field";
 
 describe("variable names", () => {
   test("normalizes what people type into the saved name", () => {

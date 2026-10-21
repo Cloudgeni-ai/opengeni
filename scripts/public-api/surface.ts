@@ -776,9 +776,39 @@ function packageEntryFiles(packageDir: string, packageName: string): Record<stri
       typeof target === "string" ? target : (target.types ?? target.default ?? target.import);
     const entryName =
       subpath === "." ? packageName : `${packageName}/${subpath.replace(/^\.\//, "")}`;
-    if (file) out[entryName] = resolve(packageDir, file);
+    if (!file) continue;
+    if (subpath.includes("*")) {
+      // A subpath pattern ("./ui/*" -> "./src/ui/*.tsx") exposes every matching
+      // module, so each one is its own entry point.
+      for (const [match, path] of expandSubpathPattern(packageDir, file)) {
+        out[entryName.replace("*", match)] = path;
+      }
+      continue;
+    }
+    out[entryName] = resolve(packageDir, file);
   }
   return out;
+}
+
+function expandSubpathPattern(packageDir: string, target: string): [string, string][] {
+  const [prefix, suffix = ""] = resolve(packageDir, target).split("*") as [string, string?];
+  const root = dirname(`${prefix}x`);
+  const matches: [string, string][] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!path.startsWith(prefix) || !path.endsWith(suffix)) continue;
+      const match = path.slice(prefix.length, path.length - suffix.length);
+      if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;
+      matches.push([match.split("\\").join("/"), path]);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return matches.sort(([a], [b]) => a.localeCompare(b));
 }
 
 function packageEntryExports(

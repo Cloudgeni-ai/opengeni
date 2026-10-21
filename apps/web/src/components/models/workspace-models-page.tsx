@@ -1,5 +1,6 @@
 import { t } from "@/lib/console-text";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { AccountGroupHeading } from "./subscription-account-ui";
 import { ModelsRefreshControl } from "./models-refresh-control";
 import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
@@ -63,7 +64,7 @@ import {
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import { ModelCompactionPage } from "./model-compaction-page";
-import { SettingNavRow } from "@/components/ui/setting-row";
+import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import {
   ConnectAudienceFields,
   EVERYONE,
@@ -116,15 +117,15 @@ import {
 import { useOrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { useAppContext } from "@/context";
 import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
@@ -1172,6 +1173,8 @@ export function WorkspaceModelsPageBody({
       listedOrgGateways.length,
       readyOrgKeys.length,
     ];
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1227,12 +1230,9 @@ export function WorkspaceModelsPageBody({
             }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
-                <OpenGeniCreditsRow
-                  credits={credits}
-                  workspaceId={anchorWorkspaceId}
-                  workspaceName={workspaceName}
-                  scope={labels.everyone}
-                />
+                {subscriptionsListed > 0 ? (
+                  <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+                ) : null}
                 <ConnectedSubscriptionUsagePool
                   client={client}
                   scope="workspace"
@@ -1245,7 +1245,6 @@ export function WorkspaceModelsPageBody({
                   organization={codexPool}
                   onKeptForPeople={reportKeptForPeople}
                 />
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
                 {claudeEnabled ? (
                   <ConnectedSubscriptionUsagePool
                     client={client}
@@ -1261,6 +1260,16 @@ export function WorkspaceModelsPageBody({
                     organization={claudePool}
                   />
                 ) : null}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {payAsYouGoListed > 0 ? (
+                  <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+                ) : null}
+                <OpenGeniCreditsRow
+                  credits={credits}
+                  workspaceId={anchorWorkspaceId}
+                  workspaceName={workspaceName}
+                  scope={labels.everyone}
+                />
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}

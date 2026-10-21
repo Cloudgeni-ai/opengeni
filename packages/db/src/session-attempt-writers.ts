@@ -1,41 +1,58 @@
 import { sql, type SQL } from "drizzle-orm";
 
 /**
- * An exact turn request whose attempt lost its execution: closed
- * `lease_lost_recoverable` or `failed` (worker death, redispatch exhaustion,
- * credential-lease loss), its turn holder gone from the lease, never adopted as
- * a retained process, provider outcome still unknown. Nothing reliably settles
- * it: the owner can admit no more work, and the only physical writer it can
- * stand for is a command that may still be running on that exact box. It must
- * not pin the sandbox (drain, command containment, deadline rotation) or
- * refuse checkpoints forever.
+ * A request whose owner lost its execution and that nothing can settle any
+ * more. Its holder is gone from the lease, it was never adopted as a retained
+ * process, and its provider outcome is still unknown. Two owners leave this
+ * shape:
  *
- * This does not prove the owning worker is dead. Safety comes from what the
- * callers do: a drain captures around the request only before terminating the
- * box, a warm capture only when it is a point-in-time image and then records
- * itself as having run around writers, and the request is rejected only in the
- * cold commit after the exact box was terminated or proven gone. A late
- * settlement by a still-running owner is then fenced. Pause, Steer and
- * cancellation closures keep their requests as writers because the replacement
- * attempt resumes the same box; the holder clause is defence in depth.
+ * - a turn attempt closed `lease_lost_recoverable` or `failed` (worker death,
+ *   redispatch exhaustion, credential-lease loss);
+ * - an API-direct request (Files, Terminal, Browser and similar surfaces)
+ *   whose API process died mid-operation. A live direct request heartbeats its
+ *   holder for the whole operation and settles its admission before releasing
+ *   it (`releaseLeaseHolder` rejects any null outcome it left), so a direct
+ *   admission without its holder was left by a holder the TTL reaper removed.
+ *
+ * Either way the owner can admit no more work, and the only physical writer the
+ * request can stand for is a command that may still be running on that exact
+ * box. It must not pin the sandbox (drain, command containment, deadline
+ * rotation) or refuse checkpoints forever.
+ *
+ * This does not prove the owning process is dead. Safety comes from what the
+ * callers do: a drain captures around the request only when its capture is a
+ * point-in-time image of a stopped or paused box and terminates that box next,
+ * a warm capture only when it is a point-in-time image and then records itself
+ * as having run around writers, and the request is rejected only in the cold
+ * commit after the exact box was terminated or proven gone. A late settlement
+ * by a still-running owner is then fenced. Pause, Steer and cancellation
+ * closures keep their requests as writers because the replacement attempt
+ * resumes the same box; the holder clause is defence in depth for turns.
  */
 export function crashedWorkerOrphanAdmissionSql(admission: SQL): SQL {
   return sql`(
-    ${admission}.actor_kind = 'turn'
-    and ${admission}.holder_kind = 'turn'
-    and ${admission}.settled_at is null
+    ${admission}.settled_at is null
     and ${admission}.provider_outcome is null
-    and exists (
-      select 1 from session_turn_attempts orphan_owner
-      where orphan_owner.account_id = ${admission}.account_id
-        and orphan_owner.workspace_id = ${admission}.workspace_id
-        and orphan_owner.session_id = ${admission}.session_id
-        and orphan_owner.turn_id = ${admission}.turn_id
-        and orphan_owner.id = ${admission}.attempt_id
-        and orphan_owner.id = ${admission}.actor_id
-        and orphan_owner.execution_generation = ${admission}.execution_generation
-        and orphan_owner.state = 'closed'
-        and orphan_owner.outcome in ('lease_lost_recoverable', 'failed')
+    and (
+      (
+        ${admission}.actor_kind = 'turn'
+        and ${admission}.holder_kind = 'turn'
+        and exists (
+          select 1 from session_turn_attempts orphan_owner
+          where orphan_owner.account_id = ${admission}.account_id
+            and orphan_owner.workspace_id = ${admission}.workspace_id
+            and orphan_owner.session_id = ${admission}.session_id
+            and orphan_owner.turn_id = ${admission}.turn_id
+            and orphan_owner.id = ${admission}.attempt_id
+            and orphan_owner.id = ${admission}.actor_id
+            and orphan_owner.execution_generation = ${admission}.execution_generation
+            and orphan_owner.state = 'closed'
+            and orphan_owner.outcome in ('lease_lost_recoverable', 'failed')
+        )
+      ) or (
+        ${admission}.actor_kind = 'direct'
+        and ${admission}.holder_kind = 'direct'
+      )
     )
     and not exists (
       select 1 from sandbox_retained_processes orphan_process

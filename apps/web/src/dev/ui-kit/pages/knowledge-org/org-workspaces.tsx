@@ -12,33 +12,33 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
 import { KIT_NOW, KIT_TIME_ZONE, organization, type WorkspaceRole } from "../../fixtures";
 import {

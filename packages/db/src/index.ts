@@ -95,11 +95,15 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
-import type { TurnAttemptFenceResult } from "./session-attempt-fence";
-export type SessionEventMutation = (
+import type { TurnAttemptEventFenceResult, TurnAttemptFenceResult } from "./session-attempt-fence";
+export type SessionEventMutation<Projection extends "full" | "event" = "full"> = (
   tx: Database,
-  fence: TurnAttemptFenceResult,
+  fence: Projection extends "event" ? TurnAttemptEventFenceResult : TurnAttemptFenceResult,
 ) => Promise<boolean>;
+/** Plain callbacks retain full rows; checkpoints may explicitly request only fence fields. */
+export type SessionEventMutationInput =
+  | SessionEventMutation
+  | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
 export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
@@ -892,6 +896,7 @@ import {
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -20499,7 +20504,8 @@ export async function markScheduledTaskRunSkippedIfQueued(
   input: {
     workspaceId: string;
     runId: string;
-    sessionId: string;
+    /** Null when the run was skipped before it got a chat. */
+    sessionId: string | null;
     error: string;
   },
 ): Promise<void> {
@@ -20513,6 +20519,23 @@ export async function markScheduledTaskRunSkippedIfQueued(
       'skipped'::text,
       ${input.error}::text
     )`);
+  });
+}
+
+/**
+ * Whether a workspace Pause holds every new chat in the workspace. A chat
+ * created now could not run, so scheduled work checks this before creating one.
+ */
+export async function isWorkspaceAgentActivityPaused(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ state: schema.workspaceInferenceControls.workspaceState })
+      .from(schema.workspaceInferenceControls)
+      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId));
+    return row?.state === "paused";
   });
 }
 
@@ -36745,6 +36768,15 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
+   * Keep `agent.toolCall.created` rows of presented tools (see
+   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files and Skill
+   * changes without loading every step. Excluded rows without a turn (PTY
+   * output) are kept too: no per-turn step read can find them. No effect
+   * unless `agent.toolCall.created` is excluded.
+   */
+  retainPresentedToolCalls?: boolean;
+  /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
    * not compete with current truth. Durable session sequence is authoritative
@@ -36753,6 +36785,28 @@ export type ListSessionEventsOptions = {
    */
   authoritativeLatest?: boolean;
 };
+
+function sessionEventExcludeTypesFilter(
+  excludeTypes: readonly SessionEventType[],
+  options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
+): SQL {
+  const excluded = notInArray(schema.sessionEvents.type, [...excludeTypes]);
+  if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
+    return excluded;
+  }
+  // The name check reads only created rows (never tool outputs), but it still
+  // detoasts large arguments on each excluded call it scans.
+  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  return or(
+    excluded,
+    // Turnless rows (PTY output) belong to no turn's step read.
+    isNull(schema.sessionEvents.turnId),
+    and(
+      eq(schema.sessionEvents.type, "agent.toolCall.created"),
+      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+    ),
+  )!;
+}
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
   /** UTF-8 JSON-array page target; one oversized full event is returned alone. */
@@ -36937,7 +36991,7 @@ export async function listSessionEventPage(
         filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
       }
       if (typeFilters.excludeTypes.length > 0) {
-        filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+        filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
       }
       if (direction === "before") {
         if (cursor !== undefined && cursor <= POSTGRES_INT_MAX) {
@@ -37393,7 +37447,7 @@ export async function listSessionEvents(
       filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
     }
     if (typeFilters.excludeTypes.length > 0) {
-      filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+      filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
     }
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));
@@ -39815,7 +39869,7 @@ function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
 export async function registerPendingSessionToolCallInTransaction(
   tx: Database,
   input: PendingSessionToolCallInput,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; registered: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const inserted = await tx
@@ -39903,7 +39957,7 @@ export async function registerPendingSessionToolCallInTransaction(
 
 function assertPendingToolCallCheckpointScope(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): void {
   if (
     fence.workspace.id !== input.workspaceId ||
@@ -39928,7 +39982,7 @@ export async function registerPendingSessionToolCall(
         db,
         { accountId: input.accountId, workspaceId: input.workspaceId },
         async (tx) => {
-          const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+          const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
           if (!fence.allowed) return { accepted: false, registered: false };
           return await registerPendingSessionToolCallInTransaction(tx, input, fence);
         },
@@ -39987,7 +40041,7 @@ export async function recordPendingSessionToolCallResultInTransaction(
       requestDigest: string;
     };
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; recorded: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const [pending] = await tx
@@ -40108,7 +40162,7 @@ export async function recordPendingSessionToolCallResult(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_pending_tool_call_result", correlationId: input.callId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, recorded: false };
       return await recordPendingSessionToolCallResultInTransaction(tx, input, fence);
     },
@@ -40272,7 +40326,7 @@ export async function clearDurablePendingSessionToolCallsInTransaction(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
     callIds: string[];
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; cleared: number }> {
   assertPendingToolCallCheckpointScope(input, fence);
   if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
@@ -40307,7 +40361,7 @@ export async function clearDurablePendingSessionToolCalls(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, cleared: 0 };
       return await clearDurablePendingSessionToolCallsInTransaction(tx, input, fence);
     },
@@ -44572,8 +44626,10 @@ async function acquireLeaseOnce(
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
           // Capture may have failed after an earlier stop attempt recorded a
-          // cutoff. This provider was never stopped; a re-armed box must have
-          // a fresh charge horizon when its next drain reaches provider stop.
+          // cutoff. The box is wanted again: a provider that was never stopped
+          // keeps running, and a Docker container stopped for a capture is
+          // restored on its workspace by the arriving owner. Either way the
+          // re-armed box needs a fresh charge horizon for its next drain.
           if (warmBillingSnapshot(row)?.stopChargeAt) {
             await tx.execute(sql`
               update sandbox_leases
@@ -52329,14 +52385,18 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
-/** Whether a lease's provider capture images the paused box at one instant
- * (Modal native filesystem/directory snapshots). Mirrors the runtime's
- * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+/** Whether a lease's drain capture images the box at one instant: a Modal
+ * native filesystem/directory snapshot of the paused box, or a Docker host
+ * workspace read after the drain stopped the exact container (possible only
+ * when the envelope carries the durable ownership receipt that lets a retry
+ * re-attach to a stopped container's root). Mirrors the runtime's
+ * `providerDrainCaptureIsPointInTime` for the lease envelope: only such a
  * capture may run around a crashed worker's orphaned request, so
  * containment may treat the orphan as non-blocking only then; otherwise its
  * drain could never capture and the box would stay fenced until it died. */
-function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
-  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+function leaseDrainCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if ((backend !== "modal" && backend !== "docker") || !resumeState) return false;
+  if (typeof resumeState !== "object") return false;
   const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
   const session =
     sessionState && typeof sessionState === "object"
@@ -52346,6 +52406,10 @@ function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boole
     session.providerState && typeof session.providerState === "object"
       ? (session.providerState as Record<string, unknown>)
       : null;
+  if (backend === "docker") {
+    const receipt = providerState?.opengeniDockerWorkspaceOwnership;
+    return Boolean(receipt && typeof receipt === "object" && !Array.isArray(receipt));
+  }
   const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
   return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
 }
@@ -52429,7 +52493,7 @@ export async function enrollRetainedCommandContainment(
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
-            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+            writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
               ? "containment"
               : "physical",
           }))));
@@ -52560,7 +52624,7 @@ export async function enrollRetainedCommandContainment(
     // can finish. Only a point-in-time drain captures around it (the cold
     // commit settles it once the box is terminated); for a tar-style capture
     // it stays a blocker, or the enrolled drain could never capture.
-    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const pointInTime = leaseDrainCaptureIsPointInTime(initial.backend, initial.resumeState);
     const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
     // A tolerated orphan is captured around only by a point-in-time drain.
@@ -52730,7 +52794,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
           ? "containment"
           : "physical",
       }))
@@ -52786,7 +52850,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resume_state)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resume_state)
           ? "containment"
           : "physical",
       }))
@@ -53842,8 +53906,16 @@ export async function confirmDrainCold(
         // A pending empty-workspace decision whose box drained before warm
         // publication stays a blocked lost workspace, never a clean new lease.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
+        // A missing Docker container is not a missing workspace: its owned host
+        // directory is the durable resource. Keep the same continuity receipt
+        // markWarmLeaseInstanceLost keeps, so the elected next owner restarts a
+        // container on that exact directory (or reattaches one a false NotFound
+        // missed) instead of the lineage being declared lost.
+        const continuity = workspaceLost
+          ? dockerContinuityRecoveryFromLeaseRow(row, row.instance_id)
+          : null;
         const restoreStatus: SandboxRestoreStatus =
-          current.archive.status === "available" && archiveComplete
+          continuity || (current.archive.status === "available" && archiveComplete)
             ? "pending"
             : hasArchive
               ? "degraded"
@@ -53900,11 +53972,13 @@ export async function confirmDrainCold(
             verifiedAt: null,
           },
           ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
+          ...(continuity ? { continuity } : {}),
         };
-        const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
+        const preserveRecovery =
+          hasArchive || restoreStatus === "unrecoverable" || continuity !== null;
         const resumeStateJson = preserveRecovery
           ? JSON.stringify(
-              archiveOnlyResumeState(
+              recoveryResumeState(
                 row,
                 recovery,
                 workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
@@ -84307,7 +84381,10 @@ export type AddSessionSystemUpdateInput = {
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
   | (RequireIdleSession extends true
-      ? { added: false; reason: "session_not_idle" } | { added: false; reason: "session_paused" }
+      ?
+          | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_paused" }
+          | { added: false; reason: "workspace_paused" }
       : never)
   | {
       added: boolean;
@@ -84350,7 +84427,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
-    rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
+    rejectionReason:
+      | "session_cancelled"
+      | "session_not_idle"
+      | "session_paused"
+      | "workspace_paused"
+      | null,
   ) => Promise<void>,
   options: {
     /**
@@ -84358,6 +84440,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
      * idle, or failed (its last turn ended and it accepts new turns).
      */
     requireIdleSession?: RequireIdleSession;
+    /**
+     * Refuse while a Pause holds the session, whatever its other work:
+     * `session_paused` for a Pause of this session or an ancestor,
+     * `workspace_paused` for a workspace Pause alone. Input queued behind a
+     * Pause could neither run nor settle until someone resumes.
+     */
+    refusePaused?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
       tx: Database,
@@ -84453,18 +84542,26 @@ export async function addSessionSystemUpdateWithSourceMutation<
             input.workspaceId,
             input.sessionId,
           ));
+        const sessionPaused = effectiveControl.blockers.some(
+          (blocker) => blocker.kind === "session",
+        );
         if (
-          options.requireIdleSession &&
-          ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
-            session.activeTurnId !== null ||
-            effectiveControl.state !== "active")
+          (options.refusePaused && effectiveControl.state !== "active") ||
+          (options.requireIdleSession &&
+            ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
+              session.activeTurnId !== null ||
+              effectiveControl.state !== "active"))
         ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
             return replayed;
           }
           const reason =
-            effectiveControl.state !== "active" ? "session_paused" : "session_not_idle";
+            effectiveControl.state === "active"
+              ? "session_not_idle"
+              : sessionPaused
+                ? "session_paused"
+                : "workspace_paused";
           await mutateSource(tx as unknown as Database, null, null, reason);
           return { added: false, reason } as const;
         }
@@ -86409,7 +86506,7 @@ export async function appendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   observer?: SessionEventAppendObserver,
-  mutate?: SessionEventMutation,
+  mutate?: SessionEventMutationInput,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -86461,10 +86558,12 @@ export async function appendTurnCapabilityCardOnce(
     executionGeneration,
     attemptId,
     [input],
-    async (tx) => {
-      const [existing] = await rawRows<{ id: string }>(
-        tx,
-        sql`
+    {
+      rowProjection: "event",
+      mutate: async (tx) => {
+        const [existing] = await rawRows<{ id: string }>(
+          tx,
+          sql`
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
@@ -86476,9 +86575,10 @@ export async function appendTurnCapabilityCardOnce(
           order by sequence
           limit 1
         `,
-      );
-      existingEventId = existing?.id ?? null;
-      return existingEventId === null;
+        );
+        existingEventId = existing?.id ?? null;
+        return existingEventId === null;
+      },
     },
   );
   return {
@@ -86577,7 +86677,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  mutate: SessionEventMutation | undefined,
+  mutate: SessionEventMutationInput | undefined,
   observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
@@ -86633,10 +86733,10 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         ? ("no_key_update" as const)
                         : ("key_share" as const),
                   };
-                  // Preserve the full-row callback contract. An event-only
-                  // batch uses the same locks and decisions without copying
-                  // frozen configuration and authority catalogs across the wire.
-                  if (mutate) {
+                  // Preserve plain callbacks' full-row contract. Explicit
+                  // checkpoints use the same fence without copying frozen
+                  // configuration and authority catalogs across the wire.
+                  if (typeof mutate === "function") {
                     const fence = await lockTurnAttemptWriteFenceTx(tx, input);
                     return { fence, applyMutation: () => mutate(tx, fence) };
                   }
@@ -86644,7 +86744,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     ...input,
                     rowProjection: "event",
                   });
-                  return { fence, applyMutation: async () => true };
+                  return {
+                    fence,
+                    applyMutation: () =>
+                      mutate ? mutate.mutate(tx, fence) : Promise.resolve(true),
+                  };
                 },
                 ({ fence }) => (fence.allowed ? "ok" : "rejected"),
               );
@@ -87064,26 +87168,29 @@ export async function settleCodemodeOperationWithOutput(
         },
       },
     ],
-    async (tx) =>
-      settlement.state === "completed"
-        ? await completeCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            result: settlement.result,
-          })
-        : await failCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            state: settlement.state,
-            errorCode: settlement.errorCode,
-            errorMessage: settlement.errorMessage,
-          }),
+    {
+      rowProjection: "event",
+      mutate: async (tx) =>
+        settlement.state === "completed"
+          ? await completeCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              result: settlement.result,
+            })
+          : await failCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              state: settlement.state,
+              errorCode: settlement.errorCode,
+              errorMessage: settlement.errorMessage,
+            }),
+    },
   );
   return {
     committed: result.mutationApplied,

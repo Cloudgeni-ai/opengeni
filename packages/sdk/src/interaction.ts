@@ -709,6 +709,41 @@ export type BrowserDownloadSaveResponse = {
   replayed: boolean;
 };
 
+/** One browser recording as its controller reports it. */
+export type BrowserRecordingSummary = {
+  recordingId: string;
+  state: "recording" | "stopped";
+  startedAt: string;
+  stoppedAt: string | null;
+  stopReason: "requested" | "duration_limit" | "size_limit" | "session_ended" | null;
+  durationMs: number;
+  frameCount: number;
+  frameBytes: number;
+  actionCount: number;
+  bundle: { sizeBytes: number; sha256: string } | null;
+  streamError: string | null;
+};
+
+export type BrowserRecordingSaveRequest = {
+  operationId: string;
+  /** Workspace-relative .mp4 path; the action log is saved beside it. */
+  destinationPath?: string | undefined;
+};
+
+export type BrowserRecordingSaveResponse = {
+  recording: BrowserRecordingSummary;
+  video: {
+    path: string;
+    artifactId: string;
+    sizeBytes: number;
+    durationMs: number;
+    width: number;
+    height: number;
+    frameCount: number;
+  };
+  actionLogPath: string;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;

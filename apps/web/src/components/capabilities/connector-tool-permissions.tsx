@@ -7,11 +7,15 @@ import type {
   UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
 import { useAppContext } from "@/context";
-import { isPermissionDenied, userErrorText } from "@/lib/api-error";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem } from "@/types";
 

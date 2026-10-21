@@ -45,29 +45,29 @@ import {
 import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 import { readyNewChat } from "@/lib/ready-new-chat";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { newArtifactPrompt, siteEditPrompt } from "@/lib/site-edit-prompt";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 import {

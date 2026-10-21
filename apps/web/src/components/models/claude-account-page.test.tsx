@@ -296,3 +296,49 @@ for (const [outcome, changeScope] of [
     },
   );
 }
+
+test("a workspace admin reads, never live-refreshes or edits, an organization account its workspace lists", async () => {
+  // Automatic source lists the organization's shared accounts beside the
+  // workspace's own; the workspace routes refuse those (409).
+  const refreshes: unknown[] = [],
+    reads: unknown[] = [];
+  const list = async () => ({
+    accounts: [{ ...account, scope: "organization" }],
+    activeAccountId: id,
+    source: "workspace",
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: id },
+  });
+  const client = {
+    listClaudeSubscriptionAccounts: list,
+    getClaudeSubscriptionAccountUsage: async (...args: unknown[]) => {
+      reads.push(args);
+      return baseUsage;
+    },
+    refreshClaudeSubscriptionAccountUsage: async (...args: unknown[]) => {
+      refreshes.push(args);
+      return baseUsage;
+    },
+    getModelConnectionAccess: async () => null,
+  };
+  function Harness() {
+    pool = useClaude({
+      client: client as unknown as OpenGeniBrowserClient,
+      canManage: true,
+      workspaceId,
+    });
+    return createElement(ClaudeAccountPage, { claude: pool, accountId: id, places });
+  }
+  await act(async () => root.render(createElement(Harness)));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(refreshes).toEqual([]);
+  expect(reads).toEqual([[workspaceId, id]]);
+  expect(pool.canManageAccounts).toBe(true);
+  const text = container.textContent ?? "";
+  expect(text).toContain("Managed by the owners and admins of Example organization.");
+  expect(text).toContain("Shared");
+  expect(container.querySelector('button[role="switch"]')).toBeNull();
+  expect(container.querySelector('[aria-label^="More actions for"]')).toBeNull();
+  await expect(pool.rename({ ...account, scope: "organization" } as never, "x")).rejects.toThrow(
+    "Manage this account in its owning scope.",
+  );
+});

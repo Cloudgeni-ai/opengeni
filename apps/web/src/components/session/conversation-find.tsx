@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon, XIcon } from "lucide-react";
 import type { TimelineSearchTarget } from "@opengeni/react/session-ui";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
 import {
   useConversationSearch,
   useCommittedSearchQuery,

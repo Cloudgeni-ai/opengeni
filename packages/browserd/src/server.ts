@@ -13,6 +13,10 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
@@ -696,6 +700,54 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.passkeySync(sync.data));
+    }
+    if (segments.length === 4 && segments[3] === "recordings") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const start = BrowserRecordingStartRequest.safeParse(await readJson(request));
+      if (!start.success) {
+        throw new ProtocolError("invalid_action", "recording start request is invalid", 400);
+      }
+      return success(
+        BrowserRecordingSummary.parse(
+          await this.supervisor.startRecording(reference, start.data.targetId),
+        ),
+      );
+    }
+    if (segments.length === 5 && segments[3] === "recordings") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(this.supervisor.recordingStatus(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "stop") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(await this.supervisor.stopRecording(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "exports") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      const exported = BrowserRecordingExportRequest.safeParse(await readJson(request));
+      if (!exported.success || exported.data.recordingId !== recordingId) {
+        throw new ProtocolError("invalid_action", "recording export authority is invalid", 400);
+      }
+      const receipt = await this.supervisor.exportRecording(
+        reference,
+        recordingId,
+        exported.data.upload,
+      );
+      return success(BrowserRecordingExportReceipt.parse({ recordingId, ...receipt }));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -2312,6 +2364,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
     (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "recordings" && request.method === "POST") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {
     return true;

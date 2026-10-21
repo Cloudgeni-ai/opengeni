@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   invalidateModelSettingsQueries,
   invalidateSharedQueries,

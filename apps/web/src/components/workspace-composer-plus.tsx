@@ -6,7 +6,7 @@ import {
   type ComposerPlusProps,
 } from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";

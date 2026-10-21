@@ -419,6 +419,8 @@ export function timelineAccessibilityLabel(
       return `${labels.turn}, ${nativeTimelineStatusLabel(item.outcome, labels)}`;
     case "worker-completion":
       return item.text;
+    case "turn-steps":
+      return labels.activity;
   }
 }
 

@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client";
 import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { RailBody } from "../src/components/rail/rail-shell";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { client, useRail, workspaceId } from "./desktop-rail-context";
 import "../src/styles.css";
 

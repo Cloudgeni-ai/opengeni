@@ -2,7 +2,7 @@ import { ArrowLeftIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 /**
  * An artifact shown by itself across the whole window, with one bar: back to

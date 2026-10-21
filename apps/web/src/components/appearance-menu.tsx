@@ -11,7 +11,7 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { parseAppearance, useAppearance } from "@/lib/appearance";
 
 const options = [

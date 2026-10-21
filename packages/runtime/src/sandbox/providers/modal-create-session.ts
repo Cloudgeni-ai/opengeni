@@ -11,13 +11,27 @@ import {
   Manifest,
   isMount,
   normalizeSandboxClientCreateArgs,
+  SandboxProviderError,
   SandboxUnsupportedFeatureError,
   type Entry,
 } from "@openai/agents/sandbox";
-import { materializeEnvironment, readOptionalString } from "@openai/agents-core/sandbox/internal";
-import { ModalClient, Sandbox, type Image, type CloudBucketMount } from "modal";
+import {
+  assertHostPathGrantsRebound,
+  materializeEnvironment,
+  readOptionalString,
+} from "@openai/agents-core/sandbox/internal";
+import { Sandbox, type CloudBucketMount, type Image, type ModalClient } from "modal";
 import { createModalProviderCreateBoundary, type ModalCreateIntent } from "./modal-create-boundary";
 import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
+import {
+  cachedModalApp,
+  cachedModalImage,
+  sharedModalClient,
+  withModalCreateBoundary,
+} from "./modal-shared-client";
+
+/** The shared process-wide client is never closed by one create. */
+const SHARED_CLIENT_TRANSPORT: Pick<ModalClient, "close"> = { close() {} };
 
 export type ModalCreateLifecycle = {
   beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
@@ -111,6 +125,50 @@ function withoutMounts(manifest: Manifest): Manifest {
   });
 }
 
+/** Native Modal cloud-bucket mounts for a manifest, resolved on `modal`. */
+export async function resolveModalCloudBucketMounts(
+  modal: ModalClient,
+  source: Manifest,
+  defaultSecretName: string | undefined,
+  /** Resume keeps the pinned adapter's behavior: ignore foreign mounts. */
+  foreignMounts: "reject" | "skip" = "reject",
+): Promise<Record<string, CloudBucketMount> | undefined> {
+  const result: Record<string, CloudBucketMount> = {};
+  for (const { entry, mountPath } of source.mountTargets()) {
+    if (!isModalCloudBucketMountEntry(entry)) {
+      if (foreignMounts === "skip") continue;
+      unsupported("entry.mountStrategy");
+    }
+    const config = buildModalCloudBucketMountConfig(
+      entry,
+      defined({
+        secretName: readOptionalString(entry.mountStrategy, "secretName") ?? defaultSecretName,
+        secretEnvironmentName: readOptionalString(entry.mountStrategy, "secretEnvironmentName"),
+      }),
+    );
+    const secret = config.secretName
+      ? await modal.secrets.fromName(
+          config.secretName,
+          defined({
+            environment: config.secretEnvironmentName,
+          }),
+        )
+      : config.credentials
+        ? await modal.secrets.fromObject(config.credentials)
+        : undefined;
+    result[mountPath] = modal.cloudBucketMounts.create(
+      config.bucketName,
+      defined({
+        bucketEndpointUrl: config.bucketEndpointUrl,
+        keyPrefix: config.keyPrefix,
+        readOnly: config.readOnly,
+        secret,
+      }),
+    );
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
 /** Own physical creation while retaining the pinned SDK's public session API.
  * Its ordinary create() applies the manifest before exposing the instance ID,
  * which is too late for a durable worker lease. No global SDK monkey-patching.
@@ -180,89 +238,51 @@ export async function createModalSessionWithLifecycle(
   let cloudBucketMounts: Record<string, CloudBucketMount> | undefined;
   let state: Omit<ModalSandboxSessionState, "sandboxId">;
   let app: Awaited<ReturnType<ModalClient["apps"]["fromName"]>>;
-  const modal = new ModalClient(
+  const modal = sharedModalClient(
     defined({
       tokenId: options.tokenId,
       tokenSecret: options.tokenSecret,
       environment: options.environment,
       endpoint: options.endpoint,
-      grpcMiddleware: [
-        createModalProviderCreateBoundary({
-          operationId: crypto.randomUUID(),
-          beforeDispatch: async (intent) => {
-            if (timedOut) throw new Error("Modal create expired before provider dispatch");
-            await lifecycle.beforeDispatch(intent, { modal });
-          },
-          onReceipt: async (receipt) => {
-            const constructorArgs = {
-              modal,
-              app,
-              sandbox: new Sandbox(modal, receipt.instanceId),
-              ownsSandbox: true,
-              state: { ...state, sandboxId: receipt.instanceId, imageId: receipt.imageId },
-              cloudBucketMounts,
-              cloudBucketMountsProvider: async () =>
-                await resolveMounts(session?.state.manifest ?? manifest),
-              concurrencyLimits: create.concurrencyLimits,
-              archiveLimits: create.archiveLimits,
-            };
-            // Agents Extensions 0.14.3's structural Modal types predate Modal 0.9's
-            // snapshot options. Runtime policy adapts that pinned interface.
-            session = installPolicy(
-              new ModalSandboxSession(
-                constructorArgs as unknown as ConstructorParameters<typeof ModalSandboxSession>[0],
-              ),
-            );
-            // The pinned SDK closes processes/the box, but not its Modal
-            // transport. This adapter owns a dedicated client per create.
-            const closeSession = session.close.bind(session);
-            session.close = async () => {
-              await closeSession();
-              modal.close();
-            };
-            await lifecycle.onCreated(session, receipt);
-          },
-        }),
-      ],
+      imageBuilderVersion: options.imageBuilderVersion,
     }),
   );
-  const resolveMounts = async (source: Manifest) => {
-    const result: Record<string, CloudBucketMount> = {};
-    for (const { entry, mountPath } of source.mountTargets()) {
-      if (!isModalCloudBucketMountEntry(entry)) unsupported("entry.mountStrategy");
-      const config = buildModalCloudBucketMountConfig(
-        entry,
-        defined({
-          secretName:
-            readOptionalString(entry.mountStrategy, "secretName") ??
-            options.nativeCloudBucketSecretName,
-          secretEnvironmentName: readOptionalString(entry.mountStrategy, "secretEnvironmentName"),
-        }),
+  // Each attempted physical create keeps its own one-shot durable boundary;
+  // only this operation's SandboxCreate (inside withModalCreateBoundary) sees it.
+  const createBoundary = createModalProviderCreateBoundary({
+    operationId: crypto.randomUUID(),
+    beforeDispatch: async (intent) => {
+      if (timedOut) throw new Error("Modal create expired before provider dispatch");
+      await lifecycle.beforeDispatch(intent, { modal });
+    },
+    onReceipt: async (receipt) => {
+      const constructorArgs = {
+        modal,
+        app,
+        sandbox: new Sandbox(modal, receipt.instanceId),
+        ownsSandbox: true,
+        state: { ...state, sandboxId: receipt.instanceId, imageId: receipt.imageId },
+        cloudBucketMounts,
+        cloudBucketMountsProvider: async () =>
+          await resolveMounts(session?.state.manifest ?? manifest),
+        concurrencyLimits: create.concurrencyLimits,
+        archiveLimits: create.archiveLimits,
+      };
+      // Agents Extensions 0.14.3's structural Modal types predate Modal 0.9's
+      // snapshot options. Runtime policy adapts that pinned interface.
+      session = installPolicy(
+        new ModalSandboxSession(
+          constructorArgs as unknown as ConstructorParameters<typeof ModalSandboxSession>[0],
+        ),
       );
-      const secret = config.secretName
-        ? await modal.secrets.fromName(
-            config.secretName,
-            defined({
-              environment: config.secretEnvironmentName,
-            }),
-          )
-        : config.credentials
-          ? await modal.secrets.fromObject(config.credentials)
-          : undefined;
-      result[mountPath] = modal.cloudBucketMounts.create(
-        config.bucketName,
-        defined({
-          bucketEndpointUrl: config.bucketEndpointUrl,
-          keyPrefix: config.keyPrefix,
-          readOnly: config.readOnly,
-          secret,
-        }),
-      );
-    }
-    return Object.keys(result).length ? result : undefined;
-  };
+      await lifecycle.onCreated(session, receipt);
+    },
+  });
+  const resolveMounts = async (source: Manifest) =>
+    await resolveModalCloudBucketMounts(modal, source, options.nativeCloudBucketSecretName);
   try {
-    app = await modal.apps.fromName(
+    app = await cachedModalApp(
+      modal,
       options.appName,
       defined({
         createIfMissing: true,
@@ -276,8 +296,8 @@ export async function createModalSessionWithLifecycle(
     if (selector.kind === "image") image = selector.value as Image;
     else if (typeof selector.value !== "string" || !selector.value.trim())
       throw new Error("Modal image identity must be non-empty");
-    else if (selector.kind === "id") image = await modal.images.fromId(selector.value);
-    else if (selector.kind === "tag") image = modal.images.fromRegistry(selector.value);
+    else if (selector.kind === "id" || selector.kind === "tag")
+      image = await cachedModalImage(modal, app, { kind: selector.kind, value: selector.value });
     else throw new Error("Unsupported Modal image selector");
     if (typeof image?.build !== "function")
       throw new Error("Modal image selector requires a native Image");
@@ -307,22 +327,26 @@ export async function createModalSessionWithLifecycle(
       nativeCloudBucketSecretName: options.nativeCloudBucketSecretName,
       useSleepCmd: options.useSleepCmd ?? true,
     };
-    const physicalCreate = modal.sandboxes.create(
-      app,
-      image,
-      defined({
-        workdir: manifest.root,
-        env: environment,
-        command: state.useSleepCmd ? ["sleep", "infinity"] : undefined,
-        timeoutMs: options.timeoutMs,
-        idleTimeoutMs: options.idleTimeoutMs,
-        cpu: options.cpu,
-        memoryMiB: options.memoryMiB,
-        gpu: options.gpu,
-        encryptedPorts: options.exposedPorts,
-        cloudBucketMounts,
-        regions: options.regions ? [...options.regions] : undefined,
-      }),
+    // The boundary scope stays active until the provider call settles, so a
+    // late receipt after the local timeout is still persisted.
+    const physicalCreate = withModalCreateBoundary(createBoundary, () =>
+      modal.sandboxes.create(
+        app,
+        image,
+        defined({
+          workdir: manifest.root,
+          env: environment,
+          command: state.useSleepCmd ? ["sleep", "infinity"] : undefined,
+          timeoutMs: options.timeoutMs,
+          idleTimeoutMs: options.idleTimeoutMs,
+          cpu: options.cpu,
+          memoryMiB: options.memoryMiB,
+          gpu: options.gpu,
+          encryptedPorts: options.exposedPorts,
+          cloudBucketMounts,
+          regions: options.regions ? [...options.regions] : undefined,
+        }),
+      ),
     );
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -357,19 +381,117 @@ export async function createModalSessionWithLifecycle(
             modal.logger.warn(
               "Late Modal create cleanup failed; durable lease requires reconciliation",
             );
-          })
-          .finally(() => modal.close());
+          });
     }
     if (!session) throw new Error("Modal create bypassed the required physical receipt boundary");
     await session.applyManifest(withoutMounts(manifest));
     return session;
   } catch (error) {
-    // Timed-out work still owns its transport until its late receipt settles.
-    // Every synchronous failure releases the transport even if stopping the
-    // provider fails; durable reconciliation uses a separate authenticated client.
+    // The transport is the shared process-wide client and is never released
+    // here; a failed box is still stopped when cleanup is provably safe.
     if (!timedOut) {
-      return await releaseModalCreateFailure(session, modal, error);
+      return await releaseModalCreateFailure(session, SHARED_CLIENT_TRANSPORT, error);
     }
     throw error;
   }
+}
+
+/** A resume that cannot proceed for this state (no persisted id, or a box
+ * that already stopped). Kept local so the sandbox leaf never imports the
+ * agent loop; callers classify these by their exact message. */
+class ModalResumeUnavailableError extends Error {
+  override readonly name = "UserError";
+}
+
+/** The pinned adapter's provider-error shape: a SandboxProviderError naming the
+ * operation, with the provider failure as its exact cause. */
+async function withModalProviderError<T>(
+  operation: string,
+  context: Record<string, string>,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof ModalResumeUnavailableError) throw error;
+    const cause = error instanceof Error ? error.message : String(error);
+    throw Object.assign(
+      new SandboxProviderError(
+        `ModalSandboxClient failed to ${operation}${cause ? `: ${cause}` : ""}`,
+        { provider: "modal", operation, ...context, cause },
+      ),
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Reattach to a live box on the shared process-wide client. Same lookups,
+ * errors and session as the pinned adapter's resume, which instead built a new
+ * client per call and so paid a fresh TLS channel, AuthTokenGet and
+ * EnvironmentGetOrCreate (about 0.5 s) on every warm turn.
+ */
+export async function resumeModalSessionOnSharedClient(
+  defaults: OpenGeniModalSandboxClientOptions,
+  state: ModalSandboxSessionState,
+): Promise<ModalSandboxSession> {
+  assertHostPathGrantsRebound(state);
+  if (!state.sandboxId) {
+    throw new ModalResumeUnavailableError("Modal sandbox resume requires a persisted sandboxId.");
+  }
+  const sandboxId = state.sandboxId;
+  const modal = sharedModalClient(
+    defined({
+      tokenId: defaults.tokenId,
+      tokenSecret: defaults.tokenSecret,
+      environment: state.modalEnvironment ?? defaults.environment,
+      endpoint: state.endpoint ?? defaults.endpoint,
+      imageBuilderVersion: state.imageBuilderVersion ?? defaults.imageBuilderVersion,
+    }),
+  );
+  const sandbox = await withModalProviderError(
+    "resume sandbox",
+    { sandboxId },
+    async () => await modal.sandboxes.fromId(sandboxId),
+  );
+  const ownsSandbox = state.ownsSandbox !== false;
+  const app =
+    ownsSandbox || state.workspacePersistence === "snapshot_filesystem"
+      ? await withModalProviderError(
+          "look up app",
+          { appName: state.appName },
+          async () =>
+            await cachedModalApp(
+              modal,
+              state.appName,
+              defined({ createIfMissing: ownsSandbox, environment: state.modalEnvironment }),
+            ),
+        )
+      : {};
+  const exitCode = await withModalProviderError(
+    "poll sandbox",
+    { sandboxId },
+    async () => await sandbox.poll(),
+  );
+  if (exitCode !== null) {
+    throw new ModalResumeUnavailableError(`Modal sandbox ${state.sandboxId} is no longer running.`);
+  }
+  const constructorArgs = {
+    state,
+    modal,
+    app,
+    sandbox,
+    ownsSandbox,
+    cloudBucketMountsProvider: async () =>
+      await resolveModalCloudBucketMounts(
+        modal,
+        state.manifest,
+        state.nativeCloudBucketSecretName ?? defaults.nativeCloudBucketSecretName,
+        "skip",
+      ),
+    archiveLimits: defaults.archiveLimits,
+  };
+  return new ModalSandboxSession(
+    constructorArgs as unknown as ConstructorParameters<typeof ModalSandboxSession>[0],
+  );
 }

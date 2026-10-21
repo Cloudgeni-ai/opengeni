@@ -20,17 +20,18 @@ type Dependencies = {
 };
 
 export async function reconcileExhaustedScheduledTasks(deps: Dependencies): Promise<void> {
-  for (const candidate of await listExhaustedScheduledTasks(deps.db)) {
-    await retireExhaustedScheduledTask(deps.db, candidate.workspace_id, candidate.id);
-  }
-  // Before Temporal reconciliation, so a schedule that paused itself stops
-  // firing in the same pass.
+  // Review before retiring, so a schedule's failed last run is told to its
+  // owner in the same pass (retirement waits for that review), and before
+  // Temporal reconciliation, so a schedule that paused itself stops firing.
   if (deps.bus) {
     await reviewScheduledTaskBlockerInventory({
       db: deps.db,
       bus: deps.bus,
       observability: deps.observability,
     });
+  }
+  for (const candidate of await listExhaustedScheduledTasks(deps.db)) {
+    await retireExhaustedScheduledTask(deps.db, candidate.workspace_id, candidate.id);
   }
   for (const pending of await listScheduledTaskScheduleReconciliations(deps.db)) {
     try {

@@ -13,28 +13,28 @@ import {
   PermissionChecklist,
   WorkspaceScopeFields,
 } from "@/components/organization-access/organization-access-fields";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { Disclosure } from "@/components/ui/disclosure";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { Section, SectionStack } from "@/components/ui/section";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
 import {
   policySummary,

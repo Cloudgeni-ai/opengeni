@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import type { NativeConnectCatalog } from "./native-connect-readiness";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";

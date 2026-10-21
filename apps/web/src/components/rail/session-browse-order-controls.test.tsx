@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DropdownMenu as Primitive } from "radix-ui";
-import { DropdownMenu } from "@/components/ui/dropdown-menu";
+import { DropdownMenu } from "@opengeni/react/ui/dropdown-menu";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
 
 describe("compact session view menu", () => {

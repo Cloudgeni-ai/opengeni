@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import {
   configuredGoogleDriveSources,
@@ -22,8 +22,8 @@ import {
   useApiIntegrationAccounts,
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   GOOGLE_DRIVE_ACCESS_DISCLOSURE,

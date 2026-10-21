@@ -53,6 +53,7 @@ import type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
   ToolCallItem,
   ToolCallTruncation,
   UserMessageItem,
@@ -160,10 +161,21 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+export type BuildTimelineOptions = {
+  partialStart?: boolean;
+  /**
+   * Turns whose steps are not all loaded, keyed by turn id. Each becomes a
+   * `turn-steps` item placed at the turn's start (its `turn.started`, or its
+   * first event), so the readable grouping gives the turn an expandable work
+   * row even when none of its steps are in the browser.
+   */
+  turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+};
+
 export function buildTimeline(
   t: OpenGeniText,
   events: SessionEvent[],
-  options: { partialStart?: boolean } = {},
+  options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   const allowanceNotices = new Set<string>();
@@ -432,7 +444,15 @@ export function buildTimeline(
     }
   };
 
+  const turnStepsByAnchor = turnStepsAnchors(ordered, options.turnSteps);
+  let pendingTurnSteps: TurnStepsItem | null = null;
   for (const event of ordered) {
+    // A turn's steps marker follows its anchor event, before anything later.
+    if (pendingTurnSteps) {
+      items.push(pendingTurnSteps);
+      pendingTurnSteps = null;
+    }
+    pendingTurnSteps = turnStepsByAnchor.get(event.id) ?? null;
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
     resolveCapacityWaits(event, payload);
@@ -1882,6 +1902,7 @@ export function buildTimeline(
         break;
     }
   }
+  if (pendingTurnSteps) items.push(pendingTurnSteps);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2213,6 +2234,37 @@ type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
  * decide its grouping, and it narrows `item` to a work item with no cast.
  * Assistant prose stays outside activity clusters.
  */
+/** Each marked turn's anchor: its `turn.started`, else its first event. */
+function turnStepsAnchors(
+  ordered: readonly SessionEvent[],
+  turnSteps: BuildTimelineOptions["turnSteps"],
+): Map<string, TurnStepsItem> {
+  const anchors = new Map<string, TurnStepsItem>();
+  if (!turnSteps || turnSteps.size === 0) return anchors;
+  const chosen = new Map<string, SessionEvent>();
+  for (const event of ordered) {
+    const turnId = event.turnId;
+    if (!turnId || !turnSteps.has(turnId)) continue;
+    const current = chosen.get(turnId);
+    if (!current || (event.type === "turn.started" && current.type !== "turn.started")) {
+      chosen.set(turnId, event);
+    }
+  }
+  for (const [turnId, anchor] of chosen) {
+    const marker = turnSteps.get(turnId)!;
+    anchors.set(anchor.id, {
+      kind: "turn-steps",
+      id: `turn-steps-${turnId}`,
+      turnId,
+      occurredAt: anchor.occurredAt,
+      state: marker.state,
+      load: marker.load,
+      retain: marker.retain,
+    });
+  }
+  return anchors;
+}
+
 function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
     case "reasoning":
@@ -2383,7 +2435,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
       return group;
     };
-    if (isActivityItem(item)) {
+    if (item.kind === "turn-steps") {
+      // Not a step: it gives the turn its work row (a turn whose steps are all
+      // unloaded has nothing else) and is rendered by that row.
+      workForTurn().work!.steps = item;
+    } else if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
       const previous = group.work!.details.at(-1);

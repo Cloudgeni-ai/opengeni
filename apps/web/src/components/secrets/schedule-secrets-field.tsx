@@ -1,6 +1,6 @@
 import type { VaultPolicy, VaultSummary } from "@opengeni/react";
-import { Checkbox, Field, useField } from "@/components/ui/field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Checkbox, Field, useField } from "@opengeni/react/ui/field";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { OWNER_LABEL } from "./vault-model";
 
 /* ----------------------------------------------------------------------------

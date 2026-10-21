@@ -20,7 +20,7 @@ import { SessionHeader } from "../src/components/rail/session-header";
 import { UsageLimitMenuBody } from "../src/components/session/new-session-settings-menu";
 import { SessionUsageLimitSection } from "../src/components/session/session-usage-limit-section";
 import { Toaster } from "../src/components/ui/sonner";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
   galleryFirstPartyTools,

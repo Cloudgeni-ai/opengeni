@@ -17,25 +17,25 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { Disclosure } from "@/components/ui/disclosure";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 import {

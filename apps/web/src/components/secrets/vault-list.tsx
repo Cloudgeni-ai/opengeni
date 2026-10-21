@@ -1,13 +1,13 @@
 import type { VaultSummary } from "@opengeni/react";
 import { KeyRoundIcon, PlugIcon, PlusIcon, RotateCcwIcon, ShieldOffIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section, SectionStack } from "@/components/ui/section";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
 
 import { ConnectionsSection } from "./provider-connections";
 import { SecretsLoadFailure, SyncStatus, VaultChips, VaultTile } from "./vault-parts";

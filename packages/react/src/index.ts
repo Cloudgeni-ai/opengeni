@@ -475,6 +475,8 @@ export type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
   UserMessageItem,
   WorkerItem,

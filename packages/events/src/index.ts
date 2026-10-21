@@ -16,7 +16,7 @@ import {
   type CanonicalTurnStartupMilestoneReceipt,
   type Database,
   type SessionEventAppendObserver,
-  type SessionEventMutation,
+  type SessionEventMutationInput,
 } from "@opengeni/db";
 import {
   connect,
@@ -1199,7 +1199,7 @@ export async function appendAndPublishTurnEventsFenced(
   attemptId: string,
   events: AppendEventInput[],
   observe?: AppendPublishObserver,
-  mutate?: SessionEventMutation,
+  mutate?: SessionEventMutationInput,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;

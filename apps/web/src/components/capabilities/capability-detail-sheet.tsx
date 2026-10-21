@@ -32,17 +32,17 @@ import {
   presentationPermissions,
   type IntegrationPresentationCopy,
 } from "@/components/capabilities/integration-experience";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   Dialog as Sheet,
   DialogDescription as SheetDescription,
   DialogHeader as SheetHeader,
   DialogTitle as SheetTitle,
-} from "@/components/ui/dialog";
+} from "@opengeni/react/ui/dialog";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
@@ -57,7 +57,7 @@ import {
   type ConnectionHealth,
 } from "@/lib/capabilities";
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
-import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
+import { analyticsAction, type AnalyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { cn } from "@/lib/utils";
 import type {
   CapabilityCatalogItem,

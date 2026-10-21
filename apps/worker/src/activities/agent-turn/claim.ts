@@ -663,7 +663,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
             durationSeconds,
           }),
       },
-      mutate,
+      mutate ? { rowProjection: "event", mutate } : undefined,
     );
     if (inputs.length > 0 && !appended.accepted) {
       throw new TurnAttemptFencedError("turn execution generation was fenced");

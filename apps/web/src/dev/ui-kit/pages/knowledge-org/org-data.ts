@@ -1,4 +1,4 @@
-import type { RoleOption, RoleValue } from "@/components/ui/role-select";
+import type { RoleOption, RoleValue } from "@opengeni/react/ui/role-select";
 
 import {
   organization,

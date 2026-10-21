@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,

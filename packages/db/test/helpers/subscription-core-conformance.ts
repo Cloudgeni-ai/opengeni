@@ -92,6 +92,7 @@ import { withSubscriptionCoreProviderPlacementWorld } from "../../src/subscripti
 import {
   acquireSubscriptionTurnLease,
   listDueSubscriptionCapacityWaiters,
+  listSubscriptionConnectionsForPlacement,
   observeSubscriptionCapacityWaiterWake,
   releaseSubscriptionTurnLease,
   renewSubscriptionTurnLease,
@@ -4374,6 +4375,132 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect((await connectionRow(org.otherKind.identified)).status).toBe("error");
       await admin()`update subscription_connections set status = 'active', health_retry_at = null
         where id = ${org.otherKind.identified}::uuid`;
+      await expectForeignUntouched(org);
+    });
+
+    test("an ended quarantine reads available to admission, the catalog and the account lists without a turn", async () => {
+      const org = await organization();
+      const sharedId = await sharedConnection(org, `shared-${crypto.randomUUID()}`);
+      const personalId = await personalConnection(org, `personal-${crypto.randomUUID()}`);
+      const quarantine = async (retry: "future" | "past" | null) =>
+        await admin()`update subscription_connections set status = 'error',
+          last_error = 'model request was forbidden for this credential',
+          health_retry_at = ${
+            retry === null
+              ? null
+              : retry === "future"
+                ? new Date(Date.now() + 60 * 60_000).toISOString()
+                : new Date(Date.now() - 1_000).toISOString()
+          }::timestamptz
+          where id = any(${[sharedId, personalId]}::uuid[])`;
+      const serving = async (workspaceId: string, subjectId: string | null) =>
+        (
+          await listSubscriptionCoreServingConnections(db(), provider, {
+            accountId: org.accountId,
+            workspaceId,
+            subjectId,
+          })
+        ).map((entry) => entry.connectionId);
+      const listed = async () => {
+        const organizationPool = await readSubscriptionCoreOrganizationPool(db(), provider, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        });
+        const workspacePool = await withRlsContext(
+          db(),
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          async (tx) => {
+            await setSubjectRlsContext(tx, org.ownerSubjectId);
+            return await readSubscriptionCoreWorkspacePool(tx, provider, {
+              accountId: org.accountId,
+              workspaceId: org.sharedWorkspaceId,
+            });
+          },
+        );
+        const personalRows = await withRlsContext(
+          db(),
+          { accountId: org.accountId, workspaceId: org.personalWorkspaceId },
+          (tx) =>
+            listSubscriptionCorePersonalConnectionRowsInTransaction(tx, provider, {
+              accountId: org.accountId,
+              workspaceId: org.personalWorkspaceId,
+              subjectId: org.ownerSubjectId,
+            }),
+        );
+        const pick = (row: { status: string; last_error: string | null } | undefined) => ({
+          status: row?.status,
+          lastError: row?.last_error,
+        });
+        return {
+          organization: pick(organizationPool!.rows.find((row) => row.id === sharedId)),
+          workspace: pick(
+            workspacePool.connections.find((entry) => entry.row.id === sharedId)?.row,
+          ),
+          personal: pick(personalRows.find((row) => row.id === personalId)),
+        };
+      };
+      const placementHealth = async (health: "effective" | "stored") =>
+        (
+          await withRlsContext(
+            db(),
+            { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+            (tx) =>
+              listSubscriptionConnectionsForPlacement(tx, {
+                accountId: org.accountId,
+                workspaceId: org.sharedWorkspaceId,
+                provider: providerId,
+                kind: connectionKind,
+                health,
+              }),
+          )
+        ).find((connection) => connection.id === sharedId)?.health;
+      const refused = {
+        status: "error",
+        lastError: "model request was forbidden for this credential",
+      };
+
+      // While the quarantine lasts, nothing offers either connection.
+      await quarantine("future");
+      expect(await serving(org.sharedWorkspaceId, null)).not.toContain(sharedId);
+      expect(await serving(org.personalWorkspaceId, org.ownerSubjectId)).not.toContain(personalId);
+      expect(await listed()).toEqual({
+        organization: refused,
+        workspace: refused,
+        personal: refused,
+      });
+      expect(await placementHealth("effective")).toBe("error");
+
+      // Once it ends, both serve again and read healthy, with no turn and no
+      // write: the stored rows still say error until a turn recovers them.
+      await quarantine("past");
+      expect(await serving(org.sharedWorkspaceId, null)).toContain(sharedId);
+      expect(await serving(org.personalWorkspaceId, org.ownerSubjectId)).toContain(personalId);
+      const recovered = { status: "active", lastError: null };
+      expect(await listed()).toEqual({
+        organization: recovered,
+        workspace: recovered,
+        personal: recovered,
+      });
+      expect(await placementHealth("effective")).toBe("healthy");
+      // An accepted turn's placement reads the stored status its lease and
+      // credential reads enforce; it recovers the row before it places.
+      expect(await placementHealth("stored")).toBe("error");
+      for (const connectionId of [sharedId, personalId])
+        expect(await connectionRow(connectionId)).toMatchObject({ status: "error" });
+      const turn = await runningTurn(org);
+      expect(await runtime().recoverSubscriptionCoreConnectionHealth(db(), turn.identity)).toBe(1);
+      expect(await placementHealth("stored")).toBe("healthy");
+
+      // An error without a retry time (an administrator's, or a refresh the
+      // provider refused) never ends by itself.
+      await quarantine(null);
+      expect(await serving(org.sharedWorkspaceId, null)).not.toContain(sharedId);
+      expect(await serving(org.personalWorkspaceId, org.ownerSubjectId)).not.toContain(personalId);
+      expect(await listed()).toEqual({
+        organization: refused,
+        workspace: refused,
+        personal: refused,
+      });
       await expectForeignUntouched(org);
     });
 

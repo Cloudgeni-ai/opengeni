@@ -15,33 +15,33 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   CadencePicker,
   validateCadence,
   type CadenceFrequency,
-} from "@/components/ui/cadence-picker";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/cadence-picker";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   Field,
   FieldStack,
   TextInput,
   useField,
   useFieldControlProps,
-} from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
+} from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { cn } from "@/lib/utils";
 
 import {

@@ -30,7 +30,7 @@ const frameSource = await Bun.file(
   `${import.meta.dir}/components/settings/settings-sidebar.tsx`,
 ).text();
 const settingsNavSource = await Bun.file(
-  `${import.meta.dir}/components/ui/settings-nav.tsx`,
+  `${import.meta.dir}/../../../packages/react/src/ui/settings-nav.tsx`,
 ).text();
 // Organization pages sit in the Organization section of the one settings rail.
 const shellSource = [

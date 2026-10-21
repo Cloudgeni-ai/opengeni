@@ -224,6 +224,14 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         outcome: item.outcome,
         failureText: item.failureText,
       };
+    case "turn-steps":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        state: item.state,
+      };
   }
 }
 

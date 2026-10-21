@@ -5,7 +5,7 @@ import type { ComponentProps } from "react";
 import { Loader2Icon } from "lucide-react";
 
 import { OrganizationInvitationDot } from "@/components/organization-invitations";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@opengeni/react/ui/avatar";
 import { cn } from "@/lib/utils";
 
 function userInitial(label: string): string {

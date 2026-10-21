@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
-import { ListRow } from "@/components/ui/list-row";
+import { ListRow } from "@opengeni/react/ui/list-row";
 import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
 import { useAppContext } from "@/context";
 import { formatMoneyMicros } from "@/lib/format";

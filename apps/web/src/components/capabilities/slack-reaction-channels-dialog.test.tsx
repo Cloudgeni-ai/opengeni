@@ -16,7 +16,7 @@ const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({ useAppContext: () => mutableContext.current }));
 // Keep the real body and fields; happy-dom does not mount Radix portals.
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
     open ? <div>{children}</div> : null,
   DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,

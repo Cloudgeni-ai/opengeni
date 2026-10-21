@@ -36,6 +36,8 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+// Patches the owner reader 0730 derives from; it follows 0730.
+const PERSONAL_QUARANTINE_EXPIRY = "0884_subscription_core_personal_quarantine_expiry.sql";
 // ...and before the drained retirement migration, which drops the Codex
 // reach twin 0714 rewrites: held back for good, so replaying 0714 cannot
 // recreate a retired routine.
@@ -107,7 +109,7 @@ beforeAll(async () => {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${MIGRATION}), (${API_KEY_CONNECTIONS}),
       (${PERSONAL_CONNECT_FORMAT}),
-      (${PERSONAL_CONNECTION_VERSIONS}), (${RETIREMENT}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
+      (${PERSONAL_CONNECTION_VERSIONS}), (${PERSONAL_QUARANTINE_EXPIRY}), (${RETIREMENT}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -211,7 +213,7 @@ beforeAll(async () => {
   try {
     await applying`delete from schema_migrations where name in (${MIGRATION}, ${API_KEY_CONNECTIONS},
       ${PERSONAL_CONNECT_FORMAT},
-      ${PERSONAL_CONNECTION_VERSIONS}, '0752_subscription_personal_sharing.sql')`;
+      ${PERSONAL_CONNECTION_VERSIONS}, ${PERSONAL_QUARANTINE_EXPIRY}, '0752_subscription_personal_sharing.sql')`;
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;

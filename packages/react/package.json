@@ -71,6 +71,10 @@
       "types": "./src/session-ui.ts",
       "default": "./src/session-ui.ts"
     },
+    "./ui/*": {
+      "types": "./src/ui/*.tsx",
+      "default": "./src/ui/*.tsx"
+    },
     "./diffs": {
       "types": "./src/diffs.ts",
       "default": "./src/diffs.ts"
@@ -232,6 +236,7 @@
     "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/connect": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
     "lucide-react": "^1.8.0",

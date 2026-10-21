@@ -386,11 +386,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
       });
       const commands: string[] = [];
+      let withoutGzip = false;
       const session = {
         ...inner,
         exec: async (args: { cmd: string }) => {
           commands.push(args.cmd);
-          return await inner.exec(args as never);
+          const cmd = withoutGzip
+            ? args.cmd.replaceAll("command -v gzip >/dev/null 2>&1", "false")
+            : args.cmd;
+          return await inner.exec({ ...args, cmd } as never);
         },
       };
       const resources = [
@@ -410,10 +414,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         return [...commands];
       };
 
-      // Fresh box: the launcher reports the program missing, it is staged once
-      // under its content hash, then the same launcher clones.
+      // Fresh box: the launcher carries the compressed program, installs it
+      // under its content hash and clones, all in one command.
       const first = await runHook("first-token");
-      expect(first.length).toBeGreaterThan(2);
+      expect(first).toHaveLength(1);
       expect(readFileSync(join(workspace, "repos", "test", "staged", "README.md"), "utf8")).toBe(
         "hello\n",
       );
@@ -444,13 +448,26 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         "second-token",
       );
 
-      // A modified program is never executed: it is re-staged and verified again.
+      // A modified program is never executed: it is reinstalled and verified
+      // again by the same single command.
       writeFileSync(programFile, "echo tampered; exit 0\n");
       const third = await runHook("third-token");
-      expect(third.length).toBeGreaterThan(2);
+      expect(third).toHaveLength(1);
+      expect(third[0]).not.toContain("tampered");
       expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
       expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
         "third-token",
+      );
+
+      // A box without gzip cannot unpack the embedded program; the launcher
+      // reports it missing and the program is staged uncompressed instead.
+      rmSync(programFile);
+      withoutGzip = true;
+      const fourth = await runHook("fourth-token");
+      expect(fourth.length).toBeGreaterThan(2);
+      expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "fourth-token",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

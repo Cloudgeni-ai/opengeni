@@ -33,13 +33,16 @@ import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
 import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ContentPage } from "@/components/ui/content-layout";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@/context";
-import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
+import {
+  apiErrorTechnicalFacts,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
 

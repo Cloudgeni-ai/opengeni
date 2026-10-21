@@ -122,7 +122,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-  mutate?: SessionEventMutation,
+  mutate?: SessionEventMutation<"event">,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;

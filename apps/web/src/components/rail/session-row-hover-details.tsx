@@ -15,8 +15,8 @@ import {
   formatRelativeTime,
   inSentence,
   useMinuteNow,
-} from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { type CreatorRef, creatorInitials, creatorLabel } from "@/lib/creator-initials";
 import { sessionHoverFacts } from "@/lib/session-hover-facts";
 import type { RailSession } from "@/lib/session-list-entry";

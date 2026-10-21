@@ -6,8 +6,8 @@ import { toast } from "sonner";
 
 import { payerShortLabel } from "@/components/models/models-ui";
 import { ModelPicker } from "@/components/pickers";
-import { buttonVariants } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
+import { buttonVariants } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@/context";
 import {
   availabilityReasonLabel,

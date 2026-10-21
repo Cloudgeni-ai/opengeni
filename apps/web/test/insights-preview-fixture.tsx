@@ -8,9 +8,9 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { UsageDashboard } from "../src/components/insights/usage-dashboard";
-import { ContentPage } from "../src/components/ui/content-layout";
-import { PageHeader } from "../src/components/ui/page-header";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { InsightsRoute } from "../src/routes/insights";
 import { WorkspaceUsagePage } from "../src/components/usage/workspace-usage-page";
 import { accountId, workspaceId } from "./insights-preview-context";

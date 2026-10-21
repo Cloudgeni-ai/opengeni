@@ -43,6 +43,8 @@ export type ScheduledTaskBlockerFacts = {
     runMode: string;
     reusableSessionId: string | null;
     updatedAt: Date;
+    /** The stored schedule spec, unvalidated: its cadence decides when to tell the owner. */
+    schedule: unknown;
   };
   review: ScheduledTaskBlockerReview | null;
   /** Newest first: scheduled (not manual) agent-turn runs only. */
@@ -89,7 +91,10 @@ function date(value: Date | string | null): Date | null {
 function refusal(value: unknown): ScheduledTaskBlockerRun["admissionRefusal"] {
   const parsed = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
   if (!parsed || typeof parsed !== "object") return null;
-  const { reason, retryable } = parsed as { reason?: unknown; retryable?: unknown };
+  const { reason, retryable } = parsed as {
+    reason?: unknown;
+    retryable?: unknown;
+  };
   return typeof reason === "string" && typeof retryable === "boolean"
     ? { reason, retryable }
     : null;
@@ -119,10 +124,11 @@ export async function reviewScheduledTaskBlockers(
         run_mode: string;
         reusable_session_id: string | null;
         updated_at: Date | string;
+        schedule: unknown;
       }>(
         exec,
         sql`select id, account_id, workspace_id, name, status, deleted_at, run_mode,
-              reusable_session_id, updated_at
+              reusable_session_id, updated_at, schedule
             from scheduled_tasks
             where workspace_id = ${workspaceId} and id = ${taskId}
             for update`,
@@ -188,6 +194,10 @@ export async function reviewScheduledTaskBlockers(
           runMode: task.run_mode,
           reusableSessionId: task.reusable_session_id,
           updatedAt: new Date(task.updated_at),
+          schedule:
+            typeof task.schedule === "string"
+              ? (JSON.parse(task.schedule) as unknown)
+              : (task.schedule ?? null),
         },
         review,
         runs: runs.map((run) => ({

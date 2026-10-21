@@ -147,6 +147,10 @@ The cursor trigger projects semantic sequence and activity together in one
 session-row update. Plain appends do not repeat that write; real lifecycle
 mutations still update their own fields. Activity uses PostgreSQL statement time
 without moving an existing session timestamp backwards.
+Receipt and operation checkpoints explicitly request the same narrow fence
+projection as plain event appends; they do not fetch frozen prompts or catalogs
+they never read. Plain mutation callbacks retain their full-row contract. Both
+projections use identical locks and admission decisions in the same transaction.
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only

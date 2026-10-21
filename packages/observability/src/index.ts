@@ -512,6 +512,7 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "browser.action",
   "browser.control",
   "browser.download.save",
+  "browser.recording.save",
   "browser.attach",
   "computer.create",
   "computer.end",

@@ -8,7 +8,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { Toaster } from "../src/components/ui/sonner";
 import { toast } from "sonner";
 import "../src/styles.css";

@@ -175,7 +175,7 @@ mock.module("@tanstack/react-router", () => ({
   useNavigate: () => () => undefined,
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,

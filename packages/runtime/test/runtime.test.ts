@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { gunzipSync } from "node:zlib";
 import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
@@ -203,6 +204,11 @@ import {
 import { hostShellSession } from "./isolated-git-home-fixture";
 
 function capturedRepositorySetupCommand(calls: Array<Record<string, unknown>>): string {
+  // Single-command programs carry the compressed program inline.
+  for (const { cmd } of calls) {
+    const embedded = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| gzip -dc/u);
+    if (embedded) return gunzipSync(Buffer.from(embedded[1]!, "base64")).toString("utf8");
+  }
   const chunks = calls.flatMap(({ cmd }) => {
     const match = String(cmd).match(/^printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
     return match ? [match[1]!] : [];
@@ -225,6 +231,10 @@ function freshSetupBox<T>(ok: T): (cmd: unknown) => T | Record<string, unknown> 
     const text = String(cmd);
     for (const match of text.matchAll(/mv -f '[^']+' '([^']+)'/gu)) installed.add(match[1]!);
     const launched = text.match(/opengeni_setup_program='([^']+)'/u);
+    // A self-installing launcher installs its embedded program before running it.
+    if (launched && text.includes('gzip -dc > "$opengeni_setup_transfer"')) {
+      installed.add(launched[1]!);
+    }
     if (launched && !installed.has(launched[1]!)) {
       const output = "__OPENGENI_SETUP_PROGRAM_MISSING__\n";
       return { output, stdout: output, stderr: "", exitCode: 86, status: 86 };
@@ -7095,7 +7105,8 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls.length).toBeGreaterThan(1);
+    // A fresh box installs and runs the compressed program in one command.
+    expect(calls).toHaveLength(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
     expect(capturedRepositorySetupCommand(calls)).toContain("-c init.defaultBranch=main init");
@@ -7152,7 +7163,7 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls.length).toBeGreaterThan(1);
+    expect(calls).toHaveLength(1);
     // The seed is inlined as an ephemeral export PREFIX on the command text — it is
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
@@ -7215,7 +7226,9 @@ describe("runtime event normalization", () => {
       },
     );
 
-    const cmd = capturedRepositorySetupCommand(calls);
+    // Seeds ride the per-turn launcher; the reusable program stays token-free.
+    const cmd = capturedRepositorySetupLauncher(calls);
+    expect(capturedRepositorySetupCommand(calls)).not.toContain("glpat_liveToken123");
     expect(calls[0]?.environment).toBeUndefined();
     expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
@@ -7284,7 +7297,78 @@ describe("runtime event normalization", () => {
     expect(capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })))).toContain(
       created[0]!.path,
     );
-    expect(deleted).toEqual([created[0]!.path]);
+    // The successful program moved the seed into its token file, so no
+    // separate cleanup round trip is needed.
+    expect(deleted).toEqual([]);
+    // The per-turn program decodes, runs and removes itself in one command.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("/tmp/opengeni/repository-setup-payloads/");
+  });
+
+  test("smart-Git broker seed is cleaned up when the clone program fails", async () => {
+    const commands: string[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    await expect(
+      runRepositoryCloneHook(
+        {
+          createEditor: () => ({
+            createFile: async (operation: { path: string }) => {
+              created.push(operation.path);
+            },
+            updateFile: async () => undefined,
+            deleteFile: async (operation: { path: string }) => {
+              deleted.push(operation.path);
+            },
+          }),
+          exec: async (args: { cmd: string }) => {
+            commands.push(args.cmd);
+            return {
+              output: "fatal",
+              stdout: "",
+              stderr: "fatal",
+              wallTimeSeconds: 0,
+              exitCode: 1,
+            };
+          },
+        } as any,
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "personal-binding",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        {
+          environment: { HOME: "/workspace" },
+          gitCredentialBindings: [
+            {
+              credentialBindingId: "personal-binding",
+              provider: "github",
+              token: "oggh1.secret-broker-bearer",
+              transport: {
+                kind: "http_broker",
+                repositories: [
+                  {
+                    repositoryUri: "https://github.com/acme/private.git",
+                    brokerUri: "https://broker.example.test/v1/git/personal/route",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ),
+    ).rejects.toThrow("Repository clone hook failed");
+    expect(created).toHaveLength(1);
+    expect(deleted).toEqual(created);
+    // The command reported its exit, so it already removed its payload in-box.
+    expect(commands).toHaveLength(1);
   });
 
   test("smart-Git broker bearer attempts cleanup when the editor write outcome is unknown", async () => {

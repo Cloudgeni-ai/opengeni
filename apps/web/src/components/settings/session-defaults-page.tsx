@@ -24,10 +24,10 @@ import {
   type LearningModes,
 } from "@/components/agent/capability-learning";
 import { InAppHelpLink } from "@/components/in-app-help-link";
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { Notice } from "@opengeni/react/ui/notice";
 import { useAppContext } from "@/context";
 import {
   agentConfigErrorText,

@@ -49,9 +49,10 @@ for (const gzipAvailable of [true, false]) {
         expect(executions).toBe(1);
         expect(calls.some((cmd) => cmd.includes("| gzip -dc"))).toBe(gzipAvailable);
         const transfers = calls.filter((cmd) => cmd.startsWith("printf '%s'"));
-        expect(transfers.every((cmd) => Buffer.byteLength(cmd, "utf8") < 4 * 1024)).toBe(true);
+        // 12 KiB base64 chunks keep each wrapped command under Modal's 64-KiB argv limit.
+        expect(transfers.every((cmd) => Buffer.byteLength(cmd, "utf8") < 13 * 1024)).toBe(true);
         if (gzipAvailable) expect(transfers.length).toBeLessThan(4);
-        else expect(transfers.length).toBeGreaterThan(40);
+        else expect(transfers.length).toBeGreaterThan(5);
         expect(await readdir(payloadRoot)).toEqual([]);
       } finally {
         await rm(home, { recursive: true, force: true });

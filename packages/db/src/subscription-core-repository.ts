@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type {
   ConnectionHealth,
   ConnectionKind,
@@ -98,6 +98,33 @@ export async function listSubscriptionConnectionAssignmentPolicies(
 }
 
 /**
+ * The status of `alias`'s connection row as an availability read sees it at
+ * `now`. A 403 quarantine is `error` with `health_retry_at` (only the
+ * quarantine writer sets it; any other status or error write drops it) and
+ * it ends by itself at that time: from then on the connection reads
+ * `active`, without waiting for a turn to run the recovery routine, which
+ * stores the same transition for the connections that turn may lease.
+ */
+export function subscriptionConnectionEffectiveStatus(
+  alias: string,
+  now: SQL = sql`clock_timestamp()`,
+): SQL {
+  const row = sql.raw(alias);
+  return sql`case when ${row}.status = 'error' and ${row}.health_retry_at <= ${now}
+    then 'active' else ${row}.status end`;
+}
+
+/** The row's last error as availability reads see it: none once its quarantine ended. */
+export function subscriptionConnectionEffectiveLastError(
+  alias: string,
+  now: SQL = sql`clock_timestamp()`,
+): SQL {
+  const row = sql.raw(alias);
+  return sql`case when ${row}.status = 'error' and ${row}.health_retry_at <= ${now}
+    then null else ${row}.last_error end`;
+}
+
+/**
  * Read the provider/workspace-visible connection world for the pure placement
  * policy. Account and workspace are mandatory; provider and connection kind
  * may narrow the result (the shared core passes both: a row of another kind
@@ -105,6 +132,14 @@ export async function listSubscriptionConnectionAssignmentPolicies(
  * credential load).
  * Callers cannot accidentally turn this into a viewer-derived or cross-account pool read.
  * Credential ciphertext is deliberately never selected here.
+ *
+ * `health` says how an ended quarantine reads. `effective`: healthy, for a
+ * reader that only decides availability (admission, the catalog), which
+ * cannot run the recovery routine. `stored`: still `error`, for placement of
+ * an accepted turn, whose lease and credential reads enforce the stored
+ * status; the turn recovers ended quarantines before it places, and one that
+ * ends after that recovery waits for the turn's next check rather than being
+ * leased and refused at credential load.
  */
 export async function listSubscriptionConnectionsForPlacement(
   db: Database,
@@ -114,6 +149,7 @@ export async function listSubscriptionConnectionsForPlacement(
     provider?: ProviderId;
     kind?: ConnectionKind;
     now?: Date;
+    health: "effective" | "stored";
   },
 ): Promise<SubscriptionConnection[]> {
   const now = (input.now ?? new Date()).toISOString();
@@ -144,7 +180,11 @@ export async function listSubscriptionConnectionsForPlacement(
     db,
     sql`select connection.id::text as id, connection.provider, connection.kind,
       connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
-      connection.status as health, connection.allocator_enabled, connection.extra_credits_enabled,
+      ${
+        input.health === "effective"
+          ? subscriptionConnectionEffectiveStatus("connection", sql`${now}::timestamptz`)
+          : sql`connection.status`
+      } as health, connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
       case when quota.model_catalog_refresh_generation = connection.refresh_generation
         and quota.model_catalog_observed_at <= ${now}::timestamptz

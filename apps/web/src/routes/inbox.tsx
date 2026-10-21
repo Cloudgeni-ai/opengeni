@@ -32,38 +32,38 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/dialog";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
-import { Toolbar } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/dropdown-menu";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { Switch } from "@opengeni/react/ui/switch";
+import { Toolbar } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@/context";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { secretSaveTargets } from "@/lib/secrets-ui";
 import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";

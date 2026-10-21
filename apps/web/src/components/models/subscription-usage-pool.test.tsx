@@ -82,7 +82,7 @@ test("workspace scope and sparse/unknown readings remain truthful", async () => 
     root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
   );
   expect(container.textContent).not.toContain("Team Pro 2");
-  expect(container.textContent).toContain("Some account limits aren't available yet");
+  expect(container.textContent).toContain("No account has reported its limit yet");
   expect(container.textContent).toContain("Not reported");
   expect(container.querySelectorAll('[role="meter"]')).toHaveLength(0);
   expect(
@@ -201,4 +201,23 @@ test("workspace loading and failure show no pool until available accounts are es
   expect(container.textContent).toBe("");
   await act(async () => reject(new Error("unavailable")));
   expect(container.textContent).toBe("");
+});
+
+test("an unreported account is named as left out of a total the others still give, aligned with the account rows", async () => {
+  const pool = pooledLimitsFixture("organization");
+  const weekly = pool.windows.find((window) => window.id === "weekly")!;
+  weekly.accounts = weekly.accounts.map((account, index) =>
+    index === 1 ? { ...account, remainingPercent: null } : account,
+  );
+  weekly.remainingPercent = 61.82;
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).toContain("62% left");
+  expect(container.textContent).toContain(
+    "Leaves out Team Pro 2, which hasn't reported its limit yet.",
+  );
+  expect(container.textContent).toContain("Read 3 min ago.");
+  // The same inset as list rows, so the bar lines up with their dividers.
+  expect(container.querySelector("section")!.className).toContain("px-3");
 });

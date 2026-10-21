@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
 import { CreditsPrize } from "@/components/onboarding/credits-prize";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@opengeni/react/ui/dialog";
 import { waitForCheckoutCredits, type CreditCheckoutClient } from "@/lib/credit-checkout";
 import { formatCreditAmount } from "@/lib/onboarding-use-case";
 import { notifyCreditBalanceChanged } from "@/lib/credit-balance-events";

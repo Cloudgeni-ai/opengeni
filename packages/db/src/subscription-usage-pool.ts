@@ -35,6 +35,40 @@ function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+/**
+ * Windows the provider refuses until a later time, as the account list shows
+ * "Limit reached": an exhausted window, or the account's usage-limit deadline
+ * matched to the window that resets then (otherwise by its distance).
+ */
+export function blockedSubscriptionWindows(
+  provider: Provider,
+  usage: ReturnType<typeof projectSubscriptionCoreAccountUsage>,
+  now: number,
+): Partial<Record<Window, number>> {
+  const blocked: Partial<Record<Window, number>> = {};
+  if (!usage) return blocked;
+  const block = (id: Window, until: number) => {
+    if (until > now) blocked[id] = Math.max(blocked[id] ?? 0, until);
+  };
+  const windows = usage.windows.flatMap((window) => {
+    const id = windowId(provider, window.id);
+    const resetsAt = epoch(window.resetsAt);
+    return id === null ? [] : [{ id, resetsAt, status: window.status }];
+  });
+  for (const window of windows) {
+    if (window.status === "exhausted" && window.resetsAt !== null)
+      block(window.id, window.resetsAt);
+  }
+  const until = epoch(usage.exhaustedUntil);
+  if (until !== null && until > now) {
+    const matched = windows.find(
+      (window) => window.resetsAt !== null && Math.abs(window.resetsAt - until) <= 15 * 60_000,
+    );
+    block(matched?.id ?? (until - now > 5 * 3_600_000 ? "weekly" : "five_hour"), until);
+  }
+  return blocked;
+}
+
 /** Relative estimates, not promised provider allowances; observations supersede these. */
 export function subscriptionPlanWeight(provider: Provider, plan: string | null): number {
   const tier = plan?.toLowerCase().replaceAll(/[^a-z0-9]/g, "") ?? "";
@@ -85,6 +119,9 @@ export async function readSubscriptionUsagePool(
           ).values(),
         ];
       }
+      // Only accounts that can serve work hold included usage: a disabled or
+      // disconnected account is left out, as it is for routing.
+      rows = rows.filter((row) => row.status === "active" && row.allocator_enabled);
       // Workspace scope selects accounts, never a fraction of their usage: a shared
       // account's history and forecast include activity from every workspace.
       const ids = rows.map((row) => row.id);
@@ -111,16 +148,18 @@ export async function readSubscriptionUsagePool(
         accounts: rows.map((row) => {
           const usage = projectSubscriptionCoreAccountUsage(row);
           const history = readings.filter((reading) => reading.connectionId === row.id);
-          const observedWindows = new Set(history.map((reading) => reading.window));
           return {
             id: row.id,
             label: row.label ?? row.account_email ?? row.provider_account_id ?? "Account",
             plan: row.plan_type,
             planWeight: subscriptionPlanWeight(input.provider, row.plan_type),
+            blocked: blockedSubscriptionWindows(input.provider, usage, now),
+            // The stored snapshot and the retained readings compete by time:
+            // the newest observation of each window is its current value.
             windows: [
               ...(usage?.windows ?? []).flatMap((window) => {
                 const id = windowId(input.provider, window.id);
-                return id === null || observedWindows.has(id)
+                return id === null
                   ? []
                   : [
                       {

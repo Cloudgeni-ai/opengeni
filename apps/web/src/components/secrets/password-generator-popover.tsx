@@ -7,9 +7,9 @@ import { RefreshCwIcon, WandSparklesIcon } from "lucide-react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { useCallback, useId, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { MENU_SURFACE_CLASS } from "@/components/ui/menu-styles";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@opengeni/react/ui/button";
+import { MENU_SURFACE_CLASS } from "@opengeni/react/ui/menu-styles";
+import { Switch } from "@opengeni/react/ui/switch";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------

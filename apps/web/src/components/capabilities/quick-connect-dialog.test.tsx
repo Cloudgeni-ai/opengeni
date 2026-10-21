@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 // directly is equivalent to Radix invoking it on an outside click, including
 // while a connect is in flight.
 let capturedOnOpenChange: ((open: boolean) => void) | null = null;
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({
     open,
     onOpenChange,

@@ -277,6 +277,8 @@ export const embeddingMigrationTail = [
   "0769_private_visibility_never_blocks.sql",
   "0763_queue_steer_admission_recheck_repair.sql",
   "0764_interrupted_turn_recovery.sql",
+  // Replaces the recovery inventory 0764 rewrote; replay after it.
+  "0880_quiescence_repair_skips_parked_waits.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501
@@ -354,5 +356,12 @@ export const embeddingMigrationTail = [
   "0873_mcp_binding_delegation_revocation.sql",
   // Rewrites the resolver installed by withheld 0478; replay after it.
   "0876_connection_validation_shared_locks.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
+  // after the fence graph it edits.
+  "0883_retired_instance_interactions.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

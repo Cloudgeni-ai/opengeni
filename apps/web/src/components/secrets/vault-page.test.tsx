@@ -8,7 +8,7 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 const { VaultPage } = await import("./vault-page");
-const { TooltipProvider } = await import("@/components/ui/tooltip");
+const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 
 afterAll(() => {
   GlobalRegistrator.unregister();

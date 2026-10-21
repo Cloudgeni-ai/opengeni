@@ -1,11 +1,14 @@
 import { useId, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { DetailPage } from "@/components/ui/detail-sheet";
-import { Disclosure } from "@/components/ui/disclosure";
-import { HelpTip } from "@/components/ui/inline-help";
-import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage } from "@opengeni/react/ui/detail-sheet";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { HelpTip } from "@opengeni/react/ui/inline-help";
+import {
+  SegmentedControl,
+  type SegmentedControlOption,
+} from "@opengeni/react/ui/segmented-control";
 
 import { organization } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection, useKitPane } from "../kit";
