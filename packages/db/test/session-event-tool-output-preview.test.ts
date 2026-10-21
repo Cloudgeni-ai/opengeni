@@ -234,3 +234,100 @@ test("previews let one step page hold many large outputs", async () => {
   expect(planned.events).toHaveLength(40);
   expect(planned.hasMore).toBe(false);
 }, 120_000);
+
+test("wide or deep structured outputs go straight to a bounded text preview", async () => {
+  const items = Array.from({ length: 20_000 }, (_, index) => ({
+    id: index,
+    title: `row ${index}`,
+  }));
+  const wideObject = Object.fromEntries(
+    Array.from({ length: 40 }, (_, index) => [`key${index}`, "v".repeat(500)]),
+  );
+  const deep = { a: { b: { c: { d: "deep ".repeat(5_000) } } } };
+  const multibyte = `${"æøå🙂".repeat(3_000)}end`;
+  const mcpJson = JSON.stringify({ isError: true, rows: Array.from({ length: 400 }, (_, i) => i) });
+  const { read } = await seed([
+    {
+      sequence: 1,
+      type: "agent.toolCall.output",
+      payload: { id: "w1", toolName: "search", output: { content: items } },
+    },
+    { sequence: 2, type: "agent.toolCall.output", payload: { id: "w2", output: wideObject } },
+    { sequence: 3, type: "agent.toolCall.output", payload: { id: "w3", output: deep } },
+    { sequence: 4, type: "agent.toolCall.output", payload: { id: "w4", output: multibyte } },
+    {
+      sequence: 5,
+      type: "agent.toolCall.output",
+      payload: {
+        id: "w5",
+        error: "command failed: exit 2",
+        output: { content: [{ type: "text", text: `${mcpJson}${" ".repeat(6_000)}` }] },
+      },
+    },
+    // Wide but within the ceiling: exact, without a preview fact.
+    {
+      sequence: 6,
+      type: "agent.toolCall.output",
+      payload: { id: "w6", output: Array.from({ length: 600 }, (_, i) => `item ${i}`) },
+    },
+  ]);
+  const page = await read({ ...stepRead, toolOutputPreview: true });
+  const payload = (sequence: number) =>
+    page.events.find((event) => event.sequence === sequence)!.payload as Record<string, any>;
+
+  const wide = payload(1);
+  expect(wide.outputPreview.shape).toBe("text");
+  expect(wide.toolName).toBe("search");
+  expect(wide.output.startsWith('{"content": [{"id": 0')).toBe(true);
+  expect(wide.output).toContain("characters omitted from this preview");
+  expect(wide.outputPreview.originalBytes).toBeGreaterThan(400_000);
+  expect(JSON.stringify(page.events)).not.toContain("opengeni:tool-output-preview:too-wide");
+
+  expect(payload(2).outputPreview.shape).toBe("text");
+  // Below the walked depth, containers are kept whole: too large, so text.
+  expect(payload(3).outputPreview.shape).toBe("text");
+
+  // Multibyte strings are cut on characters, not bytes.
+  const cut = payload(4);
+  expect(cut.outputPreview.shape).toBe("structured");
+  expect(cut.output.startsWith("æøå🙂")).toBe(true);
+  expect(cut.output.endsWith("æøå🙂end")).toBe(true);
+  expect(cut.output).not.toContain("\uFFFD");
+
+  // A string error survives; JSON text in an MCP result is cut like any text.
+  const failed = payload(5);
+  expect(failed.error).toBe("command failed: exit 2");
+  expect(failed.outputPreview.shape).toBe("structured");
+  expect(failed.output.content[0].text).toContain("characters omitted from this preview");
+
+  expect(payload(6).output).toHaveLength(600);
+  expect(payload(6).outputPreview).toBeUndefined();
+
+  for (const event of page.events) {
+    expect(bytes(event.payload)).toBeLessThanOrEqual(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES);
+  }
+}, 120_000);
+
+test("a previewed page also bounds the source bytes it projects", async () => {
+  // Legacy rows far above the write bound: each counts a sixteenth of its
+  // source, so one page walks at most about 16 MiB of source payloads.
+  const rows = Array.from({ length: 24 }, (_, index) => ({
+    sequence: index + 1,
+    type: "agent.toolCall.output",
+    payload: { id: `l${index}`, output: `${index}:${"L".repeat(1_600_000)}` },
+  }));
+  const { read } = await seed(rows);
+  for (const options of [
+    { ...stepRead, toolOutputPreview: true },
+    { ...stepRead, limit: 1_000, toolOutputPreview: true },
+  ] satisfies ListSessionEventPageOptions[]) {
+    const page = await read(options);
+    expect(page.events.length).toBeGreaterThan(1);
+    expect(page.events.length).toBeLessThan(12);
+    expect(page.hasMore).toBe(true);
+    expect(page.truncatedBy).toBe("bytes");
+    for (const event of page.events) {
+      expect((event.payload as Record<string, any>).outputPreview.shape).toBe("structured");
+    }
+  }
+}, 180_000);

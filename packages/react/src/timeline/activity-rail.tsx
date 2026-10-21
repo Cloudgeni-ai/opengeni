@@ -327,10 +327,13 @@ export function renderActivity(
       const Renderer = toolRegistry.resolve(shown);
       const outputPreview = item.outputPreview ?? null;
       // A row that cannot read its preview waits for its exact output; one
-      // whose read failed falls back to the generic row, which says so.
+      // whose read failed, or that has no reader, falls back to the generic
+      // row, which says it shows a preview.
       const exactFirst = outputPreview !== null && !rendersToolOutputPreview(Renderer, shown);
       const Shown =
-        exactFirst && outputPreview.state === "error" ? toolRegistry.fallback : Renderer;
+        exactFirst && (outputPreview.state === "error" || !outputPreview.load)
+          ? toolRegistry.fallback
+          : Renderer;
       return (
         <ToolRowBoundary name={toolDisplayName(msg, shown.name)} resetKeys={[item.status, Shown]}>
           <ToolCallTruncationProvider value={item.truncation ?? null}>
@@ -403,7 +406,7 @@ function ToolOutputExactRow({
     <div data-og-tool-output-loading="" aria-busy="true">
       <ActivityDisclosure
         icon={<WrenchIcon className="size-3.5" />}
-        title={toolDisplayName(msg, item.name)}
+        title={toolDisplayName(msg, item.name, item.display)}
         preview={msg("timeline.toolRenderers.loadingOutput")}
         expandable={false}
       />

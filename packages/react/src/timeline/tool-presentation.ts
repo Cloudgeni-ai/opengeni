@@ -1636,10 +1636,22 @@ export function presentsToolOutputPreview(item: ToolCallItem): boolean {
   const kind = presentedToolKind(shown);
   if (!PREVIEW_READABLE_KINDS.has(kind)) return false;
   if (kind !== "generic") return true;
-  // A generic row draws retained images from its result, and parses a JSON
-  // result string whole: a cut one would not parse.
-  if (typeof shown.output === "string" && /^\s*[[{]/u.test(shown.output)) return false;
+  // A generic row draws retained images from its result, and parses JSON
+  // result text whole (an MCP `content[].text` included) for its error flag:
+  // cut JSON would not parse.
+  if (hasCutJsonText(shown.output, 0)) return false;
   return retainedToolResultImages(shown.output).images.length === 0;
+}
+
+const OUTPUT_PREVIEW_OMISSION = / characters omitted from this preview\]…\n/u;
+
+function hasCutJsonText(value: unknown, depth: number): boolean {
+  if (typeof value === "string") {
+    return /^\s*[[{]/u.test(value) && OUTPUT_PREVIEW_OMISSION.test(value);
+  }
+  if (depth >= 4 || value === null || typeof value !== "object") return false;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  return children.some((child) => hasCutJsonText(child, depth + 1));
 }
 
 export function toolRowPresentation(

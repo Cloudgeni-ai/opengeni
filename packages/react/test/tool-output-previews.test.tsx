@@ -7,7 +7,11 @@ import {
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { useSessionEvents } from "../src/hooks/use-session-events";
-import { toolOutputPreviewFact } from "../src/hooks/tool-output-reads";
+import {
+  TOOL_OUTPUT_READS_IN_FLIGHT,
+  toolOutputPreviewFact,
+  useToolOutputReads,
+} from "../src/hooks/tool-output-reads";
 import type { ToolCallItem, ToolOutputPreview, TimelineItem, TurnStepsItem } from "../src/timeline";
 import { presentsToolOutputPreview } from "../src/timeline/tool-presentation";
 
@@ -32,6 +36,8 @@ const PUBLISH_RECEIPT = JSON.stringify({
   contentType: "text/plain",
   padding: "p".repeat(6000),
 });
+/** The omission marker the server puts in a shortened string. */
+const CUT = "\n…[40000 characters omitted from this preview]…\n";
 
 function at(sequence: number, type: SessionEvent["type"], payload: unknown, turnId: string | null) {
   return {
@@ -388,7 +394,12 @@ describe("tool rows with an output preview", () => {
       { name: "web_search_call", arguments: { query: "opengeni" } },
       { name: "tool_search", arguments: { query: "files" } },
       // A generic result that is a JSON document: a cut one would not parse.
-      { name: "mcp__issues__list", output: '{"issues": [{"id": 1, "title": "…' },
+      { name: "mcp__issues__list", output: `{"issues": [{"id": 1, "title": "${CUT}"}]}` },
+      // The same JSON inside an MCP text result, which carries its error flag.
+      {
+        name: "mcp__issues__list",
+        output: { content: [{ type: "text", text: `{"isError": true, "detail": "${CUT}"}` }] },
+      },
     ];
     for (const overrides of cases) {
       const { item, loads } = previewItem(overrides);
@@ -411,9 +422,23 @@ describe("tool rows with an output preview", () => {
     expect(presentsToolOutputPreview(previewItem({ name: "web_search_call" }).item)).toBe(false);
     expect(
       presentsToolOutputPreview(
-        previewItem({ name: "mcp__issues__list", output: '[{"id": 1' }).item,
+        previewItem({ name: "mcp__issues__list", output: `[{"id": 1${CUT}}]` }).item,
       ),
     ).toBe(false);
+    // JSON-looking text that was not cut parses whole: still preview-readable.
+    expect(
+      presentsToolOutputPreview(
+        previewItem({
+          name: "mcp__issues__list",
+          output: {
+            content: [
+              { type: "text", text: '{"ok": true}' },
+              { type: "text", text: CUT },
+            ],
+          },
+        }).item,
+      ),
+    ).toBe(true);
     // A preview's retained screenshots draw from the exact result.
     expect(
       presentsToolOutputPreview(
@@ -489,6 +514,138 @@ describe("tool rows with an output preview", () => {
       expect(r.container.querySelector("[data-og-tool-output-preview]")).not.toBeNull();
     } finally {
       await r.unmount();
+    }
+  });
+
+  test("without a reader, a renderer that needs the exact output never draws the preview", async () => {
+    const seen: unknown[] = [];
+    const registry = createDefaultToolRegistry({
+      entries: [
+        {
+          match: "name",
+          name: "custom_tool",
+          render: ({ item: shown }) => {
+            seen.push(shown.output);
+            return <div>custom</div>;
+          },
+        },
+      ],
+    });
+    for (const name of ["custom_tool", "view_image", "knowledge_save"]) {
+      const { item } = previewItem({ name }, { load: undefined });
+      const r = await renderComponent(<ActivityRail items={[item]} bare toolRegistry={registry} />);
+      try {
+        await flush();
+        expect(r.container.querySelector("[data-og-tool-output-loading]")).toBeNull();
+        await actRun(() => rowButton(r.container).click());
+        await flush();
+        expect([
+          name,
+          r.container.querySelector("[data-og-tool-output-preview]")?.textContent,
+        ]).toEqual([name, "Showing a preview of this output."]);
+      } finally {
+        await r.unmount();
+      }
+    }
+    expect(seen).toEqual([]);
+  });
+
+  test("a loading row keeps the connector's display title", async () => {
+    const { item } = previewItem({
+      name: "mcp__linear__list_issues",
+      display: { title: "List Linear issues", connector: { name: "Linear" } } as never,
+      output: `{"issues": [${CUT}]}`,
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} bare />);
+    try {
+      await flush();
+      expect(r.container.querySelector("[data-og-tool-output-loading]")?.textContent).toContain(
+        "List Linear issues",
+      );
+    } finally {
+      await r.unmount();
+    }
+  });
+});
+
+/* ---- the read store -------------------------------------------------------- */
+
+describe("exact tool-output reads", () => {
+  function deferredReads() {
+    const pending: Array<{ sequence: number; resolve: (events: SessionEvent[]) => void }> = [];
+    const read = (sequence: number) =>
+      new Promise<readonly SessionEvent[]>((resolve) => pending.push({ sequence, resolve }));
+    const answer = (index: number) => {
+      const { sequence, resolve } = pending[index]!;
+      resolve([at(sequence, "agent.toolCall.output", { id: `c${sequence}`, output: "x" }, "T1")]);
+    };
+    return { read, pending, answer };
+  }
+
+  test("reads at most a few rows at once and drains the rest in order", async () => {
+    const { read, pending, answer } = deferredReads();
+    const turns = new Map([["T1", {}]]);
+    const hook = await renderHook(() => useToolOutputReads(read, turns), undefined);
+    try {
+      await actRun(() => {
+        for (let sequence = 1; sequence <= 7; sequence += 1) {
+          hook.result.current.reader(`evt-${sequence}`, sequence, "T1").load();
+        }
+      });
+      await flush();
+      expect(pending.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4]);
+      expect(TOOL_OUTPUT_READS_IN_FLIGHT).toBe(4);
+      expect(hook.result.current.reader("evt-7", 7, "T1").state).toBe("loading");
+      await actRun(() => {
+        answer(0);
+        answer(1);
+      });
+      await flush();
+      expect(pending.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(hook.result.current.reader("evt-1", 1, "T1").state).toBe("loaded");
+      expect([...hook.result.current.exact.keys()]).toEqual(["evt-1", "evt-2"]);
+      await actRun(() => {
+        for (let index = 2; index < 6; index += 1) answer(index);
+      });
+      await flush();
+      await actRun(() => answer(6));
+      await flush();
+      expect(pending).toHaveLength(7);
+      expect(hook.result.current.exact.size).toBe(7);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("unloading a turn's steps drops its exact outputs and reads still waiting", async () => {
+    const { read, pending, answer } = deferredReads();
+    let turns = new Map<string, unknown>([["T1", {}]]);
+    const hook = await renderHook(() => useToolOutputReads(read, turns), undefined);
+    try {
+      await actRun(() => {
+        for (let sequence = 1; sequence <= 6; sequence += 1) {
+          hook.result.current.reader(`evt-${sequence}`, sequence, "T1").load();
+        }
+      });
+      await flush();
+      await actRun(() => answer(0));
+      await flush();
+      expect(hook.result.current.exact.has("evt-1")).toBe(true);
+      // The turn's steps are unloaded with reads in flight and queued.
+      turns = new Map();
+      await hook.rerender();
+      await flush();
+      expect(hook.result.current.exact.size).toBe(0);
+      await actRun(() => {
+        for (let index = 1; index < pending.length; index += 1) answer(index);
+      });
+      await flush();
+      // Reads already in flight settle into nothing; the queued one never runs.
+      expect(pending.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4, 5]);
+      expect(hook.result.current.exact.size).toBe(0);
+      expect(hook.result.current.reader("evt-6", 6, "T1").state).toBe("preview");
+    } finally {
+      await hook.unmount();
     }
   });
 });

@@ -73,7 +73,10 @@ class ToolOutputReads {
   private readonly listeners = new Set<() => void>();
   private readonly queue: string[] = [];
   private inFlight = 0;
-  private readonly loads = new Map<string, () => void>();
+  private notifying = false;
+  private readonly loads = new Map<string, { turnId: string | null; load: () => void }>();
+  /** Turns whose steps are loaded; null until the hook first reports them. */
+  private retained: ReadonlySet<string> | null = null;
 
   constructor(private readonly read: ToolOutputPageRead) {}
 
@@ -88,27 +91,42 @@ class ToolOutputReads {
 
   /** The stable loader for one row, so an open row's effect asks once. */
   loader(eventId: string, sequence: number, turnId: string | null): () => void {
-    let load = this.loads.get(eventId);
-    if (!load) {
-      load = () => this.request(eventId, sequence, turnId);
-      this.loads.set(eventId, load);
+    let entry = this.loads.get(eventId);
+    if (!entry) {
+      entry = { turnId, load: () => this.request(eventId, sequence, turnId) };
+      this.loads.set(eventId, entry);
     }
-    return load;
+    return entry.load;
   }
 
   /**
    * Forget exact outputs of turns whose steps are no longer loaded. They live
    * exactly as long as the step page that delivered their previews, so an
-   * open row never loses its exact output to make room for another.
+   * open row never loses its exact output to make room for another. A read
+   * still in flight for such a turn is dropped when it settles.
    */
   retainTurns(turns: ReadonlySet<string>): void {
+    this.retained = turns;
+    for (const [eventId, entry] of this.loads) {
+      if (this.released(entry.turnId)) this.loads.delete(eventId);
+    }
     let next: Map<string, Entry> | null = null;
     for (const [eventId, entry] of this.entries) {
-      if (entry.state === "loading" || !entry.turnId || turns.has(entry.turnId)) continue;
+      if (entry.state === "loading" || !this.released(entry.turnId)) continue;
       next ??= new Map(this.entries);
       next.delete(eventId);
     }
     if (next) this.commit(next);
+  }
+
+  private released(turnId: string | null): boolean {
+    return turnId !== null && this.retained !== null && !this.retained.has(turnId);
+  }
+
+  private forget(eventId: string): void {
+    const next = new Map(this.entries);
+    next.delete(eventId);
+    this.commit(next);
   }
 
   private request(eventId: string, sequence: number, turnId: string | null): void {
@@ -131,11 +149,18 @@ class ToolOutputReads {
       const eventId = this.queue.shift()!;
       const entry = this.entries.get(eventId);
       if (!entry || entry.state !== "loading") continue;
+      // Its turn's steps were unloaded while it waited: skip the read.
+      if (this.released(entry.turnId)) {
+        this.forget(eventId);
+        continue;
+      }
       this.inFlight += 1;
       const settle = (event: SessionEvent | null) => {
         this.inFlight -= 1;
         const latest = this.entries.get(eventId);
-        if (latest?.state === "loading") {
+        if (latest?.state === "loading" && this.released(latest.turnId)) {
+          this.forget(eventId);
+        } else if (latest?.state === "loading") {
           this.commit(
             new Map(this.entries).set(eventId, {
               ...latest,
@@ -155,7 +180,14 @@ class ToolOutputReads {
 
   private commit(next: ReadonlyMap<string, Entry>): void {
     this.entries = next;
-    for (const listener of this.listeners) listener();
+    // Coalesce: rows that ask together (a turn opening with several eager
+    // rows) or reads that settle together rebuild the timeline once.
+    if (this.notifying) return;
+    this.notifying = true;
+    queueMicrotask(() => {
+      this.notifying = false;
+      for (const listener of this.listeners) listener();
+    });
   }
 }
 
