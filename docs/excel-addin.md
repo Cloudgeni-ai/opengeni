@@ -9,13 +9,24 @@ Excel on the web, Windows and Mac.
 - **Manifest.** The web app serves `/office/manifest.xml` for its own public
   origin (`apps/web/src/office-manifest.ts`). The add-in id is derived from
   that origin, so two deployments never collide. It adds an Opengeni button to
-  the Home tab and needs ExcelApi 1.7 and `ReadWriteDocument`. Admins deploy it
-  through the Microsoft 365 admin center; for testing, upload it under
-  Add-ins > More Add-ins > My Add-ins > Upload My Add-in.
+  the Home tab and needs ExcelApi 1.7 and `ReadWriteDocument`.
+- **Install page.** `/excel` in the web app (public, linked from the account
+  menu as "Excel add-in") shows the steps for the person's platform: upload the
+  manifest in Excel on the web, a one-line Terminal command on Mac (saves it in
+  Excel's `wef` folder), a one-line PowerShell command on Windows (saves it and
+  lists it under the per-user `WEF\Developer` registry key), or the Microsoft
+  365 admin center's "Upload custom apps" with the manifest link for a whole
+  organization. When no workbook is connected, `excel_run` gives the agent this
+  link to pass on. No connected machine is involved: the pane talks to the API
+  directly.
 - **Pane.** `apps/web/office/` (built by `vite.office.config.ts` into
   `dist/office/`). Sign-in, a workspace picker and the packaged chat UI from
   `@opengeni/react`. Messages sent from the pane carry `modelContext` naming
-  the workbook, so the agent knows which workbook "here" is.
+  the workbook, so the agent knows which workbook "here" is, and the current
+  selection (`selection-context.ts`): the active sheet, the selected range and a
+  sample of its displayed values and formulas (at most 20 rows by 8 columns of
+  its filled part). The selection shows as a pill above the composer; the
+  person can leave it out, and selecting something else brings it back.
 - **Sign-in.** The pane opens the deployment's `/native-sign-in` page in an
   Office dialog with `platform=office` and PKCE. The page redirects to
   `/office/auth-callback.html` on the same origin, which hands the code to the

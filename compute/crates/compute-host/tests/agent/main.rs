@@ -186,9 +186,14 @@ impl World {
         self.violations.lock().unwrap().push(text);
     }
 
-    /// Simulates a VMM crash.
+    /// Simulates a VMM crash: its guest stops answering at once, as a real
+    /// one does, before the agent has noticed.
     fn crash(&self, name: &str) {
         if let Some(process) = self.vms.lock().unwrap().get(name) {
+            process.guest.abort();
+            // Aborting ends the guest's listener only at the task's next
+            // turn; until then a connection by path would still be taken.
+            let _ = std::fs::remove_file(&process.vsock);
             let _ = process.exit.send(true);
         }
     }

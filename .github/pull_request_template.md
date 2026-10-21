@@ -21,7 +21,7 @@ See `docs/design/api-compatibility-policy.md`. Pick one:
 
 - [ ] Candidate/version labels represent substantive source changes, not base-only refreshes.
 - [ ] If `main` advanced, I kept the candidate head frozen and verified mergeability/material compatibility, or documented the actual conflict/incompatibility that required a source change. Freeze-head source admission is required only for `hotfix/*` into `production`.
-- [ ] When the main merge queue is enabled, enqueue with `gh pr merge --auto`; do not bypass. See `docs/merge-queue.md`.
+- [ ] After batcher activation, submit `queue-ready` only after exact-head VM/review evidence; do not merge directly or bypass. Control-plane changes have explicit independent control-plane review. See `docs/merge-batcher.md`.
 
 ## Notes
 

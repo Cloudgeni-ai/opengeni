@@ -9,7 +9,10 @@
 //!   ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //! - [`link`]: the frames between a host and an Opengeni agent gateway
 //!   ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+//! - [`host_metrics`]: the metrics a host sends the control service, and
+//!   how the service checks an export of them.
 
 pub mod fleet;
 pub mod host;
+pub mod host_metrics;
 pub mod link;

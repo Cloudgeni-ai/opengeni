@@ -20,6 +20,7 @@ import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeli
 import type { TimelineItem, TurnStepsItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
+import { joinSessionDetailRead, sessionDetailReadMark } from "../lib/session-detail-read";
 import { usePageLiveActivity } from "./internal";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
@@ -695,6 +696,8 @@ export function useSessionEvents(
     const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
     reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
+    // A head read joins a fresh detail read (useSession's) started from here on.
+    const detailReadMark = sessionDetailReadMark();
     const isCurrent = () =>
       generationRef.current === generation &&
       !controller.signal.aborted &&
@@ -823,6 +826,22 @@ export function useSessionEvents(
      * steps. Resolves "reload" when the missed conversation is too long to
      * append (the caller then loads the latest window).
      */
+    // The durable head: the conversation's fresh detail read when one started
+    // since this stream began loading (the session view's own), else a new one.
+    const readSessionHead = async () => {
+      const joined = joinSessionDetailRead(client, workspaceId, sessionId, detailReadMark);
+      if (joined) {
+        try {
+          return await joined;
+        } catch (cause) {
+          if (controller.signal.aborted) throw cause;
+        }
+      }
+      return await client.getSession(workspaceId, sessionId, {
+        fresh: true,
+        signal: controller.signal,
+      });
+    };
     const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
@@ -830,10 +849,7 @@ export function useSessionEvents(
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await client.getSession(workspaceId, sessionId, {
-          fresh: true,
-          signal: controller.signal,
-        });
+        const session = await readSessionHead();
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {

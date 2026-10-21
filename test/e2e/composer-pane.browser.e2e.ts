@@ -43,24 +43,6 @@ describe("console composer in a split desktop pane", () => {
       viewport: { width: 1775, height: 1000 },
       reducedMotion: "reduce",
     });
-    // Keep the production settings editor, but supply deterministic context at
-    // the fixture boundary instead of bootstrapping a live authenticated app.
-    await page.route("**/src/context.tsx", (route) =>
-      route.fulfill({
-        contentType: "application/javascript",
-        body: `let settings = {}; const context = {
-        client: {
-          getAgentLearningSettings: async () => ({ version: 1, settings }),
-          saveAgentLearningSettings: async (_workspace, input) => {
-            settings = { ...settings, ...input.settings };
-            return { version: 2, settings };
-          }
-        },
-        captureWorkspaceInvocation: () => ({}), ownsWorkspaceInvocation: () => true
-      }; export function useAppContext() { return context; }
-      export function useOptionalAppContext() { return context; }`,
-      }),
-    );
     await page.goto(url, { waitUntil: "networkidle" });
   }, 60_000);
 

@@ -208,6 +208,7 @@ import {
   restoreDirectDeferredCallArgumentTypes,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { createToolSelector } from "./tool-discovery-decision";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   HARNESS_CONTROL_MCP_SERVER_ID,
@@ -2144,6 +2145,8 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Admitted decision provider; caller owns its accounting and cancellation. */
+  toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -3475,13 +3478,13 @@ export function buildOpenGeniAgent(
  * rollout flag remains only an on/off switch; provider selection never depends
  * on the unrelated sandbox structured-tool Boolean.
  *
- * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
- * exact MCP objects may finish materializing after the first request begins.
+ * Every route uses ordinary search/list/invoke controls. Exact MCP objects
+ * may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
  * that catalog is ready. Classification is origin, not transport: the same
  * always-visible base set, eager MCP tools, and authorized first-party harness
- * control tools are in the first request on every path. Generic providers add stable ordinary tool_search/tool_invoke
- * schemas; a valid dispatcher call is renamed to the real tool and bound by
+ * control tools are in the first request on every path. Selected schemas are
+ * frozen in append-only history; a valid dispatcher call is renamed and bound by
  * the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
@@ -3544,6 +3547,9 @@ function maybeInstallLazyToolTransport(
       }
       return names;
     },
+    options.toolSearchDecisionModel
+      ? createToolSelector(options.toolSearchDecisionModel)
+      : undefined,
   );
 }
 
@@ -10255,6 +10261,12 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
+export { createToolSelector } from "./tool-discovery-decision";
+export type {
+  ToolSelector,
+  ToolDecisionInput,
+  ToolDecisionCandidate,
+} from "./tool-discovery-decision";
 
 export { MaxTurnsExceededError } from "@openai/agents";
 
@@ -11136,11 +11148,12 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
 }
 
 function objectStorageFileMount(settings: Settings, prefix: string): any {
-  // Descriptor-driven: a nativeBucketMount backend (modal) mounts via the
+  // Descriptor-driven: a native bucket-mount backend (modal) mounts via the
   // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
   // it needs pre-signed downloads instead. Reading the descriptor (not a
   // hard-coded backend name) keeps this honest as providers are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
+  const nativeBucketMount =
+    CAPABILITY_DESCRIPTORS[settings.sandboxBackend].bucketMount === "native";
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
       throw new Error(

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import {
   RepositoryContextMenuBody,
@@ -22,6 +23,35 @@ const AgentLearningSettingsEditor = lazy(() =>
     default: module.AgentLearningSettingsEditor,
   })),
 );
+
+// The real settings editor reads and saves through the app's client. This
+// in-memory client keeps one chat's overrides over fixed workspace defaults.
+let chatSettings: AgentLearningOverrides = {};
+const fixtureAppContext = {
+  accessContext: { subjectId: "fixture-user" },
+  client: {
+    getAgentLearningSettings: async (_workspaceId: string, _scope: string, source?: unknown) => ({
+      version: 1,
+      settings: source
+        ? chatSettings
+        : { knowledge: "automatic", instructions: "review_first", skills: "off" },
+    }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      const next: Record<string, string> = { ...chatSettings };
+      for (const [key, value] of Object.entries(input.settings)) {
+        if (value === "inherit") delete next[key];
+        else next[key] = value;
+      }
+      chatSettings = next as AgentLearningOverrides;
+      return { version: 2, settings: chatSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -222,4 +252,8 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureAppContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

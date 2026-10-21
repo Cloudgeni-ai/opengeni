@@ -543,11 +543,11 @@ describe("compact session view on the live local workspace route (API fixture)",
     // gave the app: Vite serves this workspace package from its real path.
     const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
     await page.evaluate(
-      async ({ targetWorkspaceId, modulePath: moduleUrl }) => {
+      async ({ targetWorkspaceId, moduleUrl }) => {
         const { notifySessionListChanged } = await import(moduleUrl);
         notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
       },
-      { targetWorkspaceId: workspaceId, modulePath },
+      { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
     );
   };
   const settleRead = async () => {

@@ -57,6 +57,14 @@ mock.module("@opengeni/db", () => ({
   ...realDb,
   getWorkspace: async () => ({ id: WORKSPACE, accountId: ACCOUNT }),
   getWorkspaceSettings: async () => workspaceSettings,
+  getOrganizationModelDefaults: async () => ({
+    sessionDefaults: null,
+    allowedProviders: null,
+    allowedModels: null,
+    modelCompactionThresholds: {},
+    realtimeVoice: {},
+    updatedAt: null,
+  }),
   getActiveSessionHistoryItems: async () => [],
   getSessionRealtimeContinuityEntries: async () => [],
   readSubscriptionCoreProviderRouteForWorkspace: async (

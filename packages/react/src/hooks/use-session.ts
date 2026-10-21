@@ -1,5 +1,6 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { readFreshSessionDetail } from "../lib/session-detail-read";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
@@ -68,8 +69,8 @@ export function useSession(
         return null;
       }
       let readGeneration = 0;
-      const fetched = await client.getSession(workspaceId, sessionId, {
-        fresh: true,
+      // The live stream's head read joins this read (see session-detail-read).
+      const fetched = await readFreshSessionDetail(client, workspaceId, sessionId, {
         signal,
         onRequestStart: () => {
           readGeneration = beginRead?.() ?? ++nextReadGeneration.current;

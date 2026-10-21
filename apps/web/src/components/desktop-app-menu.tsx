@@ -3,11 +3,13 @@ import {
   ExternalLinkIcon,
   MonitorDownIcon,
   PackageIcon,
+  SheetIcon,
   TerminalIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
+import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { copyText } from "@opengeni/react/ui/copy-field";
 import {
   DropdownMenuItem,
@@ -75,5 +77,20 @@ export function DesktopAppSubmenu() {
         </DropdownMenuItem>
       </DropdownMenuSubContent>
     </DropdownMenuSub>
+  );
+}
+
+/** The account menu's "Excel add-in" row: how to add Opengeni to Excel. Hidden on phones and tablets. */
+export function ExcelAddinMenuItem() {
+  if (typeof window === "undefined" || currentPhoneAppPlatform()) return null;
+  return (
+    <DropdownMenuItem asChild>
+      <a href={EXCEL_ADDIN_PATH} target="_blank" rel="noopener noreferrer">
+        <SheetIcon />
+        Excel add-in
+        <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+    </DropdownMenuItem>
   );
 }

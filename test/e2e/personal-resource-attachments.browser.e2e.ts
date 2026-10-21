@@ -140,7 +140,7 @@ describe("personal resource attachments in Chromium", () => {
         release = resolve;
       });
       await loadingPage.route(
-        "**/src/components/personal-resource-attachment-control.tsx*",
+        "**/src/app/components/personal-resource-attachment-control.tsx*",
         async (route) => {
           await held;
           await route.continue();
@@ -171,7 +171,7 @@ describe("personal resource attachments in Chromium", () => {
       await loadingPage.close();
       const failedPage = await context.newPage();
       await failedPage.route(
-        "**/src/components/personal-resource-attachment-control.tsx*",
+        "**/src/app/components/personal-resource-attachment-control.tsx*",
         (route) => route.abort("failed"),
       );
       await failedPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {

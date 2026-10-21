@@ -432,7 +432,12 @@ export type CapabilityDescriptor = {
   };
   portExposure: { kind: PortExposureKind; supportsOnDemandPorts: boolean }; // runloop=false; blaxel only true
   workspaceRoot: string; // os-overridable; per-backend default (providers owns; os defers)
-  nativeBucketMount: boolean; // modal true -> mount/signed-download branch
+  /**
+   * How file resources in object storage can reach the box: the provider's own
+   * bucket mount (modal), an in-box rclone FUSE mount, or not at all. A "none"
+   * backend always receives files as pre-signed downloads.
+   */
+  bucketMount: "native" | "in-container" | "none";
   persistable: boolean;
   supportsRunAs: boolean;
 };
@@ -475,7 +480,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-fs", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: true,
+    bucketMount: "native",
     persistable: true,
     supportsRunAs: true,
   },
@@ -500,7 +505,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -525,7 +530,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // CR9: pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -550,7 +555,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/home/user",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -575,7 +580,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true }, // only on-demand backend
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -600,7 +605,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -626,7 +631,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/vercel/sandbox",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -651,7 +656,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -678,7 +683,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: false,
     supportsRunAs: false,
   },
@@ -703,7 +708,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "none", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -750,7 +755,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -780,7 +785,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -814,7 +819,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: true,
     // The box agent runs as root on Linux; each request still gates on the
     // live agent's Hello `run_as` capability.
@@ -2821,61 +2826,6 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Model defaults an organization owner or admin sets once for every workspace
- * in the organization. Each workspace follows them until it sets its own
- * value; a workspace value always wins, field by field and model by model.
- * Subscriptions and keys are not defaults: they stay organization resources
- * that are shared with workspaces.
- */
-export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    /** Model and reasoning for new chats and schedules; null leaves it automatic. */
-    sessionDefaults: WorkspaceSessionDefaults.nullable(),
-    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
-    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
-    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
-    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
-    /** Automatic compaction trigger by exact model id. */
-    modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
-    updatedAt: z.string().nullable(),
-  }),
-);
-export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
-
-export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
-  sessionDefaults: null,
-  allowedProviders: null,
-  allowedModels: null,
-  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
-  updatedAt: null,
-});
-
-/**
- * PATCH body for organization model defaults. Each field is independent:
- * omitted keeps it, `sessionDefaults: null` makes it automatic again,
- * `modelPolicy` replaces both allowlists at once (null allows everything),
- * and compaction merges by exact model id (null resets just that model).
- */
-export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
-      modelPolicy: z
-        .object({
-          allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
-          allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
-        })
-        .nullable()
-        .optional(),
-      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
-    })
-    .strict(),
-);
-export type UpdateOrganizationModelDefaultsRequest = z.infer<
-  typeof UpdateOrganizationModelDefaultsRequest
->;
-
-/**
  * Whether owners and admins may give an agent session admin access. Off by
  * default; turning it off ends every session's admin access.
  */
@@ -3017,6 +2967,69 @@ export const WorkspaceRealtimeVoicePatch = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoicePatch>;
 
 /**
+ * Model defaults an organization owner or admin sets once for every workspace
+ * in the organization. Each workspace follows them until it sets its own
+ * value; a workspace value always wins, field by field and model by model.
+ * Subscriptions and keys are not defaults: they stay organization resources
+ * that are shared with workspaces.
+ */
+export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Model and reasoning for new chats and schedules; null leaves it automatic. */
+    sessionDefaults: WorkspaceSessionDefaults.nullable(),
+    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
+    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
+    /** Automatic compaction trigger by exact model id. */
+    modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
+    /**
+     * Voice settings by realtime model id. A workspace uses its own settings
+     * for a model when it has saved some, and these otherwise.
+     */
+    realtimeVoice: z.record(z.string().min(1).max(128), RealtimeVoiceSettings),
+    updatedAt: z.string().nullable(),
+  }),
+);
+export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
+
+export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
+  sessionDefaults: null,
+  allowedProviders: null,
+  allowedModels: null,
+  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
+  realtimeVoice: Object.freeze({}) as Record<string, RealtimeVoiceSettings>,
+  updatedAt: null,
+});
+
+/**
+ * PATCH body for organization model defaults. Each field is independent:
+ * omitted keeps it, `sessionDefaults: null` makes it automatic again,
+ * `modelPolicy` replaces both allowlists at once (null allows everything),
+ * and compaction and voice settings merge by exact model id (null resets
+ * just that model).
+ */
+export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+      modelPolicy: z
+        .object({
+          allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+          allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
+      realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+    })
+    .strict(),
+);
+export type UpdateOrganizationModelDefaultsRequest = z.infer<
+  typeof UpdateOrganizationModelDefaultsRequest
+>;
+
+/**
  * The workspace's saved voice settings for one realtime model, or null when
  * none are saved. Read leniently: a malformed entry reads as unset.
  */
@@ -3033,6 +3046,24 @@ export function resolveWorkspaceRealtimeVoiceSettings(
   }
   const parsed = RealtimeVoiceSettings.safeParse((byModel as Record<string, unknown>)[model]);
   return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : null;
+}
+
+/**
+ * The voice settings a realtime model uses in a workspace: the workspace's
+ * own saved settings for it, else its organization's default for it, else
+ * null (the provider's defaults).
+ */
+export function resolveRealtimeVoiceSettings(
+  workspaceSettings: unknown,
+  organizationDefaults: Pick<OrganizationModelDefaults, "realtimeVoice"> | null | undefined,
+  model: string,
+): RealtimeVoiceSettings | null {
+  const own = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model);
+  if (own) return own;
+  const byModel = organizationDefaults?.realtimeVoice;
+  if (!byModel || !Object.hasOwn(byModel, model)) return null;
+  const inherited = byModel[model];
+  return inherited && Object.keys(inherited).length > 0 ? inherited : null;
 }
 
 /** Placement inherited by new top-level chats and schedules that follow the workspace. */
@@ -3495,7 +3526,14 @@ export type OrganizationProviderCustomModelsResponse = z.infer<
 >;
 
 export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["vercel_gateway", "openrouter", "anthropic", "claude_subscription", "opper"]),
+  z.enum([
+    "vercel_gateway",
+    "openrouter",
+    "anthropic",
+    "claude_subscription",
+    "opper",
+    "elevenlabs",
+  ]),
 );
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defineSchema(() =>
@@ -8715,6 +8753,11 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
     voiceDefaults: RealtimeVoiceSettings.optional(),
     /** The workspace's saved voice settings for this model. */
     workspaceVoiceSettings: RealtimeVoiceSettings.optional(),
+    /**
+     * The organization's default voice settings for this model, used while
+     * the workspace has none of its own.
+     */
+    organizationVoiceSettings: RealtimeVoiceSettings.optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;

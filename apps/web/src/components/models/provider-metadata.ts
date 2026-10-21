@@ -1,4 +1,4 @@
-import type { OrganizationModelProviderKind as ProviderKind } from "@opengeni/sdk";
+import type { OrganizationModelCatalogProviderKind as ProviderKind } from "@opengeni/sdk";
 import type { ProviderPresentation } from "@/components/ai-gateway-connection";
 
 // Dependency-free presentation data shared by workspace and organization connections.

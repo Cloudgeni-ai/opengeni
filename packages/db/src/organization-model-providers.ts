@@ -18,12 +18,15 @@ import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
 
-export type OrganizationModelProviderKind =
+/** Providers whose organization key runs models, with custom models to choose. */
+export type OrganizationModelCatalogProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
   | "opper";
+/** Every organization provider key, including ElevenLabs for realtime voice. */
+export type OrganizationModelProviderKind = OrganizationModelCatalogProviderKind | "elevenlabs";
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
@@ -34,7 +37,7 @@ export type OrganizationModelProviderConnection = {
 export type OrganizationModelProviderCustomModel = {
   id: string;
   accountId: string;
-  providerKind: OrganizationModelProviderKind;
+  providerKind: OrganizationModelCatalogProviderKind;
   upstreamModelId: string;
   label: string | null;
   version: number;
@@ -433,7 +436,7 @@ export async function listOrganizationModelProviderCustomModelsForWorkspace(
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     includeRetired?: boolean;
   },
 ): Promise<OrganizationModelProviderCustomModel[]> {
@@ -460,16 +463,16 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
   input: {
     accountId: string;
     workspaceId: string;
-    providerKinds: readonly OrganizationModelProviderKind[];
+    providerKinds: readonly OrganizationModelCatalogProviderKind[];
   },
 ): Promise<
   Record<
-    OrganizationModelProviderKind,
+    OrganizationModelCatalogProviderKind,
     { active: boolean; models: OrganizationModelProviderCustomModel[] }
   >
 > {
   const catalog: Record<
-    OrganizationModelProviderKind,
+    OrganizationModelCatalogProviderKind,
     { active: boolean; models: OrganizationModelProviderCustomModel[] }
   > = {
     vercel_gateway: { active: false, models: [] },
@@ -504,7 +507,9 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
           isNull(schema.organizationModelProviderCustomModels.retiredAt),
         ),
       );
-    for (const connection of connections) catalog[connection.providerKind].active = true;
+    for (const connection of connections) {
+      if (connection.providerKind !== "elevenlabs") catalog[connection.providerKind].active = true;
+    }
     for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
     return catalog;
   });
@@ -515,7 +520,7 @@ export async function getOrganizationModelProviderCustomModelForExecution(
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
   },
 ): Promise<OrganizationModelProviderCustomModel | null> {
@@ -541,7 +546,11 @@ export async function getOrganizationModelProviderCustomModelForExecution(
 
 export async function withOrganizationModelProviderCustomModelReadLock<T>(
   db: Database,
-  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: OrganizationModelCatalogProviderKind;
+  },
   use: (scopedDb: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -557,7 +566,7 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
     claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
   },
@@ -623,7 +632,7 @@ export async function listOrganizationModelProviderCustomModels(
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
   },
 ): Promise<OrganizationModelProviderCustomModel[]> {
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
@@ -689,7 +698,7 @@ export async function createOrganizationModelProviderCustomModel(
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
     label?: string;
     operationId: string;
@@ -770,7 +779,7 @@ export async function retireOrganizationModelProviderCustomModel(
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     customModelId: string;
     expectedVersion: number;
     operationId: string;

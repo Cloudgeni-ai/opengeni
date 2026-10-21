@@ -7,6 +7,7 @@ mod e2b;
 mod group;
 mod lease;
 mod lifecycle;
+mod metrics;
 mod moves;
 mod native;
 mod support;

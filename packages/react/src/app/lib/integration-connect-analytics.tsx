@@ -57,6 +57,7 @@ export const MODEL_CONNECTION_CLASSES = [
   "anthropic",
   "claude_subscription",
   "opper",
+  "elevenlabs",
 ] as const satisfies readonly ModelClass[];
 
 export type IntegrationClass = ConnectionClass | ModelClass;
@@ -146,6 +147,7 @@ export function modelConnectionClass(provider: string): ModelClass | null {
     case "opper":
     case "anthropic":
     case "claude_subscription":
+    case "elevenlabs":
       return provider;
     case "ai-gateway":
     case "vercel_gateway":

@@ -29,6 +29,7 @@ import { AppHostProvider, type AppHost } from "../lib/app-host";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
+import { createMessageContextStore, type MessageContextInput } from "../lib/message-context";
 import { openBlankTab, useLocation } from "../lib/navigation";
 import { toast } from "../lib/toast";
 import { UiEventTargetProvider } from "../lib/ui-events";
@@ -105,9 +106,12 @@ export type SessionAppProps = Readonly<{
   onUnauthorized?: (() => void) | undefined;
   /**
    * Model context added to each new chat and message, such as where the person
-   * is writing from. Per-message context, never instructions.
+   * is writing from and what they have selected. Items with a `label` show as
+   * pills above the composer, and the person can leave one out; pass a new
+   * value whenever it changes. A function is read when each message is sent
+   * and shows nothing. Context for the model, never instructions.
    */
-  messageContext?: (() => string | undefined) | undefined;
+  messageContext?: MessageContextInput;
 }>;
 
 function trimSlash(url: string): string {
@@ -432,16 +436,17 @@ function SessionAppForWorkspace(props: SessionAppProps) {
       navigation.page.assign(sessionsPath(props.workspaceId, requestedSessionId));
     }
   }, [navigation, props.workspaceId, requestedSessionId]);
-  const { api, stateHost, messageContext } = useMemo(() => {
+  const { api, stateHost } = useMemo(() => {
     const headers = () => latest.current.headers();
     const fetchImpl = reportingFetch(() => latest.current.onUnauthorized?.());
     const apiHost = createEmbedApiHost(apiBaseUrl, headers, fetchImpl);
     return {
       api: apiHost,
       stateHost: createEmbedStateHost(apiBaseUrl, headers, apiHost, fetchImpl),
-      messageContext: () => latest.current.messageContext?.(),
     };
   }, [apiBaseUrl]);
+  const [messageContext] = useState(() => createMessageContextStore(props.messageContext));
+  useEffect(() => messageContext.set(props.messageContext), [messageContext, props.messageContext]);
   const pdfPreview = props.surfaces?.pdfPreview;
   const editableArtifact = props.surfaces?.editableArtifact;
   const host = useMemo<AppHost>(

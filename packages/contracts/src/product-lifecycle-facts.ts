@@ -61,6 +61,7 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
     "anthropic",
     "claude_subscription",
     "opper",
+    "elevenlabs",
   ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],

@@ -4777,6 +4777,8 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .$type<Record<string, number>>()
     .notNull()
     .default({}),
+  // Voice settings by realtime model id (0895); a workspace's own win.
+  realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -9750,6 +9752,9 @@ export const sessionEvents = pgTable(
     usageSourceKey: index("session_events_usage_source_key_idx")
       .on(table.workspaceId, table.turnId, table.usageSourceKey)
       .where(sql`${table.usageSourceKey} is not null`),
+    modelFactPage: index("session_events_model_fact_page_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.occurredAt, table.id)
+      .where(sql`${table.type} = 'agent.model.usage'`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,
@@ -12929,6 +12934,17 @@ export const usageEvents = pgTable(
       table.eventType,
       table.occurredAt,
     ),
+    workspaceMetricPage: index("usage_events_workspace_metric_page_idx").on(
+      table.workspaceId,
+      table.eventType,
+      table.occurredAt,
+      table.id,
+    ),
+    workspaceMetricSource: index("usage_events_workspace_metric_source_idx").on(
+      table.workspaceId,
+      table.eventType,
+      table.sourceResourceId,
+    ),
     accountMetric: index("usage_events_account_metric_idx").on(
       table.accountId,
       table.eventType,
@@ -12979,6 +12995,50 @@ export const usageEvents = pgTable(
  * Per model-call Insights facts. Additive observability only — never the billing
  * ledger. Written after an authoritative `agent.model.usage` emit.
  */
+export const modelCallFactReconciliationProgress = pgTable(
+  "model_call_fact_reconciliation_progress",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    checkpoint:
+      jsonb("checkpoint").$type<import("./model-call-fact-reconciliation").ModelFactCheckpoint>(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    checkpointObject: check(
+      "model_call_fact_reconciliation_progress_checkpoint_check",
+      sql`${table.checkpoint} is null or jsonb_typeof(${table.checkpoint}) = 'object'`,
+    ),
+  }),
+);
+
+export const modelCallFactReconciliationCandidates = pgTable(
+  "model_call_fact_reconciliation_candidates",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    sourceKey: text("source_key").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    batchId: uuid("batch_id"),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.turnId, table.sourceKey] }),
+    ready: index("model_fact_reconciliation_ready_idx")
+      .on(table.workspaceId, table.occurredAt, table.turnId, table.sourceKey)
+      .where(sql`${table.batchId} is null`),
+    batch: index("model_fact_reconciliation_batch_idx").on(table.workspaceId, table.batchId),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
 export const modelCallFacts = pgTable(
   "model_call_facts",
   {
@@ -15160,7 +15220,14 @@ export const organizationModelProviderConnections = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+      >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
@@ -15185,7 +15252,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15214,7 +15281,14 @@ export const organizationModelProviderConnectionOperations = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+      >()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
@@ -15236,7 +15310,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",

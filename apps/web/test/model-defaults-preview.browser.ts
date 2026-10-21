@@ -164,6 +164,40 @@ try {
     );
     await shot("organization-allowed");
 
+    // Voice: Acme's ElevenLabs key and voice settings reach every workspace.
+    await open("view=organization-voice&orgKey=1");
+    await page.getByText("Connected for every workspace.", { exact: false }).waitFor();
+    await page.getByText("Voice: Aria · Norwegian", { exact: false }).waitFor();
+    await noOverflow();
+    await shot("organization-voice");
+    await open("view=organization-voice");
+    await page
+      .getByText("Connect an ElevenLabs API key once to talk with Eleven Realtime voices", {
+        exact: false,
+      })
+      .waitFor();
+    await noOverflow();
+    await shot("organization-voice-no-key");
+
+    // A workspace without its own key or settings uses Acme's.
+    await open("view=workspace-voice&orgKey=1");
+    await page.getByText("Uses Acme's ElevenLabs key.", { exact: false }).waitFor();
+    await page.getByRole("button", { name: "Use own key" }).waitFor();
+    await page.getByText("Norwegian · Balanced turn-taking · Acme's default").waitFor();
+    await noOverflow();
+    await shot("workspace-voice-following");
+
+    // A workspace with its own settings shows them, not Acme's.
+    await open("view=workspace-voice&orgKey=1&wsKey=1&own=1");
+    await page.getByText("Connected with this workspace's own key.", { exact: false }).waitFor();
+    await page.getByText("Voice: Roger", { exact: false }).waitFor();
+    assert(
+      (await page.getByText(/· Acme's default$/).count()) === 0,
+      "own settings shown as inherited",
+    );
+    await noOverflow();
+    await shot("workspace-voice-own");
+
     assert(errors.length === 0, errors.join("; "));
     await page.close();
   }

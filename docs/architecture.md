@@ -1648,6 +1648,16 @@ Canonical: [`model-providers.md`](model-providers.md),
 delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
+Discovery uses field-aware retrieval and optional generic decision-model selection.
+The shared typed predicate/choice/score interface is `@opengeni/decisions`, used by
+both discovery and the code-search judge. Deployment-owned Jev, OpenAI Decisions
+or OpenRouter Decisions credentials are explicit, separate from conversational
+models. See [`decision-models.md`](decision-models.md) for configuration, usage and
+verified provider boundaries; no ordinary-chat inference fallback is implied.
+Native Responses routes retain hosted search and native function loading; generic
+routes return compact alternatives and append selected schemas after the result.
+Catalog changes never rewrite prior items or the first-request tool block.
+`tool_list(view:"groups")` is an explicit source/resource directory, not a prefix.
 Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
 suggestions, never schemas/authority; exact `tool_search` resolves them.
 
@@ -1733,6 +1743,12 @@ tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.
 
+The control worker repairs missing call facts through the durable,
+input-paged bootstrap and commit-coupled arrival queue in
+`packages/db/src/model-call-fact-reconciliation.ts`; completed windows are not
+rescanned. Each page commits its progress with its facts, and its database work is joined to
+the activity's existing run deadline and cancellation. See the
+[reconciliation lifecycle](insights-raw-usage-api.md#missing-model-fact-reconciliation).
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
@@ -1850,7 +1866,8 @@ behind a generic 500, so its session lookups run through
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
-| `packages/jev` | `@opengeni/jev` | Jev client and `code_search` engine |
+| `packages/decisions` | `@opengeni/decisions` | Provider-neutral predicate/choice/score model interface and OpenAI/OpenRouter typed Decisions transports; no conversational fallback |
+| `packages/jev` | `@opengeni/jev` | Existing Jev client, adapter to the shared decision-model interface, and provider-neutral `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
@@ -2933,10 +2950,27 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
+The standalone merge batcher (`scripts/merge-batcher/`) is an operational
+controller, not part of the API or Temporal workers. It reconstructs state from
+Git objects and GitHub, builds one merge commit per admitted PR without checking
+out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
+run-attempt receipts distinguish assertion failures from infrastructure and
+cancellation. Landing requires the exact tested tip, a fast-forward base fence and
+a final head/readiness reread; late PR-head races require post-land reconciliation,
+never a claim that the newer head was tested. Post-merge full CI remains independent.
+`queue-health.yml` records provider batch timing separately from the controller's
+admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
+writes. The separately authorized CI-shadow stage pushes candidate refs only,
+with one hosted candidate in flight; it never updates main or PR readiness.
+Its portable container and deployment/rollback boundary are documented in
+[merge batcher](merge-batcher.md); the historical measurements and inactive
+native/vendor configurations remain in [merge queue](merge-queue.md).
+
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
+| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
