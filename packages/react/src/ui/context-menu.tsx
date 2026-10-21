@@ -6,6 +6,7 @@ import { ContextMenu as ContextMenuPrimitive } from "radix-ui";
 import {
   MENU_ITEM_CLASS,
   MENU_LABEL_CLASS,
+  MENU_META_CLASS,
   MENU_SEPARATOR_CLASS,
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
@@ -97,8 +98,20 @@ function ContextMenuLabel({
   );
 }
 
+/** An item's key on the right, like `DropdownMenuShortcut`. */
+function ContextMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="context-menu-shortcut"
+      className={cn(MENU_META_CLASS, "tracking-widest", className)}
+      {...props}
+    />
+  );
+}
+
 export {
   ContextMenu,
+  ContextMenuShortcut,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,

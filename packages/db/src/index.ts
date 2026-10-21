@@ -33243,13 +33243,14 @@ function sessionFilters(
       filters.push(eq(schema.sessions.parentSessionId, parentSessionId));
     }
   }
-  const search = options.search?.trim();
-  if (search) {
+  // Every word must appear in the title or the first message, in any order, so
+  // "deploy fix" finds "Fix the deploy script". Words are literal,
+  // case-insensitive substrings rather than user-authored SQL globbing.
+  for (const word of sessionSearchWords(options.search)) {
     // PostgreSQL LIKE uses backslash as its default escape. Escape it first so
     // a literal trailing slash cannot consume our surrounding wildcard; then
-    // escape the two wildcard metacharacters. The resulting search is literal,
-    // case-insensitive substring matching rather than user-authored SQL globbing.
-    const pattern = `%${search
+    // escape the two wildcard metacharacters.
+    const pattern = `%${word
       .replaceAll("\\", "\\\\")
       .replaceAll("%", "\\%")
       .replaceAll("_", "\\_")}%`;
@@ -33440,6 +33441,11 @@ function sessionParentFilter(parentSessionId: string | null | undefined): string
     : parentSessionId === null
       ? "null"
       : parentSessionId;
+}
+
+/** The words of a chat title search; a long query keeps its first eight words. */
+function sessionSearchWords(search: string | undefined): string[] {
+  return [...new Set((search ?? "").trim().split(/\s+/).filter(Boolean))].slice(0, 8);
 }
 
 function sessionSearchFilter(search: string | undefined): string | null {

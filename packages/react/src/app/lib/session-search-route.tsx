@@ -39,10 +39,15 @@ export function requestSessionSearch(
   target: EventTarget,
   workspaceId: string,
   returnFocus?: HTMLElement,
+  query?: string,
 ): void {
   target.dispatchEvent(
     new CustomEvent(OPEN_SESSION_SEARCH_EVENT, {
-      detail: { workspaceId, ...(returnFocus ? { returnFocus } : {}) },
+      detail: {
+        workspaceId,
+        ...(returnFocus ? { returnFocus } : {}),
+        ...(query?.trim() ? { query: query.trim() } : {}),
+      },
     }),
   );
 }

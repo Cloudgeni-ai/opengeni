@@ -26,11 +26,22 @@ export default function SessionSearchDialog(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   returnFocus?: RefObject<HTMLElement | null> | undefined;
+  /** Start with this query (the ⌘K menu's "Search messages for …"). */
+  seed?: { query: string; nonce: number } | null | undefined;
 }) {
   const { onOpenChange } = props;
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(props.seed?.query ?? "");
+  const seedNonce = props.seed?.nonce;
+  const seedQuery = props.seed?.query;
+  const appliedSeed = useRef(seedNonce);
+  useEffect(() => {
+    if (seedNonce === undefined || appliedSeed.current === seedNonce || seedQuery === undefined)
+      return;
+    appliedSeed.current = seedNonce;
+    setQuery(seedQuery);
+  }, [seedNonce, seedQuery]);
   const [archiveStatus, setArchiveStatus] = useState<"active" | "archived" | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobilePreview, setMobilePreview] = useState(false);

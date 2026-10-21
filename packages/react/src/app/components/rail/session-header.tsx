@@ -27,6 +27,7 @@ import {
   BellOffIcon,
   CalendarClockIcon,
   GaugeIcon,
+  LinkIcon,
   LockIcon,
   MoreHorizontalIcon,
   PanelRightCloseIcon,
@@ -39,7 +40,7 @@ import {
   ShieldOffIcon,
   SmartphoneIcon,
 } from "lucide-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "../billing-class-mark";
 import { ConnectionPill } from "../common";
@@ -56,8 +57,12 @@ import {
   DropdownMenuItem,
   DropdownMenuMeta,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { useChatOperations } from "../../lib/actions/chat-operations";
+import { RENAME_CURRENT_CHAT_EVENT } from "../../lib/actions/events";
 import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
@@ -215,6 +220,17 @@ export function SessionHeader({
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
+  const chatOps = useChatOperations();
+  const findKeys = useActionShortcut("chat.find");
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
+  // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
+  const startRenaming = rename.startEditing;
+  useEffect(() => {
+    const start = () => startRenaming();
+    uiEvents.addEventListener(RENAME_CURRENT_CHAT_EVENT, start);
+    return () => uiEvents.removeEventListener(RENAME_CURRENT_CHAT_EVENT, start);
+  }, [uiEvents, startRenaming]);
   const providerControl = isCodexRail ? (
     (codexSlot ?? (
       <BillingClassMark
@@ -426,6 +442,7 @@ export function SessionHeader({
             >
               <SearchIcon />
               Find
+              {findKeys ? <DropdownMenuShortcut>{findKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
@@ -435,6 +452,13 @@ export function SessionHeader({
               <PencilIcon />
               Rename
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void chatOps.copyLink(session)}>
+              <LinkIcon />
+              Copy link
+              {copyLinkKeys ? (
+                <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
+              ) : null}
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="lg:hidden"
               disabled={pin.busy}
@@ -442,6 +466,7 @@ export function SessionHeader({
             >
               <PinIcon className={session.pinned ? "fill-current" : undefined} />
               {session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             {currentPhoneAppPlatform() ? (
               <DropdownMenuItem

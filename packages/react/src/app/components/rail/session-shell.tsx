@@ -57,7 +57,6 @@ import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
 import { TooltipProvider } from "../../../ui/tooltip";
-import { matchesShortcut, NEW_SESSION_SHORTCUT } from "../../lib/keyboard-shortcuts";
 import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { useAppContext } from "../../app-context";
@@ -276,7 +275,6 @@ export function SessionShell({
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
-  const newSessionShortcut = useSessionUiFeature("newChatShortcut");
   const context = useAppContext();
   const { canvasBanners } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({
@@ -342,18 +340,6 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
-
-  // Global chords (⌘/Ctrl+⇧O → new session). Modifier chords work in inputs too.
-  useEffect(() => {
-    if (!newSessionShortcut) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (!matchesShortcut(event, NEW_SESSION_SHORTCUT.chord)) return;
-      event.preventDefault();
-      rail.startNewSession();
-    }
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [newSessionShortcut, rail]);
 
   return (
     <TooltipProvider delayDuration={300}>

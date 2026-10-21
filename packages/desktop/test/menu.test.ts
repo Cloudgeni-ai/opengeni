@@ -5,7 +5,8 @@ import { electronStub } from "./electron-stub";
 
 mock.module("electron", () => electronStub);
 
-const { applicationMenuTemplate, updateMenuItem } = await import("../src/main/menu");
+const { applicationMenuTemplate, macMenuLabel, readMenuActions, updateMenuItem } =
+  await import("../src/main/menu");
 type Model = Parameters<typeof applicationMenuTemplate>[0];
 
 const realPlatform = process.platform;
@@ -75,5 +76,83 @@ describe("application menu", () => {
     onPlatform("linux");
     const template = applicationMenuTemplate(model(null));
     expect(template.some((item) => item.label === "&Help")).toBe(false);
+  });
+});
+
+describe("page actions in the menu bar", () => {
+  const actions = [
+    {
+      id: "chat.new",
+      label: "New chat",
+      section: "file",
+      accelerator: "CmdOrCtrl+N",
+      enabled: true,
+    },
+    {
+      id: "commandMenu.open",
+      label: "Command menu",
+      section: "go",
+      accelerator: "CmdOrCtrl+K",
+      enabled: true,
+    },
+    {
+      id: "chat.copyLink",
+      label: "Copy link",
+      section: "chat",
+      accelerator: "CmdOrCtrl+Shift+,",
+      enabled: false,
+    },
+    {
+      id: "help.shortcuts",
+      label: "Keyboard shortcuts",
+      section: "help",
+      accelerator: "CmdOrCtrl+/",
+      enabled: true,
+    },
+  ];
+
+  test("reads well-formed actions and rejects anything else whole", () => {
+    expect(readMenuActions(actions)).toHaveLength(4);
+    expect(readMenuActions([])).toEqual([]);
+    expect(readMenuActions("nope")).toBeNull();
+    expect(readMenuActions([{ ...actions[0], section: "window" }])).toBeNull();
+    expect(readMenuActions([{ ...actions[0], accelerator: "CmdOrCtrl+Q; rm" }])).toBeNull();
+    expect(readMenuActions([actions[0], actions[0]])).toBeNull();
+    expect(readMenuActions([{ ...actions[0], accelerator: null }])).toHaveLength(1);
+  });
+
+  test("replace the built-in commands and add Go, Chat and Help menus", () => {
+    onPlatform("darwin");
+    const ran: string[] = [];
+    const template = applicationMenuTemplate({
+      ...model(null),
+      command: () => undefined,
+      pageActions: readMenuActions(actions),
+      runPageAction: (id) => ran.push(id),
+    });
+    const file = submenu(template, "File");
+    expect(file[0]).toMatchObject({ label: "New Chat", accelerator: "CmdOrCtrl+N" });
+    expect(submenu(template, "View").some((item) => item.label === "Search Sessions…")).toBe(false);
+    const go = submenu(template, "Go").map((item) => item.label ?? item.type);
+    expect(go).toEqual(["Command Menu", "separator", "Back", "Forward"]);
+    const chat = submenu(template, "Chat");
+    expect(chat[0]).toMatchObject({ label: "Copy Link", enabled: false });
+    const help = template.find((item) => item.role === "help");
+    const helpItems = (help?.submenu ?? []) as MenuItemConstructorOptions[];
+    expect(helpItems[0]?.label).toBe("Keyboard Shortcuts");
+    (file[0]!.click as () => void)();
+    expect(ran).toEqual(["chat.new"]);
+  });
+
+  test("pages without actions keep the built-in commands", () => {
+    onPlatform("darwin");
+    const template = applicationMenuTemplate({ ...model(null), pageActions: null });
+    expect(submenu(template, "View").some((item) => item.label === "Search Sessions…")).toBe(true);
+    expect(template.some((item) => item.label === "Go")).toBe(false);
+  });
+
+  test("macOS menus use title case", () => {
+    expect(macMenuLabel("Pin or unpin chat")).toBe("Pin or Unpin Chat");
+    expect(macMenuLabel("Search messages")).toBe("Search Messages");
   });
 });
