@@ -4286,6 +4286,15 @@ export async function autoResumeSessionBranchInTransaction(
     reason: input.reason,
     actor: input.actor,
   });
+  // The override unblocks the whole branch, exactly like an explicit Resume:
+  // descendants whose workflows closed under the Pause (capacity waits, parked
+  // recoveries, active goals, pending updates, decided approvals) need the
+  // same fresh wake. The steered session's own input carries its wake too.
+  await registerDescendantWakes(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    reason: "session_auto_resume",
+  });
   return {
     revision,
     control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
