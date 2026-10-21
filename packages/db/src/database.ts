@@ -469,10 +469,17 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
   // is never reused indefinitely, and bound each connection's prepared-statement
   // cache; application_name aids server-side diagnostics.
+  // Opening a connection costs tens of milliseconds (TCP, TLS, auth, startup
+  // parameters) on the request that needs it, while an idle one costs the server
+  // only a backend slot. With a 30 s idle timeout, bursty workers reopened about
+  // one connection a second in steady state; five minutes keeps a worker's pool
+  // warm between turns. postgres.js TCP keepalive (60 s) keeps NAT and load
+  // balancer flow state alive for idle connections, and max_lifetime still
+  // bounds every connection's age.
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
     prepare: preparedStatements,
-    idle_timeout: 30,
+    idle_timeout: 300,
     max_lifetime: 1800,
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
