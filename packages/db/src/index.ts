@@ -32942,7 +32942,10 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
  * them or received a prompt they sent directly. Agent-relayed and service
  * turns do not count, even when they carry the human's causal authority.
  * Applies to every row through its root, so a root page and its children
- * agree. The turn probe is served by session_turns_human_prompt_subject_idx.
+ * agree. Keep the existential turn probe keyed by session: pulling it into a
+ * workspace-wide hashed subplan reads a person's entire prompt history, and
+ * repeats turn RLS checks, even when the page contains only a few roots.
+ * OFFSET 0 preserves the correlated index probes without changing predicates.
  */
 function sessionMineSql(subjectId: string): SQL {
   return sql`(
@@ -32955,13 +32958,17 @@ function sessionMineSql(subjectId: string): SQL {
     )
     or exists (
       select 1 from ${schema.sessions} mine_tree
-      join ${schema.sessionTurns} mine_turn
-        on mine_turn.workspace_id = mine_tree.workspace_id
-        and mine_turn.session_id = mine_tree.id
       where mine_tree.workspace_id = ${schema.sessions.workspaceId}
         and mine_tree.root_session_id = ${schema.sessions.rootSessionId}
-        and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
-        and mine_turn.initiator_subject_id = ${subjectId}
+        and exists (
+          select 1 from ${schema.sessionTurns} mine_turn
+          where mine_turn.workspace_id = mine_tree.workspace_id
+            and mine_turn.session_id = mine_tree.id
+            and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
+            and mine_turn.initiator_subject_id = ${subjectId}
+          offset 0
+        )
+      offset 0
     )
   )`;
 }
