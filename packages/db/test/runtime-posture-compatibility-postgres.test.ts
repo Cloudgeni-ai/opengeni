@@ -174,12 +174,12 @@ realTest(
       RESET ROLE;
     `);
       await expectReady();
-      const [{ version }] = await admin<{ version: number }[]>`
+      const [server] = await admin<{ version: number }[]>`
         SELECT current_setting('server_version_num')::integer AS version`;
       // Broad CI also runs PostgreSQL 16; MAINTAIN was introduced in 17.
       // The dedicated PG17 readiness job still exercises its rejection.
       const nonRowPrivileges = ["TRUNCATE", "REFERENCES", "TRIGGER"];
-      if (version! >= 170000) nonRowPrivileges.push("MAINTAIN");
+      if (server!.version >= 170000) nonRowPrivileges.push("MAINTAIN");
       for (const privilege of nonRowPrivileges) {
         await admin.unsafe(`GRANT ${privilege} ON future_posture_rows TO opengeni_app`);
         await expectUnready(`future_posture_rows grants excess runtime privileges: ${privilege}`);
