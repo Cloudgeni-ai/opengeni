@@ -12,6 +12,8 @@
     "dist",
     "src",
     "ios",
+    "android/build.gradle",
+    "android/src",
     "expo-module.config.json",
     "README.md",
     "app.plugin.js",

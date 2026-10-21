@@ -47,6 +47,8 @@ export type { NativeTimelineMessages } from "./messages";
 export { ComposerPill, SessionComposer } from "./composer";
 export { ModelPickerSheet } from "./model-picker";
 export { BottomSheet } from "./sheet";
+export { AnnotationsChip, AnnotationsSheet } from "./annotations";
+export type { AnnotationReveal, NativeAnnotationLike } from "./annotations";
 export { SessionActionsButton } from "./session-actions";
 export type { SessionAction, SessionActionsClient, SessionActionsProps } from "./session-actions";
 export type { ModelPickerSheetProps } from "./model-picker";

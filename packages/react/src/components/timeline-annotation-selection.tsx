@@ -5,10 +5,10 @@ import { createPortal } from "react-dom";
 import { usePortalContainer } from "../ui/portal-container";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import type { TimelineAnnotationSourceDescriptor } from "../timeline";
+import { annotationFromSelection } from "../timeline/annotation-model";
 import {
   clipRangeToSource,
   matchingQuoteInSource,
-  occurrenceOffsets,
   quoteOccurrenceIndex,
   truncateAnnotationQuote,
   visibleClientRect,
@@ -23,34 +23,8 @@ type SelectionCandidate = {
 };
 
 const CONTROL_SELECTOR = "button,input,textarea,select,summary,[contenteditable='true']";
-const SOURCE_CONTEXT_BYTES = 160;
-const MAX_QUOTE_BYTES = 16 * 1024;
 const POPOVER_WIDTH = 280;
 const POPOVER_HEIGHT = 64;
-
-function utf8Prefix(value: string, maxBytes: number): string {
-  let output = "";
-  let bytes = 0;
-  for (const character of value) {
-    const next = new TextEncoder().encode(character).byteLength;
-    if (bytes + next > maxBytes) break;
-    output += character;
-    bytes += next;
-  }
-  return output;
-}
-
-function utf8Suffix(value: string, maxBytes: number): string {
-  let output = "";
-  let bytes = 0;
-  for (const character of [...value].reverse()) {
-    const next = new TextEncoder().encode(character).byteLength;
-    if (bytes + next > maxBytes) break;
-    output = character + output;
-    bytes += next;
-  }
-  return output;
-}
 
 function selectionElement(node: Node | null): Element | null {
   return node instanceof Element ? node : (node?.parentElement ?? null);
@@ -77,13 +51,6 @@ function isWhollyInsideControl(range: Range, boundary: HTMLElement): boolean {
   return (
     start instanceof Element && start === end && boundary.contains(start) && start !== boundary
   );
-}
-
-function annotationId(): string {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
-  }
-  return `annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -113,41 +80,19 @@ function buildCandidate(
   if (!clipped) return null;
   const sourceKey = startBoundary.dataset.ogAnnotationSourceKey;
   const source = sourceKey ? sources.get(sourceKey) : undefined;
+  if (!source) return null;
   const rawQuote = clipped.toString();
-  const quote = (source ? matchingQuoteInSource(source.text, rawQuote) : null) ?? rawQuote;
-  if (
-    !source ||
-    quote.trim().length === 0 ||
-    new TextEncoder().encode(quote).byteLength > MAX_QUOTE_BYTES
-  ) {
-    return null;
-  }
-  const sourceOffsets = occurrenceOffsets(source.text, quote);
-  if (sourceOffsets.length === 0) return null;
-  const occurrence = quoteOccurrenceIndex(startBoundary, clipped, quote);
-  const startOffset = sourceOffsets[Math.min(occurrence, sourceOffsets.length - 1)]!;
-  const endOffset = startOffset + quote.length;
+  const quote = matchingQuoteInSource(source.text, rawQuote) ?? rawQuote;
+  const annotation = annotationFromSelection(source, {
+    text: quote,
+    occurrence: quoteOccurrenceIndex(startBoundary, clipped, quote),
+  });
+  if (!annotation) return null;
   const rect = visibleClientRect(range) ?? visibleClientRect(clipped);
   if (!rect) return null;
   const position = popoverPosition(rect);
   return {
-    annotation: {
-      id: annotationId(),
-      quote,
-      note: "",
-      source: {
-        kind: source.kind,
-        eventId: source.eventId,
-        eventType: source.eventType,
-        sequence: source.sequence,
-        turnId: source.turnId,
-        startOffset,
-        endOffset,
-        contextBefore: utf8Suffix(source.text.slice(0, startOffset), SOURCE_CONTEXT_BYTES),
-        contextAfter: utf8Prefix(source.text.slice(endOffset), SOURCE_CONTEXT_BYTES),
-        ...(source.label ? { label: source.label } : {}),
-      },
-    },
+    annotation,
     left: position.left,
     top: position.top,
     keyboard,

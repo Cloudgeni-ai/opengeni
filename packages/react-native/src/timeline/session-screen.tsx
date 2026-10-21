@@ -13,7 +13,16 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import { ActivityIndicator, Image, Pressable, Text, View, type TextInput } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  Text,
+  View,
+  type TextInput,
+} from "react-native";
+import { annotationHasNote } from "@opengeni/react/timeline-model";
 import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
@@ -33,6 +42,12 @@ import {
 } from "./decisions";
 import { NativeMessageAttachments } from "./message-attachments";
 import { QueueDock } from "./queue-dock";
+import {
+  AnnotationsChip,
+  AnnotationsSheet,
+  type AnnotationReveal,
+  type NativeAnnotationLike,
+} from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
@@ -156,9 +171,29 @@ function SessionScreenBody({
   ...timelineProps
 }: Omit<NativeSessionScreenProps, "timelineMessages">) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const m = useNativeTimelineMessages();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
+  const annotationReveal = useRef<AnnotationReveal | null>(null);
+  const draftAnnotations = composer.annotations ?? [];
+  const annotationsIncomplete = draftAnnotations.some(
+    (annotation) => annotation.note.trim().length === 0,
+  );
+  const reviewTargetId = composer.annotationReviewTargetId ?? null;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  // A new quote, a marker tap or a send with an empty note opens its note.
+  useEffect(() => {
+    if (reviewTargetId) setReviewOpen(true);
+  }, [reviewTargetId]);
+  const closeReview = useCallback(() => {
+    setReviewOpen(false);
+    composer.clearAnnotationReviewTarget?.();
+  }, [composer]);
+  const [queuedReview, setQueuedReview] = useState<readonly NativeAnnotationLike[] | null>(null);
+  // Each send brings the conversation back to its latest row.
+  const [followLatestSignal, setFollowLatestSignal] = useState(0);
+  const followLatest = useCallback(() => setFollowLatestSignal((value) => value + 1), []);
   // The composer floats over the conversation; its occupied height insets the timeline.
   const [composerHeight, setComposerHeight] = useState(120);
   const items = useMemo(
@@ -201,6 +236,11 @@ function SessionScreenBody({
     <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
       {topBar}
       <MessageTimeline
+        onAnnotate={composer.addAnnotation}
+        draftAnnotations={composer.annotations}
+        onDraftAnnotationSelect={composer.requestAnnotationReview}
+        annotationRevealRef={annotationReveal}
+        followLatestSignal={followLatestSignal}
         {...timelineProps}
         hasOlder={controller.hasOlder}
         loadingOlder={controller.loadingOlder}
@@ -276,14 +316,31 @@ function SessionScreenBody({
         onActionFeedback: composerSlots?.onActionFeedback,
         value: composer.value,
         onChangeText: composer.setValue,
-        onSend: () => void composer.send(),
+        // A quote without its note cannot be sent: Send opens that note instead
+        // of staying disabled with no reason given.
+        onSend: () => {
+          if (annotationsIncomplete) composer.requestAnnotationReview?.();
+          else {
+            followLatest();
+            void composer.send();
+          }
+        },
         // The other choice beside Send while the agent works: Queue when
         // Send steers, Steer when Send queues.
         alternateSend: composer.alternateSend ?? null,
         ...(composer.sendAlternate
-          ? { onAlternateSend: () => void composer.sendAlternate?.() }
+          ? {
+              onAlternateSend: () => {
+                if (annotationsIncomplete) {
+                  composer.requestAnnotationReview?.();
+                  return;
+                }
+                followLatest();
+                void composer.sendAlternate?.();
+              },
+            }
           : {}),
-        canSend: composer.canSend && !busy,
+        canSend: (composer.canSend || (annotationsIncomplete && !composer.sending)) && !busy,
         sending: composer.sending,
         running: controller.runActive,
         paused: paused,
@@ -311,6 +368,44 @@ function SessionScreenBody({
           <>
             {composerSlots?.header}
             <AttachmentChips attachments={attachments} />
+            {draftAnnotations.length > 0 && composer.removeAnnotation ? (
+              <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
+                <AnnotationsChip
+                  annotations={draftAnnotations}
+                  onPress={() => composer.requestAnnotationReview?.()}
+                  onClear={() => {
+                    const removeAll = () => {
+                      for (const annotation of draftAnnotations) {
+                        composer.removeAnnotation?.(annotation.id);
+                      }
+                    };
+                    // Bare quotes go at once; written notes are worth one confirm,
+                    // since the × sits right beside the chip.
+                    if (!draftAnnotations.some((item) => annotationHasNote(item.note))) {
+                      removeAll();
+                      return;
+                    }
+                    Alert.alert(
+                      t("native.timeline.annotations.removeAllTitle", {
+                        count: draftAnnotations.length,
+                      }),
+                      t("native.timeline.annotations.removeAllMessage", {
+                        count: draftAnnotations.filter((item) => annotationHasNote(item.note))
+                          .length,
+                      }),
+                      [
+                        { text: t("native.timeline.annotations.cancel"), style: "cancel" },
+                        {
+                          text: t("native.timeline.annotations.removeAllConfirm"),
+                          style: "destructive",
+                          onPress: removeAll,
+                        },
+                      ],
+                    );
+                  }}
+                />
+              </View>
+            ) : null}
           </>
         ),
         above: (
@@ -320,6 +415,7 @@ function SessionScreenBody({
               composer={composer}
               singleSend={composer.singleSend === true}
               onComposerFocus={() => composerInput.current?.focus()}
+              onReviewAnnotations={setQueuedReview}
               leading={
                 <SessionSignals
                   goal={controller.goal}
@@ -354,6 +450,28 @@ function SessionScreenBody({
           </>
         ),
       })}
+      <AnnotationsSheet
+        open={reviewOpen}
+        onClose={closeReview}
+        annotations={draftAnnotations}
+        editable={Boolean(composer.updateAnnotation)}
+        focusId={reviewTargetId}
+        onFocusConsumed={composer.clearAnnotationReviewTarget}
+        onUpdate={composer.updateAnnotation}
+        onRemove={composer.removeAnnotation}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+        onCommit={() => {
+          closeReview();
+          setTimeout(() => composerInput.current?.focus(), 250);
+        }}
+      />
+      <AnnotationsSheet
+        open={queuedReview !== null}
+        onClose={() => setQueuedReview(null)}
+        annotations={queuedReview ?? []}
+        editable={false}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+      />
     </View>
   );
 }

@@ -60,6 +60,7 @@ const ICONS: Record<string, string> = {
   play: "PlayIcon",
   plug: "PlugIcon",
   plus: "PlusIcon",
+  quote: "QuoteIcon",
   search: "SearchIcon",
   server: "ServerIcon",
   "server-cog": "ServerCogIcon",
