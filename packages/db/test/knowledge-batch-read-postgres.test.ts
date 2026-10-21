@@ -4,10 +4,13 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
 import {
+  applySessionTurnSettlement,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   getKnowledgeEntries,
   getKnowledgeEntry,
+  initializeSessionStartAtomically,
   nestedPostgresSqlState,
   saveAgentLearningSettings,
   saveKnowledgeEntry,
@@ -181,26 +184,35 @@ test("batch retains accepted agent learning and rejects a closed attempt", async
     expectedVersion: 0,
     settings: { knowledge: "review_first" },
   });
-  const turnId = crypto.randomUUID(),
-    attemptId = crypto.randomUUID();
-  await shared.admin.begin(async (tx) => {
-    await tx`SELECT set_config('opengeni.session_inference_claim','1',true)`;
-    await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
-      status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
-      initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id)
-      VALUES(${turnId},${f.accountId},${f.workspaceId},${session.id},${crypto.randomUUID()},${`knowledge-${turnId}`},
-        'running','user',1,'Prepare Knowledge','fixture-model','medium','none',1,'subject',${f.subjectId},'{}',${f.subjectId})`;
-    await tx`UPDATE sessions SET active_turn_id=${turnId},status='running' WHERE id=${session.id}`;
-    await tx`UPDATE session_turns SET active_attempt_id=${attemptId} WHERE id=${turnId}`;
-    await tx`INSERT INTO session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
-      temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies)
-      VALUES(${attemptId},${f.accountId},${f.workspaceId},${session.id},${turnId},1,'running',${`knowledge-${turnId}`},
-        ${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
+  await initializeSessionStartAtomically(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: session.id,
+    clientEventId: `initial:${session.id}`,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
   });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+    sessionId: session.id,
+    workflowId: `knowledge-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed")
+    throw new Error(`Expected claimed attempt, got ${claimed.action}`);
   const agent: KnowledgeContext = {
     accountId: f.accountId,
     workspaceId: f.workspaceId,
-    actor: { kind: "agent", sessionId: session.id, turnId, attemptId, executionGeneration: 1 },
+    actor: {
+      kind: "agent",
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    },
   };
   const pending = await saveKnowledgeEntry(client.db, agent, {
     operationId: crypto.randomUUID(),
@@ -216,10 +228,16 @@ test("batch retains accepted agent learning and rejects a closed attempt", async
       (entry) => entry?.id ?? null,
     ),
   ).toEqual([pending.entryId, null]);
-  await shared.admin.begin(async (tx) => {
-    await tx`UPDATE session_turn_attempts SET state='closed',outcome='completed',closed_at=now() WHERE id=${attemptId}`;
-    await tx`UPDATE session_turns SET status='completed',active_attempt_id=NULL WHERE id=${turnId}`;
-    await tx`UPDATE sessions SET status='idle',active_turn_id=NULL WHERE id=${session.id}`;
+  const settled = await applySessionTurnSettlement(client.db, f.workspaceId, {
+    sessionId: session.id,
+    turnId: claimed.turn.id,
+    triggerEventId: claimed.turn.triggerEventId,
+    attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed", payload: { reason: "test" } }],
   });
+  expect(settled.action).toBe("settled");
   await denied(getKnowledgeEntries(client.db, agent, [f.groupId, pending.entryId]));
 }, 180_000);
