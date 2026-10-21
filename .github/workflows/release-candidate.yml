@@ -15,6 +15,11 @@ on:
         description: Exact retained trusted controller SHA.
         required: true
         type: string
+      provenance_sha:
+        description: Optional exact Version PR merge SHA when source_sha is a later fully green main descendant of it. Empty means source_sha is the Version merge itself.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: release-candidate-${{ inputs.source_sha }}
@@ -34,10 +39,13 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       controller_sha: ${{ inputs.controller_sha }}
+      provenance_sha: ${{ inputs.provenance_sha }}
     permissions:
+      actions: read
       checks: read
       contents: read
       pull-requests: read
+      statuses: read
 
   artifact-runtime:
     name: Build exact artifact runtime inputs

@@ -1,6 +1,11 @@
 import { test, expect } from "bun:test";
 import {
   isRedMain,
+  isBatchRun,
+  batchTiming,
+  collectBatchTimings,
+  collectBatchReport,
+  summarizeBatches,
   publicAlertsEnabled,
   queuePullNumber,
   queueTiming,
@@ -46,6 +51,142 @@ const jobs = [
     conclusion: "success",
   },
 ];
+
+test("batch telemetry binds exact attempt jobs but never invents readiness, build, landing or culprit evidence", () => {
+  const candidate = {
+    ...run,
+    event: "push",
+    head_branch: "queue/live/abc",
+    path: ".github/workflows/batch-ci.yml",
+    run_attempt: 2,
+    run_started_at: "2026-10-21T10:02:00Z",
+    conclusion: "failure",
+  };
+  const calls: string[] = [];
+  const rows = collectBatchTimings(
+    (path, method) => {
+      expect(method).toBeUndefined();
+      calls.push(path);
+      return { jobs };
+    },
+    "owner/repo",
+    [candidate, run],
+  );
+  expect(calls).toEqual(["repos/owner/repo/actions/runs/42/attempts/2/jobs?per_page=100&page=1"]);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    attempt: 2,
+    readyAt: null,
+    builtAt: null,
+    landedAt: null,
+    verifiedOutcome: "unknown",
+    providerConclusion: "failure",
+  });
+  const summary = summarizeBatches(rows);
+  expect(summary.ci.p95Minutes).toBe(14);
+  expect(summary.providerStartDelay.p95Minutes).toBe(1);
+  expect(summary.providerRedRuns).toBe(1);
+  expect(summary.queueWait.p95Minutes).toBeNull();
+  expect(summary.stopSignal).toBeNull();
+});
+
+test("batch run filtering excludes ordinary pushes and unrelated workflow paths", () => {
+  expect(
+    isBatchRun({
+      ...run,
+      event: "push",
+      head_branch: "queue/live/abc",
+      path: ".github/workflows/batch-ci.yml",
+    }),
+  ).toBe(true);
+  expect(
+    isBatchRun({
+      ...run,
+      event: "push",
+      head_branch: "main",
+      path: ".github/workflows/batch-ci.yml",
+    }),
+  ).toBe(false);
+  expect(isBatchRun({ ...run, event: "push", head_branch: "queue/live/abc" })).toBe(false);
+});
+
+test("historical traffic CI cannot contaminate live batch provider metrics", () => {
+  const live = {
+    ...run,
+    event: "push",
+    head_branch: "queue/live/abc",
+    path: ".github/workflows/batch-ci.yml",
+  };
+  const traffic = {
+    ...live,
+    id: 43,
+    head_branch: "queue/shadow-traffic/def",
+    conclusion: "failure",
+  };
+  expect(isBatchRun(traffic)).toBe(false);
+  expect(isBatchRun(traffic, true)).toBe(true);
+  const calls: string[] = [];
+  const report = collectBatchReport(
+    (path) => {
+      calls.push(path);
+      return path.includes("/workflows/") ? { workflow_runs: [live, traffic] } : { jobs };
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(report.batchRows.map((row) => row.runId)).toEqual([42]);
+  expect(report.trafficShadowRows.map((row) => row.runId)).toEqual([43]);
+  expect(report.batchSummary?.providerRedRuns).toBe(0);
+  expect(report.trafficShadowSummary?.providerRedRuns).toBe(1);
+  expect(calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+});
+
+test("batch cancellation is not a failing PR and empty samples remain unknown", () => {
+  const summary = summarizeBatches([batchTiming({ ...run, conclusion: "cancelled" }, jobs)]);
+  expect(summary.cancellations).toBe(1);
+  expect(summary.providerRedRuns).toBe(0);
+  expect(summarizeBatches([]).ci.p95Minutes).toBeNull();
+  expect(batchTiming({ ...run, status: "in_progress" }, jobs).ciFinishedAt).toBeNull();
+});
+
+test("retry start delay uses the selected attempt and is unknown without an attempt timestamp", () => {
+  const retry = {
+    ...run,
+    run_attempt: 2,
+    created_at: "2026-10-20T10:00:00Z",
+    run_started_at: "2026-10-21T10:02:00Z",
+  };
+  expect(summarizeBatches([batchTiming(retry, jobs)]).providerStartDelay.p95Minutes).toBe(1);
+  expect(
+    summarizeBatches([batchTiming({ ...retry, run_started_at: null }, jobs)]).providerStartDelay
+      .p95Minutes,
+  ).toBeNull();
+});
+
+test("a batch job lookup failure reports unavailable rather than a partial healthy sample", () => {
+  const report = collectBatchReport(
+    (path) => {
+      if (path.includes("/workflows/"))
+        return {
+          workflow_runs: [
+            {
+              ...run,
+              event: "push",
+              head_branch: "queue/live/abc",
+              path: ".github/workflows/batch-ci.yml",
+            },
+          ],
+        };
+      throw new Error("provider response not for public output");
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(report.batchSummary).toBeNull();
+  expect(report.batchRows).toEqual([]);
+  expect(report.batchError).toContain("unavailable");
+  expect(report.batchError).not.toContain("provider response");
+});
 
 test("stage evidence binds queue event, exact attempt jobs and landed PR; metadata update time is not CI finish", () => {
   expect(queuePullNumber(run.head_branch)).toBe(123);
@@ -104,6 +245,15 @@ test.each(["cancelled", "success", "skipped", "neutral", null])(
 );
 
 test("red-main alert comments on the exact landing PR without pretending causality or reverting", () => {
+  const batch = collectBatchReport(
+    () => {
+      throw new Error("404: batch-ci not on main");
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(batch.batchSummary).toBeNull();
+  expect(batch.batchError).toContain("unavailable");
   const candidate = {
     ...run,
     path: ".github/workflows/ci.yml",

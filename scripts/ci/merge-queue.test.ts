@@ -53,6 +53,10 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
 
 test("ordinary PR events cannot starve reconciliation or publish public alerts", () => {
   const health = workflow("queue-health");
+  expect(health.on.workflow_run.workflows).toContain("Batch CI");
+  expect(health.jobs.report.if).toContain(
+    "github.event.workflow_run.path == '.github/workflows/batch-ci.yml'",
+  );
   expect(health.concurrency).toBeUndefined();
   expect(health.jobs.report.if).toContain("github.event.workflow_run.event == 'merge_group'");
   expect(health.jobs.report.if).toContain(

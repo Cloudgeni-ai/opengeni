@@ -117,6 +117,7 @@ describe("image Bun stages use the distrusted Bun", () => {
     ["docker/sandbox.Dockerfile", "bun-runtime"],
     ["docker/desktop.Dockerfile", "bun-runtime"],
     ["docker/backup.Dockerfile", "bun"],
+    ["docker/merge-batcher.Dockerfile", "bun-distrusted"],
   ] as const) {
     test(file, async () => {
       const dockerfile = await readFile(join(repository, file), "utf8");
@@ -141,6 +142,25 @@ describe("image Bun stages use the distrusted Bun", () => {
       );
     });
   }
+});
+
+test("merge batcher ships patched Bun while retaining its nonroot portable runtime", async () => {
+  const dockerfile = await readFile(join(repository, "docker/merge-batcher.Dockerfile"), "utf8");
+  expect(dockerfile).toContain("ARG BUN_VERSION=1.4.3\n");
+  expect(dockerfile).toContain(
+    "FROM oven/bun:${BUN_VERSION}-slim AS runtime\n" +
+      "COPY --from=bun-distrusted /out/bun /usr/local/bin/bun\n",
+  );
+  const runtime = dockerfile.split(" AS runtime\n")[1]!;
+  expect(runtime.match(/^USER .+$/gmu)).toEqual(["USER root", "USER bun"]);
+  expect(runtime).toContain(
+    "ENV BATCHER_MODE=shadow BATCHER_GIT_DIR=/data/objects.git BATCHER_OUTPUT_DIR=/data/shadow PORT=8080",
+  );
+  expect(runtime).toContain('VOLUME ["/data"]');
+  expect(runtime).toContain("process.env.PORT||8080");
+  expect(runtime).toContain("STOPSIGNAL SIGTERM");
+  expect(runtime).toContain('ENTRYPOINT ["bun", "scripts/merge-batcher/main.ts"]');
+  expect(runtime).not.toContain("distrust-embedded-roots.ts");
 });
 
 describe("image Node stages use the distrusted Node", () => {

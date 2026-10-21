@@ -676,7 +676,7 @@ describe("release image workflow contract", () => {
     const parsed = Bun.YAML.parse(candidate) as {
       on: {
         workflow_dispatch: {
-          inputs: Record<string, { required?: boolean }>;
+          inputs: Record<string, { required?: boolean; default?: unknown }>;
         };
       };
       jobs: Record<
@@ -696,6 +696,9 @@ describe("release image workflow contract", () => {
       >;
     };
     const admissionParsed = Bun.YAML.parse(admissionWorkflow) as {
+      on: {
+        workflow_call: { inputs: Record<string, { required?: boolean; default?: unknown }> };
+      };
       permissions: Record<string, string>;
       jobs: Record<
         string,
@@ -703,8 +706,10 @@ describe("release image workflow contract", () => {
           permissions?: Record<string, string>;
           steps?: Array<{
             name?: string;
+            if?: string;
             run?: string;
             uses?: string;
+            env?: Record<string, string>;
             with?: Record<string, unknown>;
           }>;
         }
@@ -782,23 +787,32 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(candidate).not.toContain('[ "$(git rev-parse origin/production)" = "$SOURCE_SHA" ]');
     expect(parsed.on.workflow_dispatch.inputs.controller_sha?.required).toBe(true);
+    expect(parsed.on.workflow_dispatch.inputs.provenance_sha).toMatchObject({
+      required: false,
+      default: "",
+    });
     expect(parsed.jobs.admission?.uses).toBe("./.github/workflows/release-source-admission.yml");
     expect(parsed.jobs.admission?.with).toEqual({
       source_sha: "${{ inputs.source_sha }}",
       controller_sha: "${{ inputs.controller_sha }}",
+      provenance_sha: "${{ inputs.provenance_sha }}",
     });
     expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
     expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
     expect(parsed.jobs.admission?.permissions).toEqual({
+      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
+      statuses: "read",
     });
     expect(admissionParsed.permissions).toEqual({ contents: "read" });
     expect(admissionParsed.jobs.verify?.permissions).toEqual({
+      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
+      statuses: "read",
     });
     const controllerCheckout = admissionParsed.jobs.verify?.steps?.find(
       (step) => step.name === "Check out exact retained release controller",
@@ -809,6 +823,35 @@ describe("release image workflow contract", () => {
         (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
       )?.run,
     ).toBe("node scripts/check-release-pr-automation.mjs verify-approved-merge");
+    // Tested-descendant admission: explicit separate provenance, Git objects
+    // fetched only for that lane, and no release-source checkout.
+    expect(admissionParsed.on.workflow_call.inputs.provenance_sha).toMatchObject({
+      required: false,
+      default: "",
+    });
+    const verifyStep = admissionParsed.jobs.verify?.steps?.find(
+      (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
+    );
+    expect(verifyStep?.env).toMatchObject({
+      SOURCE_SHA: "${{ inputs.source_sha }}",
+      RELEASE_PROVENANCE_SHA: "${{ inputs.provenance_sha }}",
+      RELEASE_DESCENDANT_GIT_DIR: "${{ github.workspace }}",
+    });
+    const historyStep = admissionParsed.jobs.verify?.steps?.find(
+      (step) =>
+        step.name === "Restore protected main history as Git data for the descendant merge audit",
+    );
+    expect(historyStep?.if).toBe(
+      "${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
+    );
+    expect(historyStep?.run).toContain("--unshallow origin");
+    expect(historyStep?.run).toContain("'+refs/heads/main:refs/remotes/origin/main'");
+    expect(historyStep?.run).not.toMatch(/git (checkout|switch|restore|worktree|reset)/);
+    expect(admissionParsed.jobs.verify?.steps?.map((step) => step.name)).toEqual([
+      "Check out exact retained release controller",
+      "Restore protected main history as Git data for the descendant merge audit",
+      "Verify controller identity and exact reviewed merge provenance",
+    ]);
     expect(admissionWorkflow).not.toContain("ref: ${{ inputs.source_sha }}");
     expect(candidate).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
     expect(parsed.jobs.candidate?.permissions).toEqual({
