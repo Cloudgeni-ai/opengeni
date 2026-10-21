@@ -121,6 +121,7 @@ import {
 } from "./browser-model-text";
 import {
   computerActionText,
+  computerObservationDiff,
   computerObservationText,
   computerOpenText,
   computerTargetsText,
@@ -1015,6 +1016,20 @@ export function createInteractionAttemptToolDefinitions(
   // A retried browser_act (same operation) must dispatch the same File IDs, so
   // each operation publishes a given path at most once.
   const publishedUploads = new Map<string, Promise<string>>();
+  // The latest reading of each computer window this attempt showed the model.
+  // An action's receipt shows only what changed since (refs stay with their
+  // element), rendered once when the call returns, like every tool result.
+  const computerSeen = new Map<string, Parameters<typeof computerObservationText>[0]>();
+  const seenComputerKey = (observation: { computerSessionId: string; target: { id: string } }) =>
+    `${observation.computerSessionId}\u0000${observation.target.id}`;
+  const rememberComputerReading = (
+    observation: Parameters<typeof computerObservationText>[0] & { computerSessionId: string },
+  ) => {
+    const key = seenComputerKey(observation);
+    computerSeen.delete(key);
+    computerSeen.set(key, observation);
+    while (computerSeen.size > 32) computerSeen.delete(computerSeen.keys().next().value!);
+  };
   const publishUploadPath = (operationId: string, path: string): Promise<string> => {
     const key = `${operationId}\u0000${path}`;
     let published = publishedUploads.get(key);
@@ -2270,10 +2285,12 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
-    modelText: (output) =>
-      output.capturedFrame
+    modelText: (output) => {
+      rememberComputerReading(output);
+      return output.capturedFrame
         ? computerObservationText(output)
-        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
+        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
+    },
     execute: async (value) => {
       // The tree and the pixels are independent reads of the same target;
       // a generation mismatch below re-reads the tree once. An app target
@@ -2348,7 +2365,14 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     modelInputSchema: computerActModelInputSchema,
-    modelText: computerActionText,
+    modelText: (receipt) => {
+      const observation = receipt.observation;
+      if (!observation) return computerActionText(receipt);
+      const base = computerSeen.get(seenComputerKey(observation));
+      rememberComputerReading(observation);
+      const shown = base ? computerObservationDiff(base, observation) : null;
+      return computerActionText(shown ? { ...receipt, observation: shown } : receipt);
+    },
     execute: async (value, context) => {
       const action = value.action;
       if (action.type === "batch") {
