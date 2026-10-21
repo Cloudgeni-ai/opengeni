@@ -4456,6 +4456,9 @@ function SessionRow(props: {
     document.addEventListener("keydown", close, true);
     return () => document.removeEventListener("keydown", close, true);
   }, [hoverOpen]);
+  // The right-click menu replaces the preview: it would otherwise stay drawn
+  // over the menu, since the pointer is still on the row.
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   // Who started a session only adds information where other people work too.
   const personalWorkspace = isPersonalWorkspace(
     context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
@@ -4568,12 +4571,22 @@ function SessionRow(props: {
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu
+      onOpenChange={(open) => {
+        setContextMenuOpen(open);
+        if (open) setHoverOpen(false);
+      }}
+    >
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
           <SiteOriginLink session={props.session} compact />
-          <HoverCard openDelay={100} closeDelay={80} open={hoverOpen} onOpenChange={setHoverOpen}>
+          <HoverCard
+            openDelay={100}
+            closeDelay={80}
+            open={hoverOpen && !contextMenuOpen}
+            onOpenChange={(open) => setHoverOpen(open && !contextMenuOpen)}
+          >
             <HoverCardTrigger asChild>
               <Link
                 to="/workspaces/$workspaceId/sessions/$sessionId"

@@ -775,7 +775,14 @@ function CommandMenuDialog(props: {
                               {item.meta}
                             </span>
                           ) : null}
-                          {item.chord ? <Keycaps chord={item.chord} platform={platform} /> : null}
+                          {item.chord ? (
+                            // Touch screens have no keys to press.
+                            <Keycaps
+                              chord={item.chord}
+                              platform={platform}
+                              className="pointer-coarse:hidden"
+                            />
+                          ) : null}
                         </div>
                       );
                     })}
