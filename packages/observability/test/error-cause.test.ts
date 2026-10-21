@@ -191,7 +191,7 @@ describe("error cause classification", () => {
         causeName: "BrowserControlRequestError",
         causeCode: "driver_failed",
         causeDriverClass: "has spaces",
-        causeDriverFrame: "/Users/someone/secret",
+        causeDriverFrame: "/Users/user/secret",
         causeDriverMessage: `window "${title}" vanished`,
       });
       obs.warn("Channel-A operation failed", {
