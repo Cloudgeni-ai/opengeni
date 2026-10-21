@@ -762,11 +762,10 @@ describe("accepted-turn Company Brain context selection", () => {
         operationKey: `context-share-child-${crypto.randomUUID()}`,
       });
     }
-    expect(
-      await shared.admin<{ id: string; visibility: string }[]>`
-        select id, visibility from sessions where id in (${f.root.id}, ${f.child!.id})
-        order by (id = ${f.root.id}) desc`,
-    ).toEqual([
+    const visibilities = await shared.admin<{ id: string; visibility: string }[]>`
+      select id, visibility from sessions where id in (${f.root.id}, ${f.child!.id})
+      order by (id = ${f.root.id}) desc`;
+    expect([...visibilities]).toEqual([
       { id: f.root.id, visibility: "user_private" },
       { id: f.child!.id, visibility: "workspace_shared" },
     ]);
