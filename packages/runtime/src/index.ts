@@ -458,6 +458,7 @@ export {
 } from "./model-preemption";
 import {
   createTurnToolCancellationController,
+  isRouteMoveRefusal,
   TurnSandboxCommandCancelledError,
   wrapCapabilityToolsForTurnCancellation,
   type TurnSandboxCommandArgs,
@@ -4581,6 +4582,9 @@ function buildAgentCapabilitiesFromComposition(
         }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
         if (isRoutingMutationOutputRejectedError(error)) throw error;
+        // The turn's call-level wrapper knows whether this call reached a
+        // route; it reports a refused move as not started (or fails closed).
+        if (toolCancellation && isRouteMoveRefusal(error)) throw error;
         if (isRoutingMutationOutcomeUnknownError(error)) {
           // The outer physical fence must retain the exact process before
           // rendering uncertainty. Platform/setup calls still throw normally.

@@ -28,6 +28,7 @@
 // `@opengeni/db`.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { noteRoutedCallRouteResolved } from "./routed-call-scope";
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
@@ -1069,6 +1070,26 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async resolve(
     remainingFenceRetries = this.maxFenceRetries,
   ): Promise<ResolvedActiveBackend> {
+    const resolved = await this.resolveRoute(remainingFenceRetries);
+    noteRoutedCallRouteResolved();
+    return resolved;
+  }
+
+  /**
+   * Between tool batches, before the next model request: resolve a route that
+   * moved since this attempt last used it, so a move this attempt cannot serve
+   * (another workspace root, or a home it cannot reach) raises its typed
+   * transition at that clean boundary rather than on the first call of the
+   * next batch, after the model already chose it. A move this attempt can
+   * serve is adopted exactly as its next operation would adopt it.
+   */
+  async assertActiveRouteContinuable(): Promise<void> {
+    await this.resolveRoute();
+  }
+
+  private async resolveRoute(
+    remainingFenceRetries = this.maxFenceRetries,
+  ): Promise<ResolvedActiveBackend> {
     const pointer = await this.deps.readPointer();
     if (
       this.boundActiveRoute &&
@@ -1943,6 +1964,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       let backend: ResolvedActiveBackend;
       try {
         backend = pinnedBackend ?? (await this.resolve());
+        noteRoutedCallRouteResolved();
         resolutionOutcome = "completed";
       } finally {
         recordFirstOperationPhase(
@@ -2541,6 +2563,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Cancellation transport selection, pending-start control, and the launch
     // must refer to one physical backend, even before a handle is returned.
     const backend = pinnedBackend ?? (await this.resolve());
+    noteRoutedCallRouteResolved();
     const pages = new Map<
       unknown,
       ReturnType<NonNullable<ProviderCommandSession["getProviderCommandOutput"]>>

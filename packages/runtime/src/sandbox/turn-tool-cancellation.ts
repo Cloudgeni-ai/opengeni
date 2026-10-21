@@ -12,10 +12,13 @@ import {
 } from "./exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
+  RoutingWorkspaceRootChangedError,
   isRoutingMutationOutputRejectedError,
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
+import { ActiveBackendUnresolvableError } from "./routing/backend-resolver";
+import { runRoutedToolCall } from "./routing/routed-call-scope";
 import { createHash } from "node:crypto";
 import { sendCommandInput } from "./command-input";
 import {
@@ -945,6 +948,51 @@ export function renderDirectToolFault(error: unknown, retainedProcessSessionId?:
   return `An error occurred while running the tool. Please try again. Error: ${details}`;
 }
 
+/**
+ * The result of a call that the routed sandbox refused before anything
+ * started, because the session moved to a route this attempt cannot serve
+ * while the call's step was running. The next step runs on the new route.
+ */
+export const ROUTE_MOVED_CALL_NOT_STARTED =
+  "Not run: this chat moved to another machine during this step, so this call did not start. The next step runs on that machine; call it again there if it is still needed.";
+
+/** A route move this attempt cannot serve, refused before dispatch. Walks only
+ * structural `cause` and AggregateError links, never message text. */
+export function isRouteMoveRefusal(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let inspected = 0; pending.length > 0 && inspected < 16; inspected += 1) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof RoutingWorkspaceRootChangedError) return true;
+    if (
+      current instanceof ActiveBackendUnresolvableError &&
+      current.code === "home_unavailable_this_turn"
+    )
+      return true;
+    if (current instanceof AggregateError) pending.push(...current.errors);
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+  }
+  return false;
+}
+
+/** A call refused by a route move before any of its operations resolved a
+ * route started nothing: return that as its result, so the step settles with
+ * a certain outcome for every call and the attempt ends at the next model
+ * request. A refusal after the call already reached a route still fails. */
+function withRouteMoveContainment(tool: FunctionTool): FunctionTool {
+  return {
+    ...tool,
+    invoke: (runContext, input, details) =>
+      runRoutedToolCall(
+        () => tool.invoke(runContext, input, details),
+        isRouteMoveRefusal,
+        () => ROUTE_MOVED_CALL_NOT_STARTED,
+      ),
+  };
+}
+
 function safeProcessIdentity(raw: string): ShellProcessIdentity | null {
   if (parseExecBannerExitCode(raw) !== 0) return null;
   const match = execOutput(raw)
@@ -1511,7 +1559,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     const wrapped = structuralTools.map((tool) => {
-      if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
+      if (tool.type === "function")
+        return withRouteMoveContainment(this.wrapFunctionTool(tool as FunctionTool, session));
       if (tool.type === "apply_patch")
         return this.wrapApplyPatchTool(tool as ApplyPatchTool, session);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
