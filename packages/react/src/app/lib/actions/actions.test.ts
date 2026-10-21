@@ -139,7 +139,7 @@ describe("ranking", () => {
   });
 
   test("ignores case and accents", () => {
-    expect(rankLabel("Møte med Jørgen", "møte")).not.toBeNull();
+    expect(rankLabel("Møte om økonomi", "møte")).not.toBeNull();
     expect(rankLabel("Café menu", "cafe")).not.toBeNull();
     expect(rankLabel("ÅRSOPPGJØR", "årsopp")).not.toBeNull();
   });
