@@ -2,7 +2,10 @@ import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { lockSessionEventWriteRows } from "./session-control";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+} from "./session-attempt-writers";
 import * as schema from "./schema";
 
 /** Call only while holding the canonical session lock. A label is not an
@@ -26,7 +29,11 @@ export async function sessionQueueIsEmptyInTransaction(
             and t.status in ('queued', 'running', 'recovering', 'waiting_capacity', 'requires_action'))
         and not exists (select 1 from session_turn_attempts a
           where a.workspace_id = s.workspace_id and a.session_id = s.id
-            and (a.state <> 'closed' or ${sessionAttemptPendingWritersSql(sql`a`)}))
+            and a.state in ('claimed', 'running'))
+        and not exists (select 1 from session_turn_attempts a
+          where a.workspace_id = s.workspace_id and a.session_id = s.id
+            and a.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
+            and ${sessionAttemptPendingWritersSql(sql`a`)})
         and not exists (select 1 from session_system_updates u
           where u.workspace_id = s.workspace_id and u.session_id = s.id and u.state = 'pending')
         and not exists (select 1 from session_goals g
