@@ -807,6 +807,85 @@ describe("traffic recovery and bounded reads", () => {
     expect(await reader.resultArtifact({ ...manifest, tipSha: f.base }, 10, 1)).toBeNull();
     expect(calls).toBeGreaterThan(0);
   });
+  test("traffic reader runs() keeps base verified-run cache and traffic GET cache separate", async () => {
+    const f = await fixture();
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const manifest = report.cohorts[0]!.manifest!;
+    const branch = `${TRAFFIC_PREFIX}${manifest.batchId}`;
+    const trafficCache = new TrafficCache(join(f.root, "reader-cache"));
+    // A previously verified receipt avoids artifact download; the run listing
+    // below is the only mocked provider response.
+    const verified = { outcome: "success" as const, retryable: false, reason: "verified fixture" };
+    await trafficCache.put(
+      `result:${f.settings.repository}:${manifest.batchId}:${manifest.tipSha}:10:1`,
+      verified,
+      null,
+    );
+    const listed: string[] = [];
+    const transport = (async (url: string | URL | Request) => {
+      const target = String(url);
+      if (!target.includes(`/actions/workflows/batch-ci.yml/runs?branch=`))
+        throw new Error(`Unexpected provider call ${target}`);
+      listed.push(target);
+      return Response.json({
+        workflow_runs: [
+          {
+            id: 10,
+            run_attempt: 1,
+            head_sha: manifest.tipSha,
+            head_branch: branch,
+            path: f.settings.workflow,
+            event: "push",
+            status: "completed",
+            conclusion: "success",
+            run_started_at: date(6),
+            updated_at: date(8),
+          },
+        ],
+      });
+    }) as typeof fetch;
+    const reader = new CachedTrafficReader(f.settings, new GitHubAuth({}), transport, trafficCache);
+    expect(reader.trafficCache).toBe(trafficCache);
+    const first = await reader.runs(manifest, branch);
+    expect(first).toEqual([
+      {
+        id: 10,
+        attempt: 1,
+        headSha: manifest.tipSha,
+        branch,
+        workflow: f.settings.workflow,
+        status: "completed",
+        outcome: "success",
+        trusted: true,
+        retryable: false,
+        startedAt: date(6),
+        completedAt: date(8),
+      },
+    ]);
+    expect(listed).toHaveLength(1);
+    // The inherited core path stores the trusted terminal run in the base DiskCache.
+    const verifiedKey = `verified:${manifest.tipSha}:${manifest.batchId}:10:1`;
+    expect(await reader.cache.get(verifiedKey)).toEqual({ run: first[0], conclusion: "success" });
+    expect(await Bun.file(reader.cache.path).exists()).toBe(true);
+    expect(await trafficCache.get(verifiedKey)).toBeNull();
+    // The listing is served from the traffic GET cache: no further provider call.
+    expect(await reader.runs(manifest, branch)).toEqual(first);
+    expect(listed).toHaveLength(1);
+    // A restarted reader recovers both on-disk caches without any provider call.
+    const restarted = new CachedTrafficReader(
+      f.settings,
+      new GitHubAuth({}),
+      (async () => {
+        throw new Error("No provider calls allowed");
+      }) as unknown as typeof fetch,
+      new TrafficCache(join(f.root, "reader-cache")),
+    );
+    expect(await restarted.runs(manifest, branch)).toEqual(first);
+    expect(await restarted.cache.get(verifiedKey)).toEqual({
+      run: first[0],
+      conclusion: "success",
+    });
+  });
 });
 
 describe("restricted optional traffic CI", () => {
@@ -914,6 +993,72 @@ describe("restricted optional traffic CI", () => {
       ),
     ).toHaveLength(1);
   });
+  test("same-clock publishers past the final pre-push check get distinct fences and one atomic winner", async () => {
+    const f = await fixture({ adapter: true }),
+      report = await replayTraffic(f.git, f.origin.dir, f.input, 1),
+      before = await f.git.remoteRefs(f.origin.dir);
+    // Hold each push until both publishers have completed every remote
+    // observation, including the writer's final stale-snapshot check. Then
+    // release the pushes one at a time so the second sees the first's result.
+    const pushedStates: string[] = [],
+      landedStates: string[] = [];
+    let arrive!: () => void;
+    const bothArrived = new Promise<void>((resolve) => (arrive = resolve));
+    let serial = Promise.resolve();
+    const writerGit = new GitStore(f.git.dir);
+    const exec = writerGit.exec.bind(writerGit);
+    writerGit.exec = async (args: string[], input?: string, env?: Record<string, string>) => {
+      if (args[0] !== "push") return exec(args, input, env);
+      const next = args.find((arg) => arg.endsWith(`:${TRAFFIC_STATE}`))!.split(":")[0]!;
+      pushedStates.push(next);
+      if (pushedStates.length === 2) arrive();
+      await bothArrived;
+      const previous = serial;
+      let done!: () => void;
+      serial = new Promise<void>((resolve) => (done = resolve));
+      await previous;
+      try {
+        const output = await exec(args, input, env);
+        landedStates.push(next);
+        return output;
+      } finally {
+        done();
+      }
+    };
+    const publisher = new TrafficPublisher(
+      f.settings,
+      new AtomicGitWriter(writerGit, f.origin.dir, TRAFFIC_STATE, "refs/heads/main"),
+    );
+    const outcomes = await Promise.allSettled(
+      [1, 2].map(() =>
+        publishOneTraffic(
+          f.settings,
+          f.git,
+          { runs: async () => [] },
+          f.origin.dir,
+          report,
+          publisher,
+          { now: date(10) },
+        ),
+      ),
+    );
+    // Identical state commits would let Git report the loser as "up to date"
+    // before checking its lease, so both calls would claim publication.
+    expect(pushedStates).toHaveLength(2);
+    expect(pushedStates[0]).not.toBe(pushedStates[1]);
+    expect(landedStates).toHaveLength(1);
+    const winners = outcomes.flatMap((o) =>
+      o.status === "fulfilled" && o.value.action === "published" ? [o.value] : [],
+    );
+    expect(winners).toHaveLength(1);
+    expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);
+    const after = await f.git.remoteRefs(f.origin.dir);
+    expect(after.get(TRAFFIC_STATE)).toBe(landedStates[0]!);
+    expect(after.get("refs/heads/main")).toBe(before.get("refs/heads/main")!);
+    expect([...after.keys()].filter((r) => r.startsWith(`refs/heads/${TRAFFIC_PREFIX}`))).toEqual([
+      `refs/heads/${TRAFFIC_PREFIX}${winners[0]!.batchId}`,
+    ]);
+  }, 30_000);
   test("namespace/config changes cannot publish into live or main", async () => {
     const f = await fixture({ adapter: true }),
       report = await replayTraffic(f.git, f.origin.dir, f.input);
