@@ -3,8 +3,10 @@ import {
   SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_STEP_TYPES,
+  streamSessionEvents,
   type SessionEvent,
   type SessionEventListOptions,
+  type SessionEventStreamTransport,
 } from "@opengeni/sdk";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -15,9 +17,12 @@ import {
   conversationFilterMode,
   conversationTurnBounds,
   isConversationHistoryEvent,
+  REJOIN_STALL_TIMEOUT_MS,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { useSession } from "../src/hooks/use-session";
+import { PAGE_WAKE_GAP_MS } from "../src/hooks/page-wake";
+import { useTurnlessOutputGap } from "../src/hooks/turnless-output-gaps";
 import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import {
   buildTimeline,
@@ -222,6 +227,12 @@ function historyClient(input: {
   pageGate?: (options: SessionEventListOptions) => Promise<void> | undefined;
   /** Pause the live stream after this many events until `liveGate` resolves. */
   liveGate?: { after: number; open: Promise<void> };
+  /** Serve the live stream with the SDK's own reconnecting stream instead. */
+  sdkTransport?: SessionEventStreamTransport;
+  /** A head read throws this, when given. */
+  failHead?: () => Error | undefined;
+  /** A head read waits for this (then reads the head), when given. */
+  holdHead?: () => Promise<void> | undefined;
 }) {
   const reads: SessionEventListOptions[] = [];
   const streamCalls: number[] = [];
@@ -229,6 +240,9 @@ function historyClient(input: {
   const client = fakeClient({
     getSession: async () => {
       headReads += 1;
+      await input.holdHead?.();
+      const failure = input.failHead?.();
+      if (failure) throw failure;
       const store = input.store();
       return (input.head?.() ?? {
         lastSequence: store[store.length - 1]?.sequence ?? 0,
@@ -258,6 +272,14 @@ function historyClient(input: {
     streamEvents: (_workspaceId, _sessionId, options = {}) => {
       const after = options.after ?? 0;
       streamCalls.push(after);
+      if (input.sdkTransport) {
+        return streamSessionEvents(input.sdkTransport, {
+          ...options,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 2,
+          reconnectJitterRatio: 0,
+        });
+      }
       return (async function* () {
         options.onOpen?.();
         let yielded = 0;
@@ -2358,5 +2380,616 @@ describe("turn bookkeeping in conversation history", () => {
     expect(
       isConversationHistoryEvent(at(7, "agent.model.usage", {}, null), presented, new Set()),
     ).toBe(true);
+  });
+});
+
+/**
+ * A scripted SSE endpoint: each connection replays every durable row after
+ * its cursor, then stays open for live rows until dropped or aborted.
+ */
+function sseServer(store: () => readonly SessionEvent[]) {
+  const encoder = new TextEncoder();
+  const frame = (event: SessionEvent) =>
+    `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  const opened: number[] = [];
+  const replayed: number[] = [];
+  const signals: AbortSignal[] = [];
+  let current: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const transport: SessionEventStreamTransport = {
+    openStream: async (after, signal) => {
+      opened.push(after);
+      if (signal) signals.push(signal);
+      const backlog = store().filter((event) => event.sequence > after);
+      replayed.push(backlog.length);
+      return new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          current = controller;
+          if (backlog.length > 0) controller.enqueue(encoder.encode(backlog.map(frame).join("")));
+          signal?.addEventListener(
+            "abort",
+            () => {
+              try {
+                controller.error(new DOMException("aborted", "AbortError"));
+              } catch {
+                // Already closed.
+              }
+            },
+            { once: true },
+          );
+        },
+      });
+    },
+    listEvents: async (after, limit) =>
+      store()
+        .filter((event) => event.sequence > after)
+        .slice(0, limit),
+  };
+  return {
+    transport,
+    opened,
+    replayed,
+    signals,
+    push(events: readonly SessionEvent[]) {
+      current?.enqueue(encoder.encode(events.map(frame).join("")));
+    },
+    /** The network goes away under the open connection. */
+    drop() {
+      const controller = current;
+      current = null;
+      controller?.error(new TypeError("network connection lost"));
+    },
+  };
+}
+
+/** `count` more tool calls of a working turn, from `start`. */
+function lateCalls(start: number, count: number, turnId = "T1"): SessionEvent[] {
+  const events: SessionEvent[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const sequence = start + index * 2;
+    const id = `${turnId}-late-${index}`;
+    events.push(
+      at(sequence, "agent.toolCall.created", { id, name: "exec_command" }, turnId),
+      at(sequence + 1, "agent.toolCall.output", { id, output: "ok" }, turnId),
+    );
+  }
+  return events;
+}
+
+describe("rejoining the live tip after a reconnect or a sleep", () => {
+  /** A chat on a working turn whose 100 calls are already written. */
+  async function openWorkingChat(
+    options: {
+      replay?: "full";
+      failHead?: () => Error | undefined;
+      pageGate?: (options: SessionEventListOptions) => Promise<void> | undefined;
+    } = {},
+  ) {
+    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const server = sseServer(() => store);
+    const history = historyClient({
+      store: () => store,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+      sdkTransport: server.transport,
+      ...(options.failHead ? { failHead: options.failHead } : {}),
+      ...(options.pageGate ? { pageGate: options.pageGate } : {}),
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: history.client,
+          workspaceId: WORKSPACE_ID,
+          ...(options.replay ? { replay: options.replay } : {}),
+        }),
+      undefined,
+    );
+    await settle(60);
+    return { store, server, history, hook };
+  }
+
+  /** The laptop slept: the wall clock jumps, then the page is shown again. */
+  async function wake(realNow: () => number) {
+    const sleptFor = PAGE_WAKE_GAP_MS * 4;
+    Date.now = () => realNow() + sleptFor;
+    await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+  }
+
+  /** Every step sequence the chat holds, checked for duplicates. */
+  function uniqueStepSequences(events: readonly SessionEvent[]): number[] {
+    const sequences = stepEvents([...events]).map((event) => event.sequence);
+    expect(new Set(sequences).size).toBe(sequences.length);
+    return sequences;
+  }
+
+  test("an SDK reconnect after a long gap reads the newest steps instead of replaying them", async () => {
+    const { store, server, history, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      expect(server.opened).toEqual([202]);
+      expect(stepEvents(hook.result.current.events)).toHaveLength(200);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+
+      // 2,000 calls are written while the connection is dead.
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+
+      // The reconnect asked the head, then resumed AT it: nothing replayed.
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      // The open working turn shows its newest page of steps, re-read.
+      expect(history.reads.at(-1)).toMatchObject({
+        includeTypes: [...TURN_STEP_READ_TYPES],
+        before: 4_203,
+      });
+      let steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
+      expect(steps.at(-1)!.sequence).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+
+      // The stream keeps delivering live rows after the skip.
+      const next = lateCalls(4_203, 1, "T1").map((event, index) => ({
+        ...event,
+        id: `evt-live-${index}`,
+        payload: { ...(event.payload as object), id: "T1-live" },
+      }));
+      store.push(...next);
+      await actRun(() => server.push(next));
+      await settle(30);
+      steps = stepEvents(hook.result.current.events);
+      expect(steps.at(-1)!.sequence).toBe(4_204);
+      expect(hook.result.current.lastSequence).toBe(4_204);
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("an SDK reconnect after a short gap replays it once, without loss or duplicates", async () => {
+    const { store, server, history, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const reads = history.reads.length;
+      store.push(...lateCalls(203, 3));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.opened).toEqual([202, 202]);
+      expect(server.replayed).toEqual([0, 6]);
+      // No history read: the short gap came over the stream.
+      expect(history.reads).toHaveLength(reads);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(206);
+      const sequences = steps.map((event) => event.sequence);
+      expect(new Set(sequences).size).toBe(sequences.length);
+      expect(sequences.at(-1)).toBe(208);
+      expect(stepMarkers(hook.result.current.timeline)[0]!.state).toBe("complete");
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a wake rejoins a silently dead stream at once, without the heartbeat or a replay", async () => {
+    const realNow = Date.now;
+    const { store, server, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      // The lid closed: 2,000 calls were written and the connection died
+      // without an error the page could see; no visibility change either.
+      store.push(...lateCalls(203, 2_000));
+      const sleptFor = PAGE_WAKE_GAP_MS * 4;
+      Date.now = () => realNow() + sleptFor;
+      // The page notices the clock jump as soon as it is shown again.
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.signals[0]!.aborted).toBe(true);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
+      expect(steps.at(-1)!.sequence).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      Date.now = realNow;
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test(
+    "an SDK reconnect after a long conversation shows the newest window, keeping the old one until it is ready",
+    async () => {
+      // Ten finished exchanges, then 600 more (2,400 conversation rows) while
+      // disconnected: too many to append, so the newest window is loaded.
+      const store: SessionEvent[] = [];
+      const exchange = (index: number) =>
+        longTurn({ start: index * 4 + 1, turnId: `T${index}`, steps: 0 });
+      for (let index = 0; index < 10; index += 1) store.push(...exchange(index));
+      const server = sseServer(() => store);
+      let gate: Promise<void> | undefined;
+      let openGate = () => {};
+      const history = historyClient({
+        store: () => store,
+        withPages: true,
+        sdkTransport: server.transport,
+        pageGate: (options) => (options.before === Number.MAX_SAFE_INTEGER ? gate : undefined),
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client: history.client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await settle(60);
+        expect(server.opened).toEqual([40]);
+        expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+
+        for (let index = 10; index < 610; index += 1) store.push(...exchange(index));
+        gate = new Promise<void>((resolve) => {
+          openGate = resolve;
+        });
+        server.drop();
+        await settleUntil(() =>
+          history.reads.some(
+            (read) => read.before === Number.MAX_SAFE_INTEGER && history.reads.indexOf(read) > 0,
+          ),
+        );
+        await settle(30);
+        // The replacement is in flight: the reader still sees the old window.
+        expect(hook.result.current.events[0]!.sequence).toBe(1);
+        expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+        expect(server.opened).toEqual([40]);
+
+        openGate();
+        await settleUntil(() => server.opened.length === 2);
+        await settle(60);
+        expect(server.opened).toEqual([40, 2_440]);
+        expect(server.replayed).toEqual([0, 0]);
+        const events = hook.result.current.events;
+        expect(events.at(-1)!.sequence).toBe(2_440);
+        expect(events[0]!.sequence).toBeGreaterThan(40);
+        expect(hook.result.current.hasOlder).toBe(true);
+        expect(hook.result.current.connectionState).toBe("live");
+      } finally {
+        openGate();
+        await hook.unmount();
+      }
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  test("full replay keeps the SDK's exactly-once reconnect", async () => {
+    const { store, server, hook } = await openWorkingChat({ replay: "full" });
+    try {
+      expect(server.opened).toEqual([0]);
+      expect(hook.result.current.events).toHaveLength(202);
+      store.push(...lateCalls(203, 100));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settleUntil(() => hook.result.current.events.length === 402);
+      expect(server.opened).toEqual([0, 202]);
+      expect(server.replayed).toEqual([202, 200]);
+      const sequences = hook.result.current.events.map((event) => event.sequence);
+      expect(sequences).toEqual(Array.from({ length: 402 }, (_, index) => index + 1));
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a reconnect whose head read fails transiently backs off and still skips the backlog", async () => {
+    let failures = 0;
+    const { store, server, history, hook } = await openWorkingChat({
+      failHead: () => {
+        if (failures === 0) return undefined;
+        failures -= 1;
+        return new TypeError("network is still coming back");
+      },
+    });
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+      store.push(...lateCalls(203, 2_000));
+      failures = 2;
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      // Two failed checks opened nothing; the third found the long gap.
+      expect(history.headReads()).toBe(headReads + 3);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      expect(uniqueStepSequences(hook.result.current.events).at(-1)).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  for (const [name, failure, checks] of [
+    ["cannot be read at all", () => new Error("forbidden"), 1],
+    ["keeps failing transiently", () => new TypeError("still offline"), 6],
+  ] as const) {
+    test(`a reconnect whose head ${name} replays exactly instead of staying stuck`, async () => {
+      let failing = false;
+      const { store, server, history, hook } = await openWorkingChat({
+        failHead: () => (failing ? failure() : undefined),
+      });
+      let unretain: (() => void) | undefined;
+      try {
+        unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+        const headReads = history.headReads();
+        store.push(...lateCalls(203, 50));
+        failing = true;
+        server.drop();
+        await settleUntil(() => server.opened.length === 2);
+        await settle(60);
+        expect(history.headReads()).toBe(headReads + checks);
+        expect(server.opened).toEqual([202, 202]);
+        expect(server.replayed).toEqual([0, 100]);
+        const sequences = uniqueStepSequences(hook.result.current.events);
+        expect(sequences).toHaveLength(300);
+        expect(sequences.at(-1)).toBe(302);
+        expect(hook.result.current.connectionState).toBe("live");
+      } finally {
+        unretain?.();
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("only a skipped gap makes the terminal re-read its output", async () => {
+    const { store, server, hook } = await openWorkingChat();
+    const gap = await renderHook(() => useTurnlessOutputGap(WORKSPACE_ID, SESSION_ID), undefined);
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const before = gap.result.current;
+      // A short gap replays every row, terminal output included.
+      store.push(...lateCalls(203, 3));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.opened).toEqual([202, 202]);
+      expect(gap.result.current).toBe(before);
+      // A long one skips rows the terminal may need.
+      store.push(...lateCalls(209, 2_000));
+      server.drop();
+      await settleUntil(() => server.opened.length === 3);
+      await settle(60);
+      expect(server.opened).toEqual([202, 202, 4_208]);
+      expect(gap.result.current).toBeGreaterThan(before);
+    } finally {
+      unretain?.();
+      await gap.unmount();
+      await hook.unmount();
+    }
+  });
+
+  test("rows the dead connection already delivered count before the gap is measured", async () => {
+    const { store, server, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      // Ten rows arrive and wait for the next render batch...
+      const delivered = lateCalls(203, 5);
+      store.push(...delivered);
+      server.push(delivered);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      // ...when the connection dies with ten more written: a short gap.
+      store.push(...lateCalls(213, 5));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.opened).toEqual([202, 212]);
+      expect(server.replayed).toEqual([0, 10]);
+      const sequences = uniqueStepSequences(hook.result.current.events);
+      expect(sequences).toHaveLength(220);
+      expect(sequences.at(-1)).toBe(222);
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a reconnect whose catch-up read hangs is abandoned and retried, and its late answer changes nothing", async () => {
+    let held: Promise<void> | undefined;
+    let release = () => {};
+    const { store, server, history, hook } = await openWorkingChat({
+      // Only a catch-up read (forward from a cursor) is held, once.
+      pageGate: (options) => {
+        if (options.after === undefined) return undefined;
+        const hold = held;
+        held = undefined;
+        return hold;
+      },
+    });
+    let unretain: (() => void) | undefined;
+    // Fake time: drive timers by hand, letting promises settle in between.
+    const pass = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(100);
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+        });
+      }
+    };
+    jest.useFakeTimers();
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+      // The first catch-up read after the drop goes out on a dead connection.
+      held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await pass(1_000);
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202]);
+      // Nothing completes for the stall timeout: the attempt is abandoned
+      // and retried, and the retry skips the backlog.
+      await pass(REJOIN_STALL_TIMEOUT_MS + 1_000);
+      expect(history.headReads()).toBe(headReads + 2);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      const reads = history.reads.length;
+      const sequences = uniqueStepSequences(hook.result.current.events);
+      expect(sequences.at(-1)).toBe(4_202);
+      // The abandoned read answers late, after even more was written: it
+      // must not catch up, read or reconnect on behalf of a dead attempt.
+      store.push(...lateCalls(4_203, 2_000));
+      release();
+      await pass(1_000);
+      expect(history.reads).toHaveLength(reads);
+      expect(uniqueStepSequences(hook.result.current.events)).toEqual(sequences);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      release();
+      jest.useRealTimers();
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a reconnect whose reads are slow but progressing is never abandoned", async () => {
+    let slow = false;
+    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const server = sseServer(() => store);
+    const stallShare = Math.ceil(REJOIN_STALL_TIMEOUT_MS * 0.7);
+    const history = historyClient({
+      store: () => store,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+      sdkTransport: server.transport,
+      // Each read takes most of the stall timeout; together they exceed it.
+      holdHead: () =>
+        slow ? new Promise<void>((resolve) => setTimeout(resolve, stallShare)) : undefined,
+      pageDelay: (options) => (slow && options.after !== undefined ? stallShare : 0),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client: history.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const pass = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(100);
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+        });
+      }
+    };
+    let unretain: (() => void) | undefined;
+    try {
+      await settle(60);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      jest.useFakeTimers();
+      const headReads = history.headReads();
+      slow = true;
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await pass(stallShare * 3);
+      // One attempt, never restarted: one head read, nothing replayed.
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+    } finally {
+      jest.useRealTimers();
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a wake whose head read fails transiently retries before rejoining the tip", async () => {
+    const realNow = Date.now;
+    let failures = 0;
+    const { store, server, history, hook } = await openWorkingChat({
+      failHead: () => {
+        if (failures === 0) return undefined;
+        failures -= 1;
+        return new TypeError("network is still coming back");
+      },
+    });
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+      store.push(...lateCalls(203, 2_000));
+      failures = 1;
+      await wake(realNow);
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(history.headReads()).toBe(headReads + 2);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      expect(uniqueStepSequences(hook.result.current.events).at(-1)).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      Date.now = realNow;
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a wake keeps full replay exact", async () => {
+    const realNow = Date.now;
+    const { store, server, hook } = await openWorkingChat({ replay: "full" });
+    try {
+      store.push(...lateCalls(203, 100));
+      await wake(realNow);
+      await settleUntil(() => hook.result.current.events.length === 402);
+      expect(server.signals[0]!.aborted).toBe(true);
+      expect(server.opened).toEqual([0, 202]);
+      expect(server.replayed).toEqual([202, 200]);
+      const sequences = hook.result.current.events.map((event) => event.sequence);
+      expect(sequences).toEqual(Array.from({ length: 402 }, (_, index) => index + 1));
+    } finally {
+      Date.now = realNow;
+      await hook.unmount();
+    }
+  });
+
+  test("a wake while reading history opens no stream", async () => {
+    const realNow = Date.now;
+    const store: SessionEvent[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      store.push(...longTurn({ start: index * 4 + 1, turnId: `T${index}`, steps: 0 }));
+    }
+    const server = sseServer(() => store);
+    const history = historyClient({
+      store: () => store,
+      withPages: true,
+      sdkTransport: server.transport,
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client: history.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      expect(server.opened).toEqual([160]);
+      await actRun(async () => {
+        await hook.result.current.jumpToSequence(1);
+      });
+      await settle(60);
+      expect(hook.result.current.hasNewer).toBe(true);
+      await wake(realNow);
+      await settle(60);
+      expect(server.opened).toEqual([160]);
+      expect(hook.result.current.hasNewer).toBe(true);
+      expect(hook.result.current.connectionState).toBe("idle");
+    } finally {
+      Date.now = realNow;
+      await hook.unmount();
+    }
   });
 });
