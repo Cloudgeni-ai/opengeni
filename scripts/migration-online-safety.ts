@@ -122,8 +122,7 @@ function withoutComments(sql: string): string {
 }
 
 function tokens(statement: string): Token[] {
-  // A function definition is not executed by the migration, including SQL
-  // routines written with single quotes or BEGIN ATOMIC rather than $$.
+  // A quoted function definition is not executed by the migration.
   if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i.test(statement)) return [];
   let text = stripRoutineBodies(statement);
   const block =
@@ -196,6 +195,24 @@ function clauses(ts: Token[]): Token[][] {
 function has(ts: Token[], ...words: string[]): boolean {
   return ts.some((_, i) => at(ts, i, ...words));
 }
+
+/** Command positions, not words in FK actions, privileges, triggers or columns.
+ * DML can also start a CTE body, or follow the last CTE's closing parenthesis.
+ */
+function commandStart(ts: Token[], i: number, procedural: boolean): boolean {
+  if (i === 0) return true;
+  const previous = ts[i - 1];
+  if (previous?.value === ";") return true;
+  if (procedural && ["BEGIN", "THEN", "ELSE", "LOOP"].some((w) => word(previous, w))) return true;
+  if (!["UPDATE", "DELETE", "INSERT"].some((w) => word(ts[i], w))) return false;
+  if (previous?.value === "(" && (word(ts[i - 2], "AS") || word(ts[i - 2], "MATERIALIZED")))
+    return true;
+  if (previous?.value !== ")") return false;
+  let start = i - 1;
+  while (start > 0 && ts[start - 1]?.value !== ";") start--;
+  return has(ts.slice(start, i), "WITH");
+}
+
 function topLevel(ts: Token[]): Token[] {
   let depth = 0;
   return ts.filter((t) => {
@@ -342,6 +359,7 @@ function analyze(
   const batch = batched(normalized, statements);
   const created = new Set<string>();
   const temporaryAliases = new Set<string>();
+  const alteredHere = new Set<string>();
   const priorIndexes = new Map(schema.indexes);
   const findings: OnlineSafetyFinding[] = [];
   const add = (rule: OnlineSafetyRule, statement: number, operation: string) => {
@@ -371,6 +389,7 @@ function analyze(
     const ts = tokens(statement);
     const procedural = /^\s*DO\b/i.test(statement);
     for (let i = 0; i < ts.length; i++) {
+      if (!commandStart(ts, i, procedural)) continue;
       if (at(ts, i, "CREATE")) {
         let j = i + 1;
         if (word(ts[j], "GLOBAL") || word(ts[j], "LOCAL")) j++;
@@ -435,9 +454,19 @@ function analyze(
         const table = relation(ts, i + 2);
         if (!table) continue;
         const end = ts.findIndex((t, k) => k >= table.end && t.value === ";");
-        for (const c of clauses(ts.slice(table.end, end < 0 ? undefined : end))) {
+        const actions = clauses(ts.slice(table.end, end < 0 ? undefined : end));
+        // A multi-action ALTER acquires its strongest lock before any action.
+        // Ordinary files are one transaction: prior ALTER locks also survive.
+        if (actions.some((c) => !at(c, 0, "VALIDATE", "CONSTRAINT"))) alteredHere.add(table.name);
+        for (const c of actions) {
           const surface = topLevel(c);
           if (existing(table) && !maintenance) {
+            if (at(c, 0, "VALIDATE", "CONSTRAINT") && alteredHere.has(table.name))
+              add(
+                "constraint-validation",
+                number,
+                "VALIDATE retains an earlier ALTER lock until this file commits; use a separate migration",
+              );
             if (word(c[0], "ADD")) {
               if (
                 (has(c, "FOREIGN", "KEY") || has(c, "REFERENCES") || has(c, "CHECK")) &&
@@ -468,7 +497,7 @@ function analyze(
                   .some(
                     (t, k, tail) =>
                       isName(t) &&
-                      /^(?:now|random|gen_random_uuid|uuid_generate_v\d|uuidv[47]|nextval|setval|clock_timestamp|timeofday)$/i.test(
+                      /^(?:now|random|gen_random_uuid|uuid_generate_v(?:\d|1mc)|uuidv[47]|nextval|setval|clock_timestamp|timeofday)$/i.test(
                         name(t),
                       ) &&
                       tail[k + 1]?.value === "(",
@@ -477,6 +506,27 @@ function analyze(
                 add("table-rewrite", number, "ADD COLUMN with a per-row or policy-listed default");
               if (has(c, "GENERATED", "ALWAYS", "AS") && has(c, "STORED"))
                 add("table-rewrite", number, "Stored generated column rewrites existing rows");
+              let column = word(c[1], "COLUMN") ? 2 : 1;
+              if (at(c, column, "IF", "NOT", "EXISTS")) column += 3;
+              const columnDefinition = ![
+                "CONSTRAINT",
+                "CHECK",
+                "FOREIGN",
+                "PRIMARY",
+                "UNIQUE",
+                "EXCLUDE",
+              ].some((w) => word(c[1], w));
+              const type = columnDefinition ? relation(c, column + 1) : null;
+              const typeName = type && (JSON.parse(type.name) as string[]).at(-1);
+              if (
+                (typeName && /^(?:smallserial|serial|bigserial|serial[248])$/.test(typeName)) ||
+                has(surface, "AS", "IDENTITY")
+              )
+                add(
+                  "table-rewrite",
+                  number,
+                  "Serial/identity columns fill every existing row from a sequence",
+                );
             }
             const alteration = word(c[1], "COLUMN") ? 3 : 2;
             if (
@@ -488,6 +538,8 @@ function analyze(
               add("table-rewrite", number, "ALTER COLUMN TYPE/SET DATA TYPE/SET NOT NULL");
             if (at(c, 0, "SET", "TABLESPACE") || at(c, 0, "SET", "ACCESS", "METHOD"))
               add("table-rewrite", number, "ALTER TABLE SET TABLESPACE/ACCESS METHOD");
+            if (at(c, 0, "SET", "LOGGED") || at(c, 0, "SET", "UNLOGGED"))
+              add("table-rewrite", number, "Changing table logging rewrites existing rows");
             if (
               !contracted &&
               ((word(c[0], "DROP") && !word(c[1], "CONSTRAINT")) ||
@@ -528,8 +580,7 @@ function analyze(
           j = table.end + 1;
         } while (ts[j - 1]?.value === ",");
       }
-      if (!maintenance && at(ts, i, "LOCK", "TABLE"))
-        add("explicit-lock", number, "Explicit table lock");
+      if (!maintenance && word(ts[i], "LOCK")) add("explicit-lock", number, "Explicit table lock");
       if (!maintenance && (word(ts[i], "CLUSTER") || word(ts[i], "VACUUM"))) {
         if (word(ts[i], "CLUSTER") && word(ts[i + 1], "ON")) continue;
         const full = word(ts[i], "CLUSTER") || has(ts.slice(i), "FULL");

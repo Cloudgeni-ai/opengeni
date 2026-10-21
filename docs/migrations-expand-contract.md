@@ -211,11 +211,11 @@ merge; the full CI impact plan runs after merge, following repository policy.
 | Rule ID | Rolling migration rule / fix |
 | --- | --- |
 | `nonconcurrent-index` | Existing-table indexes need `CONCURRENTLY` in a separate file with the runner's line-2 `-- opengeni:concurrent-index lock-timeout=5s` directive. |
-| `constraint-validation` | Add FOREIGN KEY/CHECK constraints `NOT VALID`; validate in a separate migration. |
-| `table-rewrite` | Flag type changes, `SET NOT NULL`, policy-listed defaults on added columns, stored generated columns, PRIMARY KEY/UNIQUE builds, `CLUSTER`, `VACUUM FULL`, and tablespace/access-method moves. Expand/backfill/contract instead, or attach an earlier concurrent unique index with `USING INDEX`. |
+| `constraint-validation` | Add FOREIGN KEY/CHECK constraints `NOT VALID`; validate in a separate migration. Validation after another ALTER of that table in the same file retains its strong lock through the scan and is flagged too. |
+| `table-rewrite` | Flag type changes, `SET NOT NULL`, policy-listed defaults, serial/identity and stored generated columns, PRIMARY KEY/UNIQUE builds, `CLUSTER`, `VACUUM FULL`, and tablespace/access-method/logging changes. Expand/backfill/contract instead, or attach an earlier concurrent unique index with `USING INDEX`. |
 | `unbatched-data` | Existing-table UPDATE/DELETE and INSERT SELECT from potentially large existing sources need a rolling or post-release batched backfill. Known single-row config changes are allowed. |
 | `unannotated-contract` | DROP TABLE/COLUMN, table/column RENAME and TRUNCATE need the existing `-- contract-step:` annotation naming the earlier release that stopped using the shape, or why the previous release is unaffected. |
-| `explicit-lock` | Remove explicit `LOCK TABLE`; explain any unavoidable lock using an exception. |
+| `explicit-lock` | Remove explicit `LOCK [TABLE]`; explain any unavoidable lock using an exception. |
 | `maintenance-concurrent-index` | Move concurrent builds outside the parked window, into a rolling migration. |
 | `maintenance-batched-backfill` | Move batches into a rolling or post-release migration. |
 | `maintenance-unbatched-data` | Split large-table data work from the short maintenance cutover; run a rolling or post-release batched backfill. |
@@ -247,12 +247,19 @@ arbitrary WHERE clauses, LIMITs, procedural loops and joins do not prove it.
 Partial/expression indexes do not supply that proof. New tables created earlier
 in the same file are exempt; `IF NOT EXISTS` or conditional DO-block creation
 does not prove a table is new. Catalog reads and constant SELECTs are allowed.
-Quoted/schema-qualified names and nested comments are supported. Routine bodies
-and dynamic SQL strings are not analyzed; static SQL inside DO blocks is.
+Quoted/schema-qualified names and nested comments are supported. Quoted routine
+bodies and dynamic SQL strings are not analyzed; static SQL inside DO blocks is.
 Phase directives are ordinary comments to this guard.
 
+The heuristic does not model every PostgreSQL statement: MERGE, copies via
+CREATE TABLE AS/SELECT INTO, partition operations, REINDEX and materialized-view
+refreshes still need review. Comma joins and CTE/table name shadowing can hide
+INSERT SELECT sources; SQL-standard BEGIN ATOMIC routine bodies are not reliably
+distinguished from migration commands. Maintenance checks intentionally cover
+only the three maintenance rules above, not every possible slow DDL operation.
+
 The added-column default policy recognizes `now`, `random`, `gen_random_uuid`,
-`uuid_generate_vN`, `uuidv4`/`uuidv7`, `nextval`, `setval`, `clock_timestamp` and
+`uuid_generate_vN`/`uuid_generate_v1mc`, `uuidv4`/`uuidv7`, `nextval`, `setval`, `clock_timestamp` and
 `timeofday`. It conservatively includes `now()` even though PostgreSQL treats
 it as stable; unknown user-defined function volatility is not inferred. Passing
 this lint is not a proof that arbitrary SQL is cheap or backward compatible.
