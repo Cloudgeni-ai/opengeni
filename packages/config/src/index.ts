@@ -5845,6 +5845,18 @@ export function effectiveSandboxLifecycle(
   };
 }
 
+/** How long a box reported missing could still be running anywhere: its hard
+ * lifetime, or the renewable TTL nobody renews once the box is lost. Null when
+ * the backend has no such bound (its loss needs other proof). */
+export function sandboxProviderMaxRemainingLifetimeMs(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): number | null {
+  const lifecycle = effectiveSandboxLifecycle(settings, backend);
+  if (lifecycle.hardLifetimeMs !== null) return lifecycle.hardLifetimeMs;
+  return lifecycle.renewableTtlSeconds !== null ? lifecycle.renewableTtlSeconds * 1000 : null;
+}
+
 /**
  * One shared upper bound for the durable provider-capture claim and for command
  * admission waiting behind it. The SDK request itself is bounded by

@@ -14,7 +14,9 @@ export const SandboxRecoverySelection = /* @__PURE__ */ defineSchema(() =>
       leaseEpoch: z.number().int().nonnegative(),
       workspaceGeneration: z.number().int().nonnegative(),
       archiveGeneration: z.number().int().nonnegative(),
-      artifactId: z.string().uuid(),
+      /** The registered native checkpoint (Modal). Null for a portable
+       * archive, whose bytes are verified against `revision` instead. */
+      artifactId: z.string().uuid().nullable(),
       revision: z.string().min(1).max(512),
       capturedAt: z.string().datetime(),
     })

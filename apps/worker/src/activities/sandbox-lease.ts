@@ -113,7 +113,9 @@ import {
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
   sandboxArchiveCaptureTimeoutMs,
   sandboxDeadlineMandatoryCaptureLeadMs,
+  sandboxProviderMaxRemainingLifetimeMs,
   sandboxWarmRateMicrosPerSecond,
+  type Settings,
 } from "@opengeni/config";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { captureConnectedCommandOutput } from "../sandbox-routing";
@@ -2831,6 +2833,10 @@ async function reconcileTerminalRetainedProcesses(
           expectedEpoch: process.leaseEpoch,
           expectedInstanceId: process.providerInstanceId,
           expectedBackend: process.providerBackend,
+          providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+            settings,
+            process.providerBackend as Settings["sandboxBackend"],
+          ),
         });
         if (marked.status === "marked") {
           lostBoxes.add(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`);
@@ -4750,6 +4756,14 @@ async function terminateDrainableBox(
       expectedEpoch: row.leaseEpoch,
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
+      ...(providerMissing
+        ? {
+            providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+              settings,
+              backend as Settings["sandboxBackend"],
+            ),
+          }
+        : {}),
       idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
       // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
       providerStopped:

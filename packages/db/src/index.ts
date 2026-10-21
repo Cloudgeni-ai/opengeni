@@ -43892,7 +43892,7 @@ const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
 
 type ProviderLossRecord = {
   version: 1;
-  source: "drain_probe" | "warm_resume";
+  source: "drain_probe" | "warm_resume" | "continuity_restore";
   leaseId: string;
   lostEpoch: number;
   instanceId: string | null;
@@ -43900,7 +43900,33 @@ type ProviderLossRecord = {
   observedAt: string;
   /** The lost object's recorded hard provider deadline, when known. */
   providerDeadlineAt: string | null;
+  /** Backend-specific proof that the lost object, and with it every copy of
+   * the workspace that only it held, no longer exists anywhere. A NotFound on
+   * its own is an observation, not proof: without this (or Modal's hard
+   * lifetime, or the compute control plane's own answer) the loss may at most
+   * restore a checkpoint, never continue on an empty workspace. */
+  deathProof?: ProviderDeathProof;
 };
+
+type ProviderDeathProof = {
+  /** `workspace_absent`: the same Docker daemon reports the exact container
+   * gone and its owned host workspace directory no longer exists.
+   * `provider_lifetime`: the provider ends every box within a known bound,
+   * so none can still be running after `provenAt`. */
+  kind: "workspace_absent" | "provider_lifetime";
+  provenAt: string;
+};
+
+function parsedProviderDeathProof(value: unknown): ProviderDeathProof | null | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const proof = value as Record<string, unknown>;
+  return (proof.kind === "workspace_absent" || proof.kind === "provider_lifetime") &&
+    typeof proof.provenAt === "string" &&
+    Number.isFinite(Date.parse(proof.provenAt))
+    ? { kind: proof.kind, provenAt: proof.provenAt }
+    : null;
+}
 
 function providerLossRecord(
   resumeState: Record<string, unknown> | null | undefined,
@@ -43909,7 +43935,9 @@ function providerLossRecord(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return record.version === 1 &&
-    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    (record.source === "drain_probe" ||
+      record.source === "warm_resume" ||
+      record.source === "continuity_restore") &&
     typeof record.leaseId === "string" &&
     typeof record.lostEpoch === "number" &&
     Number.isSafeInteger(record.lostEpoch) &&
@@ -43920,7 +43948,8 @@ function providerLossRecord(
     Number.isFinite(Date.parse(record.observedAt)) &&
     (record.providerDeadlineAt === null ||
       (typeof record.providerDeadlineAt === "string" &&
-        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+        Number.isFinite(Date.parse(record.providerDeadlineAt)))) &&
+    parsedProviderDeathProof(record.deathProof) !== null
     ? (record as ProviderLossRecord)
     : null;
 }
@@ -43936,7 +43965,17 @@ function providerLossRecordForLostRow(
   row: LeaseRow,
   source: ProviderLossRecord["source"],
   observedAt: string,
+  /** The provider's bound on how long any box can still run after this
+   * observation (its hard lifetime, or the renewable TTL nobody renews any
+   * more), when it has one. */
+  providerMaxRemainingLifetimeMs?: number | null,
 ): ProviderLossRecord {
+  const lifetimeEndsAt =
+    typeof providerMaxRemainingLifetimeMs === "number" &&
+    Number.isSafeInteger(providerMaxRemainingLifetimeMs) &&
+    providerMaxRemainingLifetimeMs >= 0
+      ? Date.parse(observedAt) + providerMaxRemainingLifetimeMs + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : null;
   return {
     version: 1,
     source,
@@ -43946,7 +43985,32 @@ function providerLossRecordForLostRow(
     workspaceGeneration: Number(row.workspace_generation),
     observedAt,
     providerDeadlineAt: timestampIso(row.provider_deadline_at),
+    ...(lifetimeEndsAt !== null && Number.isFinite(lifetimeEndsAt)
+      ? {
+          deathProof: {
+            kind: "provider_lifetime" as const,
+            provenAt: new Date(lifetimeEndsAt).toISOString(),
+          },
+        }
+      : {}),
   };
+}
+
+/** The carried loss record with `workspace_absent` proof added, minting the
+ * record when an older loss transition never wrote one. Never moves a record
+ * to another lease or workspace generation. */
+function providerLossRecordWithWorkspaceAbsent(
+  row: LeaseRow,
+  provenAt: string,
+): ProviderLossRecord {
+  const carried = providerLossRecord(row.resume_state);
+  const base =
+    carried &&
+    carried.leaseId === row.id &&
+    carried.workspaceGeneration === Number(row.workspace_generation)
+      ? carried
+      : providerLossRecordForLostRow(row, "continuity_restore", provenAt);
+  return { ...base, deathProof: { kind: "workspace_absent", provenAt } };
 }
 
 function resumeStateWithPreservedArchives(
@@ -45288,8 +45352,10 @@ async function sandboxGroupRecoveryBlockersTx(
   });
 }
 
-/** A registered CURRENT native Modal checkpoint older than the lost workspace.
- * The restore path independently verifies the opaque bytes and provider binding. */
+/** The CURRENT checkpoint older than the lost workspace: on Modal a registered
+ * native checkpoint, elsewhere the lease's own verified portable archive (which
+ * has no native artifact). The restore path independently verifies the bytes
+ * against the descriptor, and a native checkpoint's provider binding. */
 async function verifiedAutomaticCheckpointSelectionTx(
   tx: Database,
   row: LeaseRow,
@@ -45300,12 +45366,17 @@ async function verifiedAutomaticCheckpointSelectionTx(
   if (
     recovery.archive.status !== "available" ||
     currentWorkspaceArchiveWasAbandoned(row) ||
-    descriptor?.version !== 2 ||
-    row.current_checkpoint_artifact_id === null ||
+    !descriptor ||
     row.archive_generation === null ||
     Number(row.archive_generation) >= Number(row.workspace_generation)
   )
     return null;
+  if ((row.resume_backend_id ?? row.backend) !== "modal") {
+    return descriptor.version === 1 && row.current_checkpoint_artifact_id === null
+      ? checkpointSelectionForSession(row, session, descriptor)
+      : null;
+  }
+  if (descriptor.version !== 2 || row.current_checkpoint_artifact_id === null) return null;
   const [artifact] = await rawRows<{ valid: boolean }>(
     tx,
     sql`select exists(select 1 from sandbox_checkpoint_artifacts
@@ -45425,6 +45496,7 @@ type AutomaticRecoveryLane =
         | "restore_retry_backoff"
         | "restore_retry_exhausted"
         | "provider_lifetime_unexpired"
+        | "provider_death_unproven"
         | "authorization_pending"
         | "authorization_invalid";
       /** For a timed wait: the earliest time a new decision (Retry or a new
@@ -45440,10 +45512,42 @@ function isoTimestamp(...candidates: Array<string | null | undefined>): string {
   return new Date().toISOString();
 }
 
-/** Structural system continuity for a definitively lost managed Modal box.
- * Prefer the latest verified registered checkpoint; otherwise continue on a
- * new EMPTY workspace. Never for an ambiguous provider state, an unresolved
- * create, a live explicit authorization, or an unsettled late capture. Group
+/** Backends whose lost boxes the system may recover by itself. Connected
+ * Machines and backend-less sessions are never system recovered. */
+function automaticRecoveryBackend(
+  session: Pick<typeof schema.sessions.$inferSelect, "sandboxBackend">,
+  row: Pick<LeaseRow, "backend" | "resume_backend_id">,
+): boolean {
+  const backend = row.resume_backend_id ?? row.backend;
+  return (
+    session.sandboxBackend === backend &&
+    row.backend === backend &&
+    backend !== "none" &&
+    backend !== "selfhosted"
+  );
+}
+
+/** When the lost object is proven gone, as a database-clock epoch, or null
+ * when nothing proves it. Modal: past its hard lifetime, which no Modal
+ * sandbox outlives in any workspace. Compute: the control plane, which is
+ * authoritative for its own sandboxes, is the only source of a compute
+ * NotFound. Others: the backend-specific proof the loss recorded. */
+function providerDeathProvenAtMs(row: LeaseRow, loss: ProviderLossRecord): number | null {
+  const backend = row.resume_backend_id ?? row.backend;
+  if (backend === "modal") {
+    return loss.providerDeadlineAt
+      ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  }
+  if (backend === "compute") return Date.parse(loss.observedAt);
+  return loss.deathProof ? Date.parse(loss.deathProof.provenAt) : null;
+}
+
+/** Structural system continuity for a definitively lost managed box. Prefer
+ * the latest verified checkpoint; otherwise, only with proof the lost object is
+ * gone (providerDeathProvenAtMs), continue on a new EMPTY workspace. Never for
+ * an ambiguous provider state, an unresolved create, a live explicit
+ * authorization, or an unsettled late capture. Group
  * quiescence is checked separately, at the exact deciding attempt. Rows
  * written by older confirmDrainCold/lost-instance code qualify as-is: the
  * decision reads current lease truth, not a new loss-time receipt. */
@@ -45476,7 +45580,7 @@ async function automaticRecoveryLaneTx(
     };
   if (pendingFreshWorkspaceRecovery(row.resume_state))
     return { kind: "unavailable", reason: "authorization_invalid" };
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
+  if (!automaticRecoveryBackend(session, row))
     return { kind: "unavailable", reason: "not_applicable" };
   const automatic = automaticCheckpointMarker(row.resume_state);
   if (automatic?.status === "accepted") {
@@ -45592,13 +45696,12 @@ async function automaticRecoveryLaneTx(
     };
   }
   // No checkpoint Opengeni can restore automatically. An empty workspace is
-  // irreversible for the running sandbox, so it additionally waits until the
-  // lost object is past its hard provider lifetime: no Modal sandbox outlives
-  // it in any workspace, so a misconfigured credential or namespace cannot
-  // turn a live box into a false loss here.
-  const lifetimeEndsAt = loss.providerDeadlineAt
-    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
-    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  // irreversible for the running sandbox, so it needs proof that the lost
+  // object, and any workspace only it held, is really gone. A NotFound alone
+  // can come from a misconfigured credential or namespace, or a daemon under
+  // memory pressure, and must never turn a live workspace into an empty one.
+  const lifetimeEndsAt = providerDeathProvenAtMs(row, loss);
+  if (lifetimeEndsAt === null) return { kind: "unavailable", reason: "provider_death_unproven" };
   if (now < lifetimeEndsAt)
     return {
       kind: "unavailable",
@@ -45789,12 +45892,15 @@ async function projectPublicSandboxRecovery(
     currentWorkspace &&
     (currentWorkspace.reason === "fresh_workspace_selected" ||
       currentWorkspace.reason === "archive_retry_selected" ||
-      canRevalidateCurrentWorkspaceArchive(row) ||
-      row.backend !== "modal")
+      canRevalidateCurrentWorkspaceArchive(row))
   )
     return currentWorkspace;
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
-    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  // Explicit historical-checkpoint consent stays Modal-only; system continuity
+  // after a loss serves every automatically recoverable backend.
+  const modalHome = session.sandboxBackend === "modal" && row.backend === "modal";
+  const homeUnsupported = (): SandboxRecoveryProjection =>
+    currentWorkspace ?? { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  if (!modalHome && !automaticRecoveryBackend(session, row)) return homeUnsupported();
   const publicRecovery = row.public_recovery as Record<string, unknown> | null;
   const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
   if (publicRecovery && acceptedSelection.success && publicRecovery.sessionId === input.sessionId) {
@@ -45869,6 +45975,7 @@ async function projectPublicSandboxRecovery(
     )
       return unavailable(lane.reason, null, lane.availableAt);
   }
+  if (!modalHome) return homeUnsupported();
   // A system decision already owns this lease; consent may not compete with it.
   if (
     pendingFreshWorkspaceRecovery(row.resume_state) ||
@@ -46988,7 +47095,7 @@ async function authorizedHistoricalArchiveGeneration(
     // until verified warm publication.
     if (!session) return null;
     return session.sandboxGroupId === row.sandbox_group_id &&
-      session.sandboxBackend === "modal" &&
+      automaticRecoveryBackend(session, row) &&
       (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
       metadata?.version === 1 &&
       metadata.automaticHistoricalCheckpoint === true &&
@@ -46997,7 +47104,7 @@ async function authorizedHistoricalArchiveGeneration(
       metadata.leaseEpoch === Number(row.lease_epoch) &&
       metadata.workspaceGeneration === Number(row.workspace_generation) &&
       metadata.archiveGeneration === archiveGeneration &&
-      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      (metadata.artifactId ?? null) === row.current_checkpoint_artifact_id &&
       archiveGeneration !== null &&
       archiveGeneration < Number(row.workspace_generation) &&
       metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
@@ -47443,6 +47550,9 @@ export async function failSandboxRematerialization(
     failureCode: string;
     retryable: boolean;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -47475,7 +47585,9 @@ export async function failSandboxRematerialization(
         }
         const current = recoveryStateFromLeaseRow(row);
         const continuity =
-          input.retryable && !input.discardContinuity ? continuityRecoveryFromLeaseRow(row) : null;
+          input.retryable && !input.discardContinuity && !input.providerWorkspaceAbsent
+            ? continuityRecoveryFromLeaseRow(row)
+            : null;
         const terminalStatus: SandboxRestoreStatus = continuity
           ? "pending"
           : input.retryable
@@ -47513,7 +47625,15 @@ export async function failSandboxRematerialization(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = JSON.stringify(recoveryResumeState(row, recovery));
+        const resumeStateJson = JSON.stringify(
+          recoveryResumeState(
+            row,
+            recovery,
+            input.providerWorkspaceAbsent
+              ? providerLossRecordWithWorkspaceAbsent(row, new Date().toISOString())
+              : undefined,
+          ),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -50230,6 +50350,9 @@ export async function markWarmLeaseInstanceLost(
     expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
+    /** The backend's bound on how long the lost box could still run (its hard
+     * lifetime or unrenewed TTL), when it has one. Recorded as death proof. */
+    providerMaxRemainingLifetimeMs?: number | null;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
@@ -50357,7 +50480,12 @@ export async function markWarmLeaseInstanceLost(
         const coldResumeState = recoveryResumeState(
           current,
           recovery,
-          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+          providerLossRecordForLostRow(
+            current,
+            "warm_resume",
+            observedAt,
+            input.providerMaxRemainingLifetimeMs,
+          ),
         );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
@@ -50789,6 +50917,9 @@ export async function failWarmingToCold(
     sandboxGroupId: string;
     expectedEpoch: number;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -50810,11 +50941,22 @@ export async function failWarmingToCold(
         if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
-        const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
+        const continuity =
+          input.discardContinuity || input.providerWorkspaceAbsent
+            ? null
+            : continuityRecoveryFromLeaseRow(row);
         // A pending empty-workspace decision must survive a failed empty create;
-        // otherwise a null envelope would look like an ordinary new lease.
+        // otherwise a null envelope would look like an ordinary new lease. So
+        // must the evidence of a lost workspace: dropping it would let the next
+        // owner publish an empty box as if nothing had ever been there.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-        const hasRecovery = hasArchive || continuity !== null || freshPending;
+        const carriedLoss = providerLossRecord(row.resume_state);
+        const hasRecovery =
+          hasArchive ||
+          continuity !== null ||
+          freshPending ||
+          carriedLoss !== null ||
+          input.providerWorkspaceAbsent === true;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         // beginSandboxRematerialization already proved this exact registered
         // checkpoint unusable in this warming epoch. Keep that terminal truth
@@ -50873,7 +51015,15 @@ export async function failWarmingToCold(
           ...(continuity ? { continuity } : {}),
         };
         const resumeStateJson = hasRecovery
-          ? JSON.stringify(recoveryResumeState(row, recovery))
+          ? JSON.stringify(
+              recoveryResumeState(
+                row,
+                recovery,
+                input.providerWorkspaceAbsent
+                  ? providerLossRecordWithWorkspaceAbsent(row, now)
+                  : undefined,
+              ),
+            )
           : null;
         await tx.execute(sql`
           update sandbox_leases set
@@ -53636,6 +53786,9 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The backend's bound on how long a box reported missing could still
+     * run, when it has one. Recorded as death proof on the loss. */
+    providerMaxRemainingLifetimeMs?: number | null;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
     /** The reaper stopped the exact provider box (or proved it gone) before
@@ -53945,7 +54098,14 @@ export async function confirmDrainCold(
               recoveryResumeState(
                 row,
                 recovery,
-                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
+                workspaceLost
+                  ? providerLossRecordForLostRow(
+                      row,
+                      "drain_probe",
+                      now,
+                      input.providerMaxRemainingLifetimeMs,
+                    )
+                  : undefined,
               ),
             )
           : null;

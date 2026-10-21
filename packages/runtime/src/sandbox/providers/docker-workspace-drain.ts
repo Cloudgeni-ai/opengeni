@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { constants } from "node:fs";
 import { chmod, lstat, open, readdir, realpath, rm } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -274,6 +274,39 @@ export async function serializeDockerOwnership(
   });
   receipts.set(state, receipt);
   return { [FIELD]: receipt };
+}
+
+/** Whether this durable envelope's workspace is provably gone, not merely
+ * unreachable: its durable ownership receipt names the daemon, the same daemon
+ * answers now and reports the exact container missing, the owned host root
+ * (both its canonical path and the SDK path) does not exist, and the directory
+ * that held it does, so an unmounted volume or another host's filesystem can
+ * never pass for a deleted workspace. Every failure to observe is "not proven". */
+export async function dockerWorkspaceProvablyAbsent(
+  state: State,
+  probe: NativeProbe = nativeProbe,
+): Promise<boolean> {
+  const receipt = durableReceipts.has(state) ? receipts.get(state) : undefined;
+  if (!receipt) return false;
+  try {
+    if ((await daemon(probe)) !== receipt.daemonId) return false;
+    if ((await observe(receipt.containerId, probe)) !== null) return false;
+    for (const path of new Set([receipt.root, receipt.sourceRoot])) {
+      const parent = await lstat(dirname(path)).catch(() => null);
+      if (!parent?.isDirectory()) return false;
+      const entry = await lstat(path).then(
+        () => "present" as const,
+        (error: unknown) =>
+          error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT"
+            ? ("absent" as const)
+            : ("unknown" as const),
+      );
+      if (entry !== "absent") return false;
+    }
+    return (await daemon(probe)) === receipt.daemonId;
+  } catch {
+    return false;
+  }
 }
 
 /** What happened to the drained host workspace directory after exact

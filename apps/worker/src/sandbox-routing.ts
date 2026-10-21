@@ -15,7 +15,11 @@ import { isDeepStrictEqual } from "node:util";
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import {
+  sandboxLifecycleTransitionWaitMs,
+  sandboxProviderMaxRemainingLifetimeMs,
+  type Settings,
+} from "@opengeni/config";
 import { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 export { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 import {
@@ -410,6 +414,10 @@ async function resolveCurrentHomeBackend(
       expectedInstanceId: lease.instanceId,
       expectedBackend: lease.backend,
       diagnostic: "provider_not_found_during_home_route_rebind",
+      providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+        services.settings,
+        lease.backend as Settings["sandboxBackend"],
+      ),
     });
     if (marked.status === "marked") {
       await publishDurableSessionEvents(
@@ -1251,6 +1259,10 @@ export function wrapTurnBoxWithRouting(
               expectedInstanceId,
               expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
+              providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+                settings,
+                home.backend as Settings["sandboxBackend"],
+              ),
             });
             if (marked.status === "marked") {
               await publishDurableSessionEvents(
@@ -1538,6 +1550,10 @@ export function wrapLazyTurnBoxWithRouting(
               expectedInstanceId: backend.providerInstanceId,
               expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
+              providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+                settings,
+                home.backend as Settings["sandboxBackend"],
+              ),
             });
             if (marked.status === "marked") {
               await publishDurableSessionEvents(
