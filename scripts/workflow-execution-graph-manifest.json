@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "6805bdded9e4fb8547c18a446a82967f7b2b223f73f152c0ed2d9d29a83d8e2e"
+      "sha256": "d056a278c1d4c86600fd2929948ce1625fd61a5218769286f67f351265b14fe4"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -337,19 +337,19 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
-      "sha256": "42214f3264e151ea02dd5c5846fadd7e2646873ceb71939afe3a9b45eebb90e6"
+      "sha256": "3ce8e33112a4e0898a1cd317fcce1ba59142d7279b7b7407103e99dfaf5b8ac1"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (macOS universal)",
-      "sha256": "69c939aadca3a44d22f203034f1882a14950dcf3e1bcf3e386fab62226b63c5c"
+      "sha256": "8381e61803ea185af6b8d3d691dcf9a3070561b78632eedfabd094086a3eed3e"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
-      "sha256": "06a7d742999d79db1ecc0acc5ddb4958817651744c7c25811848c5de6e80bde1"
+      "sha256": "0b32db2db3c2185bf6e551f7ed973666a56d6a43c77dfa06643eef33fa865b79"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

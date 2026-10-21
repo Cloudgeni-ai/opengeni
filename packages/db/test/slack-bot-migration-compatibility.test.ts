@@ -236,13 +236,18 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
-    // withheld usage-history routines. The previous runtime remains ready.
+    // withheld usage-history routines and the later 0890 reconciliation
+    // tables. The previous runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
         await inspectRuntimeDatabasePosture(client.db, options),
         options,
       ),
-    ).toEqual(ABSENT_USAGE_HISTORY_POSTURE);
+    ).toEqual([
+      ...ABSENT_USAGE_HISTORY_POSTURE,
+      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+    ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
         await previous.inspectRuntimeDatabasePosture(client.db, options),
@@ -259,12 +264,10 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
-    expect(
-      previous.evaluateRuntimeDatabasePosture(
-        await previous.inspectRuntimeDatabasePosture(client.db, options),
-        options,
-      ),
-    ).toEqual([]);
+    // The pinned pre-0864 binary is checked only at the 0864 boundary above.
+    // It predates forward-compatible posture (#5263), so tables later
+    // migrations add are unknown to it; readiness of the actual previous
+    // release against the complete schema is the pinned-readiness job's check.
   } finally {
     await client?.close();
     await staging.end();
