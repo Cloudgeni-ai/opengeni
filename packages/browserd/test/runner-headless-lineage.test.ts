@@ -51,9 +51,24 @@ async function fixture(fixtureOptions: { daemonRuntimeCopy?: boolean } = {}) {
         await writeFile(${JSON.stringify(pidFile)},String(fault.pid)+"\\n"); } catch {}
       process.exit(0);
     }); setInterval(()=>{},60000);`;
-  const daemonScript = `import {writeFile,symlink} from "node:fs/promises";
+  // Shutdown stops the browser, which then waits as this launcher's zombie, and
+  // then stops the launcher. Like a launcher that owns its browser, it reaps that
+  // exited browser before it exits, so its own exit proves the browser PID is
+  // gone; otherwise an adoptive reaper frees it later. A live browser still
+  // outlives it.
+  const daemonScript = `import {readFile,writeFile,symlink} from "node:fs/promises";
     const browser=Bun.spawn([${JSON.stringify(process.execPath)},"--no-env-file","-e",${JSON.stringify(childScript)},${JSON.stringify(`--user-data-dir=${profileDirectory}`)}],{stdout:"ignore",stderr:"ignore"});
     browser.exited.then(exitCode=>console.log(JSON.stringify({exitedBrowserPid:browser.pid,exitCode})));
+    const browserStopped=async()=>{
+      if(process.platform==="linux"){
+        try{const stat=await readFile("/proc/"+browser.pid+"/stat","utf8");return stat[stat.lastIndexOf(")")+2]==="Z";}catch{return false;}
+      }
+      return Bun.spawnSync(["ps","-o","stat=","-p",String(browser.pid)]).stdout.toString().trim().startsWith("Z");
+    };
+    process.on("SIGTERM",async()=>{
+      if(await browserStopped()) await browser.exited;
+      process.removeAllListeners("SIGTERM");process.kill(process.pid,"SIGTERM");
+    });
     await writeFile(${JSON.stringify(pidFile)},String(process.pid)+"\\n",{mode:0o600});
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
     console.log(JSON.stringify({browserPid:browser.pid}));setInterval(()=>{},60000);`;
