@@ -13,9 +13,14 @@ test("queue checks cover PR entry and the exact combined merge group", () => {
   const plan = queue.jobs.plan.steps.find((step: any) => step.id === "plan");
   expect(plan.env.BASE_SHA).toContain("github.event.merge_group.base_sha");
   expect(plan.run).toContain('--head "$GITHUB_SHA"');
-  expect(queue.jobs.units.strategy.matrix.shard).toEqual(
-    Array.from({ length: 16 }, (_, index) => index),
+  expect(queue.jobs.units.strategy.matrix.include).toBe(
+    "${{ fromJSON(needs.plan.outputs.unit_matrix) }}",
   );
+  expect(plan.run).toContain(". / 240");
+  expect(plan.run).toContain(". > 16 then 16");
+  expect(
+    queue.jobs.units.steps.find((step: any) => step.env?.OPENGENI_REQUIRE_REAL_DB).run,
+  ).toContain("--shards ${{ matrix.total }}");
   expect(
     queue.jobs.units.steps.find((step: any) => step.env?.OPENGENI_REQUIRE_REAL_DB).env
       .OPENGENI_REQUIRE_REAL_DB,
@@ -105,4 +110,16 @@ test("prepared ruleset is inert, main-only, uses MERGE and requires every succes
   expect(ruleset.rules[1].parameters.required_status_checks).toEqual([
     { context: "Queue ready", integration_id: 15368 },
   ]);
+});
+
+test("Mergify option is a non-discovered draft with true batches and isolated Version handling", () => {
+  const draft = Bun.YAML.parse(readFileSync("docs/queue-options/.mergify.yml", "utf8")) as any;
+  expect(draft.merge_queue.max_parallel_checks).toBe(2);
+  expect(draft.defaults.queue_rule.merge_method).toBe("merge");
+  expect(draft.defaults.queue_rule.max_checks_retries).toBe(1);
+  expect(draft.defaults.queue_rule.batch_max_failure_resolution_attempts).toBeNull();
+  expect(draft.defaults.queue_rule.merge_conditions).toEqual(["check-success=Queue batch ready"]);
+  expect(draft.queue_rules[0].batch_size).toBe(1);
+  expect(draft.queue_rules[1].batch_size).toEqual({ min: 1, max: 16 });
+  expect(draft.pull_request_rules).toBeUndefined();
 });

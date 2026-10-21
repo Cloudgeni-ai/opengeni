@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8e3fd5822d8ef74998c3a18a7a4293f2cf3c0b5b69a842e1c39e73f090e325c8"
+      "sha256": "2cd8a9448b7a4c2837f5e43aad74fc3f9dec602ebeccb58070c56e0b15ade424"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-queue.yml",
-      "sha256": "4c04b476c96614e7aec7647a94b53205c0580eedd00b11b80013b24c4b5f7457"
+      "sha256": "9438f4486d14236bee5d74e5ad81cf8d7443ae33136c7354ada29fe28b898ecb"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -915,7 +915,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "d55315585ed6f757dd7e0f30d65e37baf462cc4d2f9fd9c78d058a943e587f98"
+      "sha256": "449dd01a3d370129eba3121a92cbb7ff8e0b04a243c19e2312ba06050d84a43d"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1311,7 +1311,7 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "plan",
       "step": "Plan the complete combined tree, not only the last PR",
-      "sha256": "7f428345e23d167569136898ca0700904e733592586695d14596bf772d2c47be"
+      "sha256": "5a6b6762717faa59410ac30d72110199103a7af21d0e7d53ec192e472a52ddd0"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
@@ -1329,7 +1329,7 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "units",
       "step": "Run every impact-selected unit file with real database enforcement",
-      "sha256": "839c5d7f1e51a27e61981445fd8d518246d5a9a087448308f191079b1236d1da"
+      "sha256": "36ca512b4a705ef96e046ba86c82e0710b9a38be99cd1af1e270c07ef5fd7254"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",

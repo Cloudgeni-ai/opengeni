@@ -25,6 +25,24 @@ test("one-command rollback disables only the named main queue and verifies it", 
   expect(writes[0].body.rules).toEqual(rule.rules);
 });
 test("dry run never writes and ambiguous targets do not mutate", () => {
+  const rule = {
+    id: 1,
+    name: "Main merge queue",
+    target: "branch",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["refs/heads/main"], exclude: [] } },
+    rules: [],
+  };
+  expect(
+    disableQueue(
+      (path, method) => {
+        if (method) throw new Error("dry run must not write");
+        return path.includes("?") ? [rule] : rule;
+      },
+      "owner/repo",
+      true,
+    ),
+  ).toMatchObject({ dryRun: true, payload: { enforcement: "disabled" } });
   expect(() => disableQueue(() => [])).toThrow("found 0");
   expect(() =>
     disableQueue(() => [{ name: "Main merge queue" }, { name: "Main merge queue" }]),

@@ -7,10 +7,11 @@ export function latestGreenMain(
   repository = "Cloudgeni-ai/opengeni",
   api: (path: string) => any = (path) =>
     JSON.parse(execFileSync("gh", ["api", path], { encoding: "utf8" })),
+  notBefore?: string,
 ) {
   for (let page = 1; page <= 10; page++) {
     const runs = api(
-      `repos/${repository}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100&page=${page}`,
+      `repos/${repository}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100&page=${page}${notBefore ? `&created=%3E%3D${encodeURIComponent(notBefore)}` : ""}`,
     ).workflow_runs;
     for (const run of runs) {
       const statuses = api(`repos/${repository}/commits/${run.head_sha}/statuses?per_page=100`);

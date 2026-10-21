@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       unit_count: ${{ steps.plan.outputs.unit_count }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -60,6 +61,8 @@ jobs:
           base="${BASE_SHA:-$(git merge-base origin/main HEAD)}"
           bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")" >> "$GITHUB_OUTPUT"
+          # Avoid sixteen near-empty runners on focused plans; never omit files.
+          echo "unit_matrix=$(jq -c '.unitTests | length | ((. / 240) | ceil | if . < 1 then 1 elif . > 16 then 16 else . end) as $n | [range(0; $n) | {index: ., total: $n}]' "$RUNNER_TEMP/impact-plan.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: queue-impact-plan
@@ -116,7 +119,7 @@ jobs:
           --exclude publish-closure --exclude sdk-compat --exclude example-builds
 
   units:
-    name: Queue unit shard ${{ matrix.shard }}
+    name: Queue unit shard ${{ matrix.index }}/${{ matrix.total }}
     needs: plan
     if: ${{ needs.plan.outputs.unit_count != '0' }}
     runs-on: ubuntu-latest
@@ -126,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -150,14 +153,14 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/retry-once.ts --report "$RUNNER_TEMP/queue-retry.json" --
-          bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.shard }}
+          bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.index }}
           --output "$RUNNER_TEMP/queue-unit.json" --timeout-seconds 1200 --
           bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
-          --shard ${{ matrix.shard }} --shards 16
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
-          name: queue-unit-${{ matrix.shard }}
+          name: queue-unit-${{ matrix.index }}
           path: |
             ${{ runner.temp }}/queue-unit.json
             ${{ runner.temp }}/queue-retry.json

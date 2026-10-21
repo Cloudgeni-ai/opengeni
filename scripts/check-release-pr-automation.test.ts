@@ -3996,7 +3996,7 @@ describe("workflow contracts", () => {
     expect(planScript).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(planScript).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
     expect(planScript).toContain(
-      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 8)",
+      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 12)",
     );
 
     const source = ci.jobs["source-contracts"];

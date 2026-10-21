@@ -47,10 +47,30 @@ export function verifyMergeContent(base: string, head: string, cwd = process.cwd
 /** Cover every coalesced push since prior full-green evidence, not just the last
  * webhook's before SHA. Bootstrap at this check's introduction on first-parent
  * main history, never at a guessed current push boundary. */
-export function fullGreenAuditBase(head: string, cwd = process.cwd(), discover = latestGreenMain) {
+export function fullGreenAuditBase(
+  head: string,
+  cwd = process.cwd(),
+  discover?: () => ReturnType<typeof latestGreenMain>,
+) {
+  const introduced = git(
+    [
+      "log",
+      "--first-parent",
+      "--diff-filter=A",
+      "--format=%H",
+      head,
+      "--",
+      "scripts/ci/verify-merge-content.ts",
+    ],
+    cwd,
+  )
+    .split("\n")
+    .at(-1);
+  if (!introduced) throw new Error("Cannot find the merge-content audit bootstrap commit");
+  const notBefore = git(["show", "-s", "--format=%cI", introduced], cwd);
   let previous: string | undefined;
   try {
-    previous = discover().sha;
+    previous = (discover ?? (() => latestGreenMain(undefined, undefined, notBefore)))().sha;
   } catch (error) {
     if (
       !(error instanceof Error) ||
@@ -67,21 +87,6 @@ export function fullGreenAuditBase(head: string, cwd = process.cwd(), discover =
       // this older exact run from bootstrap instead of trusting a descendant.
     }
   }
-  const introduced = git(
-    [
-      "log",
-      "--first-parent",
-      "--diff-filter=A",
-      "--format=%H",
-      head,
-      "--",
-      "scripts/ci/verify-merge-content.ts",
-    ],
-    cwd,
-  )
-    .split("\n")
-    .at(-1);
-  if (!introduced) throw new Error("Cannot find the merge-content audit bootstrap commit");
   return git(["rev-parse", `${introduced}^1`], cwd);
 }
 

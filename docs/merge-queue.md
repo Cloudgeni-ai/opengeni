@@ -18,7 +18,9 @@ On a merge group it checks
 the actual combined SHA, using the merge group's base SHA (not only the final PR's
 diff) and the existing fail-closed impact planner. One required aggregate,
 **Queue ready**, requires successful planning, typechecks/static guards and every
-selected unit shard. All sixteen unit shards retain real-PostgreSQL enforcement.
+selected unit shard. The matrix uses one shard per 240 selected files, capped at
+sixteen; focused plans no longer allocate sixteen nearly empty jobs. Every shard
+retains real-PostgreSQL enforcement and the complete selected inventory.
 Unknown/global changes expand the plan rather than skip tests. Cancellation,
 failure and unexpected skips fail the aggregate. There are no test-budget increases.
 
@@ -44,6 +46,9 @@ Native queue has no configured flake-retry switch here.
 only the latest pending build. Weekly service/drift runs use a separate lane and
 cannot replace a pending push.
 Exact Version-PR merge and explicit rerun exceptions retain their existing lanes.
+The full lane uses twelve unit shards after eight-shard run 39580448753 exhausted
+its unchanged 1200-second deadline with passing tests. This splits the same
+inventory; it does not raise budgets or suppress slow files.
 New pushes cannot continually restart the expensive suite. Scheduled coverage
 does not publish canary images; release
 candidate discovery uses successful **push** runs. No CI design can promise a
@@ -100,6 +105,11 @@ Prepared settings (disabled; **not yet a capacity-qualified activation choice**)
 | Required status | `Queue ready`, GitHub Actions app 15368 |
 | Strict/up-to-date PR check | false; combined queue builds provide freshness |
 | Queue bypass actors | none |
+
+The one-PR landing limit is a temporary Version-SHA compatibility safeguard, not
+the requested CI-sharing batching. It must not be presented as a final throughput
+solution. The parent explicitly directed inert landing while the owner chooses
+a true batcher; see the [inactive Mergify draft](queue-options/mergify-rollout.md).
 
 **Do not multiply by batch size.** GitHub's merge limits combine successful merges,
 not `merge_group` builds. Maximum landing size is one so each Version PR gets its
@@ -170,6 +180,25 @@ artificially caps historical duration samples and proportionally reduces work.
 The serial batch 2× case uses 102 builds versus native C16's 637, but serialized
 bisection makes its tail worse; do not advertise its work savings as a latency win.
 
+Refined replay with `retryWithinCandidate: true` models the implementation's
+first failed attempt without invalidating successors. Only failure after the
+unchanged retry removes the entry and rebuilds successors. Same arrivals, seed
+834 and assumed 1% permanent/4% flaky; each cell is p95 wait / completion:
+
+| Native | Historical current timing, 2× | Projected ≤10 minutes, 2× | Projected ≤10 minutes, 3× |
+| --- | ---: | ---: | ---: |
+| C6 | 625.03 / 649.48 | 76.60 / 88.98 | 359.63 / 369.63 |
+| C8 | 284.75 / 310.27 | 20.40 / 32.08 | 132.15 / 142.90 |
+| C12 | 100.48 / 122.60 | 10.40 / 23.37 | 41.15 / 53.95 |
+| C16 | 26.32 / 54.53 | 2.13 / 24.62 | 16.67 / 36.57 |
+
+C16 now meets the historical-time **first-start** wait bound in this hypothesis,
+but not completion latency and not physical runner capacity. At projected C12/2×,
+median wait/completion is 0/10 minutes; p95 completion improves 31.55→23.37 and
+invalidations 200→35. The model charges a candidate-level retry, not a measured
+single failed shard; it isolates retry policy rather than claiming an exact forecast.
+The sixteen refined scenarios preserve the original 360 results in default mode.
+
 GitHub API confirms the **Team** plan and zero registered self-hosted/larger
 runners. The standard Team documented default is **60 concurrent jobs**; the
 available API only exposes a public-IP limit, not the actual/custom standard-job
@@ -185,6 +214,17 @@ build: at 50 PRs/hour, that needs **100.4 average runner slots even without fail
 The unverified ≤10-minute projection needs 53.79 before failures; the baseline
 mixed-failure replay increases this to roughly 67–74 before full CI. At the
 longer-window 54/hour target, work demand is still higher.
+
+**Fresh hosted measurement, October 21 at 10:41 UTC:** shadow run 39585134188
+passed all sixteen unit shards, with a 9m26s maximum; planning took 29s and total
+elapsed time was 10m02s. Source contracts passed type/runtime/changeset/format and
+migration checks but failed on the pre-existing stale API snapshot owned by
+PR5272; this is not a fully green aggregate. Allocated job work was **130.32
+runner-minutes**, a lower bound because source guards stopped early. Thus the
+real sharding speedup does **not** support the proportional-work-saving projection
+above: 50/hour needs **108.60 average runners**, 54/hour needs **117.29**, before
+retries or full CI. This decisive work-conservation limit is why the near-ten-minute
+critical path alone does not qualify native activation under a 60-slot default.
 
 **Activation gate:** do not enable if the failure-aware 2× replay exceeds 30-minute
 p95 first-start wait at capacity supported by measured runner availability. Current
@@ -375,6 +415,12 @@ Sources checked October 21, 2026:
 - [GitHub Actions limits](https://docs.github.com/en/actions/reference/limits)
 - [Mergify pricing](https://mergify.com/pricing), [batching](https://docs.mergify.com/merge-queue/batches), [permissions](https://docs.mergify.com/security/)
 - [Trunk pricing](https://www.trunk.io/pricing), [billing](https://docs.trunk.io/setup-and-administration/billing), [batching](https://docs.trunk.io/merge-queue/optimizations/batching), [App permissions](https://docs.trunk.io/setup/integrations/github/trunk-app)
+
+The prepared Mergify file is [`queue-options/.mergify.yml`](queue-options/.mergify.yml),
+outside all active discovery paths; [adapter, installation, ruleset, Version and
+rollback steps](queue-options/mergify-rollout.md) identify what must be completed
+after the owner's provider choice. It passes the current official JSON schema,
+but no installed-provider integration or live queue test is claimed.
 
 The supplied Super Merge anecdote (600/day, 79-second CI, 124-second coordination)
 could not be independently sourced and is not used as measured evidence here.
