@@ -7,7 +7,13 @@
 // sandbox session that runs commands on the host must come from
 // `hostShellSession` below rather than a hand-rolled `Bun.spawn`.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -54,7 +60,9 @@ function prospectiveRealPath(path: string): string {
  */
 export function assertIsolatedHome(home: string | undefined): string {
   if (!home || !isAbsolute(home)) {
-    throw new Error(`Test HOME must be an absolute temporary directory, got ${String(home)}`);
+    throw new Error(
+      `Test HOME must be an absolute temporary directory, got ${String(home)}`,
+    );
   }
   const resolved = prospectiveRealPath(home);
   const temporaryRoot = realpathSync(tmpdir());
@@ -68,7 +76,9 @@ export function assertIsolatedHome(home: string | undefined): string {
     ["the HOME this test process inherited", realpathOrUndefined(AMBIENT_HOME)],
   ] as const) {
     if (forbidden && resolved === forbidden) {
-      throw new Error(`Refusing to run Git or lifecycle scripts against ${label} (${home})`);
+      throw new Error(
+        `Refusing to run Git or lifecycle scripts against ${label} (${home})`,
+      );
     }
   }
   mkdirSync(home, { recursive: true });
@@ -110,7 +120,8 @@ export function isolatedGitEnvironment(
   const home = assertIsolatedHome(overrides.HOME);
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && !isAmbientRedirect(name)) environment[name] = value;
+    if (value !== undefined && !isAmbientRedirect(name))
+      environment[name] = value;
   }
   for (const [name, value] of Object.entries(overrides)) {
     if (value === undefined) delete environment[name];
@@ -157,32 +168,51 @@ export type HostShellSessionOptions = {
  * session exercises the production command text without ever touching the
  * developer's HOME or global Git configuration.
  */
-export function hostShellSession(home: string, options: HostShellSessionOptions = {}) {
+export function hostShellSession(
+  home: string,
+  options: HostShellSessionOptions = {},
+) {
   const environment = isolatedGitEnvironment({ ...options.env, HOME: home });
   return {
     exec: async (args: { cmd: string }): Promise<HostShellCommandResult> => {
-      let cmd = options.rewriteCommand ? options.rewriteCommand(args.cmd) : args.cmd;
+      let cmd = options.rewriteCommand
+        ? options.rewriteCommand(args.cmd)
+        : args.cmd;
       // Lifecycle hooks can transport scripts as base64 chunks. Map virtual
       // paths in the decoded program too, before executing it on the host.
-      const stagedScript = cmd.match(/exec \/bin\/sh '(\/tmp\/opengeni\/[^']+\.sh)'/u);
+      const stagedScript = cmd.match(
+        /exec \/bin\/sh '(\/tmp\/opengeni\/[^']+\.sh)'/u,
+      );
       if (stagedScript && options.rewriteCommand) {
         const path = stagedScript[1]!;
         writeFileSync(path, options.rewriteCommand(readFileSync(path, "utf8")));
         if (options.shell === "bash") {
-          cmd = cmd.replaceAll("exec /bin/sh ", "exec bash --noprofile --norc ");
+          cmd = cmd.replaceAll(
+            "exec /bin/sh ",
+            "exec bash --noprofile --norc ",
+          );
         }
       }
       // Content-addressed setup programs are verified by hash before they run,
       // so never rewrite them in place: the launcher checks the original and
-      // then executes a host-mapped copy.
-      const setupProgram = cmd.match(/opengeni_setup_program='([^']+)'/u);
-      if (setupProgram && options.rewriteCommand && existsSync(setupProgram[1]!)) {
-        const mapped = `${setupProgram[1]!}.host-mapped`;
-        writeFileSync(mapped, options.rewriteCommand(readFileSync(setupProgram[1]!, "utf8")));
-        cmd = cmd.replace(
-          'exec /bin/sh "$opengeni_setup_program"',
-          `exec ${options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh"} '${mapped}'`,
-        );
+      // then executes a host-mapped copy. Programs can be installed (or decoded
+      // for one run) by the same command, so the copy is mapped in-shell with
+      // the workspace prefix this session's rewrite applies.
+      const workspacePrefix = options.rewriteCommand?.("'/workspace/");
+      if (workspacePrefix && workspacePrefix !== "'/workspace/") {
+        const runner =
+          options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh";
+        const mapTo = (source: string, target: string) =>
+          `sed "s#'/workspace/#${workspacePrefix}#g" "${source}" > "${target}"`;
+        cmd = cmd
+          .replace(
+            'exec /bin/sh "$opengeni_setup_program"',
+            `${mapTo("$opengeni_setup_program", "$opengeni_setup_program.host-mapped")} && exec ${runner} "$opengeni_setup_program.host-mapped"`,
+          )
+          .replace(
+            '/bin/sh "$opengeni_setup_payload"',
+            `( ${mapTo("$opengeni_setup_payload", "$opengeni_setup_payload.host-mapped")} && ${runner} "$opengeni_setup_payload.host-mapped"; host_status=$?; rm -f "$opengeni_setup_payload.host-mapped"; exit "$host_status" )`,
+          );
       }
       const child = Bun.spawn(
         [

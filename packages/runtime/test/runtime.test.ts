@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { gunzipSync } from "node:zlib";
 import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
@@ -202,7 +203,17 @@ import {
 } from "@opengeni/codex";
 import { hostShellSession } from "./isolated-git-home-fixture";
 
-function capturedRepositorySetupCommand(calls: Array<Record<string, unknown>>): string {
+function capturedRepositorySetupCommand(
+  calls: Array<Record<string, unknown>>,
+): string {
+  // Single-command programs carry the compressed program inline.
+  for (const { cmd } of calls) {
+    const embedded = String(cmd).match(
+      /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| gzip -dc/u,
+    );
+    if (embedded)
+      return gunzipSync(Buffer.from(embedded[1]!, "base64")).toString("utf8");
+  }
   const chunks = calls.flatMap(({ cmd }) => {
     const match = String(cmd).match(/^printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
     return match ? [match[1]!] : [];
@@ -213,18 +224,30 @@ function capturedRepositorySetupCommand(calls: Array<Record<string, unknown>>): 
 }
 
 /** The inline per-turn launcher of a content-addressed repository setup program. */
-function capturedRepositorySetupLauncher(calls: Array<Record<string, unknown>>): string {
-  return String(calls.find(({ cmd }) => String(cmd).includes("opengeni_setup_program="))?.cmd);
+function capturedRepositorySetupLauncher(
+  calls: Array<Record<string, unknown>>,
+): string {
+  return String(
+    calls.find(({ cmd }) => String(cmd).includes("opengeni_setup_program="))
+      ?.cmd,
+  );
 }
 
 /** A box without staged setup programs: launchers report the program missing
  * until a staging command installs it at its content-addressed path. */
-function freshSetupBox<T>(ok: T): (cmd: unknown) => T | Record<string, unknown> {
+function freshSetupBox<T>(
+  ok: T,
+): (cmd: unknown) => T | Record<string, unknown> {
   const installed = new Set<string>();
   return (cmd) => {
     const text = String(cmd);
-    for (const match of text.matchAll(/mv -f '[^']+' '([^']+)'/gu)) installed.add(match[1]!);
+    for (const match of text.matchAll(/mv -f '[^']+' '([^']+)'/gu))
+      installed.add(match[1]!);
     const launched = text.match(/opengeni_setup_program='([^']+)'/u);
+    // A self-installing launcher installs its embedded program before running it.
+    if (launched && text.includes('gzip -dc > "$opengeni_setup_transfer"')) {
+      installed.add(launched[1]!);
+    }
     if (launched && !installed.has(launched[1]!)) {
       const output = "__OPENGENI_SETUP_PROGRAM_MISSING__\n";
       return { output, stdout: output, stderr: "", exitCode: 86, status: 86 };
@@ -233,9 +256,13 @@ function freshSetupBox<T>(ok: T): (cmd: unknown) => T | Record<string, unknown> 
   };
 }
 
-function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
+function makeCodexAppsAuth(
+  overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {},
+): {
   clientVersion: string;
-  withAuthorization: <T>(use: (token: CodexTokenSnapshot) => Promise<T>) => Promise<T>;
+  withAuthorization: <T>(
+    use: (token: CodexTokenSnapshot) => Promise<T>,
+  ) => Promise<T>;
 } {
   const token: CodexTokenSnapshot = overrides.token ?? {
     accessToken: "tok-123",
@@ -262,8 +289,16 @@ const CODEX_APPS_ENTRY = () => ({
 const codexAppsTestFetch =
   (url: string): typeof globalThis.fetch =>
   async (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
+    const raw =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    return await globalThis.fetch(
+      raw === CODEX_APPS_MCP_URL ? url : input,
+      init,
+    );
   };
 
 const runtimeMcpServerId = (server: MCPServer): string =>
@@ -338,12 +373,21 @@ test("connects MCP servers concurrently and keeps their input order", async () =
     delayedConnectServer("medium", 60, events),
   ];
   const startedAt = performance.now();
-  const connected = await connectMcpServersInBatches(servers, { strict: false });
+  const connected = await connectMcpServersInBatches(servers, {
+    strict: false,
+  });
   const elapsedMs = performance.now() - startedAt;
   // Serial connects would take at least 220 ms; concurrent ones about 120 ms.
   expect(elapsedMs).toBeLessThan(200);
-  expect(events.slice(0, 4).every((event) => event.startsWith("start:"))).toBe(true);
-  expect(connected.active.map(runtimeMcpServerId)).toEqual(["slow", "fast-a", "fast-b", "medium"]);
+  expect(events.slice(0, 4).every((event) => event.startsWith("start:"))).toBe(
+    true,
+  );
+  expect(connected.active.map(runtimeMcpServerId)).toEqual([
+    "slow",
+    "fast-a",
+    "fast-b",
+    "medium",
+  ]);
   await connected.close();
 });
 
@@ -359,7 +403,9 @@ test("a strict MCP connect failure closes every server that already connected", 
   console.warn = () => {};
   console.error = () => {};
   try {
-    await expect(connectMcpServersInBatches(servers, { strict: true })).rejects.toThrow();
+    await expect(
+      connectMcpServersInBatches(servers, { strict: true }),
+    ).rejects.toThrow();
   } finally {
     console.warn = originalWarn;
     console.error = originalError;
@@ -369,7 +415,9 @@ test("a strict MCP connect failure closes every server that already connected", 
 });
 
 test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
-  const raw = new Error("MCP connect failed for https://private.example/token-value");
+  const raw = new Error(
+    "MCP connect failed for https://private.example/token-value",
+  );
   raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
     code: "ECONNREFUSED",
   });
@@ -395,9 +443,11 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   });
 
   expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(clientFailure))).toBe(
-    false,
-  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(clientFailure),
+    ),
+  ).toBe(false);
   expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
   expect(mcpTransportErrorWithRetryMetadata(arbitrary)).not.toHaveProperty(
     "mcpTransportFailureKind",
@@ -421,22 +471,33 @@ test("fails closed on pathological MCP transport error wrappers", () => {
     },
   };
 
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(deeplyWrapped))).toBe(
-    false,
-  );
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingWrapper))).toBe(
-    false,
-  );
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingFields))).toBe(
-    false,
-  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(deeplyWrapped),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(throwingWrapper),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(throwingFields),
+    ),
+  ).toBe(false);
 });
 
 test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
-  const routeNotReady = Object.assign(new Error("temporary route body with secret detail"), {
-    status: 404,
-  });
-  const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const routeNotReady = Object.assign(
+    new Error("temporary route body with secret detail"),
+    {
+      status: 404,
+    },
+  );
+  const statuslessTransport = new Error(
+    "fetch failed for a secret first-party URL",
+  );
   const typedCause = Object.assign(new Error("wrapped protocol failure"), {
     cause: new TypeError("invalid MCP response shape"),
   });
@@ -445,9 +506,11 @@ test("recovers only rollout-safe first-party MCP setup 404 and statusless Error 
   });
   const typedProtocolFailure = new TypeError("invalid MCP response shape");
 
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(routeNotReady))).toBe(
-    false,
-  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(routeNotReady),
+    ),
+  ).toBe(false);
   expect(
     isMcpTransportConnectivityError(
       mcpTransportErrorWithRetryMetadata(routeNotReady, {
@@ -496,15 +559,19 @@ test("recovers typed Undici socket loss only at the safe MCP setup boundary", ()
     readonly code = "UND_ERR_SOCKET";
   }
   const socketFailure = () =>
-    new TypeError("fetch failed", { cause: new SocketError("other side closed") });
+    new TypeError("fetch failed", {
+      cause: new SocketError("other side closed"),
+    });
   const setupError = socketFailure();
-  expect(mcpTransportErrorWithRetryMetadata(setupError, { recoverySafeSetup: true })).toBe(
-    setupError,
-  );
+  expect(
+    mcpTransportErrorWithRetryMetadata(setupError, { recoverySafeSetup: true }),
+  ).toBe(setupError);
   expect(isMcpTransportConnectivityError(setupError)).toBe(true);
-  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(socketFailure()))).toBe(
-    false,
-  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(socketFailure()),
+    ),
+  ).toBe(false);
   const rejected = Object.assign(socketFailure(), { status: 401 });
   expect(
     isMcpTransportConnectivityError(
@@ -524,7 +591,9 @@ test("preserves socket setup recovery through the MCP lifecycle wrapper", async 
   class SocketError extends Error {
     readonly code = "UND_ERR_SOCKET";
   }
-  const exact = new TypeError("fetch failed", { cause: new SocketError("other side closed") });
+  const exact = new TypeError("fetch failed", {
+    cause: new SocketError("other side closed"),
+  });
   let connects = 0;
   const inner: MCPServer = {
     name: "setup-socket",
@@ -587,7 +656,9 @@ describe("structured human-input runtime boundary", () => {
       sandboxBackend: "none",
       webSearchEnabled: true,
     });
-    const defaultTools = buildOpenGeniAgent(settings, []).tools.map((tool) => tool.name);
+    const defaultTools = buildOpenGeniAgent(settings, []).tools.map(
+      (tool) => tool.name,
+    );
     const enabledTools = buildOpenGeniAgent(settings, [], {
       humanInputEnabled: true,
     }).tools.map((tool) => tool.name);
@@ -598,7 +669,9 @@ describe("structured human-input runtime boundary", () => {
     expect(defaultTools).toContain(HUMAN_INPUT_TOOL_NAME);
     expect(enabledTools).toEqual(defaultTools);
     expect(disabledTools).not.toContain(HUMAN_INPUT_TOOL_NAME);
-    expect(disabledTools).toEqual(defaultTools.filter((name) => name !== HUMAN_INPUT_TOOL_NAME));
+    expect(disabledTools).toEqual(
+      defaultTools.filter((name) => name !== HUMAN_INPUT_TOOL_NAME),
+    );
   });
 
   test("partitions human requests out of ordinary approval payloads", () => {
@@ -715,7 +788,10 @@ describe("structured human-input runtime boundary", () => {
       },
     ]);
     expect(serialized).toEqual([
-      { toolCallId: "skill-review-call", input: { ...input, allowSkip: false } },
+      {
+        toolCallId: "skill-review-call",
+        input: { ...input, allowSkip: false },
+      },
     ]);
     expect(serialized[0]!.input.questions[0]!.allowOther).toBe(false);
   });
@@ -734,7 +810,10 @@ describe("structured human-input runtime boundary", () => {
         {
           ...question,
           allowOther: true,
-          options: question.options.map((option) => ({ ...option, description: null })),
+          options: question.options.map((option) => ({
+            ...option,
+            description: null,
+          })),
           validation: null,
         },
       ],
@@ -745,7 +824,10 @@ describe("structured human-input runtime boundary", () => {
       serializeHumanInputRequests([
         {
           name: HUMAN_INPUT_TOOL_NAME,
-          rawItem: { callId: "reported-skill-review", arguments: JSON.stringify(input) },
+          rawItem: {
+            callId: "reported-skill-review",
+            arguments: JSON.stringify(input),
+          },
         },
       ]);
     expect(serialize(wire)).toEqual([
@@ -759,7 +841,10 @@ describe("structured human-input runtime boundary", () => {
       serialize({
         ...wire,
         questions: [
-          { ...wire.questions[0]!, validation: { minSelections: null, maxSelections: null } },
+          {
+            ...wire.questions[0]!,
+            validation: { minSelections: null, maxSelections: null },
+          },
         ],
       }),
     ).toEqual(serialize(wire));
@@ -771,16 +856,25 @@ describe("structured human-input runtime boundary", () => {
       { id: "different-question" },
       { options: [{ id: "save", label: "Preview" }, question.options[1]!] },
       {
-        options: [{ ...question.options[0]!, description: "No activation" }, question.options[1]!],
+        options: [
+          { ...question.options[0]!, description: "No activation" },
+          question.options[1]!,
+        ],
       },
       { validation: { minSelections: 2 } },
     ]) {
       expect(() =>
-        serialize({ ...wire, questions: [{ ...wire.questions[0]!, ...altered }] }),
+        serialize({
+          ...wire,
+          questions: [{ ...wire.questions[0]!, ...altered }],
+        }),
       ).toThrow("exact host-owned confirmation presentation");
     }
     expect(() =>
-      serialize({ ...wire, questions: [...wire.questions, { ...question, id: "extra" }] }),
+      serialize({
+        ...wire,
+        questions: [...wire.questions, { ...question, id: "extra" }],
+      }),
     ).toThrow("one dedicated human-input question");
   });
 
@@ -797,7 +891,9 @@ describe("structured human-input runtime boundary", () => {
       },
     };
     expect(serializeApprovals([interaction])).toEqual([]);
-    expect(serializeInteractionInterventionRequests([interruption, interaction])).toEqual([
+    expect(
+      serializeInteractionInterventionRequests([interruption, interaction]),
+    ).toEqual([
       {
         toolCallId: "interaction-human-call-1",
         input: {
@@ -854,10 +950,13 @@ describe("structured human-input runtime boundary", () => {
     const settings = testSettings({ sandboxBackend: "none" });
     const unresolvedAgent = buildOpenGeniAgent(settings, []);
     const unresolvedTool = unresolvedAgent.tools.find(
-      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+      (candidate) =>
+        candidate.type === "function" &&
+        candidate.name === HUMAN_INPUT_TOOL_NAME,
     );
     expect(unresolvedTool?.type).toBe("function");
-    if (!unresolvedTool || unresolvedTool.type !== "function") throw new Error("tool missing");
+    if (!unresolvedTool || unresolvedTool.type !== "function")
+      throw new Error("tool missing");
     expect(unresolvedTool.needsApproval).toBeDefined();
     await expect(
       unresolvedTool.invoke(
@@ -887,9 +986,12 @@ describe("structured human-input runtime boundary", () => {
       },
     });
     const resumedTool = resumedAgent.tools.find(
-      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+      (candidate) =>
+        candidate.type === "function" &&
+        candidate.name === HUMAN_INPUT_TOOL_NAME,
     );
-    if (!resumedTool || resumedTool.type !== "function") throw new Error("tool missing");
+    if (!resumedTool || resumedTool.type !== "function")
+      throw new Error("tool missing");
     expect(
       JSON.parse(
         String(
@@ -980,7 +1082,9 @@ describe("structured human-input runtime boundary", () => {
       },
     ]);
     const retryInput = JSON.stringify(model.requests[1]?.input);
-    expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
+    expect(retryInput).toContain(
+      "Tool execution failed. Error details are redacted.",
+    );
     expect(retryInput).toContain("human-call-invalid");
   });
 
@@ -1053,7 +1157,12 @@ describe("runtime event normalization", () => {
             role: "assistant",
             status: "completed",
             phase: "commentary",
-            content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
+            content: [
+              {
+                type: "output_text",
+                text: "Waiting for the child run to finish.",
+              },
+            ],
           } as never,
           agent,
         ),
@@ -1077,7 +1186,10 @@ describe("runtime event normalization", () => {
 
     expect(commentary).toEqual({
       type: "agent.message.completed",
-      payload: { text: "Waiting for the child run to finish.", phase: "commentary" },
+      payload: {
+        text: "Waiting for the child run to finish.",
+        phase: "commentary",
+      },
     });
     expect(finalAnswer).toEqual({
       type: "agent.message.completed",
@@ -1109,7 +1221,10 @@ describe("runtime event normalization", () => {
       ),
     );
     expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
-    expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
+    expect(completed?.payload).toEqual({
+      text: "partial answer",
+      messageId: "message-a",
+    });
   });
 
   test("extracts streamed usage without manufacturing a durable event", () => {
@@ -1302,7 +1417,9 @@ describe("runtime event normalization", () => {
       cacheWriteTokens: null,
       reasoningTokens: 0,
     });
-    expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
+    expect(
+      modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 }),
+    ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: null,
@@ -1434,18 +1551,22 @@ describe("runtime event normalization", () => {
     ).toBeNull();
     expect(
       normalizeModelCallUsage({
-        requestUsageEntries: [{ inputTokensDetails: { cached_tokens: 10 } }, { inputTokens: 20 }],
+        requestUsageEntries: [
+          { inputTokensDetails: { cached_tokens: 10 } },
+          { inputTokens: 20 },
+        ],
       }).telemetry.cachedTokens,
     ).toBeNull();
-    expect(normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } }).telemetry).toEqual(
-      {
-        inputTokens: null,
-        outputTokens: null,
-        cachedTokens: 0,
-        cacheWriteTokens: null,
-        reasoningTokens: null,
-      },
-    );
+    expect(
+      normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } })
+        .telemetry,
+    ).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: 0,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
   });
 
   test("rejects malformed and overflowing usage with bounded field-only diagnostics", () => {
@@ -1480,14 +1601,24 @@ describe("runtime event normalization", () => {
     const overflow = normalizeModelCallUsage({
       inputTokens: 600_000_000,
       outputTokens: 600_000_000,
-      inputTokensDetails: [{ cached_tokens: 600_000_000 }, { cached_tokens: 600_000_000 }],
+      inputTokensDetails: [
+        { cached_tokens: 600_000_000 },
+        { cached_tokens: 600_000_000 },
+      ],
     });
     expect(overflow.totalTokens).toBeNull();
     expect(overflow.telemetry.cachedTokens).toBeNull();
-    expect(overflow.rejectedFields).toEqual(["totalTokens.aggregate", "cachedTokens.aggregate"]);
+    expect(overflow.rejectedFields).toEqual([
+      "totalTokens.aggregate",
+      "cachedTokens.aggregate",
+    ]);
 
     const partialDetails = normalizeModelCallUsage({
-      inputTokensDetails: [{ cached_tokens: 5 }, null as never, { cached_tokens: 7 }],
+      inputTokensDetails: [
+        { cached_tokens: 5 },
+        null as never,
+        { cached_tokens: 7 },
+      ],
     });
     expect(partialDetails.telemetry.cachedTokens).toBeNull();
     expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
@@ -1675,9 +1806,10 @@ describe("runtime event normalization", () => {
       } as any),
     );
 
-    expect((completed?.payload as { raw?: { status?: string } } | undefined)?.raw?.status).toBe(
-      "completed",
-    );
+    expect(
+      (completed?.payload as { raw?: { status?: string } } | undefined)?.raw
+        ?.status,
+    ).toBe("completed");
   });
 
   test("does not persist raw SDK reasoning items", () => {
@@ -1687,7 +1819,9 @@ describe("runtime event normalization", () => {
         type: "reasoning_item",
         rawItem: {
           type: "reasoning",
-          content: [{ type: "input_text", text: "raw reasoning summary object" }],
+          content: [
+            { type: "input_text", text: "raw reasoning summary object" },
+          ],
         },
       },
     } as any);
@@ -1713,7 +1847,9 @@ describe("runtime event normalization", () => {
 
     expect(event?.type).toBe("agent.toolCall.created");
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
-    const raw = (event?.payload as { raw?: Record<string, unknown> } | undefined)?.raw;
+    const raw = (
+      event?.payload as { raw?: Record<string, unknown> } | undefined
+    )?.raw;
     expect(Object.hasOwn(raw!, "status")).toBe(false);
     expect(Object.hasOwn(raw!.action as object, "optional")).toBe(false);
     expect(Object.hasOwn(rawItem, "status")).toBe(true);
@@ -1775,8 +1911,9 @@ describe("runtime event normalization", () => {
       },
     } as any);
 
-    const persistedOutput = (event?.payload as { output?: Record<string, unknown> } | undefined)
-      ?.output;
+    const persistedOutput = (
+      event?.payload as { output?: Record<string, unknown> } | undefined
+    )?.output;
     expect(persistedOutput).toEqual({ type: "text", text: "done" });
     expect(Object.hasOwn(persistedOutput!, "structuredContent")).toBe(false);
     expect(Object.hasOwn(output, "structuredContent")).toBe(true);
@@ -1831,8 +1968,10 @@ describe("runtime event normalization", () => {
       } as any)[0];
     });
 
-    const failed = (events[0]!.payload as { output: Record<string, unknown> }).output;
-    const unknown = (events[1]!.payload as { output: Record<string, unknown> }).output;
+    const failed = (events[0]!.payload as { output: Record<string, unknown> })
+      .output;
+    const unknown = (events[1]!.payload as { output: Record<string, unknown> })
+      .output;
     expect(failed.isError).toBe(true);
     expect(Object.hasOwn(unknown, "isError")).toBe(false);
   });
@@ -1885,7 +2024,9 @@ describe("runtime event normalization", () => {
   });
 
   test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
-    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const pngBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
       item: {
@@ -1946,7 +2087,9 @@ describe("runtime event normalization", () => {
 
     test("defaults media type to image/png when absent", () => {
       const bytes = new Uint8Array([1, 2, 3]);
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toMatchObject({
+      expect(
+        normalizeToolOutputForEvent({ type: "image", image: { data: bytes } }),
+      ).toMatchObject({
         type: "media_preview",
         mediaType: "image/png",
         inlineBytes: 3,
@@ -2003,7 +2146,9 @@ describe("runtime event normalization", () => {
     });
 
     test("text outputs pass through unchanged", () => {
-      expect(normalizeToolOutputForEvent("plain tool output")).toBe("plain tool output");
+      expect(normalizeToolOutputForEvent("plain tool output")).toBe(
+        "plain tool output",
+      );
     });
 
     test("hosted computer_call data-URL string output becomes a media fact", () => {
@@ -2118,7 +2263,9 @@ describe("runtime event normalization", () => {
       const [wrappedValid] = withStructuredViewImageFunctionResults([
         { ...tool, invoke: async () => validDataUrl } as any,
       ]);
-      expect(await (wrappedValid as any).invoke(undefined, "{}", undefined)).toEqual({
+      expect(
+        await (wrappedValid as any).invoke(undefined, "{}", undefined),
+      ).toEqual({
         type: "image",
         image: { url: validDataUrl },
       });
@@ -2147,7 +2294,11 @@ describe("runtime event normalization", () => {
       const [wrappedInvalid] = withStructuredViewImageFunctionResults([
         { ...tool, invoke: async () => invalidDataUrl } as any,
       ]);
-      const result = await (wrappedInvalid as any).invoke(undefined, "{}", undefined);
+      const result = await (wrappedInvalid as any).invoke(
+        undefined,
+        "{}",
+        undefined,
+      );
       expect(result).toContain("Convert the file to PNG, JPEG, or WebP");
       expect(result).not.toContain("base64");
       if (invalidDataUrl.startsWith("data:image/png;base64,")) {
@@ -2180,10 +2331,16 @@ describe("runtime event normalization", () => {
         },
       }),
     });
-    const viewImage = bound.tools().find((tool: { name?: string }) => tool.name === "view_image");
-    const output = await viewImage.invoke(undefined, '{"path":"/tmp/image.png"}', {
-      toolCall: { callId: "call-view" },
-    });
+    const viewImage = bound
+      .tools()
+      .find((tool: { name?: string }) => tool.name === "view_image");
+    const output = await viewImage.invoke(
+      undefined,
+      '{"path":"/tmp/image.png"}',
+      {
+        toolCall: { callId: "call-view" },
+      },
+    );
     expect(observed).toEqual([
       {
         toolName: "view_image",
@@ -2213,23 +2370,29 @@ describe("runtime event normalization", () => {
         return { type: "text", text: "fixture" };
       },
     });
-    const tool = bound.tools().find((value: { name?: string }) => value.name === "view_image");
+    const tool = bound
+      .tools()
+      .find((value: { name?: string }) => value.name === "view_image");
     expect(tool).toBeTruthy();
     await tool.invoke(undefined, '{"path":"/tmp/fixture.png"}');
     expect(reads).toBe(1);
     live = false;
-    await expect(tool.invoke(undefined, '{"path":"/tmp/fixture.png"}')).rejects.toThrow(
-      "Link revoked",
-    );
+    await expect(
+      tool.invoke(undefined, '{"path":"/tmp/fixture.png"}'),
+    ).rejects.toThrow("Link revoked");
     expect(reads).toBe(1);
   });
 
   test("text-only models do not receive the filesystem view_image tool", () => {
     const toolNames = (supportsImageInput: boolean) => {
-      const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {
-        structuredToolTransport: false,
-        supportsImageInput,
-      });
+      const [filesystemCapability] = buildAgentCapabilities(
+        testSettings(),
+        [],
+        {
+          structuredToolTransport: false,
+          supportsImageInput,
+        },
+      );
       const bound = (filesystemCapability as any).bind({
         createEditor: () => ({}),
         viewImage: async () => ({ type: "image", image: { data: "aGk=" } }),
@@ -2265,7 +2428,10 @@ describe("runtime event normalization", () => {
           }),
           { mutation: true },
         );
-        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+        const agent = buildOpenGeniAgent(
+          testSettings({ sandboxBackend: "none" }),
+          [],
+        );
         const render = (agent as any).mcpConfig.errorFunction;
         const result = render({ context: {}, error: failure });
         expect(result.isError).toBe(true);
@@ -2281,10 +2447,16 @@ describe("runtime event normalization", () => {
             controlRequestId: "control-request-42",
           },
         });
-        expect(result.structuredContent.error.guidance).toContain("Do not repeat actions");
-        expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+        expect(result.structuredContent.error.guidance).toContain(
+          "Do not repeat actions",
+        );
+        expect(JSON.parse(result.content[0].text)).toEqual(
+          result.structuredContent,
+        );
         expect(result.content[0].text).not.toContain("Please try again");
-        expect(result.content[0].text).not.toContain("synthetic-private-provider-output");
+        expect(result.content[0].text).not.toContain(
+          "synthetic-private-provider-output",
+        );
       },
     );
 
@@ -2316,10 +2488,14 @@ describe("runtime event normalization", () => {
     });
 
     test("an uncertain API failure without control details still forbids automatic retries", () => {
-      const failure = new OpenGeniApiError(504, "Synthetic request timed out.", {
-        outcomeUnknown: true,
-        correlationId: "api-request-43",
-      });
+      const failure = new OpenGeniApiError(
+        504,
+        "Synthetic request timed out.",
+        {
+          outcomeUnknown: true,
+          correlationId: "api-request-43",
+        },
+      );
       const result = mcpToolErrorOutput(failure);
       expect(result.isError).toBe(true);
       expect(result.structuredContent?.error).toMatchObject({
@@ -2360,7 +2536,9 @@ describe("runtime event normalization", () => {
     });
 
     test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
-      const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
+      const out = mcpToolErrorOutput(
+        new Error("MCP error -32602: Invalid params"),
+      );
       expect(out.isError).toBe(true);
       expect(out.content[0]?.text).toContain("-32602");
       // Non-Error values stringify rather than throwing.
@@ -2373,7 +2551,9 @@ describe("runtime event normalization", () => {
           throw new Error("hostile message getter");
         },
       });
-      expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
+      expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain(
+        "MCP tool call failed",
+      );
     });
 
     test("a malformed tool schema is unavailable rather than repairable model arguments", async () => {
@@ -2406,7 +2586,10 @@ describe("runtime event normalization", () => {
         .catch((reason: unknown) => reason);
       expect(error).toBeInstanceOf(ToolGatewaySchemaCompilationError);
       expect(executions).toBe(0);
-      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const agent = buildOpenGeniAgent(
+        testSettings({ sandboxBackend: "none" }),
+        [],
+      );
       const render = (agent as any).mcpConfig.errorFunction;
       expect(render({ context: {}, error })).toEqual({
         isError: true,
@@ -2439,7 +2622,9 @@ describe("runtime event normalization", () => {
             },
             source: "mcp",
             approval: "none",
-            execute: async () => ({ content: [{ type: "text", text: "unreachable" }] }),
+            execute: async () => ({
+              content: [{ type: "text", text: "unreachable" }],
+            }),
           },
         ],
       });
@@ -2455,7 +2640,10 @@ describe("runtime event normalization", () => {
         );
       expect(rejected).toBeInstanceOf(ToolGatewayInputValidationError);
       // The agent's MCP errorFunction is the seam that renders this for the model.
-      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const agent = buildOpenGeniAgent(
+        testSettings({ sandboxBackend: "none" }),
+        [],
+      );
       const errorFunction = (agent as any).mcpConfig.errorFunction as (args: {
         context: unknown;
         error: unknown;
@@ -2472,7 +2660,9 @@ describe("runtime event normalization", () => {
       expect(text).not.toContain("Please try again");
       expect(text).not.toContain("synthetic-command-value");
       // Every other thrown failure keeps the generic retry wording.
-      expect(mcpToolErrorOutput(new Error("upstream 503")).content[0]?.text).toBe(
+      expect(
+        mcpToolErrorOutput(new Error("upstream 503")).content[0]?.text,
+      ).toBe(
         "An error occurred while running the tool. Please try again. Error: upstream 503",
       );
     });
@@ -2492,10 +2682,12 @@ describe("runtime event normalization", () => {
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
       // Both agent paths share baseConfig, so both carry the errorFunction.
       for (const backend of ["none", "docker"] as const) {
-        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), []);
+        const agent = buildOpenGeniAgent(
+          testSettings({ sandboxBackend: backend }),
+          [],
+        );
         const errorFunction = (agent as any).mcpConfig?.errorFunction as
-          | ((args: { context: unknown; error: unknown }) => unknown)
-          | undefined;
+          ((args: { context: unknown; error: unknown }) => unknown) | undefined;
         expect(typeof errorFunction).toBe("function");
         // The runtime stores the raw return as the tool output; it must be an
         // isError object (not the SDK's flat default string) so the timeline
@@ -2509,7 +2701,9 @@ describe("runtime event normalization", () => {
     });
 
     test("an isError tool output survives normalizeSdkEvent as the event output", () => {
-      const errored = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
+      const errored = mcpToolErrorOutput(
+        new Error("MCP error -32602: Invalid params"),
+      );
       const [event] = normalizeSdkEvent({
         type: "run_item_stream_event",
         item: {
@@ -2531,12 +2725,16 @@ describe("runtime event normalization", () => {
 
   describe("per-MCP-server tool approval policy", () => {
     type ApprovalAgent = {
-      getMcpTools: (runContext: RunContext) => Promise<Awaited<ReturnType<typeof getAllMcpTools>>>;
+      getMcpTools: (
+        runContext: RunContext,
+      ) => Promise<Awaited<ReturnType<typeof getAllMcpTools>>>;
     };
 
     // Resolves an agent's MCP tools and reports which prefixed tool names need
     // approval (invoking each tool's needsApproval predicate).
-    async function approvalMapForAgent(agent: ApprovalAgent): Promise<Record<string, boolean>> {
+    async function approvalMapForAgent(
+      agent: ApprovalAgent,
+    ): Promise<Record<string, boolean>> {
       const tools = await agent.getMcpTools(new RunContext());
       const entries = await Promise.all(
         tools.map(async (tool) => {
@@ -2575,9 +2773,10 @@ describe("runtime event normalization", () => {
         cacheToolsList: false,
         ...(requireApproval !== undefined ? { requireApproval } : {}),
       };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
-        { kind: "mcp", id: serverId },
-      ]);
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [serverConfig] }),
+        [{ kind: "mcp", id: serverId }],
+      );
       try {
         const agent = buildOpenGeniAgent(
           testSettings({
@@ -2636,7 +2835,9 @@ describe("runtime event normalization", () => {
         false,
         {
           fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
-          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+          search_documents: {
+            [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow",
+          },
         },
         "host",
       );
@@ -2651,7 +2852,9 @@ describe("runtime event normalization", () => {
         ["search_documents"],
         false,
         {
-          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+          search_documents: {
+            [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow",
+          },
           fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
         },
         "host",
@@ -2667,11 +2870,23 @@ describe("runtime event normalization", () => {
       // it ships a new Ask tool; nothing about the session is re-created or patched.
       const toolMeta: Record<string, Record<string, unknown>> = {};
       const mcp = startTestMcpServer({ toolMeta });
-      const serverConfig = { id: "host", name: "Host", url: mcp.url, cacheToolsList: true };
-      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const serverConfig = {
+        id: "host",
+        name: "Host",
+        url: mcp.url,
+        cacheToolsList: true,
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [serverConfig],
+      });
       const attempt = async () => {
-        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "host" }]);
-        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        const prepared = await prepareAgentTools(settings, [
+          { kind: "mcp", id: "host" },
+        ]);
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+        });
         return { prepared, agent };
       };
       const first = await attempt();
@@ -2680,9 +2895,13 @@ describe("runtime event normalization", () => {
           host__search_documents: false,
           host__fetch_document: false,
         });
-        toolMeta.fetch_document = { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" };
+        toolMeta.fetch_document = {
+          [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask",
+        };
         // A running attempt keeps the list it started with.
-        expect((await approvalMapForAgent(first.agent)).host__fetch_document).toBe(false);
+        expect(
+          (await approvalMapForAgent(first.agent)).host__fetch_document,
+        ).toBe(false);
         const second = await attempt();
         try {
           expect(await approvalMapForAgent(second.agent)).toEqual({
@@ -2732,13 +2951,19 @@ describe("runtime event normalization", () => {
         async invalidateToolsCache() {},
       };
       for (const backend of ["none", "modal"] as const) {
-        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), [], {
-          mcpServers: [interactionServer],
-        });
+        const agent = buildOpenGeniAgent(
+          testSettings({ sandboxBackend: backend }),
+          [],
+          {
+            mcpServers: [interactionServer],
+          },
+        );
         expect(await approvalMapForAgent(agent)).toEqual({
           [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
         });
-        const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        const clone = (
+          agent as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
         expect(await approvalMapForAgent(clone)).toEqual({
           [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
         });
@@ -2818,39 +3043,62 @@ describe("runtime event normalization", () => {
             throw new Error("not streamed");
           },
         };
-        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-          mcpServers: [interactionServer],
-        }) as unknown as { clone: (config: unknown) => Agent };
-        const result = await runAgent(agent.clone({ model }), "hand the sign-in over", {
-          toolExecution: { preApprovalInputGuardrails: true },
-        });
+        const agent = buildOpenGeniAgent(
+          testSettings({ sandboxBackend: "none" }),
+          [],
+          {
+            mcpServers: [interactionServer],
+          },
+        ) as unknown as { clone: (config: unknown) => Agent };
+        const result = await runAgent(
+          agent.clone({ model }),
+          "hand the sign-in over",
+          {
+            toolExecution: { preApprovalInputGuardrails: true },
+          },
+        );
         return { result, requests };
       };
 
       // A string where a number belongs: the turn continues and the model
       // sees what to correct, instead of the turn failing at the pause.
-      const invalid = await runWith(JSON.stringify({ ...request, expiresInSeconds: "1200" }));
+      const invalid = await runWith(
+        JSON.stringify({ ...request, expiresInSeconds: "1200" }),
+      );
       expect(invalid.result.interruptions).toHaveLength(0);
       expect(invalid.result.finalOutput).toBe("corrected");
       const fed = JSON.stringify(invalid.requests[1]!.input);
-      expect(fed).toContain("Invalid interaction_request_human arguments: expiresInSeconds");
+      expect(fed).toContain(
+        "Invalid interaction_request_human arguments: expiresInSeconds",
+      );
       expect(fed).toContain("Nothing was requested");
 
       // Valid arguments still pause for the person, and the recorded request
       // is exactly what the model sent.
-      const valid = await runWith(JSON.stringify({ ...request, expiresInSeconds: 1200 }));
+      const valid = await runWith(
+        JSON.stringify({ ...request, expiresInSeconds: 1200 }),
+      );
       expect(valid.result.interruptions).toHaveLength(1);
       expect(valid.requests).toHaveLength(1);
-      expect(serializeInteractionInterventionRequests(valid.result.interruptions)).toMatchObject([
-        { toolCallId: "handoff-call", input: { ...request, expiresInSeconds: 1200 } },
+      expect(
+        serializeInteractionInterventionRequests(valid.result.interruptions),
+      ).toMatchObject([
+        {
+          toolCallId: "handoff-call",
+          input: { ...request, expiresInSeconds: 1200 },
+        },
       ]);
     });
 
     test("describes invalid interaction arguments without echoing their values", () => {
-      expect(interactionRequestArgumentsProblem("{")).toContain("not valid JSON");
-      expect(interactionRequestArgumentsProblem(JSON.stringify({ operation: "wait" }))).toContain(
-        "interventionId",
+      expect(interactionRequestArgumentsProblem("{")).toContain(
+        "not valid JSON",
       );
+      expect(
+        interactionRequestArgumentsProblem(
+          JSON.stringify({ operation: "wait" }),
+        ),
+      ).toContain("interventionId");
       expect(
         interactionRequestArgumentsProblem(
           JSON.stringify({
@@ -2904,7 +3152,8 @@ describe("runtime event normalization", () => {
             candidate.type === "function" &&
             candidate.name === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
         );
-        if (!tool || tool.type !== "function") throw new Error("interaction tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("interaction tool missing");
         await expect(
           tool.invoke(new RunContext(), JSON.stringify({}), {
             toolCall: { callId },
@@ -2931,9 +3180,10 @@ describe("runtime event normalization", () => {
         cacheToolsList: false,
         requireApproval: true as const,
       };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
-        { kind: "mcp", id: "docs" },
-      ]);
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [serverConfig] }),
+        [{ kind: "mcp", id: "docs" }],
+      );
       try {
         const agent = buildOpenGeniAgent(
           // Sandbox backend → a SandboxAgent, whose tools are resolved on a fresh
@@ -2946,7 +3196,9 @@ describe("runtime event normalization", () => {
         // on the CLONE. SandboxAgent.clone reconstructs from a fixed field list, so
         // an instance-own getMcpTools override is dropped — approval must be
         // re-installed onto the clone or it silently bypasses on every sandbox turn.
-        const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        const clone = (
+          agent as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
         expect(await approvalMapForAgent(clone)).toEqual({
           docs__search_documents: true,
           docs__fetch_document: true,
@@ -3035,34 +3287,49 @@ describe("runtime event normalization", () => {
     }) {
       const mcp = startTestMcpServer({
         toolResultIsError: input.toolResultIsError,
-        ...(input.toolResultBytes ? { toolResultBytes: input.toolResultBytes } : {}),
+        ...(input.toolResultBytes
+          ? { toolResultBytes: input.toolResultBytes }
+          : {}),
       });
       const baseConfig = {
         id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
-        ...(input.legacyApproval !== undefined ? { requireApproval: input.legacyApproval } : {}),
+        ...(input.legacyApproval !== undefined
+          ? { requireApproval: input.legacyApproval }
+          : {}),
       };
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
         ...(input.previewReview
-          ? { preview: async () => ({ managed: true as const, decision: input.connectorDecision }) }
+          ? {
+              preview: async () => ({
+                managed: true as const,
+                decision: input.connectorDecision,
+              }),
+            }
           : {}),
         prepare:
           input.prepare ??
           (async (call) => {
-            calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
+            calls.push(
+              `prepare:${call.approvalId}:${String((call.arguments as any).query)}`,
+            );
             return {
               managed: true,
               decision: input.connectorDecision,
-              ...(input.alreadyApproved ? { approvalStatus: "approved" as const } : {}),
+              ...(input.alreadyApproved
+                ? { approvalStatus: "approved" as const }
+                : {}),
             };
           }),
         begin:
           input.begin ??
           (async (call) => {
-            calls.push(`begin:${call.approvalId}:${String((call.arguments as any).query)}`);
+            calls.push(
+              `begin:${call.approvalId}:${String((call.arguments as any).query)}`,
+            );
             return input.connectorDecision === "block"
               ? {
                   allowed: false,
@@ -3100,28 +3367,35 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: baseConfig.id }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        credentialSubjectId: "subject-a",
-        mcpAccountLabels: input.accountLabel
-          ? new Map([[baseConfig.id, input.accountLabel]])
-          : undefined,
-        deferNonEagerUntilToolDemand: input.lazyToolTransport !== undefined,
-        resolveCredential: async () => ({
-          status: "ok",
-          connectionId: "connection-1",
-          headers: { authorization: "Bearer connector-token" },
-        }),
-        connectorActionPolicy: hooks,
-        ...(input.spillOversizedModelToolResult
-          ? { spillOversizedModelToolResult: input.spillOversizedModelToolResult }
-          : {}),
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: baseConfig.id }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          credentialSubjectId: "subject-a",
+          mcpAccountLabels: input.accountLabel
+            ? new Map([[baseConfig.id, input.accountLabel]])
+            : undefined,
+          deferNonEagerUntilToolDemand: input.lazyToolTransport !== undefined,
+          resolveCredential: async () => ({
+            status: "ok",
+            connectionId: "connection-1",
+            headers: { authorization: "Bearer connector-token" },
+          }),
+          connectorActionPolicy: hooks,
+          ...(input.spillOversizedModelToolResult
+            ? {
+                spillOversizedModelToolResult:
+                  input.spillOversizedModelToolResult,
+              }
+            : {}),
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         lazyToolTransport: input.lazyToolTransport,
         toolPreparationReady: prepared.ready,
@@ -3144,7 +3418,15 @@ describe("runtime event normalization", () => {
         try {
           const name = prefixedMcpToolName(serverId, "search_documents");
           const model = new ScriptedModel([
-            { output: [scriptedFunctionCall(name, { query: "example" }, "account-model-call")] },
+            {
+              output: [
+                scriptedFunctionCall(
+                  name,
+                  { query: "example" },
+                  "account-model-call",
+                ),
+              ],
+            },
           ]);
           const result = await runAgentStream(
             fixture.agent.clone({ model }),
@@ -3158,7 +3440,10 @@ describe("runtime event normalization", () => {
           expect(result.interruptions).toHaveLength(1);
           expect(fixture.calls).toContain("prepare:account-model-call:example");
           expect(fixture.mcp.calls).toHaveLength(0);
-          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          const restored = await restoreInterruptedRunState(
+            fixture.agent,
+            result.state.toString(),
+          );
           expect(restored.getInterruptions()).toHaveLength(1);
         } finally {
           await fixture.prepared.close();
@@ -3182,21 +3467,32 @@ describe("runtime event normalization", () => {
               docs__fetch_document: connectorDecision === "ask",
             };
             expect(await approvalMapForAgent(fixture.agent)).toEqual(expected);
-            expect(await approvalMapForAgent(fixture.agent.clone({}))).toEqual(expected);
-            const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
-              (candidate) =>
-                candidate.type === "function" && candidate.name === "docs__search_documents",
+            expect(await approvalMapForAgent(fixture.agent.clone({}))).toEqual(
+              expected,
             );
-            if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+            const [tool] = (
+              await fixture.agent.getMcpTools(new RunContext())
+            ).filter(
+              (candidate) =>
+                candidate.type === "function" &&
+                candidate.name === "docs__search_documents",
+            );
+            if (!tool || tool.type !== "function")
+              throw new Error("connector tool missing");
             if (connectorDecision !== "ask") {
               const output = await tool.invoke(
                 new RunContext(),
                 JSON.stringify({ query: "needle" }),
-                { toolCall: { callId: `call-${connectorDecision}-${attempt}` } } as any,
+                {
+                  toolCall: { callId: `call-${connectorDecision}-${attempt}` },
+                } as any,
               );
-              if (connectorDecision === "block") expect(output).toMatchObject({ isError: true });
+              if (connectorDecision === "block")
+                expect(output).toMatchObject({ isError: true });
             }
-            expect(fixture.mcp.calls).toHaveLength(connectorDecision === "allow" ? 1 : 0);
+            expect(fixture.mcp.calls).toHaveLength(
+              connectorDecision === "allow" ? 1 : 0,
+            );
           } finally {
             await fixture.prepared.close();
             fixture.mcp.close();
@@ -3224,7 +3520,15 @@ describe("runtime event normalization", () => {
             .update(JSON.stringify([serverId, "search_documents"]))
             .digest("hex");
           const model = new ScriptedModel([
-            { output: [scriptedFunctionCall(legacy, { query: "example" }, "legacy-call")] },
+            {
+              output: [
+                scriptedFunctionCall(
+                  legacy,
+                  { query: "example" },
+                  "legacy-call",
+                ),
+              ],
+            },
           ]);
           const result = await runAgentStream(
             fixture.agent.clone({ model }),
@@ -3237,7 +3541,10 @@ describe("runtime event normalization", () => {
           await result.completed;
           expect(result.interruptions).toHaveLength(1);
           expect(fixture.mcp.calls).toHaveLength(0);
-          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          const restored = await restoreInterruptedRunState(
+            fixture.agent,
+            result.state.toString(),
+          );
           expect(restored.getInterruptions()).toHaveLength(1);
           await expect(
             restoreInterruptedRunState(other.agent, result.state.toString()),
@@ -3274,7 +3581,9 @@ describe("runtime event normalization", () => {
           const tools = await fixture.prepared.mcpServers[0]!.listTools();
           expect(tools.length).toBeGreaterThan(0);
           for (const tool of tools) {
-            expect((tool.description ?? "").startsWith("Account: ")).toBe(named);
+            expect((tool.description ?? "").startsWith("Account: ")).toBe(
+              named,
+            );
           }
           if (named) {
             expect(tools[0]!.description).toStartWith(
@@ -3304,7 +3613,11 @@ describe("runtime event normalization", () => {
       try {
         const name = prefixedMcpToolName(serverId, "search_documents");
         const requestsBefore = fixture.mcp.requests.length;
-        const call = { id: "display-call", name, arguments: { query: "example" } };
+        const call = {
+          id: "display-call",
+          name,
+          arguments: { query: "example" },
+        };
         // People get the connector and the short account; the model keeps the full one.
         const display = {
           toolName: "search_documents",
@@ -3312,7 +3625,9 @@ describe("runtime event normalization", () => {
           providerDomain: "docs.example.test",
           accountLabel: "alice@example.test",
         };
-        expect(withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call)).toMatchObject({
+        expect(
+          withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call),
+        ).toMatchObject({
           ...call,
           display,
         });
@@ -3323,10 +3638,16 @@ describe("runtime event normalization", () => {
           }),
         ).toMatchObject({ display });
         expect(
-          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
-        ).toMatchObject({ identity: { serverId, toolName: "search_documents" } });
+          fixture.prepared.attemptToolCatalog?.entries.find(
+            (entry) => entry.modelName === name,
+          ),
+        ).toMatchObject({
+          identity: { serverId, toolName: "search_documents" },
+        });
         expect(
-          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
+          fixture.prepared.attemptToolCatalog?.entries.find(
+            (entry) => entry.modelName === name,
+          ),
         ).not.toHaveProperty("accountLabel");
         expect(fixture.mcp.requests.length).toBe(requestsBefore);
         expect(fixture.mcp.calls).toHaveLength(0);
@@ -3338,23 +3659,33 @@ describe("runtime event normalization", () => {
 
     test("review metadata is read only for a new Ask", async () => {
       for (const connectorDecision of ["allow", "ask", "block"] as const) {
-        const fixture = await connectorPolicyFixture({ connectorDecision, previewReview: true });
+        const fixture = await connectorPolicyFixture({
+          connectorDecision,
+          previewReview: true,
+        });
         let reads = 0;
         for (const server of fixture.prepared.mcpServers) {
-          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
-            async () => {
-              reads++;
-              return {};
-            };
+          (
+            server as unknown as { reviewContext: () => Promise<object> }
+          ).reviewContext = async () => {
+            reads++;
+            return {};
+          };
         }
         try {
           const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "docs__search_documents",
+              candidate.type === "function" &&
+              candidate.name === "docs__search_documents",
           );
-          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("Tool missing");
           expect(
-            await tool.needsApproval(new RunContext(), { query: "synthetic" }, "metadata-fixture"),
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "synthetic" },
+              "metadata-fixture",
+            ),
           ).toBe(connectorDecision === "ask");
           expect(reads).toBe(connectorDecision === "ask" ? 1 : 0);
           expect(fixture.mcp.calls).toHaveLength(0);
@@ -3389,29 +3720,44 @@ describe("runtime event normalization", () => {
         });
         if (testCase.breakReview) {
           for (const server of fixture.prepared.mcpServers) {
-            (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
-              async () => {
-                throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
-              };
+            (
+              server as unknown as { reviewContext: () => Promise<object> }
+            ).reviewContext = async () => {
+              throw new Error(
+                "Gmail REST request failed (400): Gmail rejected the request.",
+              );
+            };
           }
         }
         try {
           const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "docs__search_documents",
+              candidate.type === "function" &&
+              candidate.name === "docs__search_documents",
           );
-          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("Tool missing");
           expect(
-            await tool.needsApproval(new RunContext(), { query: "..." }, "preflight-call"),
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "..." },
+              "preflight-call",
+            ),
           ).toBe(false);
-          const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "..." }), {
-            toolCall: { callId: "preflight-call" },
-          } as any);
+          const output = await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: "..." }),
+            {
+              toolCall: { callId: "preflight-call" },
+            } as any,
+          );
           expect(output).toMatchObject({ isError: true });
           expect(JSON.stringify(output)).toContain("The tool was not run");
           // Nothing executed and no approval or begin record was created.
           expect(fixture.mcp.calls).toHaveLength(0);
-          expect(fixture.calls.filter((call) => !call.startsWith("prepare:"))).toEqual([]);
+          expect(
+            fixture.calls.filter((call) => !call.startsWith("prepare:")),
+          ).toEqual([]);
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
@@ -3428,16 +3774,23 @@ describe("runtime event normalization", () => {
           lazyToolTransport,
         });
         for (const server of fixture.prepared.mcpServers) {
-          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
-            async () => {
-              throw new Error("Gmail REST request failed (400): Gmail rejected the request.");
-            };
+          (
+            server as unknown as { reviewContext: () => Promise<object> }
+          ).reviewContext = async () => {
+            throw new Error(
+              "Gmail REST request failed (400): Gmail rejected the request.",
+            );
+          };
         }
         try {
           const model = new ScriptedModel([
             {
               output: [
-                scriptedFunctionCall("docs__search_documents", { query: "..." }, "preflight-run"),
+                scriptedFunctionCall(
+                  "docs__search_documents",
+                  { query: "..." },
+                  "preflight-run",
+                ),
               ],
             },
             { outputText: "Recovered." },
@@ -3467,15 +3820,22 @@ describe("runtime event normalization", () => {
     );
 
     test("an approval preflight without a call id keeps failing closed", async () => {
-      const fixture = await connectorPolicyFixture({ connectorDecision: "ask" });
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "ask",
+      });
       try {
         const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
         if (!tool || tool.type !== "function") throw new Error("Tool missing");
         await expect(
-          tool.needsApproval(new RunContext(), { query: "x" }, undefined as never),
+          tool.needsApproval(
+            new RunContext(),
+            { query: "x" },
+            undefined as never,
+          ),
         ).rejects.toThrow("durable approval identity");
         expect(fixture.mcp.calls).toHaveLength(0);
       } finally {
@@ -3496,19 +3856,28 @@ describe("runtime event normalization", () => {
       try {
         const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
         if (!tool || tool.type !== "function") throw new Error("Tool missing");
         for (let index = 0; index < 300; index++) {
-          expect(await tool.needsApproval(new RunContext(), { query: "x" }, `batch-${index}`)).toBe(
-            false,
-          );
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "x" },
+              `batch-${index}`,
+            ),
+          ).toBe(false);
         }
         // The dependency recovers before the earliest call is invoked.
         failing = false;
-        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "x" }), {
-          toolCall: { callId: "batch-0" },
-        } as any);
+        const output = await tool.invoke(
+          new RunContext(),
+          JSON.stringify({ query: "x" }),
+          {
+            toolCall: { callId: "batch-0" },
+          } as any,
+        );
         expect(JSON.stringify(output)).toContain("The tool was not run");
         expect(fixture.mcp.calls).toHaveLength(0);
       } finally {
@@ -3521,24 +3890,44 @@ describe("runtime event normalization", () => {
       const mcp = startTestMcpServer({});
       const settings = testSettings({
         sandboxBackend: "none",
-        mcpServers: [{ id: "plain", name: "Plain", url: mcp.url, cacheToolsList: false }],
+        mcpServers: [
+          { id: "plain", name: "Plain", url: mcp.url, cacheToolsList: false },
+        ],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "plain" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: "plain" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+        },
+      );
       try {
         const name = "plain__search_documents";
         const model = new ScriptedModel([
-          { output: [{ ...scriptedFunctionCall(name, {}, "malformed-call"), arguments: "{" }] },
+          {
+            output: [
+              {
+                ...scriptedFunctionCall(name, {}, "malformed-call"),
+                arguments: "{",
+              },
+            ],
+          },
           { outputText: "Recovered." },
         ]);
-        const agent = buildOpenGeniAgent(settings, [], { model, mcpServers: prepared.mcpServers });
-        const result = await runAgentStream(agent, "Search documents", settings);
+        const agent = buildOpenGeniAgent(settings, [], {
+          model,
+          mcpServers: prepared.mcpServers,
+        });
+        const result = await runAgentStream(
+          agent,
+          "Search documents",
+          settings,
+        );
         for await (const _event of result.toStream()) {
           // Drain the run.
         }
@@ -3559,17 +3948,29 @@ describe("runtime event normalization", () => {
         legacyApproval: true,
       });
       try {
-        const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+        const [tool] = (
+          await fixture.agent.getMcpTools(new RunContext())
+        ).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
-        expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
-          false,
+        if (!tool || tool.type !== "function")
+          throw new Error("connector tool missing");
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            { query: "needle" },
+            "call-allow",
+          ),
+        ).toBe(false);
+        const output = await tool.invoke(
+          new RunContext(),
+          JSON.stringify({ query: "needle" }),
+          {
+            toolCall: { callId: "call-allow" },
+          } as any,
         );
-        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
-          toolCall: { callId: "call-allow" },
-        } as any);
         expect(output).toBeDefined();
         expect(fixture.mcp.calls).toEqual([
           { tool: "search_documents", args: { query: "needle" } },
@@ -3605,7 +4006,11 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const seen: Array<{ toolName: string; connectionId?: string; defaultDecision?: string }> = [];
+      const seen: Array<{
+        toolName: string;
+        connectionId?: string;
+        defaultDecision?: string;
+      }> = [];
       const hooks: ConnectorActionPolicyHooks = {
         prepare: async (call) => {
           seen.push({
@@ -3615,18 +4020,26 @@ describe("runtime event normalization", () => {
           });
           return { managed: true, decision: rules[call.toolName] ?? "allow" };
         },
-        begin: async () => ({ allowed: true, managed: true, requestId: "session-mcp-request" }),
+        begin: async () => ({
+          allowed: true,
+          managed: true,
+          requestId: "session-mcp-request",
+        }),
         complete: async () => undefined,
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: serverId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          connectorActionPolicy: hooks,
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -3635,34 +4048,50 @@ describe("runtime event normalization", () => {
         const tools = await agent.getMcpTools(new RunContext());
         const byName = (name: string) => {
           const tool = tools.find(
-            (candidate) => candidate.type === "function" && candidate.name === name,
+            (candidate) =>
+              candidate.type === "function" && candidate.name === name,
           );
-          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          if (!tool || tool.type !== "function")
+            throw new Error(`${name} missing`);
           return tool;
         };
         const search = byName(`${serverId}__search_documents`);
         const fetch = byName(`${serverId}__fetch_document`);
 
         // Allow beats the Ask recommendation, and the tool executes.
-        expect(await search.needsApproval(new RunContext(), { query: "n" }, "call-search")).toBe(
-          false,
-        );
+        expect(
+          await search.needsApproval(
+            new RunContext(),
+            { query: "n" },
+            "call-search",
+          ),
+        ).toBe(false);
         await search.invoke(new RunContext(), JSON.stringify({ query: "n" }), {
           toolCall: { callId: "call-search" },
         } as any);
-        expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "n" } }]);
+        expect(mcp.calls).toEqual([
+          { tool: "search_documents", args: { query: "n" } },
+        ]);
 
         // Ask on a tool the session recommended as Allow still pauses for approval.
-        expect(await fetch.needsApproval(new RunContext(), { id: "doc-1" }, "call-fetch")).toBe(
-          true,
-        );
+        expect(
+          await fetch.needsApproval(
+            new RunContext(),
+            { id: "doc-1" },
+            "call-fetch",
+          ),
+        ).toBe(true);
 
         const expectedId = sessionMcpApprovalConnectionId(serverId, mcp.url);
-        expect(seen.find((entry) => entry.toolName === "search_documents")).toMatchObject({
+        expect(
+          seen.find((entry) => entry.toolName === "search_documents"),
+        ).toMatchObject({
           connectionId: expectedId,
           defaultDecision: "ask",
         });
-        expect(seen.find((entry) => entry.toolName === "fetch_document")).toMatchObject({
+        expect(
+          seen.find((entry) => entry.toolName === "fetch_document"),
+        ).toMatchObject({
           connectionId: expectedId,
           defaultDecision: "allow",
         });
@@ -3674,14 +4103,27 @@ describe("runtime event normalization", () => {
 
     test("a host tool's _meta recommendation is the default on model and Codemode calls", async () => {
       const mcp = startTestMcpServer({
-        toolMeta: { fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" } },
+        toolMeta: {
+          fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
+        },
       });
       const serverId = "cloudgeni";
       const settings = testSettings({
         sandboxBackend: "none",
-        mcpServers: [{ id: serverId, name: "CloudGeni", url: mcp.url, cacheToolsList: false }],
+        mcpServers: [
+          {
+            id: serverId,
+            name: "CloudGeni",
+            url: mcp.url,
+            cacheToolsList: false,
+          },
+        ],
       });
-      const seen: Array<{ toolName: string; defaultDecision?: string; approvalMode?: string }> = [];
+      const seen: Array<{
+        toolName: string;
+        defaultDecision?: string;
+        approvalMode?: string;
+      }> = [];
       const hooks: ConnectorActionPolicyHooks = {
         // No saved rule: the recommendation decides.
         prepare: async (call) => {
@@ -3694,19 +4136,28 @@ describe("runtime event normalization", () => {
         },
         begin: async (call) =>
           call.defaultDecision === "ask"
-            ? { allowed: false, managed: true, requestId: "request-ask", reason: "approval" }
+            ? {
+                allowed: false,
+                managed: true,
+                requestId: "request-ask",
+                reason: "approval",
+              }
             : { allowed: true, managed: true, requestId: "request-allow" },
         complete: async () => undefined,
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: serverId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          connectorActionPolicy: hooks,
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -3715,9 +4166,11 @@ describe("runtime event normalization", () => {
         const tools = await agent.getMcpTools(new RunContext());
         const byName = (name: string) => {
           const tool = tools.find(
-            (candidate) => candidate.type === "function" && candidate.name === name,
+            (candidate) =>
+              candidate.type === "function" && candidate.name === name,
           );
-          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          if (!tool || tool.type !== "function")
+            throw new Error(`${name} missing`);
           return tool;
         };
         expect(
@@ -3735,8 +4188,16 @@ describe("runtime event normalization", () => {
           ),
         ).toBe(false);
         expect(seen).toEqual([
-          { toolName: "fetch_document", defaultDecision: "ask", approvalMode: "session_mcp" },
-          { toolName: "search_documents", defaultDecision: "allow", approvalMode: undefined },
+          {
+            toolName: "fetch_document",
+            defaultDecision: "ask",
+            approvalMode: "session_mcp",
+          },
+          {
+            toolName: "search_documents",
+            defaultDecision: "allow",
+            approvalMode: undefined,
+          },
         ]);
 
         // Codemode reaches the same tool through the attempt gateway with the same default.
@@ -3751,7 +4212,10 @@ describe("runtime event normalization", () => {
             caller: { kind: "codemode", subjectId: "worker:test" },
           })
           .catch((error: unknown) => error);
-        expect(seen[0]).toMatchObject({ toolName: "fetch_document", defaultDecision: "ask" });
+        expect(seen[0]).toMatchObject({
+          toolName: "fetch_document",
+          defaultDecision: "ask",
+        });
         expect(result).toBeDefined();
         expect(mcp.calls).toEqual([]);
       } finally {
@@ -3768,7 +4232,10 @@ describe("runtime event normalization", () => {
           connectorDecision: "ask",
           alreadyApproved: true,
           toolResultBytes: MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
-          spillOversizedModelToolResult: async ({ operationId, serializedBytes }) => {
+          spillOversizedModelToolResult: async ({
+            operationId,
+            serializedBytes,
+          }) => {
             spills.push(serializedBytes);
             return spilledModelToolResult({
               type: "tool_result_spilled",
@@ -3793,16 +4260,18 @@ describe("runtime event normalization", () => {
             // The model gets the bounded spill receipt instead of a size failure.
             expect(spills).toHaveLength(1);
             expect(spills[0]!).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES);
-            expect(result.structuredContent).toMatchObject({ type: "tool_result_spilled" });
+            expect(result.structuredContent).toMatchObject({
+              type: "tool_result_spilled",
+            });
           } else {
             expect(spills).toHaveLength(0);
             expect((result.content[0] as { text: string }).text).toHaveLength(
               MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
             );
           }
-          expect(fixture.calls.filter((entry) => entry.startsWith("complete:"))).toEqual([
-            "complete:request-1:completed",
-          ]);
+          expect(
+            fixture.calls.filter((entry) => entry.startsWith("complete:")),
+          ).toEqual(["complete:request-1:completed"]);
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
@@ -3820,19 +4289,27 @@ describe("runtime event normalization", () => {
         });
         try {
           if (transport === "model") {
-            const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
-              (candidate) => candidate.name === "docs__search_documents",
-            );
-            if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+            const tool = (
+              await fixture.agent.getMcpTools(new RunContext())
+            ).find((candidate) => candidate.name === "docs__search_documents");
+            if (!tool || tool.type !== "function")
+              throw new Error("connector tool missing");
             const result = await tool.invoke(
               new RunContext(),
               JSON.stringify({ query: "needle" }),
               { toolCall: { callId: "call-provider-error" } } as any,
             );
-            expect(result).toContainEqual({ type: "text", text: "The tool reported an error." });
+            expect(result).toContainEqual({
+              type: "text",
+              text: "The tool reported an error.",
+            });
             // The model receives the provider's exact error, never a replacement.
-            expect(JSON.stringify(result)).toContain("found document for needle");
-            expect(JSON.stringify(result)).not.toContain("outcome is uncertain");
+            expect(JSON.stringify(result)).toContain(
+              "found document for needle",
+            );
+            expect(JSON.stringify(result)).not.toContain(
+              "outcome is uncertain",
+            );
             expect(JSON.stringify(result)).not.toContain("Please try again");
           } else {
             const environment = fixture.prepared.attemptToolEnvironment!;
@@ -3851,9 +4328,9 @@ describe("runtime event normalization", () => {
           expect(fixture.mcp.calls).toEqual([
             { tool: "search_documents", args: { query: "needle" } },
           ]);
-          expect(fixture.calls.filter((call) => call.startsWith("complete:"))).toEqual([
-            "complete:request-1:uncertain",
-          ]);
+          expect(
+            fixture.calls.filter((call) => call.startsWith("complete:")),
+          ).toEqual(["complete:request-1:uncertain"]);
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
@@ -3869,15 +4346,20 @@ describe("runtime event normalization", () => {
             allowed: false,
             managed: true,
             requestId: `request-${connectorDecision}`,
-            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+            reason:
+              connectorDecision === "ask" ? "approval_required" : "blocked",
           }),
         });
         try {
-          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+          const [tool] = (
+            await fixture.agent.getMcpTools(new RunContext())
+          ).filter(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "docs__search_documents",
+              candidate.type === "function" &&
+              candidate.name === "docs__search_documents",
           );
-          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("connector tool missing");
           expect(
             await tool.needsApproval(
               new RunContext(),
@@ -3886,9 +4368,13 @@ describe("runtime event normalization", () => {
             ),
           ).toBe(connectorDecision === "ask");
           expect(
-            await tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
-              toolCall: { callId: `call-${connectorDecision}` },
-            } as any),
+            await tool.invoke(
+              new RunContext(),
+              JSON.stringify({ query: "top-secret-query" }),
+              {
+                toolCall: { callId: `call-${connectorDecision}` },
+              } as any,
+            ),
           ).toMatchObject({ isError: true });
           expect(fixture.mcp.calls).toHaveLength(0);
         } finally {
@@ -3907,15 +4393,20 @@ describe("runtime event normalization", () => {
             allowed: false,
             managed: true,
             requestId: `request-${connectorDecision}`,
-            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+            reason:
+              connectorDecision === "ask" ? "approval_required" : "blocked",
           }),
         });
         try {
-          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+          const [tool] = (
+            await fixture.agent.getMcpTools(new RunContext())
+          ).filter(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "remote__search_documents",
+              candidate.type === "function" &&
+              candidate.name === "remote__search_documents",
           );
-          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("connector tool missing");
           expect(
             await tool.needsApproval(
               new RunContext(),
@@ -3924,9 +4415,13 @@ describe("runtime event normalization", () => {
             ),
           ).toBe(connectorDecision === "ask");
           expect(
-            await tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
-              toolCall: { callId: `call-${connectorDecision}` },
-            } as any),
+            await tool.invoke(
+              new RunContext(),
+              JSON.stringify({ query: "top-secret-query" }),
+              {
+                toolCall: { callId: `call-${connectorDecision}` },
+              } as any,
+            ),
           ).toMatchObject({ isError: true });
           expect(fixture.mcp.calls).toHaveLength(0);
         } finally {
@@ -4014,13 +4509,23 @@ describe("runtime event normalization", () => {
         ).clone({});
         const [tool] = (await clone.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("connector tool missing");
         const details = { toolCall: { callId: "call-retry" } } as any;
-        await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details);
+        await tool.invoke(
+          new RunContext(),
+          JSON.stringify({ query: "once" }),
+          details,
+        );
         expect(
-          await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: "once" }),
+            details,
+          ),
         ).toMatchObject({ isError: true });
         expect(fixture.mcp.calls).toHaveLength(1);
       } finally {
@@ -4034,11 +4539,15 @@ describe("runtime event normalization", () => {
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
         prepare: async (call) => {
-          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).title)}`);
+          calls.push(
+            `prepare:${call.approvalId}:${String((call.arguments as any).title)}`,
+          );
           return { managed: true, decision: "ask" };
         },
         begin: async (call) => {
-          calls.push(`begin:${call.approvalId}:${String((call.arguments as any).title)}`);
+          calls.push(
+            `begin:${call.approvalId}:${String((call.arguments as any).title)}`,
+          );
           return { allowed: true, managed: true, requestId: "request-drive" };
         },
         complete: async ({ requestId, outcome }) => {
@@ -4092,16 +4601,26 @@ describe("runtime event normalization", () => {
       });
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
-          (candidate) => candidate.type === "function" && candidate.name === "drive_publish",
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "drive_publish",
         );
-        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("attempt connector tool missing");
         expect(
-          await tool.needsApproval(new RunContext(), { title: "Quarterly" }, "call-drive"),
+          await tool.needsApproval(
+            new RunContext(),
+            { title: "Quarterly" },
+            "call-drive",
+          ),
         ).toBe(true);
         expect(
-          await tool.invoke(new RunContext(), JSON.stringify({ title: "Quarterly" }), {
-            toolCall: { callId: "call-drive" },
-          } as any),
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ title: "Quarterly" }),
+            {
+              toolCall: { callId: "call-drive" },
+            } as any,
+          ),
         ).toBeDefined();
         expect(executions).toEqual([{ title: "Quarterly" }]);
         expect(calls).toEqual([
@@ -4116,23 +4635,37 @@ describe("runtime event normalization", () => {
           attemptConnectorActionBindings: bindings,
           approvedToolCallId: "call-drive-resumed",
         });
-        const [resumedTool] = (await resumedAgent.getMcpTools(new RunContext())).filter(
-          (candidate) => candidate.type === "function" && candidate.name === "drive_publish",
+        const [resumedTool] = (
+          await resumedAgent.getMcpTools(new RunContext())
+        ).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "drive_publish",
         );
         if (!resumedTool || resumedTool.type !== "function") {
           throw new Error("resumed attempt connector tool missing");
         }
         expect(
-          await resumedTool.invoke(new RunContext(), JSON.stringify({ title: "Resumed" }), {
-            toolCall: { callId: "call-drive-resumed" },
-          } as any),
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ title: "Resumed" }),
+            {
+              toolCall: { callId: "call-drive-resumed" },
+            } as any,
+          ),
         ).toBeDefined();
         expect(
-          await resumedTool.invoke(new RunContext(), JSON.stringify({ title: "Wrong call" }), {
-            toolCall: { callId: "call-drive-other" },
-          } as any),
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ title: "Wrong call" }),
+            {
+              toolCall: { callId: "call-drive-other" },
+            } as any,
+          ),
         ).toMatchObject({ isError: true });
-        expect(executions).toEqual([{ title: "Quarterly" }, { title: "Resumed" }]);
+        expect(executions).toEqual([
+          { title: "Quarterly" },
+          { title: "Resumed" },
+        ]);
         expect(calls).toEqual([
           "prepare:call-drive:Quarterly",
           "begin:call-drive:Quarterly",
@@ -4174,7 +4707,9 @@ describe("runtime event normalization", () => {
                 ? new ConnectorActionBindingRejectedError(
                     "repository is outside accepted resources",
                   )
-                : new Error("Invalid input: expected object, received undefined");
+                : new Error(
+                    "Invalid input: expected object, received undefined",
+                  );
             },
           },
         ];
@@ -4214,9 +4749,11 @@ describe("runtime event normalization", () => {
         try {
           const [tool] = (await agent.getMcpTools(new RunContext())).filter(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "github_app__repository_get",
+              candidate.type === "function" &&
+              candidate.name === "github_app__repository_get",
           );
-          if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("attempt connector tool missing");
           expect(
             await tool.needsApproval(
               new RunContext(),
@@ -4260,7 +4797,9 @@ describe("runtime event normalization", () => {
         {
           modelName: "github_app__repository_get",
           resultOutcome: (output: unknown) => {
-            const row = output as { _meta?: { testConnectorOutcome?: unknown } };
+            const row = output as {
+              _meta?: { testConnectorOutcome?: unknown };
+            };
             return row._meta?.testConnectorOutcome === "not_executed"
               ? ("not_executed" as const)
               : null;
@@ -4323,9 +4862,11 @@ describe("runtime event normalization", () => {
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "github_app__repository_get",
+            candidate.type === "function" &&
+            candidate.name === "github_app__repository_get",
         );
-        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("attempt connector tool missing");
         expect(
           await tool.needsApproval(
             new RunContext(),
@@ -4420,7 +4961,9 @@ describe("runtime event normalization", () => {
               modelName: "connector_execute",
               inputSchema: {
                 type: "object",
-                properties: { outcome: { type: "string", enum: ["completed", "uncertain"] } },
+                properties: {
+                  outcome: { type: "string", enum: ["completed", "uncertain"] },
+                },
                 required: ["outcome"],
                 additionalProperties: false,
               },
@@ -4439,7 +4982,10 @@ describe("runtime event normalization", () => {
             },
           ],
         });
-        const call = (operationId: string, outcome: "completed" | "uncertain") => ({
+        const call = (
+          operationId: string,
+          outcome: "completed" | "uncertain",
+        ) => ({
           operationId,
           catalogDigest: prepared.attemptToolCatalog!.digest,
           identity: { serverId: "connector", toolName: "execute" },
@@ -4470,10 +5016,11 @@ describe("runtime event normalization", () => {
       const waiting = await prepareFixture("ask");
       try {
         const operationId = "66666666-6666-4666-8666-666666666660";
-        const prepared = await waiting.prepared.attemptToolEnvironment!.prepareCall(
-          waiting.call(operationId, "completed"),
-          { transportMeta: { durableApproval: true } },
-        );
+        const prepared =
+          await waiting.prepared.attemptToolEnvironment!.prepareCall(
+            waiting.call(operationId, "completed"),
+            { transportMeta: { durableApproval: true } },
+          );
         expect(prepared.waitingForApproval).toMatchObject({
           requestId: "77777777-7777-4777-8777-777777777777",
         });
@@ -4487,7 +5034,10 @@ describe("runtime event normalization", () => {
       try {
         await expect(
           unavailable.prepared.attemptToolEnvironment!.prepareCall(
-            unavailable.call("66666666-6666-4666-8666-666666666663", "completed"),
+            unavailable.call(
+              "66666666-6666-4666-8666-666666666663",
+              "completed",
+            ),
           ),
         ).rejects.toThrow("policy is unavailable");
         expect(unavailable.events).toEqual([]);
@@ -4497,10 +5047,13 @@ describe("runtime event normalization", () => {
 
       const allowed = await prepareFixture("allow");
       try {
-        const completed = await allowed.prepared.attemptToolEnvironment!.prepareCall(
-          allowed.call("66666666-6666-4666-8666-666666666664", "completed"),
-        );
-        expect(allowed.events).toEqual(["preview:66666666-6666-4666-8666-666666666664"]);
+        const completed =
+          await allowed.prepared.attemptToolEnvironment!.prepareCall(
+            allowed.call("66666666-6666-4666-8666-666666666664", "completed"),
+          );
+        expect(allowed.events).toEqual([
+          "preview:66666666-6666-4666-8666-666666666664",
+        ]);
         await completed.execute();
         expect(allowed.events).toEqual([
           "preview:66666666-6666-4666-8666-666666666664",
@@ -4509,10 +5062,13 @@ describe("runtime event normalization", () => {
           "complete:request:66666666-6666-4666-8666-666666666664:completed",
         ]);
 
-        const uncertain = await allowed.prepared.attemptToolEnvironment!.prepareCall(
-          allowed.call("66666666-6666-4666-8666-666666666665", "uncertain"),
+        const uncertain =
+          await allowed.prepared.attemptToolEnvironment!.prepareCall(
+            allowed.call("66666666-6666-4666-8666-666666666665", "uncertain"),
+          );
+        await expect(uncertain.execute()).rejects.toThrow(
+          "provider request may have started",
         );
-        await expect(uncertain.execute()).rejects.toThrow("provider request may have started");
         expect(allowed.events.slice(-4)).toEqual([
           "preview:66666666-6666-4666-8666-666666666665",
           "begin:66666666-6666-4666-8666-666666666665",
@@ -4566,15 +5122,19 @@ describe("runtime event normalization", () => {
           });
         },
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: "docs" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          connectorActionPolicy: hooks,
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -4583,18 +5143,24 @@ describe("runtime event normalization", () => {
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("legacy MCP tool missing");
         const input = { query: "create-once" };
         const callId = "legacy-approved-call";
-        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(true);
+        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(
+          true,
+        );
         const details = { toolCall: { callId } } as any;
 
         await expect(
           tool.invoke(new RunContext(), JSON.stringify(input), details),
         ).resolves.toBeDefined();
-        expect(await tool.invoke(new RunContext(), JSON.stringify(input), details)).toMatchObject({
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify(input), details),
+        ).toMatchObject({
           isError: true,
         });
 
@@ -4606,7 +5172,9 @@ describe("runtime event normalization", () => {
           "prepare",
           "begin",
         ]);
-        for (const { call } of policyCalls.filter(({ phase }) => !phase.startsWith("complete:"))) {
+        for (const { call } of policyCalls.filter(
+          ({ phase }) => !phase.startsWith("complete:"),
+        )) {
           expect(call).toMatchObject({
             approvalId: callId,
             approvalMode: "session_mcp",
@@ -4650,15 +5218,19 @@ describe("runtime event normalization", () => {
           phases.push(`complete:${outcome}`);
         },
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: "docs" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          connectorActionPolicy: hooks,
+        },
+      );
       const callId = "fresh-agent-approved-call";
       const input = { query: "resume-once" };
 
@@ -4667,21 +5239,30 @@ describe("runtime event normalization", () => {
           mcpServers: prepared.mcpServers,
           connectorActionPolicy: hooks,
         });
-        const [firstTool] = (await firstAgent.getMcpTools(new RunContext())).filter(
+        const [firstTool] = (
+          await firstAgent.getMcpTools(new RunContext())
+        ).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!firstTool || firstTool.type !== "function") throw new Error("legacy MCP tool missing");
-        expect(await firstTool.needsApproval(new RunContext(), input, callId)).toBe(true);
+        if (!firstTool || firstTool.type !== "function")
+          throw new Error("legacy MCP tool missing");
+        expect(
+          await firstTool.needsApproval(new RunContext(), input, callId),
+        ).toBe(true);
 
         const resumedAgent = buildOpenGeniAgent(settings, [], {
           mcpServers: prepared.mcpServers,
           connectorActionPolicy: hooks,
           approvedToolCallId: callId,
         });
-        const [resumedTool] = (await resumedAgent.getMcpTools(new RunContext())).filter(
+        const [resumedTool] = (
+          await resumedAgent.getMcpTools(new RunContext())
+        ).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
         if (!resumedTool || resumedTool.type !== "function") {
           throw new Error("resumed legacy MCP tool missing");
@@ -4714,7 +5295,9 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const prepared = await prepareAgentTools(settings, [
+        { kind: "mcp", id: "docs" },
+      ]);
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
       });
@@ -4722,13 +5305,19 @@ describe("runtime event normalization", () => {
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("legacy MCP tool missing");
         const input = { query: "must-not-run" };
-        expect(await tool.needsApproval(new RunContext(), input, "legacy-unfenced-call")).toBe(
-          true,
-        );
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            input,
+            "legacy-unfenced-call",
+          ),
+        ).toBe(true);
         await expect(
           tool.invoke(new RunContext(), JSON.stringify(input), {
             toolCall: { callId: "legacy-unfenced-call" },
@@ -4769,7 +5358,9 @@ describe("runtime event normalization", () => {
           policyPhases.push("complete");
         },
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const prepared = await prepareAgentTools(settings, [
+        { kind: "mcp", id: "docs" },
+      ]);
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -4778,16 +5369,30 @@ describe("runtime event normalization", () => {
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("legacy MCP tool missing");
         const input = { query: "must-use-gateway" };
-        expect(await tool.needsApproval(new RunContext(), input, "legacy-no-gateway")).toBe(true);
-        const result = await tool.invoke(new RunContext(), JSON.stringify(input), {
-          toolCall: { callId: "legacy-no-gateway" },
-        } as any);
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            input,
+            "legacy-no-gateway",
+          ),
+        ).toBe(true);
+        const result = await tool.invoke(
+          new RunContext(),
+          JSON.stringify(input),
+          {
+            toolCall: { callId: "legacy-no-gateway" },
+          } as any,
+        );
         expect(result).toMatchObject({ isError: true });
-        expect(JSON.stringify(result)).toContain("exact attempt gateway is unavailable");
+        expect(JSON.stringify(result)).toContain(
+          "exact attempt gateway is unavailable",
+        );
         expect(policyPhases).toEqual(["prepare"]);
         expect(mcp.calls).toEqual([]);
       } finally {
@@ -4801,7 +5406,10 @@ describe("runtime event normalization", () => {
       const deferredConnect = new Promise<void>((resolve) => {
         releaseDeferred = resolve;
       });
-      const providerCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+      const providerCalls: Array<{
+        tool: string;
+        args: Record<string, unknown>;
+      }> = [];
       const deferred: MCPServer = {
         name: "deferred-docs",
         cacheToolsList: false,
@@ -4853,23 +5461,31 @@ describe("runtime event normalization", () => {
         },
         begin: async () => {
           policyPhases.push("begin");
-          return { allowed: true, managed: true, requestId: "deferred-request" };
+          return {
+            allowed: true,
+            managed: true,
+            requestId: "deferred-request",
+          };
         },
         complete: async ({ outcome }) => {
           policyPhases.push(`complete:${outcome}`);
         },
       };
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        deferNonEagerUntilToolDemand: true,
-        localMcpServers: [{ id: "docs", server: deferred }],
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: "docs" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          deferNonEagerUntilToolDemand: true,
+          localMcpServers: [{ id: "docs", server: deferred }],
+          connectorActionPolicy: hooks,
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -4880,20 +5496,30 @@ describe("runtime event normalization", () => {
         await prepared.ready;
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("deferred MCP tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("deferred MCP tool missing");
         const input = { query: "network policy" };
         const callId = "deferred-approved-call";
-        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(true);
+        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(
+          true,
+        );
 
         await expect(
           tool.invoke(new RunContext(), JSON.stringify(input), {
             toolCall: { callId },
           } as any),
         ).resolves.toBeDefined();
-        expect(providerCalls).toEqual([{ tool: "search_documents", args: input }]);
-        expect(policyPhases).toEqual(["prepare", "begin", "complete:completed"]);
+        expect(providerCalls).toEqual([
+          { tool: "search_documents", args: input },
+        ]);
+        expect(policyPhases).toEqual([
+          "prepare",
+          "begin",
+          "complete:completed",
+        ]);
       } finally {
         releaseDeferred();
         await prepared.close();
@@ -4965,24 +5591,28 @@ describe("runtime event normalization", () => {
             completions.push(completion);
           },
         };
-        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-          accountId: "11111111-1111-4111-8111-111111111111",
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          sessionId: "33333333-3333-4333-8333-333333333333",
-          turnId: "44444444-4444-4444-8444-444444444444",
-          attemptId: "55555555-5555-4555-8555-555555555555",
-          executionGeneration: 1,
-          credentialSubjectId: initiatingSubjectId,
-          resolveCredential: async (request) => {
-            resolverCalls.push(request);
-            return {
-              status: "ok",
-              connectionId,
-              headers: { authorization: "Bearer broker-token" },
-            };
+        const prepared = await prepareAgentTools(
+          settings,
+          [{ kind: "mcp", id: "docs" }],
+          {
+            accountId: "11111111-1111-4111-8111-111111111111",
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            sessionId: "33333333-3333-4333-8333-333333333333",
+            turnId: "44444444-4444-4444-8444-444444444444",
+            attemptId: "55555555-5555-4555-8555-555555555555",
+            executionGeneration: 1,
+            credentialSubjectId: initiatingSubjectId,
+            resolveCredential: async (request) => {
+              resolverCalls.push(request);
+              return {
+                status: "ok",
+                connectionId,
+                headers: { authorization: "Bearer broker-token" },
+              };
+            },
+            connectorActionPolicy: hooks,
           },
-          connectorActionPolicy: hooks,
-        });
+        );
         const agent = buildOpenGeniAgent(settings, [], {
           mcpServers: prepared.mcpServers,
           resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
@@ -4990,7 +5620,9 @@ describe("runtime event normalization", () => {
         });
 
         try {
-          expect(prepared.resolvedMcpConnectionIds.get("docs")).toBe(connectionId);
+          expect(prepared.resolvedMcpConnectionIds.get("docs")).toBe(
+            connectionId,
+          );
           expect(resolverCalls.length).toBeGreaterThan(0);
           expect(
             resolverCalls.every(
@@ -5003,9 +5635,11 @@ describe("runtime event normalization", () => {
 
           const [tool] = (await agent.getMcpTools(new RunContext())).filter(
             (candidate) =>
-              candidate.type === "function" && candidate.name === "docs__search_documents",
+              candidate.type === "function" &&
+              candidate.name === "docs__search_documents",
           );
-          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          if (!tool || tool.type !== "function")
+            throw new Error("connector tool missing");
           expect(
             await tool.needsApproval(
               new RunContext(),
@@ -5071,20 +5705,24 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        credentialSubjectId: "subject-a",
-        resolveCredential: async () => ({
-          status: "ok",
-          connectionId: "11111111-1111-4111-8111-111111111111",
-          headers: { authorization: "Bearer connector-token" },
-        }),
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: "docs" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          credentialSubjectId: "subject-a",
+          resolveCredential: async () => ({
+            status: "ok",
+            connectionId: "11111111-1111-4111-8111-111111111111",
+            headers: { authorization: "Bearer connector-token" },
+          }),
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
@@ -5092,16 +5730,26 @@ describe("runtime event normalization", () => {
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "docs__search_documents",
+            candidate.type === "function" &&
+            candidate.name === "docs__search_documents",
         );
-        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        if (!tool || tool.type !== "function")
+          throw new Error("connector tool missing");
         expect(
-          await tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
+          await tool.needsApproval(
+            new RunContext(),
+            { query: "blocked" },
+            "call-missing",
+          ),
         ).toBe(false);
         expect(
-          await tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
-            toolCall: { callId: "call-missing" },
-          } as any),
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ query: "blocked" }),
+            {
+              toolCall: { callId: "call-missing" },
+            } as any,
+          ),
         ).toMatchObject({ isError: true });
         expect(mcp.calls).toHaveLength(0);
       } finally {
@@ -5114,7 +5762,9 @@ describe("runtime event normalization", () => {
   test("uses normal Azure CLI service principal login hook", () => {
     const command = azureCliLoginCommand();
     expect(command.startsWith("set +x\n")).toBe(true);
-    expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("CLIENT_SECRET="));
+    expect(command.indexOf("set +x")).toBeLessThan(
+      command.indexOf("CLIENT_SECRET="),
+    );
     expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("az login"));
     expect(command).toContain("export HOME=");
     expect(command).toContain('mkdir -p "$HOME/.azure"');
@@ -5229,7 +5879,10 @@ describe("runtime event normalization", () => {
 
   test("provides ReadableStream.from for Modal sandbox compatibility under Bun", async () => {
     ensureReadableStreamFrom();
-    const stream = (ReadableStream as any).from(["a", "b"]) as ReadableStream<string>;
+    const stream = (ReadableStream as any).from([
+      "a",
+      "b",
+    ]) as ReadableStream<string>;
     const reader = stream.getReader();
     expect(await reader.read()).toEqual({ done: false, value: "a" });
     expect(await reader.read()).toEqual({ done: false, value: "b" });
@@ -5307,10 +5960,12 @@ describe("runtime event normalization", () => {
 
     expect(Array.isArray(first.input)).toBe(true);
     expect(Array.isArray(second.input)).toBe(true);
-    expect((second.input as unknown[]).slice(0, (first.input as unknown[]).length)).toEqual(
-      first.input,
+    expect(
+      (second.input as unknown[]).slice(0, (first.input as unknown[]).length),
+    ).toEqual(first.input);
+    expect(JSON.stringify(second.input)).toContain(
+      "Keep this direction across tool calls.",
     );
-    expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
   });
 
   test("delivers platform recovery context as durable turn-scoped system input", async () => {
@@ -5325,10 +5980,14 @@ describe("runtime event normalization", () => {
       {
         type: "message",
         role: "system",
-        content: expect.stringContaining("Continue the same inference after recovery."),
+        content: expect.stringContaining(
+          "Continue the same inference after recovery.",
+        ),
       },
     ]);
-    expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
+    expect(JSON.stringify(prepared.input)).not.toContain(
+      "opengeni_internal_resume",
+    );
   });
 
   test("replayed history items are stripped of the internal resume marker (the prod 400)", async () => {
@@ -5405,10 +6064,12 @@ describe("runtime event normalization", () => {
         ],
       },
     );
-    const replayedResult = (prepared.input as Array<Record<string, unknown>>).find(
-      (item) => item.type === "function_call_result",
+    const replayedResult = (
+      prepared.input as Array<Record<string, unknown>>
+    ).find((item) => item.type === "function_call_result");
+    expect(JSON.stringify(replayedResult)).toBe(
+      JSON.stringify(canonicalResult),
     );
-    expect(JSON.stringify(replayedResult)).toBe(JSON.stringify(canonicalResult));
     expect(JSON.stringify(boundModelToolOutputItem(replayedResult!, 100))).toBe(
       JSON.stringify(canonicalResult),
     );
@@ -5419,23 +6080,29 @@ describe("runtime event normalization", () => {
     // if the approval path ever sees the cleared sentinel it must fail with a
     // clear message, never the cryptic SDK "missing schema version" throw.
     await expect(
-      prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
-        kind: "approval",
-        serializedRunState: CLEARED_RUN_STATE_BLOB,
-        approvalId: "appr_1",
-        decision: "approve",
-      }),
+      prepareRunInput(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+        {
+          kind: "approval",
+          serializedRunState: CLEARED_RUN_STATE_BLOB,
+          approvalId: "appr_1",
+          decision: "approve",
+        },
+      ),
     ).rejects.toThrow(/context was cleared/i);
   });
 
   test("refuses an approval resume against the open-suffix sentinel", async () => {
     await expect(
-      prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
-        kind: "approval",
-        serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
-        approvalId: "appr_1",
-        decision: "approve",
-      }),
+      prepareRunInput(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+        {
+          kind: "approval",
+          serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
+          approvalId: "appr_1",
+          decision: "approve",
+        },
+      ),
     ).rejects.toThrow(/open suffix is the resume authority/i);
   });
 
@@ -5476,9 +6143,14 @@ describe("runtime event normalization", () => {
     const input = prepared.input as Array<Record<string, unknown>>;
     expect(Array.isArray(input)).toBe(true);
     // The orphan is gone; the valid pair and the new user turn remain in order.
-    expect(input.filter((item) => item.type === "function_call_result")).toEqual([validResult]);
     expect(
-      input.some((item) => item.type === "function_call_result" && item.callId === "call_orphan"),
+      input.filter((item) => item.type === "function_call_result"),
+    ).toEqual([validResult]);
+    expect(
+      input.some(
+        (item) =>
+          item.type === "function_call_result" && item.callId === "call_orphan",
+      ),
     ).toBe(false);
     expect(input[input.length - 1]).toEqual({
       type: "message",
@@ -5514,46 +6186,73 @@ describe("runtime event normalization", () => {
   });
 
   test("builds agents without MCP servers by default", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
     expect(agent.mcpServers).toEqual([]);
   });
 
   test("does not override the sandbox provider's default execution user", () => {
     // The sandbox provider is responsible for choosing a user that can write to
     // its workspace. Supplying a synthetic runAs user can break normal writes.
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "local" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
     expect(
-      (buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs,
+      sandboxRunAs(testSettings({ sandboxBackend: "docker" })),
     ).toBeUndefined();
     expect(
-      (buildOpenGeniAgent(testSettings({ sandboxBackend: "local" }), []) as any).runAs,
+      sandboxRunAs(testSettings({ sandboxBackend: "local" })),
     ).toBeUndefined();
     expect(
-      (buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any).runAs,
+      sandboxRunAs(testSettings({ sandboxBackend: "modal" })),
     ).toBeUndefined();
     expect(
-      (buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs,
+      sandboxRunAs(testSettings({ sandboxBackend: "none" })),
+    ).toBeUndefined();
+    expect(
+      (
+        buildOpenGeniAgent(
+          testSettings({ sandboxBackend: "docker" }),
+          [],
+        ) as any
+      ).runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "local" }), []) as any)
+        .runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any)
+        .runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any)
+        .runAs,
     ).toBeUndefined();
   });
 
   test("includes read-only attachment guidance in agent instructions", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
     expect(agent.instructions).toContain(
       "Attached files are mounted read-only; copy them before modifying.",
     );
   });
 
   test("surfaces attached workspace environment metadata in agent instructions", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceEnvironment: {
-        name: "azure-prod",
-        description: "Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
-        variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        workspaceEnvironment: {
+          name: "azure-prod",
+          description:
+            "Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
+          variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
+        },
       },
-    });
+    );
     expect(agent.instructions).toContain(
       'A workspace environment named "azure-prod" is attached to this session',
     );
@@ -5566,21 +6265,34 @@ describe("runtime event normalization", () => {
   });
 
   test("omits workspace environment instructions when no environment is attached or metadata is empty", () => {
-    const detached = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(detached.instructions).not.toContain("A workspace environment named");
+    const detached = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    expect(detached.instructions).not.toContain(
+      "A workspace environment named",
+    );
 
-    const minimal = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceEnvironment: {
-        name: "bare",
-        description: "  ",
-        variableNames: [],
+    const minimal = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        workspaceEnvironment: {
+          name: "bare",
+          description: "  ",
+          variableNames: [],
+        },
       },
-    });
+    );
     expect(minimal.instructions).toContain(
       'A workspace environment named "bare" is attached to this session',
     );
-    expect(minimal.instructions).not.toContain("Exported environment variables:");
-    expect(minimal.instructions).not.toContain("Environment notes from the operator:");
+    expect(minimal.instructions).not.toContain(
+      "Exported environment variables:",
+    );
+    expect(minimal.instructions).not.toContain(
+      "Environment notes from the operator:",
+    );
   });
 
   // THE GATE. The exact default preamble buildOpenGeniAgent produces with no
@@ -5622,7 +6334,8 @@ describe("runtime event normalization", () => {
     '- {"id":"native-tool:visualize","name":"visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
-    if (typeof instructions !== "string") throw new Error("Expected static instructions");
+    if (typeof instructions !== "string")
+      throw new Error("Expected static instructions");
     // Pin the new default catalog independently while retaining the exact
     // persona, CORE, memory, and session ordering assertions below.
     const catalog = ` ${defaultSkillIndex}`;
@@ -5641,8 +6354,13 @@ describe("runtime event normalization", () => {
       HISTORICAL_DEFAULT_INSTRUCTIONS,
     );
     // End-to-end through the agent builder with the default settings template.
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(staticInstructions(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    expect(staticInstructions(agent.instructions)).toBe(
+      EXPECTED_DEFAULT_INSTRUCTIONS,
+    );
   });
 
   test("default template with an attached environment appends the env block exactly as before", () => {
@@ -5657,20 +6375,36 @@ describe("runtime event normalization", () => {
       "Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.",
       "Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
     ].join(" ");
-    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, env)).toBe(expected);
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceEnvironment: env,
-    });
-    expect(staticInstructions(agent.instructions)).toBe(withOperationalInstructions(expected));
+    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, env)).toBe(
+      expected,
+    );
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        workspaceEnvironment: env,
+      },
+    );
+    expect(staticInstructions(agent.instructions)).toBe(
+      withOperationalInstructions(expected),
+    );
   });
 
   test("a white-label persona override is substituted at {{core}} but keeps the non-bypassable CORE", () => {
     const template = `You are ACME's deployment co-pilot. ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER} Stay on brand.`;
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      instructionsTemplate: template,
-    });
-    expect(staticInstructions(agent.instructions)).toContain("You are ACME's deployment co-pilot.");
-    expect(staticInstructions(agent.instructions)).not.toContain("general assistant");
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        instructionsTemplate: template,
+      },
+    );
+    expect(staticInstructions(agent.instructions)).toContain(
+      "You are ACME's deployment co-pilot.",
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      "general assistant",
+    );
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
     expect(staticInstructions(agent.instructions)).toContain(
       "you call opengeni__goal_complete with concrete evidence",
@@ -5684,13 +6418,21 @@ describe("runtime event normalization", () => {
 
   test("a persona template without the marker still gets the CORE appended (non-bypassable fail-safe)", () => {
     const template = "You are ACME's deployment co-pilot.";
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      instructionsTemplate: template,
-    });
-    expect(staticInstructions(agent.instructions)).toBe(
-      withOperationalInstructions(`${template} ${coreInstructions().join(" ")}`),
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        instructionsTemplate: template,
+      },
     );
-    expect(staticInstructions(agent.instructions)).toContain("opengeni__goal_complete");
+    expect(staticInstructions(agent.instructions)).toBe(
+      withOperationalInstructions(
+        `${template} ${coreInstructions().join(" ")}`,
+      ),
+    );
+    expect(staticInstructions(agent.instructions)).toContain(
+      "opengeni__goal_complete",
+    );
   });
 
   test("the per-call override beats the deployment-default template", () => {
@@ -5704,23 +6446,35 @@ describe("runtime event normalization", () => {
         OPENGENI_OPERATIONAL_INSTRUCTIONS,
       ),
     ).toBe(true);
-    expect(staticInstructions(withoutOverride.instructions)).toContain("DEPLOY DEFAULT ");
+    expect(staticInstructions(withoutOverride.instructions)).toContain(
+      "DEPLOY DEFAULT ",
+    );
     const withOverride = buildOpenGeniAgent(settings, [], {
       instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
     });
     expect(
-      staticInstructions(withOverride.instructions).startsWith(OPENGENI_OPERATIONAL_INSTRUCTIONS),
+      staticInstructions(withOverride.instructions).startsWith(
+        OPENGENI_OPERATIONAL_INSTRUCTIONS,
+      ),
     ).toBe(true);
-    expect(staticInstructions(withOverride.instructions)).toContain("WORKSPACE OVERRIDE ");
-    expect(staticInstructions(withOverride.instructions)).not.toContain("DEPLOY DEFAULT");
+    expect(staticInstructions(withOverride.instructions)).toContain(
+      "WORKSPACE OVERRIDE ",
+    );
+    expect(staticInstructions(withOverride.instructions)).not.toContain(
+      "DEPLOY DEFAULT",
+    );
   });
 
   test("per-session instructions compose AFTER the workspace persona + CORE (session-specific last)", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      instructionsTemplate: template,
-      sessionInstructions: "SESSION RULE: always answer in French.",
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        instructionsTemplate: template,
+        sessionInstructions: "SESSION RULE: always answer in French.",
+      },
+    );
     // Exact ordering: workspace persona + CORE first, session instructions last.
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
@@ -5729,61 +6483,102 @@ describe("runtime event normalization", () => {
     );
     // And it rides the same application-owned instructions string, never a message.
     expect(
-      staticInstructions(agent.instructions).endsWith("SESSION RULE: always answer in French."),
+      staticInstructions(agent.instructions).endsWith(
+        "SESSION RULE: always answer in French.",
+      ),
     ).toBe(true);
   });
 
   test("per-session instructions layer onto the DEFAULT persona too (no workspace override)", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "Be terse.",
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        sessionInstructions: "Be terse.",
+      },
+    );
     expect(staticInstructions(agent.instructions)).toBe(
       `${EXPECTED_DEFAULT_INSTRUCTIONS} Be terse.`,
     );
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
-    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: undefined,
-    });
+    const base = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    const withUndefined = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        sessionInstructions: undefined,
+      },
+    );
     // A blank/whitespace-only value is also a no-op (trimmed to nothing).
-    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "   ",
-    });
+    const withBlank = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        sessionInstructions: "   ",
+      },
+    );
     expect(staticInstructions(withUndefined.instructions)).toBe(
       staticInstructions(base.instructions),
     );
-    expect(staticInstructions(withBlank.instructions)).toBe(staticInstructions(base.instructions));
-    expect(staticInstructions(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(withBlank.instructions)).toBe(
+      staticInstructions(base.instructions),
+    );
+    expect(staticInstructions(base.instructions)).toBe(
+      EXPECTED_DEFAULT_INSTRUCTIONS,
+    );
   });
 
   test("absent workspace memory is byte-identical to today's composition", () => {
     expect(appendWorkspaceMemory("base")).toBe("base");
     expect(appendWorkspaceMemory("base", "   ")).toBe("base");
 
-    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceMemory: undefined,
-    });
-    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceMemory: "   ",
-    });
+    const base = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    const withUndefined = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        workspaceMemory: undefined,
+      },
+    );
+    const withBlank = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        workspaceMemory: "   ",
+      },
+    );
     expect(staticInstructions(withUndefined.instructions)).toBe(
       staticInstructions(base.instructions),
     );
-    expect(staticInstructions(withBlank.instructions)).toBe(staticInstructions(base.instructions));
-    expect(staticInstructions(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(withBlank.instructions)).toBe(
+      staticInstructions(base.instructions),
+    );
+    expect(staticInstructions(base.instructions)).toBe(
+      EXPECTED_DEFAULT_INSTRUCTIONS,
+    );
   });
 
   test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
-    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      instructionsTemplate: template,
-      workspaceMemory,
-      sessionInstructions: "SESSION RULE: always answer in French.",
-    });
+    const workspaceMemory =
+      "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        instructionsTemplate: template,
+        workspaceMemory,
+        sessionInstructions: "SESSION RULE: always answer in French.",
+      },
+    );
 
     expect(agent.instructions).toBe(
       withOperationalInstructions(
@@ -5796,18 +6591,28 @@ describe("runtime event normalization", () => {
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
       ),
     );
-    expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
+    expect(
+      staticInstructions(agent.instructions).indexOf(workspaceMemory),
+    ).toBeLessThan(
       staticInstructions(agent.instructions).indexOf("SESSION RULE"),
     );
   });
 
   test("the missing-title directive is not persisted across model calls", async () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "Session-scoped rule.",
-      missingSessionTitleHint: true,
-    });
-    expect(staticInstructions(agent.instructions)).toContain("Session-scoped rule.");
-    expect(staticInstructions(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        sessionInstructions: "Session-scoped rule.",
+        missingSessionTitleHint: true,
+      },
+    );
+    expect(staticInstructions(agent.instructions)).toContain(
+      "Session-scoped rule.",
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      GENESIS_TITLE_DIRECTIVE,
+    );
     expect(GENESIS_TITLE_DIRECTIVE).toContain("topic label");
     expect(GENESIS_TITLE_DIRECTIVE).toContain("not a quote or prefix");
     expect(GENESIS_TITLE_DIRECTIVE).toContain("credentials");
@@ -5823,8 +6628,12 @@ describe("runtime event normalization", () => {
       agent,
       context: undefined,
     });
-    expect(staticInstructions(first.instructions)?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
-    expect(staticInstructions(followUp.instructions)).toBe(staticInstructions(agent.instructions));
+    expect(
+      staticInstructions(first.instructions)?.endsWith(GENESIS_TITLE_DIRECTIVE),
+    ).toBe(true);
+    expect(staticInstructions(followUp.instructions)).toBe(
+      staticInstructions(agent.instructions),
+    );
   });
 
   test("the auxiliary title request is bounded, tool-less, and normalized", async () => {
@@ -5867,12 +6676,17 @@ describe("runtime event normalization", () => {
     expect(result.title).toBe("Parallel session titles");
     expect(result.usage?.responseId).toBe("resp-title-1");
     expect(requests).toHaveLength(1);
-    expect(requests[0].systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);
+    expect(requests[0].systemInstructions).toBe(
+      SESSION_TITLE_GENERATION_INSTRUCTIONS,
+    );
     expect(requests[0].input).toEqual([
       {
         role: "user",
         content: [
-          { type: "input_text", text: "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS) },
+          {
+            type: "input_text",
+            text: "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS),
+          },
         ],
       },
     ]);
@@ -5883,47 +6697,75 @@ describe("runtime event normalization", () => {
 
   test("persistent display metadata never changes system instructions", () => {
     expect(appendPersistentSessionSettings("base")).toBe("base");
-    expect(appendPersistentSessionSettings("base", { titleIsSet: true })).toBe("base");
+    expect(appendPersistentSessionSettings("base", { titleIsSet: true })).toBe(
+      "base",
+    );
 
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "Session-scoped rule.",
-      persistentSessionSettings: {
-        titleIsSet: true,
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        sessionInstructions: "Session-scoped rule.",
+        persistentSessionSettings: {
+          titleIsSet: true,
+        },
+        missingSessionTitleHint: true,
       },
-      missingSessionTitleHint: true,
-    });
+    );
 
-    expect(staticInstructions(agent.instructions)).toContain("Session-scoped rule.");
-    expect(staticInstructions(agent.instructions)).not.toContain("Persistent session settings");
-    expect(staticInstructions(agent.instructions)).not.toContain("display title");
-    expect(staticInstructions(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain(
+      "Session-scoped rule.",
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      "Persistent session settings",
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      "display title",
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      GENESIS_TITLE_DIRECTIVE,
+    );
   });
 
   test("standing goal renderer stays outside persistent instructions", () => {
     const capturedAt = "2026-08-13T10:00:00.000Z";
-    expect(appendSessionGoal("base", { state: "none", capturedAt })).toBe("base");
-    expect(renderSessionGoalContext({ state: "none", capturedAt })).toBeUndefined();
+    expect(appendSessionGoal("base", { state: "none", capturedAt })).toBe(
+      "base",
+    );
+    expect(
+      renderSessionGoalContext({ state: "none", capturedAt }),
+    ).toBeUndefined();
     const snapshot = {
       state: "active" as const,
       goalId: "11111111-1111-4111-8111-111111111111",
       objectiveRevision: 7,
       text: "Ship the durable goal boundary",
       successCriteria: "Recovery sees revision seven",
-      rootConstraints: ["Do not deploy without approval", "Preserve tenant isolation"],
+      rootConstraints: [
+        "Do not deploy without approval",
+        "Preserve tenant isolation",
+      ],
       mutationPolicy: "review_changes" as const,
       capturedAt,
     };
     const goalContext = renderSessionGoalContext(snapshot)!;
     expect(goalContext).toContain("objective revision 7");
     expect(goalContext).toContain("Ship the durable goal boundary");
-    expect(goalContext).toContain("Semantic changes are proposals until a user applies them");
+    expect(goalContext).toContain(
+      "Semantic changes are proposals until a user applies them",
+    );
     expect(goalContext).not.toContain("opengeni__goal_progress");
     expect(goalContext).toContain("Root constraints (must remain satisfied)");
     expect(goalContext).toContain("Preserve tenant isolation");
     expect(appendSessionGoal("base", snapshot)).toBe(`base ${goalContext}`);
 
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(staticInstructions(agent.instructions)).not.toContain("Ship the durable goal boundary");
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      "Ship the durable goal boundary",
+    );
 
     const completedContext = renderSessionGoalContext({
       state: "completed",
@@ -5937,7 +6779,9 @@ describe("runtime event normalization", () => {
     })!;
     expect(completedContext).toContain("remains as historical context");
     expect(completedContext).toContain("create it with opengeni__goal_set");
-    expect(completedContext).toContain("goal_update cannot revise a completed goal");
+    expect(completedContext).toContain(
+      "goal_update cannot revise a completed goal",
+    );
   });
 
   // ── generic programmatic-tool-calling (codemode) substrate directive ──────
@@ -5949,14 +6793,24 @@ describe("runtime event normalization", () => {
   } as const;
 
   test("codemode guidance separates compact discovery from explicit schema inspection", () => {
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("enumerates every authorized tool");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("without schemas or an output-size cutoff");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "enumerates every authorized tool",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "without schemas or an output-size cutoff",
+    );
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool list");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "ogtool show <tool-path>",
+    );
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --full");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, and call commands");
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same public Codemode operation journal");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "same list, show, and call commands",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "same public Codemode operation journal",
+    );
   });
 
   test("the codemode directive is present exactly when an attempt token was minted", () => {
@@ -5964,25 +6818,42 @@ describe("runtime event normalization", () => {
       codemodeTokenSeed: "ogd_seed",
       codemodeTokenSessionId: "session-instructions",
     });
-    expect(staticInstructions(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain(
+      CODEMODE_PROGRAMMATIC_DIRECTIVE,
+    );
     // No exact-attempt authority means no advertised programmatic surface.
-    const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(staticInstructions(off.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
-    expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    const off = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
+    expect(staticInstructions(off.instructions)).toBe(
+      EXPECTED_DEFAULT_INSTRUCTIONS,
+    );
+    expect(staticInstructions(off.instructions)).not.toContain(
+      CODEMODE_PROGRAMMATIC_DIRECTIVE,
+    );
   });
 
   test("no token minted for the turn omits the directive", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
-    expect(staticInstructions(agent.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
-    expect(staticInstructions(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(agent.instructions)).not.toContain(
+      CODEMODE_PROGRAMMATIC_DIRECTIVE,
+    );
+    expect(staticInstructions(agent.instructions)).toBe(
+      EXPECTED_DEFAULT_INSTRUCTIONS,
+    );
   });
 
   test("a Connected Machine advertises Codemode without installing a token file", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), [], {
-      activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/srv/project",
-      codemodeAvailable: true,
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "modal" }),
+      [],
+      {
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/srv/project",
+        codemodeAvailable: true,
+      },
+    );
     expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(() =>
       buildOpenGeniAgent(testSettings(codemodeOn), [], {
@@ -5998,7 +6869,9 @@ describe("runtime event normalization", () => {
       buildOpenGeniAgent(testSettings(codemodeOn), [], {
         codemodeTokenSeed: "ogd_unscoped",
       }),
-    ).toThrow("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
+    ).toThrow(
+      "codemodeTokenSeed and codemodeTokenSessionId must be supplied together",
+    );
   });
 
   test("the codemode directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
@@ -6017,13 +6890,18 @@ describe("runtime event normalization", () => {
       ),
     );
     expect(
-      staticInstructions(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
-    ).toBeLessThan(staticInstructions(agent.instructions).indexOf("SESSION RULE"));
+      staticInstructions(agent.instructions).indexOf(
+        CODEMODE_PROGRAMMATIC_DIRECTIVE,
+      ),
+    ).toBeLessThan(
+      staticInstructions(agent.instructions).indexOf("SESSION RULE"),
+    );
   });
 
   test("workspace memory composes after the codemode directive and before the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
-    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const workspaceMemory =
+      "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       instructionsTemplate: template,
       workspaceMemory,
@@ -6038,9 +6916,15 @@ describe("runtime event normalization", () => {
       ),
     );
     expect(
-      staticInstructions(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
-    ).toBeLessThan(staticInstructions(agent.instructions).indexOf(workspaceMemory));
-    expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
+      staticInstructions(agent.instructions).indexOf(
+        CODEMODE_PROGRAMMATIC_DIRECTIVE,
+      ),
+    ).toBeLessThan(
+      staticInstructions(agent.instructions).indexOf(workspaceMemory),
+    );
+    expect(
+      staticInstructions(agent.instructions).indexOf(workspaceMemory),
+    ).toBeLessThan(
       staticInstructions(agent.instructions).indexOf("SESSION RULE"),
     );
   });
@@ -6054,9 +6938,9 @@ describe("runtime event normalization", () => {
     });
     expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
-    expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
-      agent.instructions.indexOf("Session-scoped rule."),
-    );
+    expect(
+      agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
+    ).toBeLessThan(agent.instructions.indexOf("Session-scoped rule."));
   });
 
   test("appendCodemodeInstructions joins by space and no-ops when unavailable", () => {
@@ -6079,12 +6963,20 @@ describe("runtime event normalization", () => {
         token: "token-two",
       },
     ];
-    const instructions = appendGitCredentialBindingInstructions("BASE", bindings, "modal");
+    const instructions = appendGitCredentialBindingInstructions(
+      "BASE",
+      bindings,
+      "modal",
+    );
     expect(instructions).toContain("$HOME/.opengeni/git-bindings.json");
     expect(instructions).toContain("OPENGENI_GIT_BINDING");
     expect(instructions).not.toContain("token-one");
-    expect(appendGitCredentialBindingInstructions("BASE", bindings, "selfhosted")).toBe("BASE");
-    expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
+    expect(
+      appendGitCredentialBindingInstructions("BASE", bindings, "selfhosted"),
+    ).toBe("BASE");
+    expect(
+      appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal"),
+    ).toBe("BASE");
   });
 
   test("builds native S3 mount entries for file resources", () => {
@@ -6198,7 +7090,12 @@ describe("runtime event normalization", () => {
         sizeBytes: 12,
       },
     ];
-    const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
+    const manifest = buildManifest(
+      settings,
+      [{ kind: "file", fileId }],
+      undefined,
+      downloads,
+    );
     const entry = manifest.entries[`.opengeni/files/${fileId}`] as any;
     const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], {
       fileResourceDownloads: downloads,
@@ -6206,9 +7103,13 @@ describe("runtime event normalization", () => {
 
     expect(entry.type).toBe("dir");
     expect(entry.children["source.txt"].type).toBe("file");
-    expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
+    expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe(
+      "hello",
+    );
     expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
-    expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
+    expect(
+      (agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type,
+    ).toBe("dir");
   });
 
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
@@ -6247,7 +7148,8 @@ describe("runtime event normalization", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]?.startsWith("set +x\n")).toBe(true);
     expect(commands[0]?.indexOf("set +x")).toBeLessThan(
-      commands[0]?.indexOf("https://storage.example/input.txt?sig=secret") ?? -1,
+      commands[0]?.indexOf("https://storage.example/input.txt?sig=secret") ??
+        -1,
     );
     expect(commands[0]).toContain("set -eu");
     expect(commands[0]).not.toContain("pipefail");
@@ -6256,7 +7158,9 @@ describe("runtime event normalization", () => {
     expect(commands[0]).toContain("Refusing symlinked attachment directory");
     expect(commands[0]).toContain("Refusing non-file attachment target");
     expect(commands[0]).toContain("chmod a-w");
-    expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
+    expect(commands[0]).toContain(
+      "https://storage.example/input.txt?sig=secret",
+    );
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
   });
@@ -6295,17 +7199,22 @@ describe("runtime event normalization", () => {
 
       chmodSync(target, 0o644);
       writeFileSync(target, "wrong");
-      expect((await materializeSandboxFileDownloads(session as any, [download])).failures).toEqual(
-        [],
-      );
+      expect(
+        (await materializeSandboxFileDownloads(session as any, [download]))
+          .failures,
+      ).toEqual([]);
       expect(readFileSync(target, "utf8")).toBe("hello");
 
       chmodSync(target, 0o644);
       writeFileSync(target, "wrong");
       writeFileSync(source, "bad!!");
-      const corrupt = await materializeSandboxFileDownloads(session as any, [download]);
+      const corrupt = await materializeSandboxFileDownloads(session as any, [
+        download,
+      ]);
       expect(corrupt.failures).toHaveLength(1);
-      expect(corrupt.failures[0]?.reason).toContain("failed size or SHA-256 verification");
+      expect(corrupt.failures[0]?.reason).toContain(
+        "failed size or SHA-256 verification",
+      );
       expect(readFileSync(target, "utf8")).toBe("wrong");
       expect(events.join("\n")).not.toContain(pathToFileURL(source).href);
 
@@ -6314,10 +7223,16 @@ describe("runtime event normalization", () => {
       mkdirSync(escaped);
       symlinkSync(escaped, join(workspace, ".opengeni"), "dir");
       writeFileSync(source, "hello");
-      const symlinked = await materializeSandboxFileDownloads(session as any, [download]);
+      const symlinked = await materializeSandboxFileDownloads(session as any, [
+        download,
+      ]);
       expect(symlinked.failures).toHaveLength(1);
-      expect(symlinked.failures[0]?.reason).toContain("Refusing symlinked attachment directory");
-      expect(() => statSync(join(escaped, "files", "file-1", "input.txt"))).toThrow();
+      expect(symlinked.failures[0]?.reason).toContain(
+        "Refusing symlinked attachment directory",
+      );
+      expect(() =>
+        statSync(join(escaped, "files", "file-1", "input.txt")),
+      ).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -6333,7 +7248,8 @@ describe("runtime event normalization", () => {
       exec: async ({ cmd }: { cmd: string }) => {
         inFlight += 1;
         peak = Math.max(peak, inFlight);
-        if (cmd.includes("shared.txt")) sameTargetOrder.push(cmd.includes("?v=1") ? "v1" : "v2");
+        if (cmd.includes("shared.txt"))
+          sameTargetOrder.push(cmd.includes("?v=1") ? "v1" : "v2");
         await new Promise<void>((resolve) => releases.push(resolve));
         inFlight -= 1;
         const failing = cmd.includes("fail-a") || cmd.includes("fail-b");
@@ -6352,11 +7268,19 @@ describe("runtime event normalization", () => {
       download("file-3", "fail-a.txt", "https://storage.example/fail-a"),
       download("file-4", "ok-2.txt", "https://storage.example/ok-2"),
       {
-        ...download("file-5", "shared.txt", "https://storage.example/shared?v=1"),
+        ...download(
+          "file-5",
+          "shared.txt",
+          "https://storage.example/shared?v=1",
+        ),
         mountPath: "files/shared",
       },
       {
-        ...download("file-6", "shared.txt", "https://storage.example/shared?v=2"),
+        ...download(
+          "file-6",
+          "shared.txt",
+          "https://storage.example/shared?v=2",
+        ),
         mountPath: "files/shared",
       },
     ];
@@ -6460,11 +7384,15 @@ describe("runtime event normalization", () => {
     expect(failure.path).toBe("/.opengeni/files/file-1/Invoice.pdf");
     expect(failure.exitCode).toBe(1);
     expect(failure.output).toBe(localized);
-    expect(failure.reason).toContain("working directory is the filesystem root (/)");
+    expect(failure.reason).toContain(
+      "working directory is the filesystem root (/)",
+    );
     expect(failure.reason).toContain("may have failed for that reason");
     expect(failure.reason).toContain(".opengeni/files/file-1/Invoice.pdf");
     expect(failure.reason).toContain("start a new session on this machine");
-    expect(failure.reason).toContain("Underlying error: Sandbox file resource download file-1");
+    expect(failure.reason).toContain(
+      "Underlying error: Sandbox file resource download file-1",
+    );
     expect(failure.reason).toContain("Schreibgeschütztes Dateisystem");
     expect(sandboxFileDownloadFailureNote(result.failures)).toContain(
       "working directory is the filesystem root (/)",
@@ -6485,21 +7413,32 @@ describe("runtime event normalization", () => {
     const refusing = (root: string) =>
       ({
         state: { manifest: new Manifest({ root }) },
-        exec: async () => ({ output: "mkdir: .opengeni: Read-only file system", exitCode: 1 }),
+        exec: async () => ({
+          output: "mkdir: .opengeni: Read-only file system",
+          exitCode: 1,
+        }),
       }) as any;
 
     for (const sandboxBackend of ["modal", "docker", undefined] as const) {
-      const managed = await materializeSandboxFileDownloads(refusing("/"), [download], {
-        ...(sandboxBackend ? { sandboxBackend } : {}),
-      });
+      const managed = await materializeSandboxFileDownloads(
+        refusing("/"),
+        [download],
+        {
+          ...(sandboxBackend ? { sandboxBackend } : {}),
+        },
+      );
       expect(managed.failures).toHaveLength(1);
       expect(managed.failures[0]?.reason).toContain("Read-only file system");
       expect(managed.failures[0]?.reason).not.toContain("filesystem root");
     }
 
-    const nested = await materializeSandboxFileDownloads(refusing("/Users/me"), [download], {
-      sandboxBackend: "selfhosted",
-    });
+    const nested = await materializeSandboxFileDownloads(
+      refusing("/Users/me"),
+      [download],
+      {
+        sandboxBackend: "selfhosted",
+      },
+    );
     expect(nested.failures).toHaveLength(1);
     expect(nested.failures[0]?.reason).toContain("Read-only file system");
     expect(nested.failures[0]?.reason).not.toContain("filesystem root");
@@ -6523,7 +7462,9 @@ describe("runtime event normalization", () => {
         ],
         {
           commandRunner: async () => {
-            throw new TurnSandboxCommandCancelledError(new Error("steered during setup"));
+            throw new TurnSandboxCommandCancelledError(
+              new Error("steered during setup"),
+            );
           },
           onRuntimeEvent: (event) => {
             events.push(event.type);
@@ -6758,15 +7699,18 @@ describe("runtime event normalization", () => {
   test("emits manifests without extra path grants so remote sandbox clients accept them", () => {
     // Modal's sandbox client rejects any manifest carrying extraPathGrants at
     // create/apply time; the bundled-skills source must not reintroduce one.
-    const modalManifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [
-      {
-        kind: "repository",
-        uri: "https://github.com/acme/private.git",
-        ref: "main",
-        githubInstallationId: 123,
-        githubRepositoryId: 456,
-      },
-    ]);
+    const modalManifest = buildManifest(
+      testSettings({ sandboxBackend: "modal" }),
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ],
+    );
     expect(modalManifest.extraPathGrants).toEqual([]);
     expect(buildManifest(testSettings(), []).extraPathGrants).toEqual([]);
   });
@@ -6783,7 +7727,9 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(command).toContain('git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"');
+    expect(command).toContain(
+      'git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"',
+    );
     // The checkout needs every blob of the commit; a blob-less partial clone only
     // adds a slower second fetch round.
     expect(command).not.toContain("--filter=blob:none");
@@ -6792,15 +7738,23 @@ describe("runtime event normalization", () => {
     expect(command).toContain(
       'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
     );
-    expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
+    expect(command).toContain(
+      'git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+    );
     expect(command).toContain(
       'if [ "$repository_empty" -eq 0 ] && ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
     );
-    expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
-    expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
+    expect(command).not.toContain(
+      'origin "$ref" && git -C "$tmp" remote set-head',
+    );
+    expect(command).toContain(
+      'git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+    );
     expect(command).toContain("Repository resource ready at $target");
     expect(command).toContain("ensure_git");
-    expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
+    expect(command).toContain(
+      "apt-get install -y --no-install-recommends ca-certificates git",
+    );
     expect(command).toContain(
       "start_repository_clone '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
@@ -6873,13 +7827,17 @@ describe("runtime event normalization", () => {
     // pointer, default $HOME/.opengeni/askpass), so auth is correct on ANY box image
     // without a baked script. Written via a QUOTED heredoc to a temp, chmod 0755,
     // then renamed into place (same atomicity as the token file).
-    expect(command).toContain('git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"');
+    expect(command).toContain(
+      'git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
+    );
     expect(command).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(command).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(command).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
     // The provisioned askpass' Password branch selects a provider by prompt host
     // and reads the corresponding token FILE.
-    expect(command).toContain("*github.com*|*githubusercontent.com*) printf '%s\\n' github ;;");
+    expect(command).toContain(
+      "*github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
+    );
     expect(command).toContain("*gitlab*) printf '%s\\n' gitlab ;;");
     expect(command).toContain(
       "*dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
@@ -6891,11 +7849,17 @@ describe("runtime event normalization", () => {
 
     // Provider CLI shims are installed early on PATH by the manifest env. They
     // read the CURRENT token file at invocation time and exec the real binary.
-    expect(command).toContain('wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"');
+    expect(command).toContain(
+      'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
+    );
     expect(command).toContain("for opengeni_git_cli_tool in gh glab az; do");
     expect(command).toContain("gh) provider=github; token_env=GH_TOKEN ;;");
-    expect(command).toContain("glab) provider=gitlab; token_env=GITLAB_TOKEN ;;");
-    expect(command).toContain("az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;");
+    expect(command).toContain(
+      "glab) provider=gitlab; token_env=GITLAB_TOKEN ;;",
+    );
+    expect(command).toContain(
+      "az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
+    );
     expect(command).toContain('GH_TOKEN) export GH_TOKEN="$token" ;;');
     expect(command).toContain(
       'glpat-*) unset GITLAB_ACCESS_TOKEN OAUTH_TOKEN GLAB_IS_OAUTH2; export GITLAB_TOKEN="$token" ;;',
@@ -6903,7 +7867,9 @@ describe("runtime event normalization", () => {
     expect(command).toContain(
       '*) unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN; export OAUTH_TOKEN="$token"; export GLAB_IS_OAUTH2=true ;;',
     );
-    expect(command).toContain('AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;');
+    expect(command).toContain(
+      'AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
+    );
 
     // Helper writes MUST come BEFORE the fetch that consumes them (order matters:
     // GIT_ASKPASS execs the provisioned script, which reads the token file, during
@@ -6914,9 +7880,9 @@ describe("runtime event normalization", () => {
     expect(command.indexOf('cat > "$git_askpass.tmp.$$"')).toBeLessThan(
       command.indexOf('git -C "$tmp" fetch'),
     );
-    expect(command.indexOf("cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'")).toBeLessThan(
-      command.indexOf('git -C "$tmp" fetch'),
-    );
+    expect(
+      command.indexOf("cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'"),
+    ).toBeLessThan(command.indexOf('git -C "$tmp" fetch'));
     // The token VALUE is never literally in the command (only the env-var reference);
     // the "x-access-token" USERNAME constant is not a credential.
     expect(command).not.toContain("OPENGENI_GIT_TOKEN_SEED=");
@@ -6939,26 +7905,44 @@ describe("runtime event normalization", () => {
     // Cloud home backend: the clone fires today (modal always clones; any
     // backend clones a GitHub-App-connected repo). These are the unchanged
     // cloud paths.
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo)).toBe(
-      true,
-    );
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), plainRepo)).toBe(
-      true,
-    );
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo)).toBe(
-      true,
-    );
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
-      true,
-    );
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "modal" }),
+        githubRepo,
+      ),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "modal" }),
+        plainRepo,
+      ),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        githubRepo,
+      ),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        plainRepo,
+      ),
+    ).toBe(true);
 
     // Home backend IS selfhosted: gated with no caller change (active backend
     // defaults to the home backend).
     expect(
-      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), githubRepo),
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "selfhosted" }),
+        githubRepo,
+      ),
     ).toBe(false);
     expect(
-      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), plainRepo),
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "selfhosted" }),
+        plainRepo,
+      ),
     ).toBe(false);
 
     // Cloud home backend but ACTIVE sandbox swapped to a connected machine:
@@ -6981,7 +7965,11 @@ describe("runtime event normalization", () => {
 
     // Active backend is another cloud box (a sibling Modal swap): still clones.
     expect(
-      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal"),
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "modal" }),
+        githubRepo,
+        "modal",
+      ),
     ).toBe(true);
 
     // A best-effort repository always goes through the clone hook on a cloud
@@ -6989,7 +7977,10 @@ describe("runtime event normalization", () => {
     // still never cloned onto a connected machine.
     const optionalRepo = { ...plainRepo, optional: true };
     expect(
-      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), optionalRepo),
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        optionalRepo,
+      ),
     ).toBe(true);
     expect(
       repositoryUsesSandboxClone(
@@ -7045,10 +8036,16 @@ describe("runtime event normalization", () => {
         sandboxWorkspaceRoot: "/home/user/project",
       }),
     ).not.toThrow();
-    const machineAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
-      activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/home/user/project",
-    }) as { defaultManifest: { root: string; entries: Record<string, unknown> } };
+    const machineAgent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "modal" }),
+      resources,
+      {
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user/project",
+      },
+    ) as {
+      defaultManifest: { root: string; entries: Record<string, unknown> };
+    };
     expect(machineAgent.defaultManifest.root).toBe("/home/user/project");
     expect(machineAgent.defaultManifest.entries).toEqual({});
     expect(() =>
@@ -7095,10 +8092,13 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls.length).toBeGreaterThan(1);
+    // A fresh box installs and runs the compressed program in one command.
+    expect(calls).toHaveLength(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
-    expect(capturedRepositorySetupCommand(calls)).toContain("-c init.defaultBranch=main init");
+    expect(capturedRepositorySetupCommand(calls)).toContain(
+      "-c init.defaultBranch=main init",
+    );
     expect(capturedRepositorySetupCommand(calls)).not.toContain("secret-token");
     // Exercise the installed SDK path as well as the runtime provider path:
     // both wrappers expand their input before Modal applies its argv limit.
@@ -7117,7 +8117,10 @@ describe("runtime event normalization", () => {
       );
       expect(Buffer.byteLength(wrapped, "utf8") + 10).toBeLessThan(65_536);
     }
-    expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
+    expect(events).toEqual([
+      "sandbox.operation.started",
+      "sandbox.operation.completed",
+    ]);
   });
 
   test("TOKEN-BROKER (B1): the clone hook seeds the git token PER-EXEC (command prefix), never on the exec env/manifest", async () => {
@@ -7152,7 +8155,7 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls.length).toBeGreaterThan(1);
+    expect(calls).toHaveLength(1);
     // The seed is inlined as an ephemeral export PREFIX on the command text — it is
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
@@ -7161,8 +8164,12 @@ describe("runtime event normalization", () => {
     // inline launcher that exports them and then runs the verified program.
     const launcher = capturedRepositorySetupLauncher(calls);
     const program = capturedRepositorySetupCommand(calls);
-    expect(launcher).toContain("export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'");
-    expect(launcher).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
+    expect(launcher).toContain(
+      "export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'",
+    );
+    expect(launcher).toContain(
+      "export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'",
+    );
     expect(launcher.startsWith("set +x\n")).toBe(true);
     expect(launcher.indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
       launcher.indexOf('exec /bin/sh "$opengeni_setup_program"'),
@@ -7215,11 +8222,19 @@ describe("runtime event normalization", () => {
       },
     );
 
-    const cmd = capturedRepositorySetupCommand(calls);
+    // Seeds ride the per-turn launcher; the reusable program stays token-free.
+    const cmd = capturedRepositorySetupLauncher(calls);
+    expect(capturedRepositorySetupCommand(calls)).not.toContain(
+      "glpat_liveToken123",
+    );
     expect(calls[0]?.environment).toBeUndefined();
     expect(cmd.startsWith("set +x\n")).toBe(true);
-    expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
-    expect(cmd).toContain("export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'");
+    expect(cmd).toContain(
+      "export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'",
+    );
+    expect(cmd).toContain(
+      "export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'",
+    );
     expect(cmd).not.toContain("GITLAB_TOKEN='glpat_liveToken123'");
     expect(cmd).not.toContain("AZURE_DEVOPS_EXT_PAT='azdo_liveToken456'");
   });
@@ -7241,7 +8256,13 @@ describe("runtime event normalization", () => {
         }),
         exec: async (args: { cmd: string }) => {
           commands.push(args.cmd);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -7268,7 +8289,8 @@ describe("runtime event normalization", () => {
               repositories: [
                 {
                   repositoryUri: "https://github.com/acme/private.git",
-                  brokerUri: "https://broker.example.test/v1/git/personal/route",
+                  brokerUri:
+                    "https://broker.example.test/v1/git/personal/route",
                 },
               ],
             },
@@ -7278,34 +8300,51 @@ describe("runtime event normalization", () => {
     );
 
     expect(created).toHaveLength(1);
-    expect(created[0]!.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
-    expect(created[0]!.diff).toBe("+oggh1.secret-broker-bearer");
-    expect(commands.every((command) => !command.includes("oggh1.secret-broker-bearer"))).toBe(true);
-    expect(capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })))).toContain(
-      created[0]!.path,
+    expect(created[0]!.path).toStartWith(
+      "/workspace/.opengeni/git-broker-seeds/",
     );
-    expect(deleted).toEqual([created[0]!.path]);
+    expect(created[0]!.diff).toBe("+oggh1.secret-broker-bearer");
+    expect(
+      commands.every(
+        (command) => !command.includes("oggh1.secret-broker-bearer"),
+      ),
+    ).toBe(true);
+    expect(
+      capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd }))),
+    ).toContain(created[0]!.path);
+    // The successful program moved the seed into its token file, so no
+    // separate cleanup round trip is needed.
+    expect(deleted).toEqual([]);
+    // The per-turn program decodes, runs and removes itself in one command.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("/tmp/opengeni/repository-setup-payloads/");
   });
 
-  test("smart-Git broker bearer attempts cleanup when the editor write outcome is unknown", async () => {
+  test("smart-Git broker seed is cleaned up when the clone program fails", async () => {
+    const commands: string[] = [];
     const created: string[] = [];
     const deleted: string[] = [];
-
     await expect(
       runRepositoryCloneHook(
         {
           createEditor: () => ({
             createFile: async (operation: { path: string }) => {
               created.push(operation.path);
-              throw new Error("response lost after remote write");
             },
             updateFile: async () => undefined,
             deleteFile: async (operation: { path: string }) => {
               deleted.push(operation.path);
             },
           }),
-          exec: async () => {
-            throw new Error("clone command must not run after an unconfirmed seed write");
+          exec: async (args: { cmd: string }) => {
+            commands.push(args.cmd);
+            return {
+              output: "fatal",
+              stdout: "",
+              stderr: "fatal",
+              wallTimeSeconds: 0,
+              exitCode: 1,
+            };
           },
         } as any,
         [
@@ -7332,7 +8371,71 @@ describe("runtime event normalization", () => {
                 repositories: [
                   {
                     repositoryUri: "https://github.com/acme/private.git",
-                    brokerUri: "https://broker.example.test/v1/git/personal/route",
+                    brokerUri:
+                      "https://broker.example.test/v1/git/personal/route",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ),
+    ).rejects.toThrow("Repository clone hook failed");
+    expect(created).toHaveLength(1);
+    expect(deleted).toEqual(created);
+    // The command reported its exit, so it already removed its payload in-box.
+    expect(commands).toHaveLength(1);
+  });
+
+  test("smart-Git broker bearer attempts cleanup when the editor write outcome is unknown", async () => {
+    const created: string[] = [];
+    const deleted: string[] = [];
+
+    await expect(
+      runRepositoryCloneHook(
+        {
+          createEditor: () => ({
+            createFile: async (operation: { path: string }) => {
+              created.push(operation.path);
+              throw new Error("response lost after remote write");
+            },
+            updateFile: async () => undefined,
+            deleteFile: async (operation: { path: string }) => {
+              deleted.push(operation.path);
+            },
+          }),
+          exec: async () => {
+            throw new Error(
+              "clone command must not run after an unconfirmed seed write",
+            );
+          },
+        } as any,
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "personal-binding",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        {
+          environment: { HOME: "/workspace" },
+          gitCredentialBindings: [
+            {
+              credentialBindingId: "personal-binding",
+              provider: "github",
+              token: "oggh1.secret-broker-bearer",
+              transport: {
+                kind: "http_broker",
+                repositories: [
+                  {
+                    repositoryUri: "https://github.com/acme/private.git",
+                    brokerUri:
+                      "https://broker.example.test/v1/git/personal/route",
                   },
                 ],
               },
@@ -7360,7 +8463,13 @@ describe("runtime event normalization", () => {
         }),
         exec: async (args: { cmd: string }) => {
           commands.push(args.cmd);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -7383,9 +8492,11 @@ describe("runtime event normalization", () => {
 
     expect(created[0]!.diff).toBe("+oggh1.renewed-secret-bearer");
     expect(commands).toHaveLength(1);
-    expect(commands[0]!.startsWith("set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n")).toBe(
-      true,
-    );
+    expect(
+      commands[0]!.startsWith(
+        "set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n",
+      ),
+    ).toBe(true);
     expect(commands[0]).not.toContain("oggh1.renewed-secret-bearer");
     expect(commands[0]).toContain(created[0]!.path);
   });
@@ -7421,7 +8532,9 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(capturedRepositorySetupCommand(calls)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
+    expect(capturedRepositorySetupCommand(calls)).not.toContain(
+      "export OPENGENI_GIT_TOKEN_SEED=",
+    );
     // The only prefix is the sandbox target that admits the provisioning guard;
     // the exported builder alone refuses to run on a host.
     expect(capturedRepositorySetupCommand(calls)).toBe(
@@ -7437,7 +8550,9 @@ describe("runtime event normalization", () => {
 
   test("CODEMODE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
     const command = codemodeTokenSeedCommand();
-    expect(command).toContain('if [ -n "${OPENGENI_CODEMODE_TOKEN_SEED:-}" ]; then');
+    expect(command).toContain(
+      'if [ -n "${OPENGENI_CODEMODE_TOKEN_SEED:-}" ]; then',
+    );
     expect(command).toContain("umask 077");
     expect(command).toContain(
       'token_file="${OPENGENI_CODEMODE_TOKEN_FILE:-$HOME/.opengeni/codemode-token}"',
@@ -7477,8 +8592,12 @@ describe("runtime event normalization", () => {
     expect(calls[0]?.environment).toBeUndefined();
     const cmd = String(calls[0]?.cmd);
     expect(cmd.startsWith("set +x\n")).toBe(true);
-    expect(cmd).toContain("export OPENGENI_CODEMODE_TOKEN_SEED='ogd_codemode_live'");
-    expect(cmd.indexOf("set +x")).toBeLessThan(cmd.indexOf("export OPENGENI_CODEMODE_TOKEN_SEED="));
+    expect(cmd).toContain(
+      "export OPENGENI_CODEMODE_TOKEN_SEED='ogd_codemode_live'",
+    );
+    expect(cmd.indexOf("set +x")).toBeLessThan(
+      cmd.indexOf("export OPENGENI_CODEMODE_TOKEN_SEED="),
+    );
     expect(cmd.indexOf("export OPENGENI_CODEMODE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_CODEMODE_TOKEN_SEED\""),
     );
@@ -7534,7 +8653,10 @@ describe("runtime event normalization", () => {
       ),
     ).rejects.toThrow("did not finish before the lifecycle command timeout");
 
-    expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    expect(events).toEqual([
+      "sandbox.operation.started",
+      "sandbox.operation.failed",
+    ]);
   });
 
   test("keeps repository subpaths as git repo manifest subpaths", () => {
@@ -7587,7 +8709,9 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual([
+      "repos/github.com/acme/two.git",
+    ]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions without drift reporting", async () => {
@@ -7635,7 +8759,9 @@ describe("runtime event normalization", () => {
     expect(applied).toHaveLength(1);
     expect(Object.keys(applied[0]!.entries)).toEqual([]);
     expect(
-      JSON.parse(JSON.stringify((session.state.manifest as Manifest).environment)),
+      JSON.parse(
+        JSON.stringify((session.state.manifest as Manifest).environment),
+      ),
     ).toMatchObject({
       GH_TOKEN: { value: "new-token" },
     });
@@ -7674,13 +8800,17 @@ describe("runtime event normalization", () => {
     });
     // The agent's manifest now declares the box's OWN env (byte-identical ->
     // the SDK's validateNoEnvironmentDelta sees no delta), entries preserved.
-    expect(JSON.parse(JSON.stringify(agent.defaultManifest.environment))).toMatchObject({
+    expect(
+      JSON.parse(JSON.stringify(agent.defaultManifest.environment)),
+    ).toMatchObject({
       HOME: { value: "/workspace" },
     });
-    expect(JSON.parse(JSON.stringify(agent.defaultManifest.environment))).not.toHaveProperty(
-      "NEW_KEY",
-    );
-    expect(Object.keys(agent.defaultManifest.entries)).toEqual(["repos/acme/one"]);
+    expect(
+      JSON.parse(JSON.stringify(agent.defaultManifest.environment)),
+    ).not.toHaveProperty("NEW_KEY");
+    expect(Object.keys(agent.defaultManifest.entries)).toEqual([
+      "repos/acme/one",
+    ]);
     // W1/RM-3: no drift machinery, so no event.
     expect(events).toEqual([]);
   });
@@ -7696,7 +8826,12 @@ describe("runtime event normalization", () => {
       API_TOKEN: "user-secret",
     });
     const names = Object.keys(JSON.parse(JSON.stringify(manifest.environment)));
-    expect(names.sort()).toEqual(["GIT_AUTHOR_NAME", "HOME", "OPENGENI_CODEMODE_URL", "PATH"]);
+    expect(names.sort()).toEqual([
+      "GIT_AUTHOR_NAME",
+      "HOME",
+      "OPENGENI_CODEMODE_URL",
+      "PATH",
+    ]);
     expect(JSON.stringify(manifest)).not.toContain("user-secret");
   });
 
@@ -7754,18 +8889,24 @@ describe("runtime event normalization", () => {
       {
         state: { manifest: JSON.parse(JSON.stringify(current)) },
         applyManifest: async (manifest: Manifest) => {
-          expect(typeof manifest.mountTargetsForMaterialization).toBe("function");
+          expect(typeof manifest.mountTargetsForMaterialization).toBe(
+            "function",
+          );
           applied.push(manifest);
         },
       } as any,
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual([
+      "repos/github.com/acme/two.git",
+    ]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
-    const manifestRecord = JSON.parse(JSON.stringify(new Manifest({ entries: {} })));
+    const manifestRecord = JSON.parse(
+      JSON.stringify(new Manifest({ entries: {} })),
+    );
     let received: Record<string, unknown> | null = null;
     const restored = await deserializeSandboxSessionStateEnvelope(
       {
@@ -7788,7 +8929,9 @@ describe("runtime event normalization", () => {
       },
     );
     expect(received?.manifest).toEqual(manifestRecord);
-    expect(typeof restored?.manifest.mountTargetsForMaterialization).toBe("function");
+    expect(typeof restored?.manifest.mountTargetsForMaterialization).toBe(
+      "function",
+    );
   });
 
   test("fails when resumed sandbox sessions cannot apply missing manifest entries", async () => {
@@ -7832,14 +8975,20 @@ describe("runtime event normalization", () => {
 
   test("attaches selected MCP servers to built agents", () => {
     const server = fakeMcpServer("docs");
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      mcpServers: [server],
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+      {
+        mcpServers: [server],
+      },
+    );
     expect(agent.mcpServers).toEqual([server]);
   });
 
   test("prefixes MCP tool names deterministically", () => {
-    expect(prefixedMcpToolName("docs", "search_documents")).toBe("docs__search_documents");
+    expect(prefixedMcpToolName("docs", "search_documents")).toBe(
+      "docs__search_documents",
+    );
     expect(prefixedMcpToolName("files", "files_get_download_url")).toBe(
       "files__files_get_download_url",
     );
@@ -7853,10 +9002,14 @@ describe("runtime event normalization", () => {
     expect(name.length).toBeLessThanOrEqual(64);
     expect(name).toMatch(/^[A-Za-z0-9_]+$/);
     expect(name).not.toBe(prefixedMcpToolName(second, "search_documents"));
-    expect(prefixedMcpToolName(first, "a.b")).not.toBe(prefixedMcpToolName(first, "a-b"));
+    expect(prefixedMcpToolName(first, "a.b")).not.toBe(
+      prefixedMcpToolName(first, "a-b"),
+    );
     const long = "search_" + "documents_".repeat(20);
     expect(prefixedMcpToolName(first, long).length).toBeLessThanOrEqual(64);
-    expect(prefixedMcpToolName(first, long)).not.toBe(prefixedMcpToolName(first, long + "other"));
+    expect(prefixedMcpToolName(first, long)).not.toBe(
+      prefixedMcpToolName(first, long + "other"),
+    );
   });
 
   test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {
@@ -7895,7 +9048,9 @@ describe("runtime event normalization", () => {
     const wrapped = new PrefixedMcpServer(inner, "rich");
 
     expect(await wrapped.callTool("rich__inspect", {})).toEqual(fullResult);
-    expect(await wrapped.callToolResult("rich__inspect", {})).toEqual(fullResult);
+    expect(await wrapped.callToolResult("rich__inspect", {})).toEqual(
+      fullResult,
+    );
   });
 
   test("the Agents SDK preserves prefixed MCP model output and retains the audit result as custom data", async () => {
@@ -7973,7 +9128,8 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
@@ -7991,7 +9147,9 @@ describe("runtime event normalization", () => {
     ]);
 
     const [durable] = normalizeSdkEvent(outputEvent);
-    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(
+      fullResult,
+    );
 
     // The model sees the content and structured result; `_meta` and
     // non-standard envelope fields stay in the retained audit result.
@@ -8003,10 +9161,16 @@ describe("runtime event normalization", () => {
   });
 
   test("the Agents SDK sends a structuredContent duplicate text block to the model once while retaining the exact audit result", async () => {
-    const structuredContent = { issues: [{ number: 7, title: 'Fix "quoted" title' }], total: 1 };
+    const structuredContent = {
+      issues: [{ number: 7, title: 'Fix "quoted" title' }],
+      total: 1,
+    };
     const fullResult = {
       content: [
-        { type: "text" as const, text: JSON.stringify(structuredContent, null, 2) },
+        {
+          type: "text" as const,
+          text: JSON.stringify(structuredContent, null, 2),
+        },
         { type: "text" as const, text: "Showing the first page." },
       ],
       structuredContent,
@@ -8022,7 +9186,11 @@ describe("runtime event normalization", () => {
           {
             name: "search",
             description: "Search issues.",
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
           },
         ];
       },
@@ -8036,8 +9204,14 @@ describe("runtime event normalization", () => {
     };
     // A prefixed wrapper around another prefixed wrapper must still recover
     // the exact inner result rather than the outer model projection.
-    const wrapped = new PrefixedMcpServer(new PrefixedMcpServer(inner, "dup"), "outer");
-    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const wrapped = new PrefixedMcpServer(
+      new PrefixedMcpServer(inner, "dup"),
+      "outer",
+    );
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+    });
     const model = new ScriptedModel([
       { output: [scriptedFunctionCall("outer__dup__search", {}, "dup-call")] },
       { outputText: "done" },
@@ -8055,20 +9229,26 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
     });
     const [durable] = normalizeSdkEvent(outputEvent);
-    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(
+      fullResult,
+    );
 
     const toolOutput = ((model.requests[1]?.input ?? []) as any[]).find(
       (item) => item.type === "function_call_result",
     )?.output;
     expect(toolOutput).toEqual([
       { type: "input_text", text: "Showing the first page." },
-      { type: "input_text", text: `Structured result: ${JSON.stringify(structuredContent)}` },
+      {
+        type: "input_text",
+        text: `Structured result: ${JSON.stringify(structuredContent)}`,
+      },
     ]);
   });
 
@@ -8087,7 +9267,9 @@ describe("runtime event normalization", () => {
 
   test("releases only the live MCP audit marker after durable event capture", async () => {
     const fullResult = {
-      content: [{ type: "text" as const, text: "release after durable capture" }],
+      content: [
+        { type: "text" as const, text: "release after durable capture" },
+      ],
       structuredContent: { receiptId: "release-receipt-1" },
       isError: false,
       _meta: { providerTrace: "release-trace-1" },
@@ -8142,24 +9324,32 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     const [durable] = normalizeSdkEvent(outputEvent);
-    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
-    expect(result.state.toString()).toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(
+      fullResult,
+    );
+    expect(result.state.toString()).toContain(
+      OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+    );
 
     expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(true);
     expect(outputEvent.item.customData).toEqual({
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "retain-inner-1" },
     });
-    expect(result.state.toString()).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect(result.state.toString()).not.toContain(
+      OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+    );
     expect(result.state.toString()).toContain("retain-inner-1");
     expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(false);
   });
 
   test("nested prefixed servers preserve one exact result marker and the innermost custom data", async () => {
-    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
-      [];
+    const observations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]
+    > = [];
     const lifecycleObservations: Array<
       Parameters<NonNullable<RuntimeMetricsHooks["onMcpLifecycle"]>>[0]
     > = [];
@@ -8168,7 +9358,9 @@ describe("runtime event normalization", () => {
       onMcpLifecycle: (input) => lifecycleObservations.push(input),
     });
     const fullResult = {
-      content: [{ type: "text" as const, text: "nested model-visible content" }],
+      content: [
+        { type: "text" as const, text: "nested model-visible content" },
+      ],
       structuredContent: { receiptId: "nested-receipt-1" },
       isError: false,
       _meta: { providerTrace: "nested-trace-1" },
@@ -8211,7 +9403,9 @@ describe("runtime event normalization", () => {
     });
     const model = new ScriptedModel([
       {
-        output: [scriptedFunctionCall("outer__inner__inspect", {}, "nested-call")],
+        output: [
+          scriptedFunctionCall("outer__inner__inspect", {}, "nested-call"),
+        ],
       },
       { outputText: "done" },
     ]);
@@ -8232,9 +9426,12 @@ describe("runtime event normalization", () => {
 
       const outputEvent = streamed.find(
         (event) =>
-          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+          event.type === "run_item_stream_event" &&
+          event.item?.type === "tool_call_output_item",
       );
-      expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
+      expect(outputEvent?.item.output).toEqual(
+        mcpResultModelContent(fullResult),
+      );
       expect(outputEvent?.item.customData).toEqual({
         [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
         [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
@@ -8243,7 +9440,11 @@ describe("runtime event normalization", () => {
       await outer.close();
       connected = false;
       expect(
-        lifecycleObservations.map(({ phase, policy, outcome }) => ({ phase, policy, outcome })),
+        lifecycleObservations.map(({ phase, policy, outcome }) => ({
+          phase,
+          policy,
+          outcome,
+        })),
       ).toEqual([
         { phase: "connect", policy: "best_effort", outcome: "completed" },
         { phase: "close", policy: "best_effort", outcome: "completed" },
@@ -8296,7 +9497,13 @@ describe("runtime event normalization", () => {
     });
     const model = new ScriptedModel([
       {
-        output: [scriptedFunctionCall("caller_marker__inspect", {}, "caller-marker-call")],
+        output: [
+          scriptedFunctionCall(
+            "caller_marker__inspect",
+            {},
+            "caller-marker-call",
+          ),
+        ],
       },
       { outputText: "done" },
     ]);
@@ -8313,7 +9520,8 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
@@ -8392,7 +9600,8 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
@@ -8441,7 +9650,13 @@ describe("runtime event normalization", () => {
     });
     const model = new ScriptedModel([
       {
-        output: [scriptedFunctionCall("structured_only__inspect", {}, "structured-call")],
+        output: [
+          scriptedFunctionCall(
+            "structured_only__inspect",
+            {},
+            "structured-call",
+          ),
+        ],
       },
       { outputText: "done" },
     ]);
@@ -8506,7 +9721,13 @@ describe("runtime event normalization", () => {
     });
     const model = new ScriptedModel([
       {
-        output: [scriptedFunctionCall("structured__inspect", {}, "structured-inner-call")],
+        output: [
+          scriptedFunctionCall(
+            "structured__inspect",
+            {},
+            "structured-inner-call",
+          ),
+        ],
       },
       { outputText: "done" },
     ]);
@@ -8522,7 +9743,9 @@ describe("runtime event normalization", () => {
     }
     await result.completed;
 
-    expect(innerToolOutputs).toEqual([JSON.stringify(fullResult.structuredContent)]);
+    expect(innerToolOutputs).toEqual([
+      JSON.stringify(fullResult.structuredContent),
+    ]);
   });
 
   test("a prefixed inner extractor cannot mutate the retained MCP result", async () => {
@@ -8537,7 +9760,8 @@ describe("runtime event normalization", () => {
       cacheToolsList: false,
       customDataExtractor: async (context) => {
         (context.resultMeta!.trace as { id: string }).id = "mutated-trace";
-        (context.structuredContent!.receipt as { id: string }).id = "mutated-structured";
+        (context.structuredContent!.receipt as { id: string }).id =
+          "mutated-structured";
         (context.toolOutput as { text: string }).text = "mutated content";
         return { retained: true };
       },
@@ -8570,7 +9794,9 @@ describe("runtime event normalization", () => {
     });
     const model = new ScriptedModel([
       {
-        output: [scriptedFunctionCall("mutating__inspect", {}, "mutating-call")],
+        output: [
+          scriptedFunctionCall("mutating__inspect", {}, "mutating-call"),
+        ],
       },
       { outputText: "done" },
     ]);
@@ -8587,7 +9813,8 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
@@ -8601,7 +9828,8 @@ describe("runtime event normalization", () => {
     const inner: MCPServer = {
       name: "normalized-inner",
       cacheToolsList: false,
-      customDataExtractor: async () => extractorResults.shift() as Record<string, unknown>,
+      customDataExtractor: async () =>
+        extractorResults.shift() as Record<string, unknown>,
       async connect() {},
       async close() {},
       async listTools() {
@@ -8646,7 +9874,8 @@ describe("runtime event normalization", () => {
       await result.completed;
       return streamed.find(
         (event) =>
-          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+          event.type === "run_item_stream_event" &&
+          event.item?.type === "tool_call_output_item",
       );
     };
 
@@ -8718,7 +9947,8 @@ describe("runtime event normalization", () => {
 
     const outputEvent = streamed.find(
       (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+        event.type === "run_item_stream_event" &&
+        event.item?.type === "tool_call_output_item",
     );
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
@@ -8810,7 +10040,9 @@ describe("runtime event normalization", () => {
 
     const serialized = result.state.toString();
     expect(serialized).toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
-    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(3 * 1024 * 1024);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(
+      3 * 1024 * 1024,
+    );
 
     const compacted = compactMcpResultCustomDataRunState(serialized);
     expect(compacted).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
@@ -8844,13 +10076,22 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(1);
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toEqual(["docs__search_documents"]);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "docs__search_documents",
+      ]);
 
-      const result = await prepared.mcpServers[0]!.callTool("docs__search_documents", {
-        query: "network policy",
-      });
-      expect(JSON.stringify(result)).toContain("found document for network policy");
-      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
+      const result = await prepared.mcpServers[0]!.callTool(
+        "docs__search_documents",
+        {
+          query: "network policy",
+        },
+      );
+      expect(JSON.stringify(result)).toContain(
+        "found document for network policy",
+      );
+      expect(mcp.calls).toEqual([
+        { tool: "search_documents", args: { query: "network policy" } },
+      ]);
       await expect(
         prepared.mcpServers[0]!.callTool("docs__fetch_document", {
           id: "doc-1",
@@ -8863,8 +10104,9 @@ describe("runtime event normalization", () => {
   });
 
   test("preserves HTTP-200 MCP errors through the SDK and meters bounded structural outcomes", async () => {
-    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
-      [];
+    const observations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]
+    > = [];
     configureRuntimeMetricsHooks({
       onMcpToolCall: (input) => observations.push(input),
     });
@@ -8920,7 +10162,8 @@ describe("runtime event normalization", () => {
 
       const outputEvent = streamed.find(
         (event) =>
-          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+          event.type === "run_item_stream_event" &&
+          event.item?.type === "tool_call_output_item",
       );
       expect(outputEvent?.item.output).toEqual([
         { type: "text", text: "The tool reported an error." },
@@ -8934,7 +10177,9 @@ describe("runtime event normalization", () => {
       const nextModelInput = model.requests[1]?.input;
       expect(Array.isArray(nextModelInput)).toBe(true);
       const nextModelToolResult = (nextModelInput as any[]).find(
-        (item) => item.type === "function_call_result" && item.callId === "http-error-call",
+        (item) =>
+          item.type === "function_call_result" &&
+          item.callId === "http-error-call",
       );
       expect(nextModelToolResult.output).toEqual([
         { type: "input_text", text: "The tool reported an error." },
@@ -8944,7 +10189,9 @@ describe("runtime event normalization", () => {
       const scriptedResults: unknown[] = [
         { content: [{ type: "text", text: "ok" }] },
         Object.assign(
-          new Error("Authentication required - a connection link was posted to the session."),
+          new Error(
+            "Authentication required - a connection link was posted to the session.",
+          ),
           { code: 40_101 },
         ),
         Object.assign(new Error("outcome uncertain"), {
@@ -8956,11 +10203,16 @@ describe("runtime event normalization", () => {
         }),
         Object.assign(new Error("cancelled"), { name: "AbortError" }),
         Object.assign(new Error("upstream unavailable"), { status: 503 }),
-        Object.assign(new Error("application-defined protocol failure"), { code: 503 }),
+        Object.assign(new Error("application-defined protocol failure"), {
+          code: 503,
+        }),
         Object.assign(new Error("MCP error -32602: Invalid params"), {
           code: ErrorCode.InvalidParams,
         }),
-        new McpError(ErrorCode.ConnectionClosed, "application-defined protocol failure"),
+        new McpError(
+          ErrorCode.ConnectionClosed,
+          "application-defined protocol failure",
+        ),
       ];
       const structural = new PrefixedMcpServer(
         {
@@ -8987,7 +10239,9 @@ describe("runtime event normalization", () => {
       );
       const structuralResults: unknown[] = [];
       for (let index = 0; index < 9; index += 1) {
-        structuralResults.push(await structural.executeCatalogTool("inspect", {}));
+        structuralResults.push(
+          await structural.executeCatalogTool("inspect", {}),
+        );
       }
 
       expect(structuralResults[2]).toMatchObject({
@@ -9013,7 +10267,9 @@ describe("runtime event normalization", () => {
         "thrown_protocol_error",
         "thrown_protocol_error",
       ]);
-      expect(observations.every(({ durationSeconds }) => durationSeconds >= 0)).toBe(true);
+      expect(
+        observations.every(({ durationSeconds }) => durationSeconds >= 0),
+      ).toBe(true);
     } finally {
       configureRuntimeMetricsHooks(null);
       await prepared.close();
@@ -9049,9 +10305,9 @@ describe("runtime event normalization", () => {
       "oversized-direct-gateway-result",
     );
 
-    await expect(oversizedResult.executeCatalogTool("inspect", {})).rejects.toThrow(
-      "MCP tool result exceeds the 1048576-byte safety limit",
-    );
+    await expect(
+      oversizedResult.executeCatalogTool("inspect", {}),
+    ).rejects.toThrow("MCP tool result exceeds the 1048576-byte safety limit");
 
     const oversizedUncertainOutcome = new PrefixedMcpServer(
       {
@@ -9069,7 +10325,9 @@ describe("runtime event normalization", () => {
           throw Object.assign(new Error("outcome uncertain"), {
             code: 40_102,
             data: {
-              providerFailure: { body: "x".repeat(MCP_MAX_TOOL_RESULT_BYTES + 1) },
+              providerFailure: {
+                body: "x".repeat(MCP_MAX_TOOL_RESULT_BYTES + 1),
+              },
             },
           });
         },
@@ -9077,14 +10335,15 @@ describe("runtime event normalization", () => {
       },
       "oversized-uncertain-gateway-result",
     );
-    await expect(oversizedUncertainOutcome.executeCatalogTool("inspect", {})).rejects.toThrow(
-      "MCP tool result exceeds the 1048576-byte safety limit",
-    );
+    await expect(
+      oversizedUncertainOutcome.executeCatalogTool("inspect", {}),
+    ).rejects.toThrow("MCP tool result exceeds the 1048576-byte safety limit");
   });
 
   test("preserves generated integration outcome uncertainty across best-effort isolation", async () => {
-    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
-      [];
+    const observations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]
+    > = [];
     configureRuntimeMetricsHooks({
       onMcpToolCall: (input) => observations.push(input),
     });
@@ -9136,13 +10395,17 @@ describe("runtime event normalization", () => {
   });
 
   test("MCP outcome metrics and projections cannot replace hostile source failures", async () => {
-    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
-      [];
+    const observations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]
+    > = [];
     configureRuntimeMetricsHooks({
       onMcpToolCall: (input) => observations.push(input),
     });
 
-    const withHostileProperty = (property: "name" | "code" | "message", label: string) => {
+    const withHostileProperty = (
+      property: "name" | "code" | "message",
+      label: string,
+    ) => {
       const error = new Error(`${label} source failure`);
       Object.defineProperty(error, property, {
         configurable: true,
@@ -9152,28 +10415,29 @@ describe("runtime event normalization", () => {
       });
       return error;
     };
-    const fixtures: Array<{ error: unknown; expectedBestEffortText: string }> = [
-      {
-        error: withHostileProperty("name", "name"),
-        expectedBestEffortText: "name source failure",
-      },
-      {
-        error: withHostileProperty("code", "code"),
-        expectedBestEffortText: "code source failure",
-      },
-      {
-        error: withHostileProperty("message", "message"),
-        expectedBestEffortText: "MCP tool call failed",
-      },
-      {
-        error: new Proxy(new Error("proxy source failure"), {
-          getPrototypeOf() {
-            throw new Error("hostile proxy getPrototypeOf");
-          },
-        }),
-        expectedBestEffortText: "MCP tool call failed",
-      },
-    ];
+    const fixtures: Array<{ error: unknown; expectedBestEffortText: string }> =
+      [
+        {
+          error: withHostileProperty("name", "name"),
+          expectedBestEffortText: "name source failure",
+        },
+        {
+          error: withHostileProperty("code", "code"),
+          expectedBestEffortText: "code source failure",
+        },
+        {
+          error: withHostileProperty("message", "message"),
+          expectedBestEffortText: "MCP tool call failed",
+        },
+        {
+          error: new Proxy(new Error("proxy source failure"), {
+            getPrototypeOf() {
+              throw new Error("hostile proxy getPrototypeOf");
+            },
+          }),
+          expectedBestEffortText: "MCP tool call failed",
+        },
+      ];
     const serverFor = (error: unknown): MCPServer => ({
       name: "hostile-error",
       cacheToolsList: false,
@@ -9210,7 +10474,10 @@ describe("runtime event normalization", () => {
         }
         expect(requiredFailure).toBe(fixture.error);
 
-        const bestEffortResult = await bestEffort.executeCatalogTool("inspect", {});
+        const bestEffortResult = await bestEffort.executeCatalogTool(
+          "inspect",
+          {},
+        );
         expect(bestEffortResult.isError).toBe(true);
         expect(bestEffortResult.content[0]).toEqual({
           type: "text",
@@ -9218,7 +10485,10 @@ describe("runtime event normalization", () => {
         });
       }
       expect(observations.map(({ outcome }) => outcome)).toEqual(
-        Array.from({ length: fixtures.length * 2 }, () => "thrown_protocol_error"),
+        Array.from(
+          { length: fixtures.length * 2 },
+          () => "thrown_protocol_error",
+        ),
       );
     } finally {
       configureRuntimeMetricsHooks(null);
@@ -9226,13 +10496,17 @@ describe("runtime event normalization", () => {
   });
 
   test("classifies an SDK connection closure as transport without replacing the source failure", async () => {
-    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
-      [];
+    const observations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]
+    > = [];
     configureRuntimeMetricsHooks({
       onMcpToolCall: (input) => observations.push(input),
     });
 
-    const sourceFailure = new McpError(ErrorCode.ConnectionClosed, "Connection closed");
+    const sourceFailure = new McpError(
+      ErrorCode.ConnectionClosed,
+      "Connection closed",
+    );
     const server: MCPServer = {
       name: "connection-closed",
       cacheToolsList: false,
@@ -9249,7 +10523,10 @@ describe("runtime event normalization", () => {
       },
       async invalidateToolsCache() {},
     };
-    const required = new PrefixedMcpServer(server, "connection-closed-required");
+    const required = new PrefixedMcpServer(
+      server,
+      "connection-closed-required",
+    );
     const bestEffort = new PrefixedMcpServer(
       server,
       "connection-closed-best-effort",
@@ -9266,7 +10543,10 @@ describe("runtime event normalization", () => {
       }
       expect(requiredFailure).toBe(sourceFailure);
 
-      const bestEffortResult = await bestEffort.executeCatalogTool("inspect", {});
+      const bestEffortResult = await bestEffort.executeCatalogTool(
+        "inspect",
+        {},
+      );
       expect(bestEffortResult.isError).toBe(true);
       expect(bestEffortResult.content[0]).toEqual({
         type: "text",
@@ -9325,9 +10605,12 @@ describe("runtime event normalization", () => {
       ]);
       expect(persistedDigest).toBe(prepared.attemptToolCatalog?.digest ?? null);
 
-      const modelResult = await prepared.mcpServers[0]!.callTool("docs__search_documents", {
-        query: "model",
-      });
+      const modelResult = await prepared.mcpServers[0]!.callTool(
+        "docs__search_documents",
+        {
+          query: "model",
+        },
+      );
       expect(JSON.stringify(modelResult)).toContain("found document for model");
       const environment = prepared.attemptToolEnvironment!;
       const codemodeResult = await environment.call({
@@ -9337,7 +10620,9 @@ describe("runtime event normalization", () => {
         arguments: { query: "codemode" },
         caller: { kind: "codemode", subjectId: "agent:test" },
       });
-      expect(JSON.stringify(codemodeResult)).toContain("found document for codemode");
+      expect(JSON.stringify(codemodeResult)).toContain(
+        "found document for codemode",
+      );
       await expect(
         environment.call({
           operationId: "77777777-7777-4777-8777-777777777777",
@@ -9547,9 +10832,12 @@ describe("runtime event normalization", () => {
         }),
       ]);
       expect(
-        await prepared.mcpServers[0]!.callToolResult?.("interaction__browser_observe", {
-          targetId: "tab-1",
-        }),
+        await prepared.mcpServers[0]!.callToolResult?.(
+          "interaction__browser_observe",
+          {
+            targetId: "tab-1",
+          },
+        ),
       ).toMatchObject({
         structuredContent: { observationId: "observation-1" },
       });
@@ -9606,7 +10894,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const modelNames = (
-        await Promise.all(prepared.mcpServers.map(async (server) => await server.listTools()))
+        await Promise.all(
+          prepared.mcpServers.map(async (server) => await server.listTools()),
+        )
       )
         .flat()
         .map((tool) => tool.name)
@@ -9675,10 +10965,15 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toEqual(["opengeni__search_documents"]);
-      const result = await prepared.mcpServers[0]!.callTool("opengeni__search_documents", {
-        query: "auth",
-      });
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "opengeni__search_documents",
+      ]);
+      const result = await prepared.mcpServers[0]!.callTool(
+        "opengeni__search_documents",
+        {
+          query: "auth",
+        },
+      );
       expect(JSON.stringify(result)).toContain("found document for auth");
     } finally {
       await prepared.close();
@@ -9746,18 +11041,27 @@ describe("runtime event normalization", () => {
       try {
         // T0: connect + first list — bearer minted with exp = T0 + 1h.
         const first = await prepared.mcpServers[0]!.listTools();
-        expect(first.map((t) => t.name)).toContain("opengeni__search_documents");
+        expect(first.map((t) => t.name)).toContain(
+          "opengeni__search_documents",
+        );
         const expsAfterFirst = seenExps.length;
         // Fast-forward 2h — any bearer minted at connect is now expired.
         nowMs += 2 * 60 * 60 * 1000;
         // The attempt catalog is frozen, so re-list is deliberately local. A
         // real tool request still re-signs at the transport boundary.
         const second = await prepared.mcpServers[0]!.listTools();
-        expect(second.map((t) => t.name)).toContain("opengeni__search_documents");
-        const toolResult = await prepared.mcpServers[0]!.callTool("opengeni__search_documents", {
-          query: "fresh bearer",
-        });
-        expect(JSON.stringify(toolResult)).toContain("found document for fresh bearer");
+        expect(second.map((t) => t.name)).toContain(
+          "opengeni__search_documents",
+        );
+        const toolResult = await prepared.mcpServers[0]!.callTool(
+          "opengeni__search_documents",
+          {
+            query: "fresh bearer",
+          },
+        );
+        expect(JSON.stringify(toolResult)).toContain(
+          "found document for fresh bearer",
+        );
         // Proof of per-request re-signing: the later bearer's exp advanced with
         // the clock (a static baked bearer would have a constant exp).
         expect(seenExps.length).toBeGreaterThan(expsAfterFirst);
@@ -9809,7 +11113,9 @@ describe("runtime event normalization", () => {
     try {
       await prepared.mcpServers[0]!.listTools();
       expect(seenSelections.length).toBeGreaterThan(0);
-      expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
+      expect(
+        seenSelections.every((selection) => JSON.stringify(selection) === "[]"),
+      ).toBe(true);
       expect(seenPrincipalKinds.every((kind) => kind === "service")).toBe(true);
     } finally {
       await prepared.close();
@@ -9827,7 +11133,10 @@ describe("runtime event normalization", () => {
           authorization.slice("Bearer ".length),
         );
         if (!payload) return false;
-        seenDepths.push([payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth]);
+        seenDepths.push([
+          payload.nestedAgentDepth,
+          payload.effectiveMaxNestedAgentDepth,
+        ]);
         return true;
       },
     });
@@ -9858,7 +11167,9 @@ describe("runtime event normalization", () => {
     try {
       await prepared.mcpServers[0]!.listTools();
       expect(seenDepths.length).toBeGreaterThan(0);
-      expect(seenDepths.every((value) => value[0] === 3 && value[1] === 3)).toBe(true);
+      expect(
+        seenDepths.every((value) => value[0] === 3 && value[1] === 3),
+      ).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -9939,7 +11250,9 @@ describe("runtime event normalization", () => {
         onAuthNeeded: (payload) => authNeeded.push(payload),
         mcpFetchImpl: async (input, init) => {
           transportCalls.push({ input, init });
-          throw new Error("credential-free request must not reach the transport");
+          throw new Error(
+            "credential-free request must not reach the transport",
+          );
         },
       },
     );
@@ -9994,7 +11307,10 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(fetched).toBe(0);
       expect(events).toEqual([
-        expect.objectContaining({ serverId: "gmail", reason: "personal_authority_unavailable" }),
+        expect.objectContaining({
+          serverId: "gmail",
+          reason: "personal_authority_unavailable",
+        }),
       ]);
     } finally {
       await prepared.close();
@@ -10055,10 +11371,13 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
-      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([
+      expect(
+        (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name),
+      ).toEqual(["gmail__list_labels"]);
+      const result = await prepared.mcpServers[0]!.callTool(
         "gmail__list_labels",
-      ]);
-      const result = await prepared.mcpServers[0]!.callTool("gmail__list_labels", {});
+        {},
+      );
       expect(JSON.stringify(result)).toContain("Projects");
       const codemodeResult = await prepared.attemptToolEnvironment!.call({
         operationId: "66666666-6666-4666-8666-666666666666",
@@ -10085,7 +11404,9 @@ describe("runtime event normalization", () => {
         serverId: "gmail",
         toolName: "list_labels",
       });
-      expect(prepared.resolvedMcpConnectionIds.get("gmail")).toBe("gmail-connection");
+      expect(prepared.resolvedMcpConnectionIds.get("gmail")).toBe(
+        "gmail-connection",
+      );
     } finally {
       await prepared.close();
     }
@@ -10114,9 +11435,12 @@ describe("runtime event normalization", () => {
       expect(tools.map((tool) => tool.name)).toContain(
         prefixedMcpToolName("cap-secure", "search_documents"),
       );
-      const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", {
-        query: "headers",
-      });
+      const result = await prepared.mcpServers[0]!.callTool(
+        "cap-secure__search_documents",
+        {
+          query: "headers",
+        },
+      );
       expect(JSON.stringify(result)).toContain("found document for headers");
     } finally {
       await prepared.close();
@@ -10165,14 +11489,18 @@ describe("runtime event normalization", () => {
       expect(tools.map((tool) => tool.name)).toContain(
         prefixedMcpToolName("cap-broker", "search_documents"),
       );
-      const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", {
-        query: "broker",
-      });
+      const result = await prepared.mcpServers[0]!.callTool(
+        "cap-broker__search_documents",
+        {
+          query: "broker",
+        },
+      );
       expect(JSON.stringify(result)).toContain("found document for broker");
       expect(
         resolved.some(
           (input) =>
-            input.connectionRef.connectionId === connectionId && input.serverId === "cap-broker",
+            input.connectionRef.connectionId === connectionId &&
+            input.serverId === "cap-broker",
         ),
       ).toBe(true);
     } finally {
@@ -10208,13 +11536,17 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "cap-refresh" }],
       {
         workspaceId: "44444444-4444-4444-8444-444444444444",
-        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+        resolveCredential: async (
+          input,
+        ): Promise<ResolveConnectionCredentialResult> => {
           resolved.push(input);
           return {
             status: "ok",
             connectionId,
             headers: {
-              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+              authorization: input.forceRefresh
+                ? "Bearer fresh-token"
+                : "Bearer stale-token",
             },
             authorizeProviderRequest: async () => {
               providerAuthorizations += 1;
@@ -10261,15 +11593,17 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "host-refresh-failed" }],
       {
         workspaceId: "44444444-4444-4444-8444-444444444444",
-        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
-          status: "ok",
-          authoritySource: "host",
-          connectionId,
-          headers: { authorization: "Bearer host-token" },
-        }),
+        resolveCredential:
+          async (): Promise<ResolveConnectionCredentialResult> => ({
+            status: "ok",
+            authoritySource: "host",
+            connectionId,
+            headers: { authorization: "Bearer host-token" },
+          }),
         onAuthNeeded: (payload) => authNeeded.push(payload),
         mcpFetchImpl: async (input, init) => {
-          const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+          const body =
+            typeof init?.body === "string" ? JSON.parse(init.body) : null;
           if (body?.method === "tools/list") {
             return new Response("unauthorized", { status: 401 });
           }
@@ -10299,7 +11633,9 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
-    const resolved: Array<ResolveConnectionCredentialInput & { submittedToolCalls: number }> = [];
+    const resolved: Array<
+      ResolveConnectionCredentialInput & { submittedToolCalls: number }
+    > = [];
     let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
@@ -10321,7 +11657,9 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "cap-uncertain" }],
       {
         workspaceId: "45454545-4545-4545-8545-454545454545",
-        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+        resolveCredential: async (
+          input,
+        ): Promise<ResolveConnectionCredentialResult> => {
           resolved.push({
             ...input,
             submittedToolCalls: mcp.requests.filter(
@@ -10332,7 +11670,9 @@ describe("runtime event normalization", () => {
             status: "ok",
             connectionId,
             headers: {
-              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+              authorization: input.forceRefresh
+                ? "Bearer fresh-token"
+                : "Bearer stale-token",
             },
             authorizeProviderRequest: async () => {
               providerAuthorizations += 1;
@@ -10374,9 +11714,11 @@ describe("runtime event normalization", () => {
       expect(warning).toMatch(/verify provider state before any new attempt/i);
       expect(result.content).toContainEqual({ type: "text", text: warning });
       expect(JSON.stringify(result)).toContain("unauthorized");
-      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toEqual([
-        { httpMethod: "POST", jsonRpcMethod: "tools/call" },
-      ]);
+      expect(
+        mcp.requests.filter(
+          (request) => request.jsonRpcMethod === "tools/call",
+        ),
+      ).toEqual([{ httpMethod: "POST", jsonRpcMethod: "tools/call" }]);
       expect(mcp.calls).toHaveLength(0);
       expect(providerAuthorizations - setupAuthorizations).toBe(1);
       // A post-401 refresh prepares future requests; it must not authorize or
@@ -10384,7 +11726,10 @@ describe("runtime event normalization", () => {
       expect(
         resolved
           .filter((input) => input.toolName === "search_documents")
-          .map(({ forceRefresh, submittedToolCalls }) => ({ forceRefresh, submittedToolCalls })),
+          .map(({ forceRefresh, submittedToolCalls }) => ({
+            forceRefresh,
+            submittedToolCalls,
+          })),
       ).toEqual([
         { forceRefresh: false, submittedToolCalls: 0 },
         { forceRefresh: true, submittedToolCalls: 1 },
@@ -10437,9 +11782,12 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callToolResult!("cap-scoped__search_documents", {
-        query: "scope",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-scoped__search_documents",
+        {
+          query: "scope",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toContainEqual(
         expect.objectContaining({
@@ -10461,7 +11809,8 @@ describe("runtime event normalization", () => {
     const connectionId = "legacy-host-scoped-binding";
     const mcp = startTestMcpServer({
       forbiddenTools: ["search_documents"],
-      forbiddenAuthenticateHeader: 'Bearer error="insufficient_scope", scope="deploy:read"',
+      forbiddenAuthenticateHeader:
+        'Bearer error="insufficient_scope", scope="deploy:read"',
     });
     const authNeeded: ToolAuthNeededPayload[] = [];
     const prepared = await prepareAgentTools(
@@ -10485,12 +11834,13 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "host-scoped" }],
       {
         workspaceId: "66666666-6666-4666-8666-666666666666",
-        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
-          status: "ok",
-          authoritySource: "host",
-          connectionId,
-          headers: {},
-        }),
+        resolveCredential:
+          async (): Promise<ResolveConnectionCredentialResult> => ({
+            status: "ok",
+            authoritySource: "host",
+            connectionId,
+            headers: {},
+          }),
         onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
@@ -10601,7 +11951,9 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "cap-auth-needed" }],
       {
         workspaceId: "88888888-8888-4888-8888-888888888888",
-        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+        resolveCredential: async (
+          input,
+        ): Promise<ResolveConnectionCredentialResult> => {
           if (input.toolName) {
             return {
               status: "auth_needed",
@@ -10678,7 +12030,9 @@ describe("runtime event normalization", () => {
       [{ kind: "mcp", id: "cap-batched-auth", optional: true }],
       {
         workspaceId: "89898989-8989-4989-8989-898989898989",
-        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> =>
+        resolveCredential: async (
+          input,
+        ): Promise<ResolveConnectionCredentialResult> =>
           input.toolName
             ? {
                 status: "auth_needed",
@@ -10702,7 +12056,10 @@ describe("runtime event normalization", () => {
           inner: {
             underlying: {
               params: {
-                fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+                fetch: (
+                  input: string | URL | Request,
+                  init?: RequestInit,
+                ) => Promise<Response>;
               };
             };
           };
@@ -10716,7 +12073,8 @@ describe("runtime event normalization", () => {
         });
       const expectedError = {
         code: 40_101,
-        message: "Authentication required - a connection link was posted to the session.",
+        message:
+          "Authentication required - a connection link was posted to the session.",
       };
 
       const single = await invoke({
@@ -10815,9 +12173,12 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const pending = prepared.mcpServers[0]!.callTool("request-timeout__search_documents", {
-        query: "wait",
-      });
+      const pending = prepared.mcpServers[0]!.callTool(
+        "request-timeout__search_documents",
+        {
+          query: "wait",
+        },
+      );
       await started;
       let failure: unknown;
       try {
@@ -10991,10 +12352,15 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(1);
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
-      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
-        query: "gmail",
-      });
+      expect(tools.map((tool) => tool.name)).toContain(
+        "codex_apps__search_documents",
+      );
+      const result = await prepared.mcpServers[0]!.callTool(
+        "codex_apps__search_documents",
+        {
+          query: "gmail",
+        },
+      );
       expect(JSON.stringify(result)).toContain("found document for gmail");
       expect(tokenResolutions).toBeGreaterThanOrEqual(2);
     } finally {
@@ -11005,7 +12371,10 @@ describe("runtime event normalization", () => {
 
   test("codex_apps: core admission owns each physical fetch and fences calls after disconnect", async () => {
     const mcp = startTestMcpServer({
-      requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" },
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "chatgpt-account-id": "acct-9",
+      },
     });
     let disconnected = false;
     let admissions = 0;
@@ -11016,13 +12385,18 @@ describe("runtime event normalization", () => {
       clientVersion: "0.0.0-test",
       withAuthorization: async () => {
         legacyAuthorizations += 1;
-        throw new Error("core must not extract a bearer outside physical admission");
+        throw new Error(
+          "core must not extract a bearer outside physical admission",
+        );
       },
       withRequest: async (use) => {
         if (disconnected) throw new CodexAppsCredentialUnavailable();
         admissions += 1;
         availablePermits += 1;
-        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        return await use({
+          accessToken: "tok-123",
+          chatgptAccountId: "acct-9",
+        });
       },
     };
     const fetchImpl = codexAppsTestFetch(mcp.url);
@@ -11042,9 +12416,12 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
-      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
-        query: "admitted",
-      });
+      const result = await prepared.mcpServers[0]!.callTool(
+        "codex_apps__search_documents",
+        {
+          query: "admitted",
+        },
+      );
       expect(JSON.stringify(result)).toContain("found document for admitted");
       expect(dispatches).toBe(admissions);
       expect(availablePermits).toBe(0);
@@ -11074,7 +12451,10 @@ describe("runtime event normalization", () => {
       fetch(request) {
         if (new URL(request.url).pathname === "/redirect") {
           redirectRequests += 1;
-          return new Response(null, { status: 307, headers: { location: "/destination" } });
+          return new Response(null, {
+            status: 307,
+            headers: { location: "/destination" },
+          });
         }
         destinationRequests += 1;
         return new Response("must not reach redirected destination");
@@ -11085,7 +12465,10 @@ describe("runtime event normalization", () => {
       ...makeCodexAppsAuth(),
       withRequest: async (use) => {
         try {
-          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+          return await use({
+            accessToken: "tok-123",
+            chatgptAccountId: "acct-9",
+          });
         } catch (error) {
           unknownRequests += 1;
           throw error;
@@ -11101,7 +12484,9 @@ describe("runtime event normalization", () => {
         mcpFetchImpl: async (input, init) => {
           expect(init?.redirect).toBe("error");
           const method =
-            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+            typeof init?.body === "string"
+              ? String(JSON.parse(init.body).method)
+              : null;
           return method === "tools/call"
             ? await fetch(new URL("/redirect", redirectServer.url), init)
             : await fetchImpl(input, init);
@@ -11110,9 +12495,12 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
-      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
-        query: "must-not-follow",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        {
+          query: "must-not-follow",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(redirectRequests).toBe(1);
       expect(destinationRequests).toBe(0);
@@ -11128,9 +12516,13 @@ describe("runtime event normalization", () => {
   test("codex_apps: a pending native admission cannot dispatch and receives the transport signal", async () => {
     const mcp = startTestMcpServer();
     let beginAdmission!: () => void;
-    const admissionStarted = new Promise<void>((resolve) => (beginAdmission = resolve));
+    const admissionStarted = new Promise<void>(
+      (resolve) => (beginAdmission = resolve),
+    );
     let releaseAdmission!: () => void;
-    const admissionGate = new Promise<void>((resolve) => (releaseAdmission = resolve));
+    const admissionGate = new Promise<void>(
+      (resolve) => (releaseAdmission = resolve),
+    );
     let gate = false;
     let dispatches = 0;
     let admittedSignal: AbortSignal | null | undefined;
@@ -11144,7 +12536,10 @@ describe("runtime event normalization", () => {
           await admissionGate;
           throw new CodexAppsCredentialUnavailable();
         }
-        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        return await use({
+          accessToken: "tok-123",
+          chatgptAccountId: "acct-9",
+        });
       },
     };
     const fetchImpl = codexAppsTestFetch(mcp.url);
@@ -11164,9 +12559,12 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(1);
       const before = dispatches;
       gate = true;
-      const pending = prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
-        query: "waiting-for-commit",
-      });
+      const pending = prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        {
+          query: "waiting-for-commit",
+        },
+      );
       await admissionStarted;
       expect(dispatches).toBe(before);
       expect(admittedSignal).toBeInstanceOf(AbortSignal);
@@ -11194,7 +12592,10 @@ describe("runtime event normalization", () => {
       ...makeCodexAppsAuth(),
       withRequest: async (use) => {
         try {
-          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+          return await use({
+            accessToken: "tok-123",
+            chatgptAccountId: "acct-9",
+          });
         } catch (error) {
           unknownRequests += 1;
           throw error;
@@ -11209,7 +12610,9 @@ describe("runtime event normalization", () => {
         codexAppsAuth: auth,
         mcpFetchImpl: async (input, init) => {
           const method =
-            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+            typeof init?.body === "string"
+              ? String(JSON.parse(init.body).method)
+              : null;
           if (failTransport && method === "tools/call") {
             failedDispatches += 1;
             failedMethods.push(method);
@@ -11223,9 +12626,12 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(1);
       failTransport = true;
-      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
-        query: "ambiguous",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        {
+          query: "ambiguous",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(failedMethods).toEqual(["tools/call"]);
       expect(failedDispatches).toBe(1);
@@ -11327,9 +12733,12 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(1);
       await prepared.mcpServers[0]!.listTools();
       authorized = false;
-      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
-        query: "must-not-run",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        {
+          query: "must-not-run",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(mcp.calls).toEqual([]);
     } finally {
@@ -11438,9 +12847,12 @@ describe("runtime event normalization", () => {
         {
           codexAppsAuth: makeCodexAppsAuth(),
           mcpFetchImpl: async () => {
-            throw Object.assign(new Error("socket closed with credential-shaped body"), {
-              code: "ECONNRESET",
-            });
+            throw Object.assign(
+              new Error("socket closed with credential-shaped body"),
+              {
+                code: "ECONNRESET",
+              },
+            );
           },
           onAuthNeeded: (payload) => authNeeded.push(payload),
         },
@@ -11454,7 +12866,9 @@ describe("runtime event normalization", () => {
       const renderedWarnings = JSON.stringify(warnings);
       expect(renderedWarnings).toContain('"serverId":"codex_apps"');
       expect(renderedWarnings).toContain('"retryable":true');
-      expect(renderedWarnings).not.toContain("socket closed with credential-shaped body");
+      expect(renderedWarnings).not.toContain(
+        "socket closed with credential-shaped body",
+      );
     } finally {
       console.warn = originalWarn;
     }
@@ -11603,7 +13017,9 @@ describe("runtime event normalization", () => {
       }
       expect(publishAttempts).toBe(2);
       expect(delivered).toHaveLength(1);
-      expect(delivered[0]).toMatchObject({ reason: "designated_credential_unavailable" });
+      expect(delivered[0]).toMatchObject({
+        reason: "designated_credential_unavailable",
+      });
     } finally {
       await prepared.close();
       mcp.close();
@@ -11634,12 +13050,18 @@ describe("runtime event normalization", () => {
     try {
       await prepared.mcpServers[0]!.listTools();
       failure = new Error("Codex token refresh timed out");
-      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
-        query: "refresh",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        {
+          query: "refresh",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toHaveLength(1);
-      expect(authNeeded[0]).toMatchObject({ serverId: "codex_apps", reason: "refresh_failed" });
+      expect(authNeeded[0]).toMatchObject({
+        serverId: "codex_apps",
+        reason: "refresh_failed",
+      });
     } finally {
       await prepared.close();
       mcp.close();
@@ -11728,7 +13150,10 @@ describe("runtime event normalization", () => {
   });
 
   test("a rejected optional connection group fails open without weakening required MCP", () => {
-    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const source = readFileSync(
+      new URL("../src/index.ts", import.meta.url),
+      "utf8",
+    );
     const settlement = source.slice(
       source.indexOf("const connectEntryGroups = async"),
       source.indexOf("const connectedEager = await connectEntryGroups"),
@@ -11745,7 +13170,10 @@ describe("runtime event normalization", () => {
     const optionalConnect = new Promise<void>((resolve) => {
       releaseOptional = resolve;
     });
-    const makeServer = (name: string, connect: () => Promise<void>): MCPServer => ({
+    const makeServer = (
+      name: string,
+      connect: () => Promise<void>,
+    ): MCPServer => ({
       name,
       cacheToolsList: false,
       connect,
@@ -11769,8 +13197,14 @@ describe("runtime event normalization", () => {
       async invalidateToolsCache() {},
     });
     const eager = makeServer("eager-inner", async () => {});
-    const strict = makeServer("strict-inner", async () => await optionalConnect);
-    const optional = makeServer("optional-inner", async () => await optionalConnect);
+    const strict = makeServer(
+      "strict-inner",
+      async () => await optionalConnect,
+    );
+    const optional = makeServer(
+      "optional-inner",
+      async () => await optionalConnect,
+    );
     const configs = [
       {
         id: "eager",
@@ -11791,7 +13225,10 @@ describe("runtime event normalization", () => {
         cacheToolsList: false,
       },
     ];
-    const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: configs,
+    });
     const measurements: { phase: string; execution: string }[] = [];
     const prepared = await prepareAgentTools(
       settings,
@@ -11814,35 +13251,49 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.ready).toBeDefined();
-      expect(measurements.some((measurement) => measurement.execution === "background")).toBe(
-        false,
-      );
+      expect(
+        measurements.some(
+          (measurement) => measurement.execution === "background",
+        ),
+      ).toBe(false);
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
       });
-      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name)).toEqual([
-        "eager__lookup",
-      ]);
+      expect(
+        (await agent.getMcpTools(new RunContext())).map((tool) => tool.name),
+      ).toEqual(["eager__lookup"]);
 
       releaseOptional();
       const complete = await prepared.ready!;
       expect(measurements).toContainEqual(
-        expect.objectContaining({ phase: "required_connect", execution: "blocking" }),
+        expect.objectContaining({
+          phase: "required_connect",
+          execution: "blocking",
+        }),
       );
       expect(measurements).toContainEqual(
-        expect.objectContaining({ phase: "required_connect", execution: "background" }),
+        expect.objectContaining({
+          phase: "required_connect",
+          execution: "background",
+        }),
       );
       expect(measurements).toContainEqual(
-        expect.objectContaining({ phase: "optional_connect", execution: "background" }),
+        expect.objectContaining({
+          phase: "optional_connect",
+          execution: "background",
+        }),
       );
       expect(measurements).toContainEqual(
-        expect.objectContaining({ phase: "attempt_catalog_build", execution: "background" }),
+        expect.objectContaining({
+          phase: "attempt_catalog_build",
+          execution: "background",
+        }),
       );
-      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
-        "eager__lookup",
-        "optional__lookup",
-        "strict__lookup",
-      ]);
+      expect(
+        (await agent.getMcpTools(new RunContext()))
+          .map((tool) => tool.name)
+          .sort(),
+      ).toEqual(["eager__lookup", "optional__lookup", "strict__lookup"]);
       expect(complete.attemptToolEnvironment).toBeNull();
     } finally {
       releaseOptional();
@@ -11867,7 +13318,10 @@ describe("runtime event normalization", () => {
           {
             name: "lookup",
             description: "Deferred lookup",
-            inputSchema: { type: "object" as const, additionalProperties: false },
+            inputSchema: {
+              type: "object" as const,
+              additionalProperties: false,
+            },
           },
         ];
       },
@@ -11891,30 +13345,34 @@ describe("runtime event normalization", () => {
         },
       ],
     });
-    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-      accountId: "11111111-1111-4111-8111-111111111111",
-      workspaceId: "22222222-2222-4222-8222-222222222222",
-      sessionId: "33333333-3333-4333-8333-333333333333",
-      turnId: "44444444-4444-4444-8444-444444444444",
-      attemptId: "55555555-5555-4555-8555-555555555555",
-      executionGeneration: 3,
-      deferNonEagerUntilToolDemand: true,
-      localMcpServers: [{ id: "docs", server: deferred }],
-      attemptToolDefinitions: [
-        {
-          identity: { serverId: "interaction", toolName: "observe" },
-          modelName: "interaction__observe",
-          codemodePath: ["interaction", "observe"],
-          inputSchema: { type: "object", additionalProperties: false },
-          source: "interaction",
-          approval: "none",
-          execute: async () => {
-            localExecutions += 1;
-            return { content: [{ type: "text", text: "observed" }] };
+    const prepared = await prepareAgentTools(
+      settings,
+      [{ kind: "mcp", id: "docs" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 3,
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [{ id: "docs", server: deferred }],
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "interaction", toolName: "observe" },
+            modelName: "interaction__observe",
+            codemodePath: ["interaction", "observe"],
+            inputSchema: { type: "object", additionalProperties: false },
+            source: "interaction",
+            approval: "none",
+            execute: async () => {
+              localExecutions += 1;
+              return { content: [{ type: "text", text: "observed" }] };
+            },
           },
-        },
-      ],
-    });
+        ],
+      },
+    );
     try {
       const local = prepared.mcpServers.find(
         (server) => server.name === "opengeni-attempt-local-tools",
@@ -11935,7 +13393,9 @@ describe("runtime event normalization", () => {
       });
       const complete = await prepared.ready!;
       expect(
-        complete.attemptToolEnvironment!.catalog.entries.map((entry) => entry.identity),
+        complete.attemptToolEnvironment!.catalog.entries.map(
+          (entry) => entry.identity,
+        ),
       ).toEqual(
         expect.arrayContaining([
           { serverId: "docs", toolName: "lookup" },
@@ -11959,7 +13419,9 @@ describe("runtime event normalization", () => {
   });
 
   test("keeps published local and eager servers live when deferred preparation fails", async () => {
-    const deferredFailure = new Error("synthetic deferred MCP preparation failure");
+    const deferredFailure = new Error(
+      "synthetic deferred MCP preparation failure",
+    );
     let rejectDeferred!: (error: Error) => void;
     const deferredConnect = new Promise<void>((_resolve, reject) => {
       rejectDeferred = reject;
@@ -12058,7 +13520,9 @@ describe("runtime event normalization", () => {
             },
             source: "interaction",
             approval: "none",
-            execute: async () => ({ content: [{ type: "text", text: "observed" }] }),
+            execute: async () => ({
+              content: [{ type: "text", text: "observed" }],
+            }),
           },
         ],
       },
@@ -12066,7 +13530,9 @@ describe("runtime event normalization", () => {
     const local = prepared.mcpServers.find(
       (server) => server.name === "opengeni-attempt-local-tools",
     );
-    const publishedEager = prepared.mcpServers.find((server) => server.name.includes("eager"));
+    const publishedEager = prepared.mcpServers.find((server) =>
+      server.name.includes("eager"),
+    );
     expect(local).toBeDefined();
     expect(publishedEager).toBeDefined();
     expect((await local!.listTools()).map((tool) => tool.name)).toEqual([
@@ -12081,12 +13547,16 @@ describe("runtime event normalization", () => {
     expect((await local!.listTools()).map((tool) => tool.name)).toEqual([
       "interaction__browser_observe",
     ]);
-    expect((await publishedEager!.listTools()).map((tool) => tool.name)).toEqual(["eager__lookup"]);
+    expect(
+      (await publishedEager!.listTools()).map((tool) => tool.name),
+    ).toEqual(["eager__lookup"]);
 
     await expect(prepared.close()).rejects.toBe(deferredFailure);
     expect(eagerCloseCount).toBe(1);
     expect(deferredCloseCount).toBe(1);
-    await expect(local!.listTools()).rejects.toThrow("local model tool server is closed");
+    await expect(local!.listTools()).rejects.toThrow(
+      "local model tool server is closed",
+    );
   });
 
   test("closes unpublished eager and deferred servers when eager schema freezing fails", async () => {
@@ -12097,7 +13567,11 @@ describe("runtime event normalization", () => {
       sandboxBackend: "none",
       mcpServers: [
         { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
-        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+        {
+          id: "deferred",
+          name: "Deferred",
+          url: "https://deferred.invalid/mcp",
+        },
       ],
     });
     const server = (
@@ -12185,7 +13659,11 @@ describe("runtime event normalization", () => {
       sandboxBackend: "none",
       mcpServers: [
         { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
-        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+        {
+          id: "deferred",
+          name: "Deferred",
+          url: "https://deferred.invalid/mcp",
+        },
       ],
     });
     const prepared = await prepareAgentTools(
@@ -12211,13 +13689,16 @@ describe("runtime event normalization", () => {
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";
-    const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
-      name: sentinel,
-      code: sentinel,
-      status: 503,
-      responseBody: { sentinel },
-      cause: { exact: sentinel },
-    });
+    const exactSourceError = Object.assign(
+      new Error(`connect failed: ${sentinel}`),
+      {
+        name: sentinel,
+        code: sentinel,
+        status: 503,
+        responseBody: { sentinel },
+        cause: { exact: sentinel },
+      },
+    );
     const guarded = guardedMcpFetch(
       testSettings(),
       async () => {
@@ -12234,7 +13715,8 @@ describe("runtime event normalization", () => {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
       }),
     ).rejects.toBe(exactSourceError);
-    const transportDiagnostic = mcpTransportRequestFailureDiagnostic(exactSourceError);
+    const transportDiagnostic =
+      mcpTransportRequestFailureDiagnostic(exactSourceError);
     expect(transportDiagnostic).toMatchObject({
       httpMethod: "POST",
       rpcMethod: "initialize",
@@ -12280,7 +13762,9 @@ describe("runtime event normalization", () => {
       });
       const returnedError = bestEffort.errors.get(bestEffortFacade);
       expect(returnedError).toBe(exactSourceError);
-      expect(mcpTransportRequestFailureDiagnostic(returnedError)).toEqual(transportDiagnostic);
+      expect(mcpTransportRequestFailureDiagnostic(returnedError)).toEqual(
+        transportDiagnostic,
+      );
       await bestEffort.close();
 
       const strictFacade = makeFacade();
@@ -12291,11 +13775,15 @@ describe("runtime event normalization", () => {
         (error) => error as Error,
       );
       expect(strictError).toBe(exactSourceError);
-      expect(mcpTransportRequestFailureDiagnostic(strictError)).toEqual(transportDiagnostic);
+      expect(mcpTransportRequestFailureDiagnostic(strictError)).toEqual(
+        transportDiagnostic,
+      );
 
       const renderedLogs = [...warnings, ...errors]
         .flat()
-        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) =>
+          value instanceof Error ? `${value.name}: ${value.message}` : value,
+        )
         .map((value) => JSON.stringify(value))
         .join("\n");
       const lifecycleErrors = [...warnings, ...errors]
@@ -12318,7 +13806,11 @@ describe("runtime event normalization", () => {
       expect(exactSourceError.responseBody).toEqual({ sentinel });
       expect(exactSourceError.cause).toEqual({ exact: sentinel });
       expect(
-        lifecycleObservations.map(({ phase, policy, outcome }) => ({ phase, policy, outcome })),
+        lifecycleObservations.map(({ phase, policy, outcome }) => ({
+          phase,
+          policy,
+          outcome,
+        })),
       ).toEqual([
         { phase: "connect", policy: "best_effort", outcome: "failed" },
         { phase: "close", policy: "best_effort", outcome: "completed" },
@@ -12378,7 +13870,9 @@ describe("runtime event normalization", () => {
         .filter((value): value is Error => value instanceof Error);
       const renderedLogs = [...warnings, ...errors]
         .flat()
-        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) =>
+          value instanceof Error ? `${value.name}: ${value.message}` : value,
+        )
         .map((value) => JSON.stringify(value))
         .join("\n");
       expect(renderedLogs).toContain("McpLifecycleError");
@@ -12402,37 +13896,43 @@ describe("runtime event normalization", () => {
     const sentinel = "synthetic-mcp-close-boundary-4d7e91";
     const closeCalls: number[] = [];
     const exactCloseErrors = new Map<number, Error>();
-    const servers = Array.from({ length: MCP_MAX_CONCURRENT_SERVER_OPERATIONS + 1 }, (_, index) => {
-      const exactCloseError = Object.assign(new Error(`close failed ${index}: ${sentinel}`), {
-        name: `${sentinel}-${index}`,
-        code: `${sentinel}-code-${index}`,
-        status: 502,
-        cause: { exact: `${sentinel}-cause-${index}` },
-      });
-      if (index === 0 || index === MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-        exactCloseErrors.set(index, exactCloseError);
-      }
-      return new PrefixedMcpServer(
-        {
-          name: `inner-${sentinel}-${index}`,
-          cacheToolsList: false,
-          async connect() {},
-          async close() {
-            closeCalls.push(index);
-            const failure = exactCloseErrors.get(index);
-            if (failure) throw failure;
+    const servers = Array.from(
+      { length: MCP_MAX_CONCURRENT_SERVER_OPERATIONS + 1 },
+      (_, index) => {
+        const exactCloseError = Object.assign(
+          new Error(`close failed ${index}: ${sentinel}`),
+          {
+            name: `${sentinel}-${index}`,
+            code: `${sentinel}-code-${index}`,
+            status: 502,
+            cause: { exact: `${sentinel}-cause-${index}` },
           },
-          async listTools() {
-            return [];
-          },
-          async callTool() {
-            return [];
-          },
-          async invalidateToolsCache() {},
-        } as MCPServer,
-        `registry-close-boundary-${index}`,
-      );
-    });
+        );
+        if (index === 0 || index === MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+          exactCloseErrors.set(index, exactCloseError);
+        }
+        return new PrefixedMcpServer(
+          {
+            name: `inner-${sentinel}-${index}`,
+            cacheToolsList: false,
+            async connect() {},
+            async close() {
+              closeCalls.push(index);
+              const failure = exactCloseErrors.get(index);
+              if (failure) throw failure;
+            },
+            async listTools() {
+              return [];
+            },
+            async callTool() {
+              return [];
+            },
+            async invalidateToolsCache() {},
+          } as MCPServer,
+          `registry-close-boundary-${index}`,
+        );
+      },
+    );
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
     const originalWarn = console.warn;
@@ -12450,7 +13950,9 @@ describe("runtime event normalization", () => {
       expect(closeCalls.toSorted((left, right) => left - right)).toEqual(
         servers.map((_, index) => index),
       );
-      expect(closeError).toBe(exactCloseErrors.get(MCP_MAX_CONCURRENT_SERVER_OPERATIONS));
+      expect(closeError).toBe(
+        exactCloseErrors.get(MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
+      );
       expect(closeError?.cause).toEqual({
         exact: `${sentinel}-cause-${MCP_MAX_CONCURRENT_SERVER_OPERATIONS}`,
       });
@@ -12500,7 +14002,9 @@ describe("runtime event normalization", () => {
       try {
         expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["docs"]);
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
+        expect(tools.map((tool) => tool.name)).toContain(
+          "docs__search_documents",
+        );
       } finally {
         await prepared.close();
       }
@@ -12567,7 +14071,9 @@ describe("runtime event normalization", () => {
         strict: false,
       });
       try {
-        expect(connected.active.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        expect(connected.active.map(runtimeMcpServerId)).toEqual([
+          "codex_apps",
+        ]);
         expect(connected.failed.map(runtimeMcpServerId)).toEqual(["slack"]);
         expect(connected.errors.get(slack)).toBe(exactSlackError);
         expect(apps.name).not.toBe(slack.name);
@@ -12621,9 +14127,13 @@ describe("runtime event normalization", () => {
         },
       );
       try {
-        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual([
+          "codex_apps",
+        ]);
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
+        expect(tools.map((tool) => tool.name)).toContain(
+          "codex_apps__search_documents",
+        );
       } finally {
         await prepared.close();
       }
@@ -12692,7 +14202,9 @@ describe("runtime event normalization", () => {
       }
       expect(firstPartyFailure).toBeInstanceOf(Error);
       expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
-      expect(isFirstPartyMcpSetupUnavailableError(firstPartyFailure)).toBe(false);
+      expect(isFirstPartyMcpSetupUnavailableError(firstPartyFailure)).toBe(
+        false,
+      );
 
       let externalFailure: unknown;
       try {
@@ -12774,19 +14286,20 @@ describe("runtime event normalization", () => {
         ],
         {
           workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          resolveCredential: async (): Promise<ResolveConnectionCredentialResult> =>
-            connected
-              ? {
-                  status: "auth_needed",
-                  reason: "expired",
-                  providerDomain: "api.integrations-example.com",
-                  connectionId,
-                }
-              : {
-                  status: "ok",
-                  connectionId,
-                  headers: { authorization: "Bearer valid-at-connect" },
-                },
+          resolveCredential:
+            async (): Promise<ResolveConnectionCredentialResult> =>
+              connected
+                ? {
+                    status: "auth_needed",
+                    reason: "expired",
+                    providerDomain: "api.integrations-example.com",
+                    connectionId,
+                  }
+                : {
+                    status: "ok",
+                    connectionId,
+                    headers: { authorization: "Bearer valid-at-connect" },
+                  },
           onAuthNeeded: (payload) => {
             authNeeded.push(payload);
           },
@@ -12796,14 +14309,19 @@ describe("runtime event normalization", () => {
       connected = true;
       try {
         // Both connected, so both are handed to the runner.
-        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["cap-expired", "docs"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual([
+          "cap-expired",
+          "docs",
+        ]);
         // Drive the exact code path the agent runner uses. Pre-fix this REJECTS
         // (the expired server's tools/list 401 throws out of getAllMcpTools).
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const toolNames = tools.map((tool) => tool.name);
         // The healthy sibling's tools survive; the expired server contributes none.
         expect(toolNames).toContain("docs__search_documents");
-        expect(toolNames.some((name) => name.startsWith("cap-expired__"))).toBe(false);
+        expect(toolNames.some((name) => name.startsWith("cap-expired__"))).toBe(
+          false,
+        );
         expect(authNeeded).toEqual([]);
       } finally {
         await prepared.close();
@@ -12829,7 +14347,10 @@ describe("runtime event normalization", () => {
   });
 
   test("best-effort discovery preserves a bounded catalog with more than 1000 tools", async () => {
-    const names = Array.from({ length: 1_100 }, (_, index) => `catalog_tool_${index}`);
+    const names = Array.from(
+      { length: 1_100 },
+      (_, index) => `catalog_tool_${index}`,
+    );
     const provider = startTestMcpServer({ toolsForAuthorization: () => names });
     try {
       const prepared = await prepareAgentTools(
@@ -12839,7 +14360,8 @@ describe("runtime event normalization", () => {
       try {
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const exposed = new Set(tools.map((tool) => tool.name));
-        for (const name of names) expect(exposed.has(`catalog__${name}`)).toBe(true);
+        for (const name of names)
+          expect(exposed.has(`catalog__${name}`)).toBe(true);
         expect(provider.calls).toEqual([]);
       } finally {
         await prepared.close();
@@ -12889,11 +14411,16 @@ describe("runtime event normalization", () => {
       );
       try {
         // The optional server connects (initialize is fine); only tools/list 500s.
-        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["docs", "flaky"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual([
+          "docs",
+          "flaky",
+        ]);
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
-        expect(toolNames.some((name) => name.startsWith("flaky__"))).toBe(false);
+        expect(toolNames.some((name) => name.startsWith("flaky__"))).toBe(
+          false,
+        );
       } finally {
         await prepared.close();
       }
@@ -12945,7 +14472,9 @@ describe("runtime event normalization", () => {
         // Connect succeeded, so the server is handed to the runner.
         expect(prepared.mcpServers).toHaveLength(1);
         // The run-time tools/list 401 must propagate (fail-loud), not degrade.
-        await expect(getAllMcpTools({ mcpServers: prepared.mcpServers })).rejects.toThrow();
+        await expect(
+          getAllMcpTools({ mcpServers: prepared.mcpServers }),
+        ).rejects.toThrow();
       } finally {
         await prepared.close();
       }
@@ -12989,7 +14518,9 @@ describe("runtime event normalization", () => {
       {
         workspaceId: "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2",
         // Valid for connect/list (no toolName), auth_needed at tool-call time.
-        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> =>
+        resolveCredential: async (
+          input,
+        ): Promise<ResolveConnectionCredentialResult> =>
           input.toolName
             ? {
                 status: "auth_needed",
@@ -12997,7 +14528,8 @@ describe("runtime event normalization", () => {
                 providerDomain: "api.integrations-example.com",
                 authoritySource: "host",
                 connectionId,
-                authorizationUrl: "https://api.integrations-example.com/oauth/start",
+                authorizationUrl:
+                  "https://api.integrations-example.com/oauth/start",
               }
             : {
                 status: "ok",
@@ -13010,8 +14542,12 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
-      const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
+      const cap = prepared.mcpServers.find(
+        (server) => runtimeMcpServerId(server) === "cap",
+      )!;
+      const docs = prepared.mcpServers.find(
+        (server) => runtimeMcpServerId(server) === "docs",
+      )!;
       await cap.listTools();
       const result = await cap.callToolResult!("cap__search_documents", {
         query: "x",
@@ -13078,11 +14614,16 @@ describe("runtime event normalization", () => {
         const flakySrv = prepared.mcpServers.find(
           (server) => runtimeMcpServerId(server) === "flaky",
         )!;
-        const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
+        const docs = prepared.mcpServers.find(
+          (server) => runtimeMcpServerId(server) === "docs",
+        )!;
         await flakySrv.listTools(); // fine — only tools/call 401s
-        const result = await flakySrv.callToolResult!("flaky__search_documents", {
-          query: "x",
-        });
+        const result = await flakySrv.callToolResult!(
+          "flaky__search_documents",
+          {
+            query: "x",
+          },
+        );
         expect(result).toMatchObject({ isError: true });
         const text = JSON.stringify(result);
         // Loop-safety: the copy must steer the model away from re-calling it.
@@ -13105,15 +14646,15 @@ describe("runtime event normalization", () => {
           (a) =>
             typeof a === "object" &&
             a !== null &&
-            (a as { errorClass?: unknown }).errorClass === "McpOperationError" &&
+            (a as { errorClass?: unknown }).errorClass ===
+              "McpOperationError" &&
             (a as { errorCode?: unknown }).errorCode === "mcp_tool_call_failed",
         ),
       );
       expect(warned).toBeDefined();
-      const payload = warned!.find((a) => typeof a === "object" && a !== null) as Record<
-        string,
-        unknown
-      >;
+      const payload = warned!.find(
+        (a) => typeof a === "object" && a !== null,
+      ) as Record<string, unknown>;
       expect(payload).toMatchObject({
         errorClass: "McpOperationError",
         errorCode: "mcp_tool_call_failed",
@@ -13153,9 +14694,12 @@ describe("runtime event normalization", () => {
       try {
         const flakySrv = prepared.mcpServers[0]!;
         await flakySrv.listTools(); // fine — only tools/call 500s
-        const result = await flakySrv.callToolResult!("flaky__search_documents", {
-          query: "x",
-        });
+        const result = await flakySrv.callToolResult!(
+          "flaky__search_documents",
+          {
+            query: "x",
+          },
+        );
         expect(result).toMatchObject({ isError: true });
         expect(JSON.stringify(result)).toMatch(/do not retry/i);
       } finally {
@@ -13278,9 +14822,12 @@ describe("runtime event normalization", () => {
     // flips cacheToolsList back to true is caught here too.
     const originalEnv = process.env;
     process.env = {};
-    let opengeniDefault: ReturnType<typeof getSettings>["mcpServers"][number] | undefined;
+    let opengeniDefault:
+      ReturnType<typeof getSettings>["mcpServers"][number] | undefined;
     try {
-      opengeniDefault = getSettings().mcpServers.find((server) => server.id === "opengeni");
+      opengeniDefault = getSettings().mcpServers.find(
+        (server) => server.id === "opengeni",
+      );
     } finally {
       process.env = originalEnv;
     }
@@ -13300,9 +14847,10 @@ describe("runtime event normalization", () => {
       });
 
     const toolNamesFor = async (authorization: string): Promise<string[]> => {
-      const prepared = await prepareAgentTools(settingsForAuthorization(authorization), [
-        { kind: "mcp", id: "opengeni" },
-      ]);
+      const prepared = await prepareAgentTools(
+        settingsForAuthorization(authorization),
+        [{ kind: "mcp", id: "opengeni" }],
+      );
       try {
         // Drive the exact code path the agent runner uses (getAllMcpTools),
         // which is what populates the process-global cache.
@@ -13342,11 +14890,19 @@ describe("runtime event normalization", () => {
         return [
           {
             name: "read_records",
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
           },
           {
             name: "delete_records",
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
           },
         ];
       },
@@ -13411,7 +14967,11 @@ describe("runtime event normalization", () => {
           {
             identity: { serverId: "attempt", toolName: modelName },
             modelName,
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
             source: "mcp",
             approval: "none",
             execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
@@ -13419,7 +14979,9 @@ describe("runtime event normalization", () => {
         ],
       });
       try {
-        return (await getAllMcpTools({ mcpServers: prepared.mcpServers })).map((tool) => tool.name);
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers })).map(
+          (tool) => tool.name,
+        );
       } finally {
         await prepared.close();
       }
@@ -13487,20 +15049,31 @@ describe("runtime event normalization", () => {
         ],
         mcpFetchImpl: async () => {
           remoteFetchCalled = true;
-          throw new Error("local adapters must not use the remote MCP transport");
+          throw new Error(
+            "local adapters must not use the remote MCP transport",
+          );
         },
       },
     );
     try {
       expect(connected).toBe(1);
       expect(remoteFetchCalled).toBe(false);
-      expect(prepared.resolvedMcpConnectionIds.get("inventory_api")).toBe(connectionId);
+      expect(prepared.resolvedMcpConnectionIds.get("inventory_api")).toBe(
+        connectionId,
+      );
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toEqual(["inventory_api__list_items"]);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        "inventory_api__list_items",
+      ]);
       const controller = new AbortController();
-      await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {}, null, {
-        signal: controller.signal,
-      });
+      await prepared.mcpServers[0]!.callTool(
+        "inventory_api__list_items",
+        {},
+        null,
+        {
+          signal: controller.signal,
+        },
+      );
       expect(observedSignal).toBe(controller.signal);
     } finally {
       await prepared.close();
@@ -13583,30 +15156,34 @@ function editableArtifactAttemptToolCatalog() {
     },
     generation: 1,
     definitions: [
-      ...Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(([toolName, codemodePath]) => ({
-        identity: { serverId: "opengeni", toolName },
-        modelName: `opengeni__${toolName}`,
-        codemodePath,
-        inputSchema: { type: "object", additionalProperties: false },
-        source: "opengeni" as const,
-        approval: "none" as const,
-        execute: async () => ({
-          content: [{ type: "text" as const, text: "ok" }],
-          structuredContent: { ok: true },
+      ...Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(
+        ([toolName, codemodePath]) => ({
+          identity: { serverId: "opengeni", toolName },
+          modelName: `opengeni__${toolName}`,
+          codemodePath,
+          inputSchema: { type: "object", additionalProperties: false },
+          source: "opengeni" as const,
+          approval: "none" as const,
+          execute: async () => ({
+            content: [{ type: "text" as const, text: "ok" }],
+            structuredContent: { ok: true },
+          }),
         }),
-      })),
-      ...["artifacts_create", "artifacts_get_source", "artifacts_publish"].map((toolName) => ({
-        identity: { serverId: "opengeni", toolName },
-        modelName: `opengeni__${toolName}`,
-        codemodePath: ["opengeni", toolName],
-        inputSchema: { type: "object", additionalProperties: false },
-        source: "opengeni" as const,
-        approval: "none" as const,
-        execute: async () => ({
-          content: [{ type: "text" as const, text: "ok" }],
-          structuredContent: { ok: true },
+      ),
+      ...["artifacts_create", "artifacts_get_source", "artifacts_publish"].map(
+        (toolName) => ({
+          identity: { serverId: "opengeni", toolName },
+          modelName: `opengeni__${toolName}`,
+          codemodePath: ["opengeni", toolName],
+          inputSchema: { type: "object", additionalProperties: false },
+          source: "opengeni" as const,
+          approval: "none" as const,
+          execute: async () => ({
+            content: [{ type: "text" as const, text: "ok" }],
+            structuredContent: { ok: true },
+          }),
         }),
-      })),
+      ),
     ],
   }).catalog;
 }
@@ -13663,9 +15240,12 @@ describe("runtime Skill activation", () => {
     });
     const index = enabled.index;
     expect(index.map((entry) => entry.name)).toContain("sites");
-    const site = enabled.artifacts.find((artifact) => artifact.name === "sites");
+    const site = enabled.artifacts.find(
+      (artifact) => artifact.name === "sites",
+    );
     const packagePins = JSON.parse(
-      site?.files.find((file) => file.path === "package-versions.json")?.content ?? "{}",
+      site?.files.find((file) => file.path === "package-versions.json")
+        ?.content ?? "{}",
     );
     expect(Object.keys(packagePins).sort()).toEqual([
       "@opengeni/codemode",
@@ -13685,10 +15265,14 @@ describe("runtime Skill activation", () => {
       reason: "bundled Site authoring skill",
     });
     expect(
-      indexedSkillNames(buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [])),
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
+      ),
     ).toContain("sites");
     expect(
-      indexedSkillNames(buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), [])),
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []),
+      ),
     ).toContain("sites");
   });
 
@@ -13720,8 +15304,10 @@ describe("runtime Skill activation", () => {
     const runtimeOnlyAgent = buildOpenGeniAgent(settings, [], {
       artifactRuntimeAvailable: true,
       sandboxEnvironment: {
-        OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
-        OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
+        OPENGENI_ARTIFACT_RUNTIME_MANIFEST:
+          "/opt/opengeni/artifacts/installation.json",
+        OPENGENI_ARTIFACT_TOOL_ENTRY:
+          "/opt/opengeni/artifacts/skill-facade-entry.mjs",
       },
     });
     expect(indexedSkillNames(runtimeOnlyAgent)).not.toContain("documents");
@@ -13737,23 +15323,31 @@ describe("runtime Skill activation", () => {
     });
     expect(typeof agent.instructions).toBe("string");
     expect(agent.instructions).toBe(rehydratedAgent.instructions);
-    expect(indexedSkillNames(agent)).toEqual(indexedSkillNames(rehydratedAgent));
+    expect(indexedSkillNames(agent)).toEqual(
+      indexedSkillNames(rehydratedAgent),
+    );
 
     const incompleteCatalog = {
       ...catalog,
       entries: catalog.entries.slice(1),
     };
-    expect(hasCanonicalEditableArtifactToolSurface(incompleteCatalog)).toBe(false);
+    expect(hasCanonicalEditableArtifactToolSurface(incompleteCatalog)).toBe(
+      false,
+    );
   });
 
   function indexedSkillNames(agent: unknown): string[] {
-    return runtimeSkillIndexForAgent(agent as object).map((entry) => entry.name);
+    return runtimeSkillIndexForAgent(agent as object).map(
+      (entry) => entry.name,
+    );
   }
 
   test("artifact runtime doctor blocks the agent before an unavailable image can be used", async () => {
     const hooks = sandboxArtifactRuntimeDoctorHooks({
-      OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifact-runtime/installation.json",
-      OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST:
+        "/opt/opengeni/artifact-runtime/installation.json",
+      OPENGENI_ARTIFACT_TOOL_ENTRY:
+        "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
     });
     const commands: string[] = [];
     await runBeforeAgentStartHooks(
@@ -13804,7 +15398,11 @@ describe("runtime Skill activation", () => {
     });
     expect(commands).toEqual([azureCliLoginCommand()]);
     expect(() =>
-      sandboxLifecycleHooksForIds(["azure-cli-login", "unknown", "azure-cli-login"]),
+      sandboxLifecycleHooksForIds([
+        "azure-cli-login",
+        "unknown",
+        "azure-cli-login",
+      ]),
     ).toThrow("Unknown sandbox lifecycle hook unknown");
   });
 
@@ -13813,15 +15411,20 @@ describe("runtime Skill activation", () => {
       (candidate) => candidate.id === "azure-verified-modules",
     );
     expect(entry).toBeDefined();
-    const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
+    const loaded = loadSkillLibrarySkill(
+      "azure-verified-modules",
+      entry?.version,
+    );
     const composition = composeRuntimeSkills([installedActivation(loaded)]);
     const artifact = composition.artifacts.find(
       (candidate) => candidate.name === loaded.skill.name,
     );
-    expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toContain(
-      "Azure Verified Modules",
+    expect(
+      artifact?.files.find((file) => file.path === "SKILL.md")?.content,
+    ).toContain("Azure Verified Modules");
+    expect(composition.index.map((item) => item.name)).toContain(
+      "azure-verified-modules",
     );
-    expect(composition.index.map((item) => item.name)).toContain("azure-verified-modules");
   });
 
   test("the document parser guidance is an exact opt-in curated artifact", () => {
@@ -13829,7 +15432,8 @@ describe("runtime Skill activation", () => {
     expect(loaded.entry).toMatchObject({
       category: "documents",
       license: "MIT",
-      contentSha256: "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
+      contentSha256:
+        "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
     });
     expect(loaded.skill.files).toEqual([
       expect.objectContaining({
@@ -13841,13 +15445,16 @@ describe("runtime Skill activation", () => {
 
   test("session Skills join the explicit skill index", () => {
     const composition = composeRuntimeSkills([sessionActivation(infraSkill)]);
-    const artifact = composition.artifacts.find((entry) => entry.name === "infra-ops");
-    expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toContain(
-      "# Infra ops",
+    const artifact = composition.artifacts.find(
+      (entry) => entry.name === "infra-ops",
     );
-    expect(artifact?.files.find((file) => file.path === "references/runbook.md")?.content).toBe(
-      "Runbook.",
-    );
+    expect(
+      artifact?.files.find((file) => file.path === "SKILL.md")?.content,
+    ).toContain("# Infra ops");
+    expect(
+      artifact?.files.find((file) => file.path === "references/runbook.md")
+        ?.content,
+    ).toBe("Runbook.");
     const index = composition.index;
     const names = index.map((entry) => entry.name);
     expect(names).toContain("infra-ops");
@@ -13859,7 +15466,10 @@ describe("runtime Skill activation", () => {
   test("an explicit session description cannot override SKILL.md frontmatter", () => {
     expect(() =>
       composeRuntimeSkills([
-        sessionActivation({ ...infraSkill, description: "Explicit description." }),
+        sessionActivation({
+          ...infraSkill,
+          description: "Explicit description.",
+        }),
       ]),
     ).toThrow("must match SKILL.md frontmatter");
   });
@@ -13871,12 +15481,15 @@ describe("runtime Skill activation", () => {
         files: [
           {
             path: "SKILL.md",
-            content: "---\nname: checkov\ndescription: Session-selected checkov.\n---\n",
+            content:
+              "---\nname: checkov\ndescription: Session-selected checkov.\n---\n",
           },
         ],
       }),
     ]);
-    expect(composition.artifacts.some((artifact) => artifact.name === "checkov")).toBe(true);
+    expect(
+      composition.artifacts.some((artifact) => artifact.name === "checkov"),
+    ).toBe(true);
     const index = composition.index;
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
@@ -13895,7 +15508,9 @@ describe("runtime Skill activation", () => {
         reason: "selected for solution session",
       },
     ]);
-    const entries = composition.index.filter((entry) => entry.name === loaded.skill.name);
+    const entries = composition.index.filter(
+      (entry) => entry.name === loaded.skill.name,
+    );
     expect(entries).toHaveLength(1);
     expect(composition.selections).toContainEqual(
       expect.objectContaining({
@@ -13950,13 +15565,19 @@ describe("runtime Skill activation", () => {
         sessionActivation({
           name: "dup",
           files: [
-            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\na" },
+            {
+              path: "SKILL.md",
+              content: "---\nname: dup\ndescription: Duplicate fixture\n---\na",
+            },
           ],
         }),
         sessionActivation({
           name: "dup",
           files: [
-            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb" },
+            {
+              path: "SKILL.md",
+              content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb",
+            },
           ],
         }),
       ]),
@@ -13972,16 +15593,25 @@ describe("runtime Skill activation", () => {
   });
 
   test("buildOpenGeniAgent keeps configured activations without SDK load_skill", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [sessionActivation(infraSkill)],
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+      {
+        skillActivations: [sessionActivation(infraSkill)],
+      },
+    );
     expect(
       ((agent as any).capabilities as Array<{ type?: string }>).some(
         (capability) => capability.type === "skills",
       ),
     ).toBe(false);
-    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain("infra-ops");
-    const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
+    expect(
+      runtimeSkillIndexForAgent(agent).map((entry) => entry.name),
+    ).toContain("infra-ops");
+    const plainAgent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+    );
     expect(
       ((plainAgent as any).capabilities as Array<{ type?: string }>).some(
         (capability) => capability.type === "skills",
@@ -13990,23 +15620,35 @@ describe("runtime Skill activation", () => {
   });
 
   test("capability construction does not emit load_skill", () => {
-    const capabilities = buildAgentCapabilities(testSettings(), [sessionActivation(infraSkill)], {
-      editableArtifactToolsAvailable: true,
-      videoGenerationAvailable: true,
-    });
-    expect(
-      (capabilities as Array<{ type?: string }>).some((capability) => capability.type === "skills"),
-    ).toBe(false);
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [sessionActivation(infraSkill)],
-    });
-    const toolNames = ((agent as { tools?: Array<{ name?: string }> }).tools ?? []).map(
-      (tool) => tool.name,
+    const capabilities = buildAgentCapabilities(
+      testSettings(),
+      [sessionActivation(infraSkill)],
+      {
+        editableArtifactToolsAvailable: true,
+        videoGenerationAvailable: true,
+      },
     );
+    expect(
+      (capabilities as Array<{ type?: string }>).some(
+        (capability) => capability.type === "skills",
+      ),
+    ).toBe(false);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+      {
+        skillActivations: [sessionActivation(infraSkill)],
+      },
+    );
+    const toolNames = (
+      (agent as { tools?: Array<{ name?: string }> }).tools ?? []
+    ).map((tool) => tool.name);
     expect(toolNames).not.toContain("load_skill");
     expect(toolNames).toContain("skill_read");
     expect(
-      composeRuntimeSkills([sessionActivation(infraSkill)]).index.map((entry) => entry.name),
+      composeRuntimeSkills([sessionActivation(infraSkill)]).index.map(
+        (entry) => entry.name,
+      ),
     ).toContain("infra-ops");
   });
 
@@ -14017,7 +15659,12 @@ describe("runtime Skill activation", () => {
       videoGeneration: false,
     });
     expect(bundled.index.map((entry) => entry.name)).toEqual(
-      expect.arrayContaining(["documents", "spreadsheets", "presentations", "sites"]),
+      expect.arrayContaining([
+        "documents",
+        "spreadsheets",
+        "presentations",
+        "sites",
+      ]),
     );
     const configured = composeRuntimeSkills([sessionActivation(infraSkill)]);
     expect(configured.configuredDescriptors).toEqual([
@@ -14039,18 +15686,23 @@ describe("runtime Skill activation", () => {
     async (sandboxBackend) => {
       const agent = buildOpenGeniAgent(testSettings({ sandboxBackend }), [], {
         ...(sandboxBackend === "selfhosted"
-          ? { activeSandboxBackend: sandboxBackend, sandboxWorkspaceRoot: "/srv/agent" }
+          ? {
+              activeSandboxBackend: sandboxBackend,
+              sandboxWorkspaceRoot: "/srv/agent",
+            }
           : {}),
         skillActivations: [sessionActivation(infraSkill)],
       });
       const inspection = persistentAgentInstructionInspectionFor(agent);
-      expect(inspection.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain(
-        "infra-ops",
-      );
+      expect(
+        inspection.layers.find((layer) => layer.id === "skill_catalog")
+          ?.content,
+      ).toContain("infra-ops");
       expect(inspection.composed).toContain("skill_read");
       expect(inspection.composed).not.toContain("load_skill");
       const skillRead = (
-        (agent as { tools: Array<{ name: string; invoke?: Function }> }).tools ?? []
+        (agent as { tools: Array<{ name: string; invoke?: Function }> })
+          .tools ?? []
       ).find((tool) => tool.name === "skill_read");
       expect(skillRead).toBeDefined();
       const listed = JSON.parse(
@@ -14061,14 +15713,20 @@ describe("runtime Skill activation", () => {
       );
       expect(listed.paths).toEqual(["SKILL.md", "references/runbook.md"]);
       const body = JSON.parse(
-        await skillRead!.invoke!(undefined, JSON.stringify({ skill: "infra-ops" })),
+        await skillRead!.invoke!(
+          undefined,
+          JSON.stringify({ skill: "infra-ops" }),
+        ),
       );
       expect(body.files[0]?.content).toContain("# Infra ops");
       expect(
-        readRuntimeSkill(composeRuntimeSkills([sessionActivation(infraSkill)]), {
-          skill: "infra-ops",
-          paths: ["references/runbook.md"],
-        }).files?.[0]?.content,
+        readRuntimeSkill(
+          composeRuntimeSkills([sessionActivation(infraSkill)]),
+          {
+            skill: "infra-ops",
+            paths: ["references/runbook.md"],
+          },
+        ).files?.[0]?.content,
       ).toBe("Runbook.");
       const explicit = JSON.parse(
         await skillRead!.invoke!(
@@ -14079,30 +15737,35 @@ describe("runtime Skill activation", () => {
           }),
         ),
       );
-      expect(explicit.files.map((file: { path: string }) => file.path)).toEqual([
-        "references/runbook.md",
-        "SKILL.md",
-      ]);
+      expect(explicit.files.map((file: { path: string }) => file.path)).toEqual(
+        ["references/runbook.md", "SKILL.md"],
+      );
     },
   );
 
   test("host catalog ownership neither adds a duplicate reader nor selects hidden bundled Skills", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillCatalog: [],
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+      {
+        skillCatalog: [],
+      },
+    );
     expect(runtimeSkillIndexForAgent(agent)).toEqual([]);
     expect(
-      agent.tools.filter((tool) => tool.type === "function" && tool.name === "skill_read"),
+      agent.tools.filter(
+        (tool) => tool.type === "function" && tool.name === "skill_read",
+      ),
     ).toHaveLength(0);
-    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
-      "native-tool:sites",
-    );
-    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
-      "document-parsing",
-    );
-    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
-      "native-tool:visualize",
-    );
+    expect(
+      persistentAgentInstructionInspectionFor(agent).composed,
+    ).not.toContain("native-tool:sites");
+    expect(
+      persistentAgentInstructionInspectionFor(agent).composed,
+    ).not.toContain("document-parsing");
+    expect(
+      persistentAgentInstructionInspectionFor(agent).composed,
+    ).not.toContain("native-tool:visualize");
     expect(() =>
       buildOpenGeniAgent(testSettings(), [], {
         skillCatalog: [],
@@ -14113,9 +15776,13 @@ describe("runtime Skill activation", () => {
 
   test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [installedActivation(loaded)],
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+      {
+        skillActivations: [installedActivation(loaded)],
+      },
+    );
     expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
       id: `skill:${loaded.entry.id}`,
       name: loaded.entry.name,
@@ -14129,7 +15796,9 @@ describe("runtime Skill activation", () => {
   test("installed artifact identity is verified before materialization", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
     expect(() =>
-      composeRuntimeSkills([{ ...installedActivation(loaded), contentSha256: "0".repeat(64) }]),
+      composeRuntimeSkills([
+        { ...installedActivation(loaded), contentSha256: "0".repeat(64) },
+      ]),
     ).toThrow("Installed Skill artifact hash mismatch");
   });
 
@@ -14195,7 +15864,11 @@ describe("curated skill-library artifact integrity", () => {
     try {
       mkdirSync(join(root, "references"));
       writeFileSync(join(root, "SKILL.md"), "# Reviewed skill\n", "utf8");
-      writeFileSync(join(root, "references", "runbook.md"), "Runbook bytes.\n", "utf8");
+      writeFileSync(
+        join(root, "references", "runbook.md"),
+        "Runbook bytes.\n",
+        "utf8",
+      );
       run(root);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -14213,23 +15886,37 @@ describe("curated skill-library artifact integrity", () => {
         "SKILL.md",
         "references/runbook.md",
       ]);
-      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(artifact);
+      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(
+        artifact,
+      );
     });
   });
 
   test("rejects an added file under an unchanged reviewed artifact", () => {
     withArtifact((root) => {
       const expected = baseline(root);
-      writeFileSync(join(root, "references", "injected.md"), "Unreviewed guidance.\n", "utf8");
-      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+      writeFileSync(
+        join(root, "references", "injected.md"),
+        "Unreviewed guidance.\n",
+        "utf8",
+      );
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(
+        /artifact hash mismatch/,
+      );
     });
   });
 
   test("rejects a modified file under a reviewed artifact", () => {
     withArtifact((root) => {
       const expected = baseline(root);
-      writeFileSync(join(root, "references", "runbook.md"), "Changed guidance.\n", "utf8");
-      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+      writeFileSync(
+        join(root, "references", "runbook.md"),
+        "Changed guidance.\n",
+        "utf8",
+      );
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(
+        /artifact hash mismatch/,
+      );
     });
   });
 
@@ -14237,7 +15924,9 @@ describe("curated skill-library artifact integrity", () => {
     withArtifact((root) => {
       const expected = baseline(root);
       rmSync(join(root, "references", "runbook.md"));
-      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(
+        /artifact hash mismatch/,
+      );
     });
   });
 
@@ -14270,7 +15959,10 @@ describe("portable skill artifact validation", () => {
       totalBytes: expect.any(Number),
       contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
-    expect(artifact.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+    expect(artifact.files.map((file) => file.path)).toEqual([
+      "SKILL.md",
+      "references/runbook.md",
+    ]);
   });
 
   test("rejects path traversal, duplicate files, missing metadata, and size overflow", () => {
@@ -14288,7 +15980,9 @@ describe("portable skill artifact validation", () => {
       ]),
     ).toThrow("duplicate file path");
     expect(() =>
-      buildPortableSkillArtifact([{ path: "SKILL.md", content: "# Missing\n" }]),
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: "# Missing\n" },
+      ]),
     ).toThrow("must declare a safe name");
     expect(() =>
       buildPortableSkillArtifact([
@@ -14318,13 +16012,20 @@ describe("provider item id stripping", () => {
     const before = structuredClone(input);
     const filter = callModelInputFilterForSettings(testSettings())!;
     const run = (items: unknown[]) =>
-      filter({ modelData: { input: items as never }, agent: {} as never, context: undefined });
+      filter({
+        modelData: { input: items as never },
+        agent: {} as never,
+        context: undefined,
+      });
     const first = await run(input);
     const next = await run([
       ...input,
       { type: "function_call_result", callId: "checkpoint", output: "ACK" },
     ]);
-    expect(first.input[0]).toMatchObject({ type: "message", role: "assistant" });
+    expect(first.input[0]).toMatchObject({
+      type: "message",
+      role: "assistant",
+    });
     expect(JSON.stringify(first.input[0])).toContain("exactly seven colors");
     expect(next.input[0]).toBe(first.input[0]);
     expect(next.input[1]).toBe(first.input[1]);
@@ -14367,7 +16068,13 @@ describe("provider item id stripping", () => {
       role: "user",
       content: "do the thing",
     } as any;
-    const input = [reasoning, message, functionCall, functionOutput, userMessage];
+    const input = [
+      reasoning,
+      message,
+      functionCall,
+      functionOutput,
+      userMessage,
+    ];
     const result = stripProviderItemIdsFilter({
       modelData: { input, instructions: "be useful" },
       agent: undefined as any,
@@ -14419,7 +16126,9 @@ describe("provider item id stripping", () => {
     expect("id" in stripped).toBe(false);
 
     // "preserve": computer_call still normalized, but provider id preserved.
-    const preserved = await runFilter(testSettings({ openaiProviderItemIds: "preserve" }));
+    const preserved = await runFilter(
+      testSettings({ openaiProviderItemIds: "preserve" }),
+    );
     expect("actions" in preserved).toBe(true);
     expect("action" in preserved).toBe(false);
     expect(preserved.id).toBe("cu_abc");
@@ -14473,8 +16182,14 @@ describe("provider item id stripping", () => {
       role: "user",
       content: "replacement prefix",
     };
-    const replacement = await run([replacementFirst, ...prefix.slice(1), appended]);
-    expect((replacement.input[0] as { content?: unknown }).content).toBe("replacement prefix");
+    const replacement = await run([
+      replacementFirst,
+      ...prefix.slice(1),
+      appended,
+    ]);
+    expect((replacement.input[0] as { content?: unknown }).content).toBe(
+      "replacement prefix",
+    );
     expect("id" in (replacement.input[0] as object)).toBe(false);
   });
 
@@ -14617,7 +16332,9 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(projected)).not.toContain("retained_artifact");
     expect(projected.some((item) => item.name === "view_image")).toBe(true);
     expect(projected.some((item) => item.type === "computer_call")).toBe(false);
-    expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({
+    expect(
+      projected.find((item) => item.callId === "view-1" && "output" in item),
+    ).toEqual({
       type: "function_call_result",
       callId: "view-1",
       output: [
@@ -14628,7 +16345,11 @@ describe("provider item id stripping", () => {
       ],
     });
     expect(projected.some((item) => item.type === "reasoning")).toBe(true);
-    expect(projected.find((item) => item.callId === "metadata-1" && "output" in item)).toEqual({
+    expect(
+      projected.find(
+        (item) => item.callId === "metadata-1" && "output" in item,
+      ),
+    ).toEqual({
       type: "function_call_result",
       callId: "metadata-1",
       output: [
@@ -14642,7 +16363,9 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(projected)).toContain("Image content omitted");
     expect(JSON.stringify(input)).toBe(durableJson);
     expect(projectModelInputForImageSupport(input, true)).toBe(input);
-    expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
+    expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(
+      durableJson,
+    );
   });
 
   test("text-only projection does not reapply a tool-output bound", () => {
@@ -14738,8 +16461,12 @@ describe("provider item id stripping", () => {
     const output = second.input as unknown as Array<Record<string, unknown>>;
 
     expect(output.slice(0, prefix.length)).toEqual(prefix);
-    expect(JSON.stringify(output.slice(prefix.length))).not.toContain("data:image");
-    expect(JSON.stringify(output.slice(prefix.length))).toContain("Image content omitted");
+    expect(JSON.stringify(output.slice(prefix.length))).not.toContain(
+      "data:image",
+    );
+    expect(JSON.stringify(output.slice(prefix.length))).toContain(
+      "Image content omitted",
+    );
   });
 
   test("defensive RunState projection scans its giant prefix only once", async () => {
@@ -14785,8 +16512,12 @@ describe("provider item id stripping", () => {
     const second = await run(next);
 
     expect(prefixInspections).toBe(firstPassInspections);
-    expect(JSON.stringify(second.input).slice(-500)).not.toContain("data:image");
-    expect(JSON.stringify(second.input).slice(-500)).toContain("Image content omitted");
+    expect(JSON.stringify(second.input).slice(-500)).not.toContain(
+      "data:image",
+    );
+    expect(JSON.stringify(second.input).slice(-500)).toContain(
+      "Image content omitted",
+    );
   });
 
   test("text-only projection runs before context accounting in the real agent loop", async () => {
@@ -14817,14 +16548,21 @@ describe("provider item id stripping", () => {
       },
     ] as Array<Record<string, unknown>>;
 
-    const result = await runAgentStream(agent, { input: input as any }, settings, {
-      contextCompactionRequested: () => false,
-    });
+    const result = await runAgentStream(
+      agent,
+      { input: input as any },
+      settings,
+      {
+        contextCompactionRequested: () => false,
+      },
+    );
     for await (const event of result.toStream()) void event;
     await result.completed;
 
     expect(model.calls).toBe(1);
-    expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
+    expect(JSON.stringify(model.requests[0]?.input)).not.toContain(
+      "data:image",
+    );
     expect(JSON.stringify(result.state.history)).toContain("data:image");
     expect(JSON.stringify(input)).toContain("data:image");
   });
@@ -14890,19 +16628,26 @@ describe("provider item id stripping", () => {
     ] as Array<Record<string, unknown>>;
     const freeze = (value: unknown): void => {
       if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
-      for (const nested of Object.values(value as Record<string, unknown>)) freeze(nested);
+      for (const nested of Object.values(value as Record<string, unknown>))
+        freeze(nested);
       Object.freeze(value);
     };
     freeze(input);
     const original = JSON.stringify(input);
 
-    const result = await runAgentStream(agent, { input: input as any }, settings);
+    const result = await runAgentStream(
+      agent,
+      { input: input as any },
+      settings,
+    );
     for await (const event of result.toStream()) void event;
     await result.completed;
 
     expect((result.state as any)._originalInput[0]).toBe(input[0]);
     expect(JSON.stringify(input)).toBe(original);
-    const wire = model.requests[0]!.input as unknown as Array<Record<string, unknown>>;
+    const wire = model.requests[0]!.input as unknown as Array<
+      Record<string, unknown>
+    >;
     expect(wire[0]).not.toHaveProperty("id");
     expect(wire[0]).not.toHaveProperty("action");
     expect(JSON.stringify(wire[2])).toContain("tokens truncated");
@@ -15045,12 +16790,19 @@ describe("provider item id stripping", () => {
       agent: {} as any,
       context: undefined,
     });
-    const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
+    const expected = boundModelToolOutputItem(
+      item,
+      settings.modelToolOutputTruncationTokens,
+    );
     expect(result.input[0]).toEqual(expected);
     const serializedProviderItem = JSON.stringify(result.input[0]);
     expect(serializedProviderItem).toBe(JSON.stringify(expected));
-    expect(JSON.stringify(result.input[0])).toContain("structured object properties");
-    expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
+    expect(JSON.stringify(result.input[0])).toContain(
+      "structured object properties",
+    );
+    expect(
+      Buffer.byteLength(JSON.stringify(result.input[0]), "utf8"),
+    ).toBeLessThan(100_000);
 
     const replayed = await filter({
       modelData: { input: result.input },
@@ -15106,7 +16858,9 @@ describe("provider item id stripping", () => {
 
     expect(JSON.stringify(first.input)).toBe(firstInputSerialized);
     expect(second.input.slice(0, first.input.length)).toEqual(first.input);
-    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(firstInputSerialized);
+    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(
+      firstInputSerialized,
+    );
     expect(second.input).toHaveLength(first.input.length + 2);
     expect(JSON.stringify(firstInput)).toBe(firstInputSerialized);
     expect(JSON.stringify(secondInput)).toBe(secondInputSerialized);
@@ -15124,7 +16878,9 @@ describe("provider item id stripping", () => {
         contextCompactionSignal: () => signal,
       },
     );
-    const userOnly = [{ type: "message", role: "user", content: "start" }] as any;
+    const userOnly = [
+      { type: "message", role: "user", content: "start" },
+    ] as any;
     await filter({
       modelData: { input: userOnly, instructions: "system" },
       agent: {} as any,
@@ -15151,11 +16907,15 @@ describe("provider item id stripping", () => {
         agent: {} as any,
         context: undefined,
       });
-      throw new Error("expected complete trailing tool output to trigger compaction");
+      throw new Error(
+        "expected complete trailing tool output to trigger compaction",
+      );
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).signalSource).toBe("provider");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
+      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(
+        10_000,
+      );
     }
   });
 
@@ -15286,7 +17046,8 @@ describe("provider item id stripping", () => {
       close: async () => undefined,
       listTools: async () => [],
       callTool: async () => ({ content: [] }),
-      modelToolSchemaTokens: () => (selectedSchemaAccountingDeferred ? 0 : 300_000),
+      modelToolSchemaTokens: () =>
+        selectedSchemaAccountingDeferred ? 0 : 300_000,
       deferModelToolSchemaAccounting: () => {
         selectedSchemaAccountingDeferred = true;
       },
@@ -15299,7 +17060,8 @@ describe("provider item id stripping", () => {
       close: async () => undefined,
       listTools: async () => [],
       callTool: async () => ({ content: [] }),
-      modelToolSchemaTokens: () => (mandatorySchemaAccountingDeferred ? 0 : 500),
+      modelToolSchemaTokens: () =>
+        mandatorySchemaAccountingDeferred ? 0 : 500,
       deferModelToolSchemaAccounting: () => {
         mandatorySchemaAccountingDeferred = true;
       },
@@ -15378,7 +17140,9 @@ describe("provider item id stripping", () => {
     )!;
     const args = {
       modelData: {
-        input: [{ type: "message", role: "user", content: "small input" }] as any,
+        input: [
+          { type: "message", role: "user", content: "small input" },
+        ] as any,
       },
       agent: {} as any,
       context: undefined,
@@ -15388,7 +17152,9 @@ describe("provider item id stripping", () => {
     requested = true;
     try {
       await filter(args);
-      throw new Error("expected operator compaction request to stop the model call");
+      throw new Error(
+        "expected operator compaction request to stop the model call",
+      );
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
@@ -15398,7 +17164,10 @@ describe("provider item id stripping", () => {
   });
 
   test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
     expect((agent as any).modelSettings.providerData).toEqual({
       include: ["reasoning.encrypted_content"],
     });
