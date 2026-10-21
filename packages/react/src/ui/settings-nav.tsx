@@ -52,7 +52,7 @@ export interface NavItemProps extends Omit<ComponentProps<"a">, "children"> {
 }
 
 const ITEM_BASE =
-  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-normal text-fg-label transition-colors duration-[120ms] outline-none select-none hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
+  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-normal text-fg-label transition-colors duration-[120ms] outline-hidden select-none hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
 
 function textLabel(label: ReactNode): string | undefined {
   return typeof label === "string" ? label : undefined;

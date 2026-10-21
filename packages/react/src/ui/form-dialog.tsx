@@ -386,7 +386,7 @@ export function FormFrame({
                 {/* Focusable from script only: a form page opened in place moves focus here. */}
                 <Title
                   tabIndex={-1}
-                  className="text-xl font-semibold tracking-[-0.5px] text-fg outline-none"
+                  className="text-xl font-semibold tracking-[-0.5px] text-fg outline-hidden"
                 >
                   {title}
                 </Title>
@@ -677,7 +677,7 @@ export function FormDialog({
           {...overlay.contentProps}
           {...(frame.description ? {} : { "aria-describedby": undefined })}
           className={cn(
-            "fixed z-50 flex flex-col outline-none transition-opacity duration-[120ms] starting:opacity-0",
+            "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
             "inset-x-0 bottom-0 max-h-[92dvh]",
             "sm:inset-x-auto sm:bottom-auto sm:top-[12vh] sm:left-1/2 sm:max-h-[76vh] sm:w-[calc(100vw-2rem)] sm:-translate-x-1/2",
             DIALOG_WIDTH[size],

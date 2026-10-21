@@ -227,8 +227,9 @@ describe("compiled CSS contract", () => {
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
     // A tripwire for accidental bloat (unscoped sources, whole palettes, prose
     // words turned into utilities), not a feature budget. The builder already
-    // excludes non-class sources; real UI growth raises this deliberately.
-    expect(Buffer.byteLength(compiled)).toBeLessThan(272_000);
+    // excludes non-class sources; real UI growth raises this deliberately (the
+    // web app's UI primitives moved into src/ui: ~404 KB).
+    expect(Buffer.byteLength(compiled)).toBeLessThan(432_000);
   });
 
   test("nests only leading-& selectors so host bundlers lower them without :is()", () => {

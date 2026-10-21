@@ -164,6 +164,13 @@ test("every published package entry resolves to an emitted file or a shipped ass
   // import, which is how `@opengeni/react/accounts` shipped broken.
   const emitted = /\.(?:js|cjs|mjs|json)$/u;
   const root = join(import.meta.dir, "..");
+  // A pattern export (`./ui/*`) resolves when the build emits at least one
+  // file it matches; the publish closure guard checks each compiled target.
+  const resolves = (dir: string, target: string) =>
+    target.includes("*")
+      ? new Bun.Glob(target.replace(/^\.\//u, "")).scanSync({ cwd: join(root, dir) }).next()
+          .done !== true
+      : existsSync(join(root, dir, target));
   const problems: string[] = [];
   for (const pkg of publishableWorkspacePackages()) {
     const published = structuredClone(pkg.packageJson);
@@ -180,10 +187,10 @@ test("every published package entry resolves to an emitted file or a shipped ass
         // canonical build and then also requires every emitted file to exist.
         if (
           process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1" &&
-          !existsSync(join(root, pkg.dir, target))
+          !resolves(pkg.dir, target)
         )
           problems.push(`${label}: missing after the package build`);
-      } else if (!existsSync(join(root, pkg.dir, target))) {
+      } else if (!resolves(pkg.dir, target)) {
         problems.push(`${label}: shipped file does not exist`);
       }
     }

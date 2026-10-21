@@ -21,7 +21,7 @@ export function FormDisclosure(props: {
       <CollapsibleTrigger asChild>
         <button
           type="button"
-          className="group flex w-full min-w-0 items-center justify-between gap-4 border-y border-border py-3 text-left hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+          className="group flex w-full min-w-0 items-center justify-between gap-4 border-y border-border py-3 text-left hover:text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
         >
           <span className="min-w-0">
             <span className="block text-sm font-medium text-fg">{props.title}</span>

@@ -86,7 +86,7 @@ export function ComposerMenuSwitch(props: {
       aria-disabled={props.locked || props.disabled || undefined}
       disabled={props.disabled}
       className={cn(
-        "inline-flex size-9 shrink-0 items-center justify-end rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
+        "inline-flex size-9 shrink-0 items-center justify-end rounded-md outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
         props.locked ? "cursor-default" : "cursor-pointer",
         props.className,
       )}

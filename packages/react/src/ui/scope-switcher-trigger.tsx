@@ -26,7 +26,7 @@ export const ScopeSwitcherTrigger = forwardRef<
       ref={ref}
       type="button"
       className={cn(
-        "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand",
+        "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-brand",
         compact && (meta ? "min-h-8 gap-1.5 py-1" : "h-8 gap-1.5 py-0 pointer-coarse:h-11"),
         className,
       )}

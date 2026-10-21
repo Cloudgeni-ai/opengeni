@@ -209,7 +209,7 @@ const TRIGGER_CLASS =
 // The one menu surface (menu-styles.ts); the list inside carries the 6px inset.
 const PANEL_CLASS = cn(
   MENU_SURFACE_CLASS,
-  "z-50 flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[max(var(--radix-popover-trigger-width),22rem)] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0 outline-none transition-opacity duration-[120ms] starting:opacity-0",
+  "z-50 flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[max(var(--radix-popover-trigger-width),22rem)] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0 outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
 );
 
 function TriggerValue<V extends string>({
@@ -995,7 +995,7 @@ function ComboboxSearch({
         placeholder={placeholder}
         onChange={(event) => onChange?.(event.target.value)}
         onKeyDown={onKeyDown}
-        className="h-full min-w-0 flex-1 bg-transparent text-sm text-fg outline-none! placeholder:text-fg-subtle"
+        className="h-full min-w-0 flex-1 bg-transparent text-sm text-fg outline-hidden! placeholder:text-fg-subtle"
       />
     </div>
   );

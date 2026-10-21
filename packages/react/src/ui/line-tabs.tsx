@@ -59,7 +59,7 @@ const scrollerVariants = cva(
 );
 
 export const lineTabVariants = cva(
-  "group/line-tab relative inline-flex shrink-0 items-center gap-1.5 text-sm font-medium whitespace-nowrap transition-colors duration-[120ms] outline-none select-none disabled:pointer-events-none aria-disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "group/line-tab relative inline-flex shrink-0 items-center gap-1.5 text-sm font-medium whitespace-nowrap transition-colors duration-[120ms] outline-hidden select-none disabled:pointer-events-none aria-disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -323,7 +323,7 @@ export function LineTabsContent({
   return (
     <TabsPrimitive.Content
       data-slot="line-tabs-content"
-      className={cn("min-w-0 outline-none", className)}
+      className={cn("min-w-0 outline-hidden", className)}
       {...props}
     />
   );

@@ -2667,6 +2667,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getBrowserRecording",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
+    ]
+  },
+  {
     "id": "getBrowserSession",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
@@ -6968,6 +6977,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "saveBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
+    "request": [
+      "BrowserRecordingSaveRequest"
+    ],
+    "response": [
+      "BrowserRecordingSaveResponse"
+    ]
+  },
+  {
     "id": "saveComposerDraft",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft",
@@ -7295,6 +7315,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AuthRunMutationResponse"
+    ]
+  },
+  {
+    "id": "startBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
     ]
   },
   {

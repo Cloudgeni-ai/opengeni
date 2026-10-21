@@ -122,7 +122,7 @@ const menuContent = cn(
 );
 
 const menuItem =
-  "relative flex min-h-8 cursor-pointer flex-col items-start rounded-[10px] py-1.5 pr-9 pl-2.5 text-left outline-none select-none data-[disabled]:cursor-not-allowed data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
+  "relative flex min-h-8 cursor-pointer flex-col items-start rounded-[10px] py-1.5 pr-9 pl-2.5 text-left outline-hidden select-none data-[disabled]:cursor-not-allowed data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
 
 // Field trigger: the Select primitive's look at 32px (rows) or 36px (forms).
 const fieldTrigger =
