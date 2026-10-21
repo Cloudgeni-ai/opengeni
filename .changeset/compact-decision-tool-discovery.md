@@ -4,7 +4,6 @@
 "@opengeni/worker-bundle": minor
 "@opengeni/decisions": minor
 "@opengeni/jev": minor
-"@opengeni/deployment": minor
 ---
 
 Improve deferred tool discovery with field-aware retrieval, best-match-first schema
