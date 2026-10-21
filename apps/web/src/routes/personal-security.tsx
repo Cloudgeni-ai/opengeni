@@ -1,6 +1,11 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiBaseUrl } from "@/api";
+import {
+  SIGN_IN_METHOD_ORIGIN_MESSAGE,
+  signInMethodsHaveSameOrigin,
+} from "@/lib/sign-in-method-origin";
 import { ProblemPanel } from "@/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
 import {
@@ -41,6 +46,19 @@ export function PersonalSecurityRoute() {
         title="Sign-in methods unavailable"
         description="Personal sign-in methods are managed by Opengeni only on deployments with managed browser sign-in."
       />
+    );
+  }
+  if (!signInMethodsHaveSameOrigin(apiBaseUrl, window.location.href)) {
+    return (
+      <PersonalSettingsShell email={context.authSession.user.email}>
+        <SecurityPageHeader />
+        <SecurityPageBody>
+          <Notice tone="failed">
+            <p>Account security configuration required</p>
+            <p>{SIGN_IN_METHOD_ORIGIN_MESSAGE}</p>
+          </Notice>
+        </SecurityPageBody>
+      </PersonalSettingsShell>
     );
   }
   const mode = context.clientConfig.managedAuthSessionSetMode ?? "dual";
