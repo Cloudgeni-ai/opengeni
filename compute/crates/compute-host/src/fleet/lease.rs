@@ -331,6 +331,10 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
+        memory_reclaimable_mib: status
+            .capacity
+            .as_ref()
+            .map_or(0, |_| mib(status.reclaimable_memory)),
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),

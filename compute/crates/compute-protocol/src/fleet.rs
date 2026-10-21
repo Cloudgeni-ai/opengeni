@@ -108,6 +108,13 @@ pub struct ReadyClones {
 pub struct Capacity {
     /// Memory free for sandboxes above the host's buffer, in MiB.
     pub memory_free_mib: u64,
+    /// Memory in MiB beyond [`Capacity::memory_free_mib`] that a new
+    /// sandbox could take now by the host ending idle VM processes whose
+    /// state is saved, as its admission counts it (ADR 4). Placement and
+    /// scaling count it as free. Missing from what a host or the service of
+    /// an earlier release wrote, which then counts none.
+    #[serde(default)]
+    pub memory_reclaimable_mib: u64,
     /// Processor time it guarantees sandboxes at once now, in
     /// millicores: less than [`HostInfo::cpu_millis`] while what else runs
     /// on the host takes more of its processors than it keeps back.

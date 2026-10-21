@@ -130,8 +130,13 @@ pick a VM.
   what the group gets: above the processors it overcommits them on
   purpose, requests then hold only in proportion, and the agent warns.
   Hosts
-  report their capacity as it is now and what is free; placement skips a
-  host without
+  report their capacity as it is now, what is free, and what ending idle
+  VM processes whose state is saved, and ready spare VMs, frees at once,
+  which admission counts for a wake (ADR 4). Placement and host groups
+  count both as free, so a saved idle sandbox holds no room; placement
+  prefers a host with free memory, which leaves those VMs in memory,
+  waking fastest, until a wake needs their room. Placement skips a host
+  without
   room for a sandbox's request, and a host group grows for whichever of
   memory and processor time runs short first, or when its hosts have too
   few rooms for the largest sandbox (its memory and processor time on one

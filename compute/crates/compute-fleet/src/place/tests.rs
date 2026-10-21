@@ -18,6 +18,7 @@ fn capacity(free_mib: u64) -> Capacity {
     Capacity {
         memory_mib: 64 * 1024,
         free_memory_mib: free_mib,
+        reclaimable_memory_mib: 0,
         free_cpu_millis: 64_000,
         free_disk_mib: 100_000,
         ready: Vec::new(),
@@ -307,6 +308,51 @@ fn the_view_steers_but_never_refuses() {
     // A report resets what was counted.
     two.update(HostId(0), capacity(2_000));
     assert_eq!(two.get(HostId(0)).unwrap().2.free_memory_mib, 2_000);
+}
+
+#[test]
+fn memory_idle_saved_sandboxes_hold_counts_as_free_but_free_memory_goes_first() {
+    // Both hosts are full, host 0 of idle sandboxes whose state is saved:
+    // it frees their memory for a wake at once, so it fits.
+    let mut idle = capacity(0);
+    idle.reclaimable_memory_mib = 3_000;
+    let mut one = Fleet::new();
+    one.upsert(HostId(0), info(0), HostState::Live, idle.clone());
+    one.upsert(HostId(1), info(1), HostState::Live, capacity(0));
+    let mut rng = Rng::new(4);
+    let wanted = demand(1_000);
+    for _ in 0..100 {
+        assert_eq!(
+            one.place(&wanted, &HashSet::new(), &mut rng).unwrap().host,
+            HostId(0)
+        );
+    }
+    let placed = one.place(&wanted, &HashSet::new(), &mut rng).unwrap();
+
+    // What was sent takes free memory first, then what it would free.
+    let mut partly = idle.clone();
+    partly.free_memory_mib = 500;
+    one.update(HostId(0), partly);
+    one.reserve(placed, &wanted);
+    let left = one.get(HostId(0)).unwrap().2;
+    assert_eq!(
+        (left.free_memory_mib, left.reclaimable_memory_mib),
+        (0, 2_500)
+    );
+
+    // A host with free memory is better than one that would have to end
+    // idle VM processes, which then stay in memory, waking fastest.
+    let mut two = Fleet::new();
+    let mut more_idle = capacity(1_000);
+    more_idle.reclaimable_memory_mib = 50_000;
+    two.upsert(HostId(0), info(0), HostState::Live, more_idle);
+    two.upsert(HostId(1), info(1), HostState::Live, capacity(2_000));
+    for _ in 0..100 {
+        assert_eq!(
+            two.place(&wanted, &HashSet::new(), &mut rng).unwrap().host,
+            HostId(1)
+        );
+    }
 }
 
 #[test]

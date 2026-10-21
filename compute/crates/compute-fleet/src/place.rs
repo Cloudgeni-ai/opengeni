@@ -18,11 +18,18 @@
 //! run it refuses it before making anything, and it goes to the next
 //! host. Only when every such host has refused is there no capacity.
 //!
+//! A host's memory fits a sandbox when what is free and what it would free
+//! at once by ending idle VM processes whose state is saved cover it: the
+//! host's own admission counts both (ADR 4), so an idle sandbox takes no
+//! room from placement once it is saved, and stays in memory, waking
+//! fastest, until a wake needs that room.
+//!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,
-//! then the one with more free memory. Drawing two keeps load even without
-//! herding every request onto the single emptiest host, and costs the same
-//! at five thousand hosts as at five.
+//! then the one with more free memory, then the one with more it could
+//! free. Drawing two keeps load even without herding every request onto the
+//! single emptiest host, and costs the same at five thousand hosts as at
+//! five.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -61,6 +68,9 @@ pub struct Capacity {
     /// Memory in MiB it can still promise to sandboxes that wake, beyond
     /// what it keeps spare.
     pub free_memory_mib: u64,
+    /// Memory in MiB it frees at once for a wake that needs it, by ending
+    /// idle VM processes whose state is saved.
+    pub reclaimable_memory_mib: u64,
     /// Processor time in millicores it can still promise to sandboxes
     /// that wake.
     pub free_cpu_millis: u64,
@@ -299,9 +309,12 @@ impl Fleet {
         self.unindex(slot);
         if let Some(entry) = self.slots[slot as usize].as_mut() {
             let capacity = &mut entry.capacity;
-            capacity.free_memory_mib = capacity
-                .free_memory_mib
-                .saturating_sub(demand.memory_on(entry.info));
+            let memory = demand.memory_on(entry.info);
+            let from_free = memory.min(capacity.free_memory_mib);
+            capacity.free_memory_mib -= from_free;
+            capacity.reclaimable_memory_mib = capacity
+                .reclaimable_memory_mib
+                .saturating_sub(memory - from_free);
             capacity.free_cpu_millis = capacity.free_cpu_millis.saturating_sub(demand.cpu_millis);
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
@@ -333,7 +346,10 @@ impl Fleet {
                     && !exclude.contains(&entry.id)
                     && capacity.memory_mib >= memory
                     && (!now
-                        || (capacity.free_memory_mib >= memory
+                        || (capacity
+                            .free_memory_mib
+                            .saturating_add(capacity.reclaimable_memory_mib)
+                            >= memory
                             && capacity.free_cpu_millis >= demand.cpu_millis
                             && capacity.free_disk_mib >= demand.disk_mib))
             })
@@ -419,9 +435,13 @@ impl Fleet {
     /// Whether host `a` suits `demand` better than host `b`.
     fn better(&self, a: u32, b: u32, demand: &Demand) -> bool {
         let key = |slot: u32| {
-            self.slots[slot as usize]
-                .as_ref()
-                .map(|entry| (has_ready(entry, demand), entry.capacity.free_memory_mib))
+            self.slots[slot as usize].as_ref().map(|entry| {
+                (
+                    has_ready(entry, demand),
+                    entry.capacity.free_memory_mib,
+                    entry.capacity.reclaimable_memory_mib,
+                )
+            })
         };
         key(a) > key(b)
     }

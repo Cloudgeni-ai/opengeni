@@ -428,6 +428,7 @@ impl Fleet {
 pub fn roomy() -> Capacity {
     Capacity {
         memory_free_mib: 64 * 1024,
+        memory_reclaimable_mib: 0,
         cpu_millis: 64_000,
         cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,

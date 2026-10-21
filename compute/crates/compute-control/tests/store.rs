@@ -26,6 +26,7 @@ fn random() -> u64 {
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
+        memory_reclaimable_mib: 0,
         cpu_millis: 4000,
         cpu_free_millis: 4000,
         disk_free_mib: 1024,

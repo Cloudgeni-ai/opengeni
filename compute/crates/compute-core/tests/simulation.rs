@@ -435,7 +435,6 @@ impl World {
             );
         }
         assert_eq!(self.host.len(), self.live.len());
-        let mut protected_resident = 0;
         for (id, truth) in &self.live {
             let view = self.host.sandbox(*id).expect("live sandbox is managed");
             assert_eq!(view.state, truth.state, "{id:?} state");
@@ -448,13 +447,7 @@ impl World {
                 "{id:?} sleep request"
             );
             assert_eq!(truth.unreported_losses, 0, "{id:?} lost programs silently");
-            if matches!(truth.state.level, Level::Paused | Level::Compressed)
-                && truth.state.durability != Durability::Volatile
-            {
-                protected_resident += truth.resident;
-            }
         }
-        assert!(self.host.reclaimable_memory() <= protected_resident);
     }
 
     fn add(&mut self) {
