@@ -3,6 +3,10 @@
 The checked-in ruleset is **disabled**. Landing workflows does not enable queue
 enforcement. Activation needs the rollout owner's explicit go after review.
 Production branch rules and release/environment approvals are not changed here.
+This document retains the native-queue measurements and inactive configuration.
+The selected in-house batching workflow is documented in
+[`merge-batcher.md`](merge-batcher.md); do not enable native enforcement as a
+side effect of following the historical commands below.
 
 ## Two independent test lanes
 
@@ -290,7 +294,7 @@ paging integration. A failed full run cannot prove causality alone.
    limitations, `Independent reviewer: <session>`, and findings resolved.
 4. Explicitly call out any threshold/budget increase or test skip/coverage
    reduction. Label `test-policy-change`; the reviewer must confirm it explicitly.
-5. Once enabled, `gh pr merge <number> --auto` enqueues; do not specify a conflicting
+5. For the inactive native option only, `gh pr merge <number> --auto` enqueues; do not specify a conflicting
    squash/rebase method, use `--admin`, invoke the direct merge endpoint or jump
    the queue. Observe merge-group success and the actual landed SHA.
 6. A substantive head edit invalidates the evidence: rerun affected full suites
@@ -306,6 +310,12 @@ check with the `Queue ready` name; manual dispatch is always a shadow result.
 The combined merge group still runs the ordinary fast workflow. Version
 automation opens/updates PRs; it does not auto-merge them or bypass agent evidence.
 Do not update an already reviewed/queued Version PR just to refresh its base.
+For the selected in-house batcher, Version PRs retain the real VM-test and
+independent-review evidence requirement, then use `queue-ready` with auto-merge
+off. They occupy one singleton batch. `Queue ready` from trusted Version CI is
+not a substitute for that evidence comment, nor for the batch's `Batch ready`
+result. See the before/after-activation procedure in `deployment.md`; no existing
+Version merge bot needs a bypass or a fabricated test attestation.
 
 Release source admission accepts an exact-head merge onto moving main only when
 the provider merge topology retains that head, the integration base retains the

@@ -2261,12 +2261,26 @@ and terminal head identity remain fail-closed. The merge authority separately pe
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR until trusted
+Before batcher activation, do not enable or leave auto-merge armed on a generated Version PR until trusted
 CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
 `headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
 remain open and auto-merge to remain null, then merge with an exact head-SHA
 fence. Never rely on an earlier UI observation for this boundary. Ordinary
 candidate/operator admission does not re-read GitHub reviews after merge.
+
+After the rollout owner enables the in-house batcher, replace only that manual
+merge action with the `queue-ready` label. Keep auto-merge off for Version PRs.
+First require the exact-head trusted full CI, `Queue ready`, current-base source
+admission and release-head retention evidence described above. Also run the
+full relevant VM tests, obtain independent review, and post the genuine exact-head
+evidence comment required by `AGENTS.md`; bot-created PRs have no exemption.
+The existing workflows create/update and validate Version PRs, but do not merge
+them automatically or fabricate that comment. Observe the singleton batch's
+`Batch ready` result and actual landed merge SHA. A regenerated head invalidates
+the earlier VM/review evidence and requires a fresh admission. The batcher performs
+the final head/readiness reread and post-land reconciliation; a late newer head
+must never be described as tested. The release consumer separately verifies full
+main CI at the released tip, not just the fast batch result.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
