@@ -257,6 +257,8 @@ export function useSessionEvents(
   const [presentedOutputs, setPresentedOutputs] =
     useState<ReadonlyMap<string, SessionEvent>>(EMPTY_PRESENTED_OUTPUTS);
   const presentedRequestedRef = useRef(new Map<string, PresentedRequest>());
+  // Failed reads per call: each retries after a growing pause, a few times.
+  const presentedFailuresRef = useRef(new Map<string, number>());
   // Bumped when a presented-result read settles, so the next pass runs.
   const [presentedPass, setPresentedPass] = useState(0);
   // A return to the live tip from history: catch up without replaying steps.
@@ -271,17 +273,25 @@ export function useSessionEvents(
    * Keep the steps that are still whole for a new `window`: only turns in it,
    * and, when live continuity broke, only turns already settled in the window
    * before the break (`sealedBy`). A turn still working then may have written
-   * steps this browser never saw; it reloads them when opened. Presented
-   * results of turns that left the window go too.
+   * steps this browser never saw; it reloads them when opened. `rereading` is
+   * a working turn whose tail is read again right after: its steps stay on
+   * screen until that read replaces them. Presented results of turns that
+   * left the window go too.
    */
   const pruneStepStores = useCallback(
-    (window: readonly SessionEvent[], sealedBy: readonly SessionEvent[] | null) => {
+    (
+      window: readonly SessionEvent[],
+      sealedBy: readonly SessionEvent[] | null,
+      rereading: string | null = null,
+    ) => {
       const present = windowTurns(window);
       const settled = sealedBy ? settledTurns(sealedBy) : null;
       const next = new Map<string, TurnStepStore>();
       for (const [turnId, store] of stepStoresRef.current) {
         // A dropped store also retires its read in flight (see requestId).
-        if (present.has(turnId) && (!settled || settled.has(turnId))) next.set(turnId, store);
+        if (present.has(turnId) && (!settled || settled.has(turnId) || turnId === rereading)) {
+          next.set(turnId, store);
+        }
       }
       if (next.size !== stepStoresRef.current.size) commitStepStores(next);
       // After a break, results still missing are read again; otherwise only
@@ -344,6 +354,7 @@ export function useSessionEvents(
           hasOlder: turnHasHiddenSequences(windowEvents, turnId, events[0]!.sequence),
           cursor: null,
           floor: null,
+          pinned: null,
           loading: false,
           error: false,
           touched: now,
@@ -368,13 +379,17 @@ export function useSessionEvents(
     (turnId: string, before?: number) => {
       if (!ownsNavigation() || !sessionId || fullReplay) return;
       const current = stepStoresRef.current.get(turnId);
-      const pinned = before !== undefined;
+      // Retrying a failed pinned read reads the same tail again: continuing
+      // below the loaded steps would leave the gap above them unread.
+      const pinnedUpper =
+        before ?? (current?.error && current.pinned !== null ? current.pinned : undefined);
+      const pinned = pinnedUpper !== undefined;
       if (!pinned && current?.loading) return;
       const bounds = conversationTurnBounds(eventWindowRef.current.events).get(turnId);
       if (!bounds) return;
       if (!pinned && current && !stepStoreHasOlder(current, bounds) && !current.error) return;
       const upper =
-        before ??
+        pinnedUpper ??
         current?.cursor ??
         current?.events[0]?.sequence ??
         (bounds.terminal !== null ? bounds.terminal + 1 : Number.MAX_SAFE_INTEGER);
@@ -396,6 +411,7 @@ export function useSessionEvents(
         hasOlder: true,
         cursor: null,
         floor: null,
+        pinned: null,
         loading: false,
         error: false,
         touched: 0,
@@ -404,6 +420,7 @@ export function useSessionEvents(
       commitStepStores(
         new Map(stepStoresRef.current).set(turnId, {
           ...base,
+          pinned: pinned ? upper : null,
           loading: true,
           error: false,
           touched: Date.now(),
@@ -457,6 +474,7 @@ export function useSessionEvents(
               ? lower + 1
               : page.events.reduce((oldest, event) => Math.min(oldest, event.sequence), upper),
             floor: reachedFloor ? lower : null,
+            pinned: null,
             loading: false,
             error: false,
             touched: Date.now(),
@@ -564,6 +582,7 @@ export function useSessionEvents(
       presentedCallIdsRef.current = new Set();
       presentedScanRef.current = null;
       presentedRequestedRef.current = new Map();
+      presentedFailuresRef.current = new Map();
       setPresentedOutputs(EMPTY_PRESENTED_OUTPUTS);
     }
     // AbortController is advisory: custom SDK clients and async iterators may
@@ -756,8 +775,8 @@ export function useSessionEvents(
       // may be missing, so those stores go (the working one is re-read).
       const previous = eventWindowRef.current.events;
       installCatchup(catchup, head);
-      pruneStepStores(eventWindowRef.current.events, previous);
       const working = sessionActiveTurn ?? activeConversationTurn(eventWindowRef.current.events);
+      pruneStepStores(eventWindowRef.current.events, previous, working);
       if (working) loadTurnStepsRef.current(working, head + 1);
       return "joined";
     };
@@ -1610,9 +1629,15 @@ export function useSessionEvents(
           setPresentedPass((pass) => pass + 1);
         },
         () => {
-          // A later pass retries; the tool row still shows its call.
+          // Retried after a pause; meanwhile the tool row still shows its call.
           if (!isCurrent()) return;
           requested.delete(callId);
+          const failures = (presentedFailuresRef.current.get(callId) ?? 0) + 1;
+          presentedFailuresRef.current.set(callId, failures);
+          if (failures > PRESENTED_OUTPUT_RETRIES) return;
+          setTimeout(() => {
+            if (ownsNavigation()) setPresentedPass((pass) => pass + 1);
+          }, PRESENTED_OUTPUT_RETRY_MS * failures);
         },
       );
     }
@@ -2206,6 +2231,8 @@ type TurnStepStore = {
    * bound (its start, or an earlier other turn), the store has older steps.
    */
   floor: number | null;
+  /** The upper bound of a pinned read not yet answered; a retry stays pinned. */
+  pinned: number | null;
   loading: boolean;
   error: boolean;
   /** Recency for eviction of turns nobody is viewing. */
@@ -2302,7 +2329,8 @@ export function conversationTurnBounds(events: readonly SessionEvent[]): Map<str
       }
       if (TERMINAL_TURN_TYPES.has(event.type)) current.terminal = event.sequence;
     }
-    previous = resume;
+    // A queued turn's rows can precede the working turn's later steps.
+    if (!PRE_START_TURN_TYPES.has(event.type)) previous = resume;
   }
   for (const turn of bounds.values()) {
     // Any gap that starts after the turn's first event and before its last.
@@ -2344,6 +2372,8 @@ function windowTurns(events: readonly SessionEvent[]): Set<string> {
 }
 
 const EMPTY_PRESENTED_OUTPUTS: ReadonlyMap<string, SessionEvent> = new Map();
+/** Rows a turn writes before it starts, while an earlier turn may still run. */
+const PRE_START_TURN_TYPES: ReadonlySet<string> = new Set(["turn.queued", "turn.capacity_waiting"]);
 /** A presented result read: its turn, and whether it is still in flight. */
 type PresentedRequest = { turnId: string | null; pending: boolean };
 // Presented results read per pass; each scans later outputs a page at a time,
@@ -2351,6 +2381,8 @@ type PresentedRequest = { turnId: string | null; pending: boolean };
 const PRESENTED_OUTPUT_READS_PER_PASS = 8;
 const PRESENTED_OUTPUT_PAGE_SIZE = 16;
 const PRESENTED_OUTPUT_MAX_PAGES = 16;
+const PRESENTED_OUTPUT_RETRIES = 3;
+const PRESENTED_OUTPUT_RETRY_MS = 2_000;
 const RETAINED_VIEW_STEPS: Pick<TurnStepsItem, "load" | "retain"> = {
   load: () => {},
   retain: () => () => {},

@@ -131,6 +131,8 @@ function historyClient(input: {
   failSteps?: () => boolean;
   /** Milliseconds before a page read answers. */
   pageDelay?: (options: SessionEventListOptions) => number;
+  /** A page read waits for this, when given. */
+  pageGate?: (options: SessionEventListOptions) => Promise<void> | undefined;
   /** Pause the live stream after this many events until `liveGate` resolves. */
   liveGate?: { after: number; open: Promise<void> };
 }) {
@@ -161,6 +163,7 @@ function historyClient(input: {
             reads.push(options);
             const delay = input.pageDelay?.(options) ?? 0;
             if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+            await input.pageGate?.(options);
             return serverRead(input.store(), options) as never;
           },
         }
@@ -519,6 +522,127 @@ describe("conversation-first session history", () => {
       } else {
         delete (document as { visibilityState?: unknown }).visibilityState;
       }
+    }
+  });
+
+  test("an open working turn keeps its steps on screen while a long-gap return re-reads them", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const store = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const live: SessionEvent[] = [];
+    let gate: Promise<void> | undefined;
+    let openGate = () => {};
+    const { client } = historyClient({
+      store: () => store,
+      live: () => live,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+      pageGate: (options) =>
+        options.includeTypes && options.includeTypes.length > 1 ? gate : undefined,
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    let unretain: (() => void) | undefined;
+    try {
+      await settle(60);
+      expect(stepEvents(hook.result.current.events)).toHaveLength(200);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+
+      jest.useFakeTimers();
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(() => jest.advanceTimersByTime(2_000));
+      // Twenty calls while away: too long to replay, so the tail is re-read.
+      for (let index = 0; index < 20; index += 1) {
+        const sequence = 203 + index * 2;
+        const id = `T1-late-${index}`;
+        store.push(
+          at(sequence, "agent.toolCall.created", { id, name: "exec_command" }, "T1"),
+          at(sequence + 1, "agent.toolCall.output", { id, output: "ok" }, "T1"),
+        );
+      }
+      gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(async () => {
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        jest.advanceTimersByTime(20);
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+      });
+      jest.useRealTimers();
+      await settle(30);
+      // The re-read is in flight: the open row still shows what it had.
+      expect(stepMarkers(hook.result.current.timeline)[0]!.state).toBe("loading");
+      expect(stepEvents(hook.result.current.events)).toHaveLength(200);
+
+      openGate();
+      await settle(60);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
+      expect(steps.at(-1)!.sequence).toBe(242);
+      expect(stepMarkers(hook.result.current.timeline)[0]!.state).toBe("partial");
+    } finally {
+      jest.useRealTimers();
+      openGate();
+      unretain?.();
+      await hook.unmount();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    }
+  });
+
+  test("a queued turn's row ahead of a running turn does not cut the running turn short", async () => {
+    // T2 was queued while T1 ran; its turn.queued row is the window's oldest.
+    const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
+    store.push(
+      at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+      at(101, "turn.started", { turnId: "T1" }, "T1"),
+    );
+    let sequence = 102;
+    const call = (index: number) => {
+      const id = `T1-call-${index}`;
+      store.push(at(sequence, "agent.model.request", {}, "T1"));
+      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+      sequence += 3;
+    };
+    for (let index = 0; index < 2500; index += 1) call(index);
+    const queued = sequence;
+    store.push(at(sequence++, "turn.queued", { turnId: "T2" }, "T2"));
+    for (let index = 2500; index < 4497; index += 1) call(index);
+    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+    const { client } = historyClient({ store: () => store, withPages: true });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const marker = () =>
+      stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
+    try {
+      await settle();
+      expect(hook.result.current.events[0]!.sequence).toBe(queued);
+      for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
+        await actRun(() => marker().load());
+        await settle(5);
+      }
+      expect(marker().state).toBe("complete");
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(4497 * 2);
+      expect(steps[0]!.sequence).toBe(103);
+    } finally {
+      await hook.unmount();
     }
   });
 
