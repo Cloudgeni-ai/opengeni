@@ -16,9 +16,19 @@ export function ordinaryMigrationIsPostureInert(sqlText: string): boolean {
     const text = stripComments(statement).trim();
     if (!text) return true;
     if (postureChange.test(text)) return false;
+    if (
+      /^ALTER\s+TABLE\b[\s\S]*\b(?:RENAME\s+TO|SET\s+SCHEMA|INHERIT|(?:ATTACH|DETACH)\s+PARTITION)\b/i.test(
+        text,
+      )
+    )
+      return false;
+    if (/^SET\s+(?:(?:LOCAL|SESSION)\s+)?(?:ROLE|SESSION\s+AUTHORIZATION)\b/i.test(text))
+      return false;
     // DO/CALL/EXECUTE and unknown statement forms may hide dynamic DDL. They
     // are intentionally not admitted even if no literal posture keyword occurs.
-    return /^(?:ALTER\s+(?:TABLE|INDEX)|CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|INSERT|UPDATE|DELETE|SELECT|WITH|SET|RESET)\b/i.test(
+    // SELECT/CTEs can call arbitrary routines too; admit only literal SELECTs.
+    if (/^SELECT\s+(?:\d+|TRUE|FALSE|NULL)\s*;?$/i.test(text)) return true;
+    return /^(?:ALTER\s+(?:TABLE|INDEX)|CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|INSERT|UPDATE|DELETE|SET|RESET)\b/i.test(
       text,
     );
   });

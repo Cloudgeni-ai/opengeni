@@ -55,6 +55,17 @@ describe("posture-inert pre eligibility", () => {
       "DO $$ BEGIN EXECUTE 'CREATE ' || 'TABLE t (id int)'; END $$;",
       "CALL opaque();",
       "CREATE EXTENSION opaque;",
+      "ALTER TABLE t RENAME TO renamed;",
+      "ALTER TABLE t SET SCHEMA other;",
+      "ALTER TABLE t INHERIT parent;",
+      "ALTER TABLE t NO INHERIT parent;",
+      "ALTER TABLE t ATTACH PARTITION child FOR VALUES IN (1);",
+      "ALTER TABLE t DETACH PARTITION child;",
+      "SET ROLE app;",
+      "SET LOCAL ROLE app;",
+      "SET SESSION AUTHORIZATION app;",
+      "SELECT opaque_ddl();",
+      "WITH invoked AS (SELECT opaque_ddl()) SELECT * FROM invoked;",
     ])
       expect(isPreReleaseEligible(file, `-- deployment-mode: rolling\n${sql}`)).toBe(false);
     expect(
@@ -63,6 +74,7 @@ describe("posture-inert pre eligibility", () => {
         "-- deployment-mode: rolling\n-- GRANT and ROW LEVEL SECURITY are just comments\n/* CREATE TABLE */ ALTER TABLE t ADD COLUMN value text;",
       ),
     ).toBe(true);
+    expect(isPreReleaseEligible(file, "-- deployment-mode: rolling\nSELECT 1;")).toBe(true);
   });
   test("real production migrations cannot run pre until old-binary readiness tolerates their posture", () => {
     const directory = join(import.meta.dir, "../drizzle");

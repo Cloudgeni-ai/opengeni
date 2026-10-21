@@ -14,7 +14,11 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitStatements, stripComments, stripRoutineBodies } from "./migration-rls-backfills";
-import { isPostReleaseEligible } from "../packages/db/src/migrate";
+import {
+  isPostReleaseEligible,
+  parseBatchedBackfillMigration,
+  parseConcurrentIndexMigration,
+} from "../packages/db/src/migrate";
 import { RELEASE_DIRECTIVE, migrationReleaseDirectives } from "../packages/db/src/migration-phases";
 
 export { MIGRATIONS_DIR } from "./migration-rls-backfills";
@@ -47,6 +51,7 @@ export type DeploymentModeFindingKind =
   | "unannotated-contract"
   | "weak-contract-step"
   | "ineligible-post-release"
+  | "ineligible-pre-release"
   | "conflicting-release-directives";
 
 export type DeploymentModeFinding = {
@@ -331,6 +336,23 @@ export function analyzeMigrationDeploymentMode(
       detail:
         "`-- opengeni:post-release` requires a rolling concurrent-index or batched-backfill migration accepted by the runner; ordinary DDL and maintenance migrations cannot be deferred",
     });
+  }
+  if (releaseMarkers.has("pre-release") && !releaseMarkers.has("post-release")) {
+    let supported = false;
+    try {
+      supported = !!(
+        parseBatchedBackfillMigration(file, text) || parseConcurrentIndexMigration(file, text)
+      );
+    } catch {
+      /* Malformed execution directives are not a scheduling escape hatch. */
+    }
+    if (!supported)
+      findings.push({
+        file,
+        kind: "ineligible-pre-release",
+        detail:
+          "`-- opengeni:pre-release` requires a concurrent-index or batched-backfill execution directive on line 2; ordinary migrations do not support this marker",
+      });
   }
   const misplaced = misplacedDirectiveLines(text);
   if (misplaced.length > 0) {

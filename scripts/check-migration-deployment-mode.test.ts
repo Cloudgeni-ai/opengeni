@@ -58,6 +58,9 @@ UPDATE widgets SET color = 'blue' FROM batch WHERE widgets.id = batch.id RETURNI
   });
 
   test("post-release rejects ordinary DDL, maintenance, invalid parser bodies and conflicting markers", () => {
+    expect(
+      kinds("5000_ordinary.sql", "-- deployment-mode: rolling\n-- opengeni:pre-release\nSELECT 1;"),
+    ).toEqual(["ineligible-pre-release"]);
     for (const body of [
       "CREATE TABLE widgets (id int);",
       "ALTER TABLE widgets ADD COLUMN color text;",

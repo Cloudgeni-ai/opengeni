@@ -61,7 +61,8 @@ indexes and batched backfills are inert. Ordinary SQL is admitted only when it
 has no table/function/procedure creation, grants/revokes, ownership changes,
 row-level security or policies, schema creation, default privileges, views,
 `SECURITY DEFINER`, or table/function drops. Unknown/dynamic statement forms
-(including `DO` and `CALL`) stay out of pre. Historical/unclassified files also
+(including `DO`, `CALL`, and nonliteral `SELECT`/CTEs), table renames/moves/
+inheritance/partition changes, and role switches stay out of pre. Historical/unclassified files also
 stay out. Comments do not count as SQL; uncertainty conservatively moves work
 into the middle span rather than rejecting execution.
 
@@ -376,6 +377,8 @@ it fails when:
   migration is declared maintenance;
 - `post-release` marks anything other than a valid rolling concurrent-index or
   batched-backfill migration, or both release markers appear together;
+- `pre-release` appears without a valid concurrent-index or batched-backfill
+  execution directive (ordinary migrations cannot carry this marker);
 - a maintenance migration has no meaningful `-- maintenance-justification:`;
 - a rolling migration runs `DROP COLUMN`, `DROP TABLE`, `RENAME COLUMN`,
   `RENAME TO`, `ALTER COLUMN ... TYPE` or `SET NOT NULL` on a table it did not
