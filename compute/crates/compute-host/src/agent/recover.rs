@@ -566,8 +566,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // as forgetting the memory of one a caller holds awake.
         let mut inputs = Vec::new();
         // A new sandbox whose first wake the agent before booked and that
-        // has not run since keeps that room booked until its deadline, so
-        // what this agent admits first cannot take it.
+        // has not woken since keeps that room booked until its deadline,
+        // so what this agent admits first cannot take it, even after a
+        // failed try at that wake.
         if state.level != Level::Running
             && let Some(by_ms) = record.first_wake_by_ms.filter(|by| *by > unix_ms_now())
         {

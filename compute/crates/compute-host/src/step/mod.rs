@@ -506,6 +506,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(()) => Outcome::Done,
             Err(error) => self.after_failed_wake(&error, image, archived).await,
         };
+        if outcome == Outcome::Done {
+            self.woke().await;
+        }
         (outcome, After::Kept(live))
     }
 
@@ -865,7 +868,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         notes::phase("load");
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
-        let running = Change::new().image(false).archived(false).woke();
+        let running = Change::new().image(false).archived(false);
         if let Err(error) = self.commit(running).await {
             let outcome = self
                 .end_with_memory(vm, live_memory, state_failure(&error))
@@ -900,6 +903,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(outcome) = told {
             return (outcome, After::New(vm, live_memory));
         }
+        self.woke().await;
         (Outcome::Done, After::New(vm, live_memory))
     }
 
@@ -1182,6 +1186,17 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Ends what the record keeps of the sandbox's first wake once a wake
+    /// of it succeeded, so no later agent books that room again; a failed
+    /// try keeps it. Kept by a failed write, it only lapses.
+    async fn woke(&mut self) {
+        if self.record.first_wake_by_ms.is_some()
+            && let Err(error) = self.commit(Change::new().woke()).await
+        {
+            tracing::warn!(id = %self.id, %error, "the first wake's booking stays until it lapses");
+        }
+    }
+
     /// Has the engine keep the description `watch` syncs for as long as
     /// `vm` lives, so a later agent can still vouch for the disk; see
     /// `DiskWatch`. Without it, a later agent never saves the VM.
@@ -1205,11 +1220,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// that does not is ended and the boot retried, as nothing changed.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
         let pending = self.record.identity == Identity::Pending;
-        let fresh = Change::new()
-            .image(false)
-            .archived(false)
-            .execution()
-            .woke();
+        let fresh = Change::new().image(false).archived(false).execution();
         let fresh = if pending {
             fresh
         } else {
@@ -1248,6 +1259,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                         .await;
                     return (outcome, After::NoVm);
                 }
+                self.woke().await;
                 (Outcome::Done, After::New(vm, memory))
             }
             Err(error) => {

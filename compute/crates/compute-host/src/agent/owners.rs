@@ -296,6 +296,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             )));
             return;
         }
+        if self.preparing.contains(&id.0) {
+            // Perhaps this very adopt's earlier attempt, whose record may
+            // be written before its copy's disk is admitted: retrying once
+            // it is done tells.
+            let _ = reply.send(Err(HostError::Busy(id)));
+            return;
+        }
         if let Some(record) = self.records.get(id)
             && !self.destroying.contains_key(&id.0)
         {
@@ -340,10 +347,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             return;
         }
-        if self.preparing.contains(&id.0)
-            || self.destroying.contains_key(&id.0)
-            || self.tearing_down.contains_key(&id.0)
-        {
+        if self.destroying.contains_key(&id.0) || self.tearing_down.contains_key(&id.0) {
             let _ = reply.send(Err(HostError::Busy(id)));
             return;
         }
@@ -352,7 +356,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         // Its first wake fetches it, so it must fit as that wake would.
-        match self.can_create(id, &config, true) {
+        // Only the copy tells how long its disk is, so until the copy is
+        // claimed the wake is checked and booked without it; its disk is
+        // judged by the copy's own then (see `Self::adopted_room`).
+        let unclaimed = self.size(&config, Some(0));
+        match self.can_create(id, &config, unclaimed, true) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
@@ -380,10 +388,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.preparing.insert(id.0);
-        // Booked as the base image's disk would be; the copy's own disk,
-        // known once it is claimed, is checked and booked then.
         let by_ms = first_wake_by_ms();
-        self.input(self.first_wake(id, self.size(&config, None), true, by_ms));
+        self.input(self.first_wake(id, unclaimed, true, by_ms));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);

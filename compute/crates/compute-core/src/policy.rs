@@ -473,8 +473,8 @@ pub struct HostPolicy {
 /// ([`crate::Input::Creating`]) from its yes until the sandbox first
 /// runs, so a burst of creates takes no more sandboxes than the host can
 /// wake. The host agent keeps that booking's deadline in the sandbox's
-/// record, so a restarted agent books it again, and checks an adoption
-/// again with its copy's own disk once the copy is claimed.
+/// record until a wake succeeds, so a restarted agent books it again, and
+/// judges an adoption's disk by its copy's own once the copy is claimed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Admission {
     /// Bytes of guest memory the host can hold at once: its capacity for

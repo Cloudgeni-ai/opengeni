@@ -485,20 +485,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Refuses a new sandbox `id` of `config` that cannot be created here,
-    /// or not woken at once; adopted with `remote`, its first wake fetches
-    /// it. Otherwise says whether it fits now or only the next disk
-    /// reading can tell.
+    /// or not woken at once as `size`; adopted with `remote`, its first
+    /// wake fetches it. Otherwise says whether it fits now or only the
+    /// next disk reading can tell.
     pub(super) fn can_create(
         &self,
         id: Id,
         config: &SandboxConfig,
+        size: Size,
         remote: bool,
     ) -> Result<Room, HostError> {
         self.sleep_policy(config).map_err(HostError::Invalid)?;
         if let Some(refused) = self.needs_absent_store(&config.sleep) {
             return Err(refused);
         }
-        self.room_for(id, self.size(config, None), remote, DiskSpace::default())
+        self.room_for(id, size, remote, DiskSpace::default())
     }
 
     /// Refuses a new sandbox `id` of `config` this host could not wake at
@@ -543,10 +544,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Books the first wake of adopted sandbox `record` as its copy's own
     /// disk needs, `size`, if this host can wake it now: the adopt booked
-    /// it as the base image's disk would be, before the copy was claimed.
-    /// Otherwise the sandbox goes again, leaving the store's copy for
-    /// another host, and the adopt is refused as a wake that would wait
-    /// here for room is, even for disk only the next reading could show.
+    /// it without that disk, which only the claimed copy shows. Otherwise
+    /// the sandbox goes again, leaving the store's copy for another host,
+    /// and the adopt is refused as a wake that would wait here for room
+    /// is, even for disk only the next reading could show.
     pub(super) fn adopted_room(&mut self, record: &Record, size: Size) -> Result<(), HostError> {
         let id = record.id;
         let room = self
@@ -612,7 +613,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(answer);
             return;
         }
-        let room = match self.can_create(id, &config, false) {
+        let room = match self.can_create(id, &config, self.size(&config, None), false) {
             Ok(room) => room,
             Err(error) => {
                 let _ = reply.send(Err(error));

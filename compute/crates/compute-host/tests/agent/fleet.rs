@@ -439,14 +439,10 @@ async fn read_disk(lab: &Lab, gauge: &DiskGauge, bytes: u64) -> DiskStatus {
     lab.status().await.disk.expect("a disk policy")
 }
 
-/// An adopt books the first wake the base image's disk would need before
-/// it claims the store's copy, then books it again with the copy's own
-/// disk: a copy this host has no disk for is refused there, leaving
-/// nothing here and the store's copy whole for another host.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_the_copy() {
-    const GROWN: u64 = 64 << 20;
-    const PLENTY: u64 = 1 << 50;
+/// Two hosts sharing a store, the second of which reads its free disk
+/// from the gauge returned, and a sandbox of the first's per id, written
+/// to, paused and handed off through the store.
+async fn handed_to_a_gauged_host(sandboxes: &[Id]) -> (Lab, Lab, DiskGauge, PathBuf) {
     let a = Lab::root();
     let shelf = a.join("shelf");
     let one = Lab::start_stored(a, Arc::default(), Directory::new(&shelf)).await;
@@ -465,13 +461,25 @@ async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_
         },
     )
     .await;
-    let (small, grown) = (id(1), id(2));
-    for sandbox in [small, grown] {
+    for &sandbox in sandboxes {
         one.create(sandbox, NEVER).await;
         one.run(sandbox, &["write on-disk"]).await;
         assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
         one.wait_level(sandbox, LevelName::Paused).await;
     }
+    (one, two, gauge, shelf)
+}
+
+/// An adopt books the first wake without the copy's disk before it claims
+/// the store's copy, then books it again with the copy's own disk: a copy
+/// this host has no disk for is refused there, leaving nothing here and
+/// the store's copy whole for another host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_the_copy() {
+    const GROWN: u64 = 64 << 20;
+    const PLENTY: u64 = 1 << 50;
+    let (small, grown) = (id(1), id(2));
+    let (one, two, gauge, shelf) = handed_to_a_gauged_host(&[small, grown]).await;
     std::fs::OpenOptions::new()
         .write(true)
         .open(one.sandbox_dir(grown).join("root/disk.ext4"))
@@ -482,7 +490,7 @@ async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_
         assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
     }
 
-    // What the first wake of a copy with the base image's disk books.
+    // What the first wake of the small copy books.
     let empty = read_disk(&two, &gauge, PLENTY).await.free;
     assert_eq!(adopt(&two, small, 2).await, Reply::Done);
     let first = empty - two.status().await.disk.unwrap().free;
@@ -521,6 +529,32 @@ async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_
         "its files moved"
     );
     assert_eq!(two.run(small, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt judges disk by the store's copy alone, never by the adopting
+/// host's base image: a host with room for the copy's first wake but not
+/// for one of a disk as long as its base image, far longer than the
+/// copy's, takes the copy and books only what it needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_judges_disk_by_the_copy_never_by_the_base_image() {
+    const LONG: u64 = 8 << 30;
+    let sandbox = id(3);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(two.root.join("base.img"))
+        .unwrap()
+        .set_len(LONG)
+        .unwrap();
+
+    let free = read_disk(&two, &gauge, LONG / 2).await.free;
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let booked = free - two.status().await.disk.unwrap().free;
+    assert!(booked > 0 && booked < LONG / 4, "booked {booked}");
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
     one.assert_clean();
     two.assert_clean();
 }

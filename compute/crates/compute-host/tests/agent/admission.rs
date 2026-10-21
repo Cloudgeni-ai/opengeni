@@ -3,7 +3,8 @@
 //! wakes in the background, reports its capacity, and rebuilds what it
 //! promised after a restart.
 
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use compute_core::{Admission, HostPolicy};
 use compute_host::protocol::{
@@ -225,6 +226,49 @@ async fn first_wake_bookings_survive_a_restart() {
     let lab = Lab::start(root, world, Delays::default(), policy()).await;
     let after = capacity(&lab).await;
     assert_eq!((after.reserved, after.awake), (256 * MIB, 1));
+    lab.assert_clean();
+}
+
+/// The record keeps a first wake's deadline until a wake succeeds, never
+/// dropping it as the wake starts: an agent that restarts during that
+/// wake, or after it failed, still books its room. Once the sandbox runs,
+/// the record drops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_wake_keeps_its_deadline_until_it_succeeds() {
+    let lab = Lab::new(Delays::default(), policy()).await;
+    let sandbox = id(1);
+    lab.create(sandbox, NEVER).await;
+    let created = lab.record(sandbox);
+    let due = created["first_wake_by_ms"].as_u64();
+    assert!(due.is_some(), "kept as it is created");
+
+    lab.world.hold_boots.store(true, Ordering::SeqCst);
+    let hold = Request::Hold {
+        id: sandbox,
+        generation: None,
+        hold: "work".into(),
+        ttl_ms: None,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(lab.client.call(&hold).await.unwrap(), Reply::Done);
+    // The boot's own write to the record raises its generation.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lab.record(sandbox)["generation"] == created["generation"] {
+        assert!(Instant::now() < deadline, "the boot never began");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        lab.record(sandbox)["first_wake_by_ms"].as_u64(),
+        due,
+        "kept while it boots"
+    );
+
+    lab.world.hold_boots.store(false, Ordering::SeqCst);
+    lab.wait_level(sandbox, LevelName::Running).await;
+    assert!(
+        lab.record(sandbox).get("first_wake_by_ms").is_none(),
+        "dropped once it runs"
+    );
     lab.assert_clean();
 }
 

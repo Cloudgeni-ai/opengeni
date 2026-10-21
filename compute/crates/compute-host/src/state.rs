@@ -164,8 +164,11 @@ pub(crate) struct Record {
     pub handed_off: bool,
     /// Until when the host keeps the room of its first wake booked, in
     /// milliseconds since the Unix epoch: set as it is created, claimed
-    /// or adopted here, so an agent that starts before then books that
-    /// wake again (see [`compute_core::Input::Creating`]).
+    /// or adopted here, so an agent that starts before then and finds it
+    /// not running books that wake again (see
+    /// [`compute_core::Input::Creating`]). Dropped only once a wake
+    /// succeeded, so a first wake that fails and is tried again keeps its
+    /// room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_wake_by_ms: Option<u64>,
 }
@@ -341,8 +344,8 @@ impl Change {
         self
     }
 
-    /// Its VM runs: its first wake is done, so no agent books that wake's
-    /// room again.
+    /// A wake of it succeeded: its first wake is done, so no agent books
+    /// that wake's room again.
     pub fn woke(mut self) -> Self {
         self.woke = true;
         self

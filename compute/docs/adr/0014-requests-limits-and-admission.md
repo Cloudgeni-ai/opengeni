@@ -34,12 +34,15 @@ pick a VM.
   rest are refused with `host_full` at once and placed elsewhere
   ([15](0015-placement-and-moves-between-hosts.md)).
   - The deadline of that booking is in the sandbox's record and the record
-    drops it once the sandbox first runs, so an agent that restarts books
-    each first wake still due again before it admits anything else.
-  - An adoption is first checked as if its copy had the base image's disk,
-    since only claiming the copy shows its own; once claimed, it is checked
-    again with the copy's disk and refused with `host_full` if that does not
-    fit, leaving nothing on the host and the store's copy for another host.
+    drops it only once a wake of the sandbox succeeded, so an agent that
+    restarts books each first wake still due again before it admits
+    anything else, including one whose first try failed.
+  - An adoption is first checked without its copy's disk, since only
+    claiming the copy shows how long that is, never by this host's base
+    image. Once claimed, it is checked with the copy's disk and refused with
+    `host_full` if that does not fit, leaving nothing on the host and the
+    store's copy for another host. A repeat of the adopt meanwhile is
+    answered busy, never done, until that check is over.
   - A claimed ready sandbox's VM already holds memory. Its first wake books
     that memory up to the request, and only what the VM holds beyond the
     request stays counted apart until the sandbox joins the core, so claims
