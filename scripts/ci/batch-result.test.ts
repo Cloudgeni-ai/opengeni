@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -208,3 +208,44 @@ test("CLI emits infrastructure evidence when the command cannot start", async ()
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test.each([0, 1])(
+  "setup exit %i writes only failure evidence, never a stale test success",
+  async (exit) => {
+    const directory = mkdtempSync(join(tmpdir(), "batch-setup-receipt-"));
+    try {
+      const output = join(directory, "receipt-source.json");
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "scripts/ci/batch-result.ts",
+          "run",
+          "--failure-only",
+          "--job",
+          "source",
+          "--output",
+          output,
+          "--",
+          process.execPath,
+          "-e",
+          `process.exit(${exit})`,
+        ],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            BATCH_ID: identity.batchId,
+            GITHUB_SHA: identity.headSha,
+            GITHUB_RUN_ID: identity.runId,
+            GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
+          },
+        },
+      );
+      expect(await child.exited).toBe(exit);
+      expect(existsSync(output)).toBe(exit !== 0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

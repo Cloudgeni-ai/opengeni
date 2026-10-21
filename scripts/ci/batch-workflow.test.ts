@@ -48,7 +48,7 @@ test("receipts never mix attempts and the gate runs even on failed code jobs", (
 test("installation and database setup produce explicit receipts before candidate assertions", () => {
   for (const job of [workflow.jobs.source, workflow.jobs.units]) {
     const setup = job.steps.find((step: any) => step.run?.includes("batch-setup.ts install"));
-    expect(setup.run).toContain("batch-result.ts run --job");
+    expect(setup.run).toContain("batch-result.ts run --failure-only --job");
   }
   expect(
     workflow.jobs.units.steps.some((step: any) => step.run?.includes("batch-setup.ts postgres")),

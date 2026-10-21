@@ -10,6 +10,11 @@ export function classifyInstallExit(exitCode: number, output: string): number {
 
 if (import.meta.main) {
   const phase = process.argv[2];
+  // Syntax/import failures are candidate code failures, not unavailable Docker.
+  const acquireBlankTestDatabase =
+    phase === "postgres"
+      ? (await import("../../packages/testing/src/shared-pg")).acquireBlankTestDatabase
+      : undefined;
   try {
     if (phase === "install") {
       const child = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
@@ -36,8 +41,7 @@ if (import.meta.main) {
     } else if (phase === "postgres") {
       // Exercise container/image/server setup before attributing test assertions.
       // Blank acquisition does not apply candidate migrations; those stay tests.
-      const { acquireBlankTestDatabase } = await import("../../packages/testing/src/shared-pg");
-      const fixture = await acquireBlankTestDatabase("batch-infrastructure");
+      const fixture = await acquireBlankTestDatabase!("batch-infrastructure");
       if (!fixture) throw new Error("Real PostgreSQL fixture is unavailable");
       await fixture.release();
     } else throw new Error("usage: batch-setup.ts install|postgres");

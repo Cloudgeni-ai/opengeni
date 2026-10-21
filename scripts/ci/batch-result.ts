@@ -185,15 +185,19 @@ if (import.meta.main) {
       );
     }
     if (interrupted) exitCode = 130;
-    save(output, {
-      schemaVersion: 1,
-      ...identity,
-      job,
-      ...classifyBatchExit(exitCode),
-      exitCode,
-      startedAt,
-      finishedAt: new Date().toISOString(),
-    });
+    // Setup success is not test success. If a later test is killed, do not
+    // leave a stale green setup receipt masquerading as that test's result.
+    if (exitCode !== 0 || !process.argv.slice(0, split).includes("--failure-only")) {
+      save(output, {
+        schemaVersion: 1,
+        ...identity,
+        job,
+        ...classifyBatchExit(exitCode),
+        exitCode,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      });
+    }
     process.exit(exitCode < 0 ? 1 : exitCode);
   } else if (mode === "aggregate") {
     const identity = batchIdentity(process.env);
