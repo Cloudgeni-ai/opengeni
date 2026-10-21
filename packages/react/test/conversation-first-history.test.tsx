@@ -17,6 +17,7 @@ import {
   conversationFilterMode,
   conversationTurnBounds,
   isConversationHistoryEvent,
+  REJOIN_STALL_TIMEOUT_MS,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { useSession } from "../src/hooks/use-session";
@@ -230,6 +231,8 @@ function historyClient(input: {
   sdkTransport?: SessionEventStreamTransport;
   /** A head read throws this, when given. */
   failHead?: () => Error | undefined;
+  /** A head read waits for this (then reads the head), when given. */
+  holdHead?: () => Promise<void> | undefined;
 }) {
   const reads: SessionEventListOptions[] = [];
   const streamCalls: number[] = [];
@@ -237,6 +240,7 @@ function historyClient(input: {
   const client = fakeClient({
     getSession: async () => {
       headReads += 1;
+      await input.holdHead?.();
       const failure = input.failHead?.();
       if (failure) throw failure;
       const store = input.store();
@@ -2450,7 +2454,11 @@ function lateCalls(start: number, count: number, turnId = "T1"): SessionEvent[] 
 describe("rejoining the live tip after a reconnect or a sleep", () => {
   /** A chat on a working turn whose 100 calls are already written. */
   async function openWorkingChat(
-    options: { replay?: "full"; failHead?: () => Error | undefined } = {},
+    options: {
+      replay?: "full";
+      failHead?: () => Error | undefined;
+      pageGate?: (options: SessionEventListOptions) => Promise<void> | undefined;
+    } = {},
   ) {
     const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
     const server = sseServer(() => store);
@@ -2460,6 +2468,7 @@ describe("rejoining the live tip after a reconnect or a sleep", () => {
       head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
       sdkTransport: server.transport,
       ...(options.failHead ? { failHead: options.failHead } : {}),
+      ...(options.pageGate ? { pageGate: options.pageGate } : {}),
     });
     const hook = await renderHook(
       () =>
@@ -2780,6 +2789,117 @@ describe("rejoining the live tip after a reconnect or a sleep", () => {
       expect(sequences).toHaveLength(220);
       expect(sequences.at(-1)).toBe(222);
     } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a reconnect whose catch-up read hangs is abandoned and retried, and its late answer changes nothing", async () => {
+    let held: Promise<void> | undefined;
+    let release = () => {};
+    const { store, server, history, hook } = await openWorkingChat({
+      // Only a catch-up read (forward from a cursor) is held, once.
+      pageGate: (options) => {
+        if (options.after === undefined) return undefined;
+        const hold = held;
+        held = undefined;
+        return hold;
+      },
+    });
+    let unretain: (() => void) | undefined;
+    // Fake time: drive timers by hand, letting promises settle in between.
+    const pass = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(100);
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+        });
+      }
+    };
+    jest.useFakeTimers();
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+      // The first catch-up read after the drop goes out on a dead connection.
+      held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await pass(1_000);
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202]);
+      // Nothing completes for the stall timeout: the attempt is abandoned
+      // and retried, and the retry skips the backlog.
+      await pass(REJOIN_STALL_TIMEOUT_MS + 1_000);
+      expect(history.headReads()).toBe(headReads + 2);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      const reads = history.reads.length;
+      const sequences = uniqueStepSequences(hook.result.current.events);
+      expect(sequences.at(-1)).toBe(4_202);
+      // The abandoned read answers late, after even more was written: it
+      // must not catch up, read or reconnect on behalf of a dead attempt.
+      store.push(...lateCalls(4_203, 2_000));
+      release();
+      await pass(1_000);
+      expect(history.reads).toHaveLength(reads);
+      expect(uniqueStepSequences(hook.result.current.events)).toEqual(sequences);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      release();
+      jest.useRealTimers();
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a reconnect whose reads are slow but progressing is never abandoned", async () => {
+    let slow = false;
+    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const server = sseServer(() => store);
+    const stallShare = Math.ceil(REJOIN_STALL_TIMEOUT_MS * 0.7);
+    const history = historyClient({
+      store: () => store,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+      sdkTransport: server.transport,
+      // Each read takes most of the stall timeout; together they exceed it.
+      holdHead: () =>
+        slow ? new Promise<void>((resolve) => setTimeout(resolve, stallShare)) : undefined,
+      pageDelay: (options) => (slow && options.after !== undefined ? stallShare : 0),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client: history.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const pass = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(100);
+          for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+        });
+      }
+    };
+    let unretain: (() => void) | undefined;
+    try {
+      await settle(60);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      jest.useFakeTimers();
+      const headReads = history.headReads();
+      slow = true;
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await pass(stallShare * 3);
+      // One attempt, never restarted: one head read, nothing replayed.
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+    } finally {
+      jest.useRealTimers();
       unretain?.();
       await hook.unmount();
     }
