@@ -55,11 +55,12 @@ export function publicAlertsEnabled(
   return !event.workflow_run && setting === "true";
 }
 
-export function isBatchRun(run: Run): boolean {
+export function isBatchRun(run: Run, trafficShadow = false): boolean {
   return (
     run.path === ".github/workflows/batch-ci.yml" &&
     run.event === "push" &&
-    run.head_branch.startsWith("queue/")
+    run.head_branch.startsWith("queue/") &&
+    run.head_branch.startsWith("queue/shadow-traffic/") === trafficShadow
   );
 }
 
@@ -279,9 +280,14 @@ export function collectQueueTimings(api: Api, repository: string, runs: Run[]): 
   return rows;
 }
 
-export function collectBatchTimings(api: Api, repository: string, runs: Run[]) {
+export function collectBatchTimings(
+  api: Api,
+  repository: string,
+  runs: Run[],
+  trafficShadow = false,
+) {
   return runs
-    .filter(isBatchRun)
+    .filter((run) => isBatchRun(run, trafficShadow))
     .map((run) =>
       batchTiming(
         run,
@@ -303,12 +309,21 @@ export function collectBatchReport(api: Api, repository: string, since: string) 
       "workflow_runs",
     ) as Run[];
     const batchRows = collectBatchTimings(api, repository, runs);
-    return { batchRows, batchSummary: summarizeBatches(batchRows), batchError: null };
+    const trafficShadowRows = collectBatchTimings(api, repository, runs, true);
+    return {
+      batchRows,
+      batchSummary: summarizeBatches(batchRows),
+      trafficShadowRows,
+      trafficShadowSummary: summarizeBatches(trafficShadowRows),
+      batchError: null,
+    };
   } catch {
     // Do not expose provider response bodies or publish a partial healthy sample.
     return {
       batchRows: [],
       batchSummary: null,
+      trafficShadowRows: [],
+      trafficShadowSummary: null,
       batchError:
         "Batch telemetry unavailable; collection failed. Full-main reconciliation remains independent.",
     };
@@ -367,6 +382,7 @@ if (import.meta.main) {
     const run: Run = gh(`repos/${repository}/actions/runs/${event.workflow_run.id}`);
     const rows = collectQueueTimings(gh, repository, [run]);
     const batchRows = collectBatchTimings(gh, repository, [run]);
+    const trafficShadowRows = collectBatchTimings(gh, repository, [run], true);
     const alert = {
       reported: false,
       redMain: isRedMain(run),
@@ -375,7 +391,15 @@ if (import.meta.main) {
     writeFileSync(
       "queue-health.json",
       JSON.stringify(
-        { generatedAt: now, rows, batchRows, batchSummary: summarizeBatches(batchRows), alert },
+        {
+          generatedAt: now,
+          rows,
+          batchRows,
+          batchSummary: summarizeBatches(batchRows),
+          trafficShadowRows,
+          trafficShadowSummary: summarizeBatches(trafficShadowRows),
+          alert,
+        },
         null,
         2,
       ) + "\n",
@@ -389,7 +413,8 @@ if (import.meta.main) {
     ) as Run[];
     const rows = collectQueueTimings(gh, repository, runs);
     const summary = summarizeQueue(rows, now);
-    const { batchRows, batchSummary, batchError } = collectBatchReport(gh, repository, since);
+    const { batchRows, batchSummary, trafficShadowRows, trafficShadowSummary, batchError } =
+      collectBatchReport(gh, repository, since);
     // The report lane coalesces pending invocations. Reconcile completed red
     // main runs too, so a queue-report burst cannot hide a full-CI failure.
     const redRuns = paginated(
@@ -407,7 +432,17 @@ if (import.meta.main) {
     writeFileSync(
       "queue-health.json",
       JSON.stringify(
-        { ...summary, rows, batchRows, batchSummary, batchError, alertsEnabled, alerts },
+        {
+          ...summary,
+          rows,
+          batchRows,
+          batchSummary,
+          trafficShadowRows,
+          trafficShadowSummary,
+          batchError,
+          alertsEnabled,
+          alerts,
+        },
         null,
         2,
       ) + "\n",
@@ -415,7 +450,7 @@ if (import.meta.main) {
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
-        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify({ nativeQueue: summary, batchCi: batchSummary, batchError }, null, 2)}\n\`\`\`\n`,
+        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify({ nativeQueue: summary, batchCi: batchSummary, trafficShadow: trafficShadowSummary, batchError }, null, 2)}\n\`\`\`\n`,
       );
     if (summary.stopSignal) console.log("::warning::" + summary.recommendation);
   }

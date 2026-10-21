@@ -268,6 +268,10 @@ attempt's `run_started_at`; a retry without that timestamp remains unknown.
 Hourly reconciliation contains only the latest attempt of each run, while event
 receipts retain each delivered completion. Do not interpret that hourly sample as
 the controller's complete retry history.
+Historical `queue/shadow-traffic/` runs are reported in separate
+`trafficShadowRows` / `trafficShadowSummary` fields; they never contribute to the
+live batch provider sample. Historical readiness proxies and reconstruction
+artifacts must not be presented as live queue capacity or culprit evidence.
 
 Landing instrumentation does **not** post public comments or issues. Explicit
 rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation

@@ -56,7 +56,7 @@ test("batch telemetry binds exact attempt jobs but never invents readiness, buil
   const candidate = {
     ...run,
     event: "push",
-    head_branch: "queue/shadow-traffic/abc",
+    head_branch: "queue/live/abc",
     path: ".github/workflows/batch-ci.yml",
     run_attempt: 2,
     run_started_at: "2026-10-21T10:02:00Z",
@@ -108,6 +108,37 @@ test("batch run filtering excludes ordinary pushes and unrelated workflow paths"
     }),
   ).toBe(false);
   expect(isBatchRun({ ...run, event: "push", head_branch: "queue/live/abc" })).toBe(false);
+});
+
+test("historical traffic CI cannot contaminate live batch provider metrics", () => {
+  const live = {
+    ...run,
+    event: "push",
+    head_branch: "queue/live/abc",
+    path: ".github/workflows/batch-ci.yml",
+  };
+  const traffic = {
+    ...live,
+    id: 43,
+    head_branch: "queue/shadow-traffic/def",
+    conclusion: "failure",
+  };
+  expect(isBatchRun(traffic)).toBe(false);
+  expect(isBatchRun(traffic, true)).toBe(true);
+  const calls: string[] = [];
+  const report = collectBatchReport(
+    (path) => {
+      calls.push(path);
+      return path.includes("/workflows/") ? { workflow_runs: [live, traffic] } : { jobs };
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(report.batchRows.map((row) => row.runId)).toEqual([42]);
+  expect(report.trafficShadowRows.map((row) => row.runId)).toEqual([43]);
+  expect(report.batchSummary?.providerRedRuns).toBe(0);
+  expect(report.trafficShadowSummary?.providerRedRuns).toBe(1);
+  expect(calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
 });
 
 test("batch cancellation is not a failing PR and empty samples remain unknown", () => {
