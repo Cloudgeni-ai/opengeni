@@ -452,7 +452,10 @@ function expandSourcePattern(pkgDir: string, sourceTarget: string): string[] {
         visit(path);
         continue;
       }
-      const relative = `./${path.slice(join(repoRoot, pkgDir).length + 1).split("\\").join("/")}`;
+      const relative = `./${path
+        .slice(join(repoRoot, pkgDir).length + 1)
+        .split("\\")
+        .join("/")}`;
       if (!relative.startsWith(prefix) || !relative.endsWith(suffix)) continue;
       const match = relative.slice(prefix.length, relative.length - suffix.length);
       if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;

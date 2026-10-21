@@ -14,14 +14,10 @@ import {
   repositoryCloneCommand,
   runRepositoryCloneHook,
 } from "../src/index";
-import {
-  hostShellSession,
-  isolatedGitEnvironment,
-} from "./isolated-git-home-fixture";
+import { hostShellSession, isolatedGitEnvironment } from "./isolated-git-home-fixture";
 
 describe("lifecycle scripts — real sh execution semantics", () => {
-  const childProcess =
-    require("node:child_process") as typeof import("node:child_process");
+  const childProcess = require("node:child_process") as typeof import("node:child_process");
   const {
     mkdtempSync,
     mkdirSync,
@@ -52,9 +48,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
   /** A sandbox-like environment: isolated HOME plus the sandbox provisioning
    *  target the runtime's lifecycle hooks set. `undefined` removes a name. */
-  function isolatedProcessEnv(
-    overrides: ChildEnvironment = {},
-  ): NodeJS.ProcessEnv {
+  function isolatedProcessEnv(overrides: ChildEnvironment = {}): NodeJS.ProcessEnv {
     return isolatedGitEnvironment(
       { HOME: harnessHome, ...overrides },
       { sandboxGitProvisioning: true },
@@ -66,10 +60,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
   function execFileSync(
     file: string,
     args: readonly string[],
-    options: Omit<
-      import("node:child_process").ExecFileSyncOptions,
-      "env" | "encoding"
-    > & {
+    options: Omit<import("node:child_process").ExecFileSyncOptions, "env" | "encoding"> & {
       env?: ChildEnvironment;
       encoding?: "utf8";
     } = {},
@@ -104,8 +95,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       .split("\n")
       .filter(
         (line) =>
-          !line.startsWith("start_repository_clone '") &&
-          line !== "wait_repository_clone_batch",
+          !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
     return `${withoutInvocations}\nclone_repository '${target}' '${uri}' '${ref}' '${subpath}' '${resource.expectedCommitSha ?? ""}'${credentialSource ? ` '${credentialSource}'` : ""}`;
@@ -119,8 +109,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       .split("\n")
       .filter(
         (line) =>
-          !line.startsWith("start_repository_clone '") &&
-          line !== "wait_repository_clone_batch",
+          !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
   }
@@ -143,21 +132,14 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     return origin;
   }
 
-  function runScript(
-    script: string,
-    env: ChildEnvironment,
-  ): { status: number; output: string } {
+  function runScript(script: string, env: ChildEnvironment): { status: number; output: string } {
     try {
       // merge stderr into stdout so diagnostics like "Re-materializing..." are visible
-      const output = childProcess.execFileSync(
-        "sh",
-        ["-c", `{\n${script}\n} 2>&1`],
-        {
-          env: isolatedProcessEnv(env),
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      const output = childProcess.execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
+        env: isolatedProcessEnv(env),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       return { status: 0, output };
     } catch (error) {
       const e = error as { status?: number; stdout?: string; stderr?: string };
@@ -205,10 +187,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ref: "main",
         expectedCommitSha: "f".repeat(40),
       };
-      const mismatch = runScript(
-        cloneScriptWithTarget(target, `file://${origin}`, resource),
-        {},
-      );
+      const mismatch = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {});
       expect(mismatch.status).not.toBe(0);
       expect(mismatch.output).toContain("resolved to an unexpected commit");
       expect(existsSync(target)).toBe(false);
@@ -253,25 +232,16 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         credentialBindingId: "host-guard",
       };
       const bindings = [
-        {
-          credentialBindingId: "host-guard",
-          provider: "github" as const,
-          token: "host-token",
-        },
+        { credentialBindingId: "host-guard", provider: "github" as const, token: "host-token" },
       ];
       const scripts = {
         clone: cloneScriptWithTarget(target, `file://${origin}`, resource),
-        providerRefresh: gitProviderTokenRefreshCommand({
-          github: "host-token",
-        }),
+        providerRefresh: gitProviderTokenRefreshCommand({ github: "host-token" }),
         bindingRefresh: gitCredentialBindingTokenRefreshCommand(bindings),
       };
       // Exactly how a developer or a careless test would run an exported builder:
       // on the host, without the sandbox lifecycle target.
-      const hostEnvironment = isolatedGitEnvironment({
-        HOME: home,
-        GIT_TERMINAL_PROMPT: "0",
-      });
+      const hostEnvironment = isolatedGitEnvironment({ HOME: home, GIT_TERMINAL_PROMPT: "0" });
       expect(hostEnvironment.OPENGENI_GIT_PROVISIONING_TARGET).toBeUndefined();
       for (const [name, script] of Object.entries(scripts)) {
         let status = 0;
@@ -293,13 +263,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           output = failure.stdout ?? "";
         }
         expect({ name, status }).toEqual({ name, status: 78 });
-        expect(output).toContain(
-          "Refusing to provision Opengeni Git credentials",
-        );
+        expect(output).toContain("Refusing to provision Opengeni Git credentials");
         expect(readFileSync(join(home, ".gitconfig"), "utf8")).toBe(gitconfig);
-        expect(
-          readFileSync(join(home, ".config", "git", "config"), "utf8"),
-        ).toBe(xdgConfig);
+        expect(readFileSync(join(home, ".config", "git", "config"), "utf8")).toBe(xdgConfig);
         expect(existsSync(join(home, ".opengeni"))).toBe(false);
         expect(existsSync(target)).toBe(false);
       }
@@ -324,19 +290,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       mkdirSync(workspace, { recursive: true });
       const remote = "https://github.com/opengeni/hooked-fixture.git";
       const resources = [
-        {
-          kind: "repository" as const,
-          uri: remote,
-          ref: "main",
-          mountPath: "repos/test/hooked",
-        },
+        { kind: "repository" as const, uri: remote, ref: "main", mountPath: "repos/test/hooked" },
       ];
       const bindings = [
-        {
-          credentialBindingId: "hooked",
-          provider: "github" as const,
-          token: "hook-token",
-        },
+        { credentialBindingId: "hooked", provider: "github" as const, token: "hook-token" },
       ];
       const tokenDirectory = (home: string) => join(home, ".opengeni");
       const bindingTokenFile = (home: string) =>
@@ -360,8 +317,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
             GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
             GIT_CONFIG_VALUE_0: remote,
           },
-          rewriteCommand: (cmd) =>
-            cmd.replaceAll("'/workspace/", `'${workspace}/`),
+          rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
         });
 
       // The exact builders the hooks wrap, run on their own through the same kind
@@ -375,9 +331,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ]) {
         const refused = await bareSession.exec({ cmd: command });
         expect(refused.exitCode).toBe(78);
-        expect(refused.stderr).toContain(
-          "Refusing to provision Opengeni Git credentials",
-        );
+        expect(refused.stderr).toContain("Refusing to provision Opengeni Git credentials");
       }
       expect(readdirSync(bareHome)).toEqual([]);
       expect(existsSync(join(workspace, "repos"))).toBe(false);
@@ -390,33 +344,24 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         gitTokenSeeds: { github: "hook-token" },
         gitCredentialBindings: bindings,
       });
-      expect(
-        readFileSync(
-          join(workspace, "repos", "test", "hooked", "README.md"),
-          "utf8",
-        ),
-      ).toBe("hello\n");
+      expect(readFileSync(join(workspace, "repos", "test", "hooked", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
       expect(readFileSync(join(home, ".gitconfig"), "utf8")).toContain(
         join(tokenDirectory(home), "git-credentials", "helper"),
       );
       expect(readFileSync(bindingTokenFile(home), "utf8")).toBe("hook-token");
-      expect(
-        readFileSync(join(tokenDirectory(home), "git-token"), "utf8"),
-      ).toBe("hook-token");
+      expect(readFileSync(join(tokenDirectory(home), "git-token"), "utf8")).toBe("hook-token");
 
       await refreshGitCredentialBindingTokenFiles(session as never, [
         { ...bindings[0]!, token: "renewed-binding-token" },
       ]);
-      expect(readFileSync(bindingTokenFile(home), "utf8")).toBe(
-        "renewed-binding-token",
-      );
+      expect(readFileSync(bindingTokenFile(home), "utf8")).toBe("renewed-binding-token");
 
-      await refreshGitProviderTokenFiles(session as never, {
-        github: "renewed-provider-token",
-      });
-      expect(
-        readFileSync(join(tokenDirectory(home), "git-token"), "utf8"),
-      ).toBe("renewed-provider-token");
+      await refreshGitProviderTokenFiles(session as never, { github: "renewed-provider-token" });
+      expect(readFileSync(join(tokenDirectory(home), "git-token"), "utf8")).toBe(
+        "renewed-provider-token",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -438,8 +383,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
           GIT_CONFIG_VALUE_0: remote,
         },
-        rewriteCommand: (cmd) =>
-          cmd.replaceAll("'/workspace/", `'${workspace}/`),
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
       });
       const commands: string[] = [];
       let withoutGzip = false;
@@ -474,20 +418,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // under its content hash and clones, all in one command.
       const first = await runHook("first-token");
       expect(first).toHaveLength(1);
-      expect(
-        readFileSync(
-          join(workspace, "repos", "test", "staged", "README.md"),
-          "utf8",
-        ),
-      ).toBe("hello\n");
-      const programDirs = readdirSync(join(workspace, ".opengeni")).filter(
-        (name) => name.startsWith("setup-programs-"),
+      expect(readFileSync(join(workspace, "repos", "test", "staged", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      const programDirs = readdirSync(join(workspace, ".opengeni")).filter((name) =>
+        name.startsWith("setup-programs-"),
       );
       expect(programDirs).toHaveLength(1);
       const programDir = join(workspace, ".opengeni", programDirs[0]!);
-      const programs = readdirSync(programDir).filter((name) =>
-        name.endsWith(".sh"),
-      );
+      const programs = readdirSync(programDir).filter((name) => name.endsWith(".sh"));
       expect(programs).toHaveLength(1);
       expect(programs[0]).toMatch(/^[0-9a-f]{64}\.sh$/u);
       const programFile = join(programDir, programs[0]!);
@@ -505,12 +444,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(second[0]).toContain("second-token");
       expect(existsSync(staleProgram)).toBe(false);
       expect(existsSync(programFile)).toBe(true);
-      expect(
-        readFileSync(
-          join(join(root, "home", ".opengeni"), "git-token"),
-          "utf8",
-        ),
-      ).toBe("second-token");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "second-token",
+      );
 
       // A modified program is never executed: it is reinstalled and verified
       // again by the same single command.
@@ -519,12 +455,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(third).toHaveLength(1);
       expect(third[0]).not.toContain("tampered");
       expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
-      expect(
-        readFileSync(
-          join(join(root, "home", ".opengeni"), "git-token"),
-          "utf8",
-        ),
-      ).toBe("third-token");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "third-token",
+      );
 
       // A box without gzip cannot unpack the embedded program; the launcher
       // reports it missing and the program is staged uncompressed instead.
@@ -533,12 +466,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const fourth = await runHook("fourth-token");
       expect(fourth.length).toBeGreaterThan(2);
       expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
-      expect(
-        readFileSync(
-          join(join(root, "home", ".opengeni"), "git-token"),
-          "utf8",
-        ),
-      ).toBe("fourth-token");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "fourth-token",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -556,8 +486,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       execFileSync("git", ["init", "--bare", "-b", "main", empty]);
       const workspace = join(root, "workspace");
       mkdirSync(workspace, { recursive: true });
-      const remote = (name: string) =>
-        `https://github.com/opengeni/${name}.git`;
+      const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
       const session = hostShellSession(join(root, "home"), {
         shell: "bash",
         cwd: workspace,
@@ -573,8 +502,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           GIT_CONFIG_KEY_3: `url.file://${empty}.insteadOf`,
           GIT_CONFIG_VALUE_3: remote("empty"),
         },
-        rewriteCommand: (cmd) =>
-          cmd.replaceAll("'/workspace/", `'${workspace}/`),
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
       });
       const repository = (name: string, optional: boolean) => ({
         kind: "repository" as const,
@@ -583,8 +511,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         mountPath: `repos/test/${name}`,
         ...(optional ? { optional: true } : {}),
       });
-      const events: Array<{ type: string; payload: Record<string, unknown> }> =
-        [];
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
       const warnings: unknown[][] = [];
       const warn = console.warn;
       console.warn = (...args: unknown[]) => {
@@ -609,18 +536,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       } finally {
         console.warn = warn;
       }
-      expect(
-        readFileSync(
-          join(workspace, "repos", "test", "required", "README.md"),
-          "utf8",
-        ),
-      ).toBe("hello\n");
-      expect(
-        readFileSync(
-          join(workspace, "repos", "test", "recent", "README.md"),
-          "utf8",
-        ),
-      ).toBe("hello\n");
+      expect(readFileSync(join(workspace, "repos", "test", "required", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      expect(readFileSync(join(workspace, "repos", "test", "recent", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
       expect(
         execFileSync("git", [
           "-C",
@@ -635,9 +556,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           readdirSync(join(workspace, "repos", "test", "missing")).length > 0,
       ).toBe(false);
       expect(
-        readdirSync(join(workspace, "repos", "test")).filter((name) =>
-          name.includes(".tmp."),
-        ),
+        readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
       ).toEqual([]);
       expect(events.map((event) => event.type)).toEqual([
         "sandbox.operation.started",
@@ -659,32 +578,20 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // hook fails and reports the failure.
       const strictEvents: string[] = [];
       await expect(
-        runRepositoryCloneHook(
-          session as never,
-          [repository("missing", false)],
-          {
-            environment: {},
-            onRuntimeEvent: async (event) => {
-              strictEvents.push(event.type);
-            },
+        runRepositoryCloneHook(session as never, [repository("missing", false)], {
+          environment: {},
+          onRuntimeEvent: async (event) => {
+            strictEvents.push(event.type);
           },
-        ),
+        }),
       ).rejects.toThrow("Repository resource fetch failed");
-      expect(strictEvents).toEqual([
-        "sandbox.operation.started",
-        "sandbox.operation.failed",
-      ]);
+      expect(strictEvents).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
 
       // An explicitly attached empty repository no longer fails the turn.
       const emptyEvents: string[] = [];
       await runRepositoryCloneHook(
         session as never,
-        [
-          {
-            ...repository("empty", false),
-            mountPath: "repos/test/empty-required",
-          },
-        ],
+        [{ ...repository("empty", false), mountPath: "repos/test/empty-required" }],
         {
           environment: {},
           onRuntimeEvent: async (event) => {
@@ -692,10 +599,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           },
         },
       );
-      expect(emptyEvents).toEqual([
-        "sandbox.operation.started",
-        "sandbox.operation.completed",
-      ]);
+      expect(emptyEvents).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
       expect(
         execFileSync("git", [
           "-C",
@@ -710,9 +614,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
   });
 
   test("an optional repository whose fetch hangs is skipped after its bound while a required one still clones", async () => {
-    const root = mkdtempSync(
-      join(tmpdir(), "opengeni-optional-clone-timeout-"),
-    );
+    const root = mkdtempSync(join(tmpdir(), "opengeni-optional-clone-timeout-"));
     // A server that accepts the connection and never answers: a hung fetch.
     const sockets: Array<{ end: () => void }> = [];
     const hanging = Bun.listen({
@@ -729,8 +631,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const origin = makeOrigin(root);
       const workspace = join(root, "workspace");
       mkdirSync(workspace, { recursive: true });
-      const remote = (name: string) =>
-        `https://github.com/opengeni/${name}.git`;
+      const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
       const session = hostShellSession(join(root, "home"), {
         shell: "bash",
         cwd: workspace,
@@ -742,11 +643,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           GIT_CONFIG_KEY_1: `url.http://127.0.0.1:${hanging.port}/hung.git.insteadOf`,
           GIT_CONFIG_VALUE_1: remote("hung"),
         },
-        rewriteCommand: (cmd) =>
-          cmd.replaceAll("'/workspace/", `'${workspace}/`),
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
       });
-      const events: Array<{ type: string; payload: Record<string, unknown> }> =
-        [];
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
       const warn = console.warn;
       console.warn = () => undefined;
       const started = Date.now();
@@ -780,12 +679,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         console.warn = warn;
       }
       expect(Date.now() - started).toBeLessThan(30_000);
-      expect(
-        readFileSync(
-          join(workspace, "repos", "test", "required", "README.md"),
-          "utf8",
-        ),
-      ).toBe("hello\n");
+      expect(readFileSync(join(workspace, "repos", "test", "required", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
       expect(events[1]!.payload).toMatchObject({
         name: "repository-clone",
         repositoryCount: 2,
@@ -797,9 +693,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           readdirSync(join(workspace, "repos", "test", "hung")).length > 0,
       ).toBe(false);
       expect(
-        readdirSync(join(workspace, "repos", "test")).filter((name) =>
-          name.includes(".tmp."),
-        ),
+        readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
       ).toEqual([]);
     } finally {
       for (const socket of sockets) socket.end();
@@ -827,9 +721,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ]);
 
     expect(command).toContain("https://dev.azure.com/acme/project/_git/repo");
-    expect(command).toContain(
-      "https://dev.azure.com/acme/project/_git/repo.git",
-    );
+    expect(command).toContain("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
   test("keeps provider-neutral credential-helper paths exact", () => {
@@ -902,51 +794,30 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-atomic-456",
         OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED: "azdo-atomic-789",
       };
-      const run = runScript(
-        cloneScriptWithTarget(target, `file://${origin}`),
-        env,
-      );
+      const run = runScript(cloneScriptWithTarget(target, `file://${origin}`), env);
       expect(run.status).toBe(0);
       const tokenFile = join(home, ".opengeni", "git-token");
       const credentialDir = join(home, ".opengeni", "git-credentials");
       const askpass = join(home, ".opengeni", "askpass");
       expect(readFileSync(tokenFile, "utf8")).toBe("tok-atomic-123");
-      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe(
-        "tok-atomic-123",
+      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe("tok-atomic-123");
+      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe("glpat-atomic-456");
+      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe(
+        "azdo-atomic-789",
       );
-      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe(
-        "glpat-atomic-456",
-      );
-      expect(
-        readFileSync(join(credentialDir, "azure_devops-token"), "utf8"),
-      ).toBe("azdo-atomic-789");
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
-      expect(statSync(join(credentialDir, "github-token")).mode & 0o777).toBe(
-        0o600,
-      );
-      expect(statSync(join(credentialDir, "gitlab-token")).mode & 0o777).toBe(
-        0o600,
-      );
-      expect(
-        statSync(join(credentialDir, "azure_devops-token")).mode & 0o777,
-      ).toBe(0o600);
+      expect(statSync(join(credentialDir, "github-token")).mode & 0o777).toBe(0o600);
+      expect(statSync(join(credentialDir, "gitlab-token")).mode & 0o777).toBe(0o600);
+      expect(statSync(join(credentialDir, "azure_devops-token")).mode & 0o777).toBe(0o600);
       expect(statSync(askpass).mode & 0o777).toBe(0o755);
       for (const tool of ["gh", "glab", "az"]) {
-        expect(
-          statSync(join(home, ".opengeni", "bin", tool)).mode & 0o777,
-        ).toBe(0o755);
+        expect(statSync(join(home, ".opengeni", "bin", tool)).mode & 0o777).toBe(0o755);
       }
       // atomic install: no pid temp files left behind
+      expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
       expect(
-        readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp.")),
-      ).toEqual([]);
-      expect(
-        readdirSync(credentialDir).filter((f) => f.includes(".tmp.")),
-      ).toEqual([]);
-      expect(
-        readdirSync(join(home, ".opengeni", "bin")).filter((f) =>
-          f.includes(".tmp."),
-        ),
+        readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
       // the askpass Password branch reads the token file
       const askOut = execFileSync("sh", [askpass, "Password for host"], {
@@ -954,23 +825,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         encoding: "utf8",
       });
       expect(askOut).toBe("tok-atomic-123");
-      const gitlabOut = execFileSync(
-        "sh",
-        [askpass, "Password for https://gitlab.com"],
-        {
-          env: { HOME: home },
-          encoding: "utf8",
-        },
-      );
+      const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], {
+        env: { HOME: home },
+        encoding: "utf8",
+      });
       expect(gitlabOut).toBe("glpat-atomic-456");
-      const azureOut = execFileSync(
-        "sh",
-        [askpass, "Password for https://dev.azure.com/acme"],
-        {
-          env: { HOME: home },
-          encoding: "utf8",
-        },
-      );
+      const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], {
+        env: { HOME: home },
+        encoding: "utf8",
+      });
       expect(azureOut).toBe("azdo-atomic-789");
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
@@ -1005,24 +868,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(second.status).toBe(0);
 
       const credentialDir = join(home, ".opengeni", "git-credentials");
-      expect(readFileSync(join(home, ".opengeni", "git-token"), "utf8")).toBe(
-        "gh-new",
-      );
-      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe(
-        "gh-new",
-      );
-      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe(
-        "gl-new",
-      );
-      expect(
-        readFileSync(join(credentialDir, "azure_devops-token"), "utf8"),
-      ).toBe("az-new");
-      expect(
-        readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp.")),
-      ).toEqual([]);
-      expect(
-        readdirSync(credentialDir).filter((f) => f.includes(".tmp.")),
-      ).toEqual([]);
+      expect(readFileSync(join(home, ".opengeni", "git-token"), "utf8")).toBe("gh-new");
+      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe("gh-new");
+      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe("gl-new");
+      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe("az-new");
+      expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1072,27 +923,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const credentialDir = join(home, ".opengeni", "git-credentials");
       expect(
         readFileSync(
-          join(
-            credentialDir,
-            `${gitCredentialBindingHash("installation/one")}-token`,
-          ),
+          join(credentialDir, `${gitCredentialBindingHash("installation/one")}-token`),
           "utf8",
         ),
       ).toBe("gh-one");
       expect(
         readFileSync(
-          join(
-            credentialDir,
-            `${gitCredentialBindingHash("../../installation two")}-token`,
-          ),
+          join(credentialDir, `${gitCredentialBindingHash("../../installation two")}-token`),
           "utf8",
         ),
       ).toBe("gh-two");
-      expect(
-        readdirSync(credentialDir).some((name) =>
-          name.includes("installation"),
-        ),
-      ).toBe(false);
+      expect(readdirSync(credentialDir).some((name) => name.includes("installation"))).toBe(false);
       expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
       expect(existsSync(join(credentialDir, "github-token"))).toBe(false);
 
@@ -1151,8 +992,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         repositories: [
           {
             repositoryUri: "https://gitlab.com/acme/private.git",
-            brokerUri:
-              "https://broker.example.test/git/session/binding/private.git",
+            brokerUri: "https://broker.example.test/git/session/binding/private.git",
           },
         ],
       };
@@ -1167,23 +1007,16 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ];
       const initialSeedPath = join(root, "broker-seed-one");
       writeFileSync(initialSeedPath, "broker-bearer-one", { mode: 0o600 });
-      const initialRefresh = gitCredentialBindingTokenRefreshCommand(
-        initialBindings,
-        [
-          {
-            bindingHash: gitCredentialBindingHash(
-              initialBindings[0]!.credentialBindingId,
-            ),
-            path: initialSeedPath,
-          },
-        ],
-      );
+      const initialRefresh = gitCredentialBindingTokenRefreshCommand(initialBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(initialBindings[0]!.credentialBindingId),
+          path: initialSeedPath,
+        },
+      ]);
       expect(initialRefresh).not.toContain("broker-bearer-one");
       expect(
-        runScript(
-          `${initialRefresh}\n${setupScript(resources, initialBindings)}`,
-          { HOME: home },
-        ).status,
+        runScript(`${initialRefresh}\n${setupScript(resources, initialBindings)}`, { HOME: home })
+          .status,
       ).toBe(0);
       expect(existsSync(initialSeedPath)).toBe(false);
 
@@ -1193,10 +1026,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           encoding: "utf8",
         }).trim(),
       ).toBe("https://broker.example.test/git/session/binding/private.git");
-      const fill = (
-        host = "broker.example.test",
-        path = "git/session/binding/private.git",
-      ) =>
+      const fill = (host = "broker.example.test", path = "git/session/binding/private.git") =>
         execFileSync("git", ["credential", "fill"], {
           env: {
             HOME: home,
@@ -1207,14 +1037,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           encoding: "utf8",
         });
       expect(fill()).toContain("password=broker-bearer-one");
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
       expect(
-        existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token")),
-      ).toBe(false);
-      expect(
-        readFileSync(
-          join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"),
-          "utf8",
-        ),
+        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
       ).not.toContain("broker-bearer-one");
 
       expect(() =>
@@ -1237,17 +1062,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ];
       const renewedSeedPath = join(root, "broker-seed-two");
       writeFileSync(renewedSeedPath, "broker-bearer-two", { mode: 0o600 });
-      const renewedRefresh = gitCredentialBindingTokenRefreshCommand(
-        renewedBindings,
-        [
-          {
-            bindingHash: gitCredentialBindingHash(
-              renewedBindings[0]!.credentialBindingId,
-            ),
-            path: renewedSeedPath,
-          },
-        ],
-      );
+      const renewedRefresh = gitCredentialBindingTokenRefreshCommand(renewedBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(renewedBindings[0]!.credentialBindingId),
+          path: renewedSeedPath,
+        },
+      ]);
       expect(renewedRefresh).not.toContain("broker-bearer-two");
       expect(runScript(renewedRefresh, { HOME: home }).status).toBe(0);
       expect(existsSync(renewedSeedPath)).toBe(false);
@@ -1280,14 +1100,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         }).trim(),
       ).toBe("https://gitlab.com/acme/private.git");
       expect(
-        readFileSync(
-          join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"),
-          "utf8",
-        ),
+        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
       ).toBe("");
-      expect(fill("gitlab.com", "acme/private.git")).toContain(
-        "password=direct-contained-token",
-      );
+      expect(fill("gitlab.com", "acme/private.git")).toContain("password=direct-contained-token");
       const staleBrokerFill = fill();
       expect(staleBrokerFill).toContain("password=\n");
       expect(staleBrokerFill).not.toContain("broker-bearer-one");
@@ -1366,8 +1181,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
             repositories: [
               {
                 repositoryUri: "https://gitlab.com/acme/brokered.git",
-                brokerUri:
-                  "https://broker.example.test/git/session/brokered.git",
+                brokerUri: "https://broker.example.test/git/session/brokered.git",
               },
             ],
           },
@@ -1377,17 +1191,13 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       writeFileSync(brokerSeedPath, "broker-bearer", { mode: 0o600 });
       const refresh = gitCredentialBindingTokenRefreshCommand(bindings, [
         {
-          bindingHash: gitCredentialBindingHash(
-            bindings[1]!.credentialBindingId,
-          ),
+          bindingHash: gitCredentialBindingHash(bindings[1]!.credentialBindingId),
           path: brokerSeedPath,
         },
       ]);
       expect(refresh).not.toContain("broker-bearer");
       expect(
-        runScript(`${refresh}\n${setupScript(resources, bindings)}`, {
-          HOME: home,
-        }).status,
+        runScript(`${refresh}\n${setupScript(resources, bindings)}`, { HOME: home }).status,
       ).toBe(0);
       expect(existsSync(brokerSeedPath)).toBe(false);
 
@@ -1401,24 +1211,20 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           input: `protocol=https\nhost=${host}\npath=${path}\n\n`,
           encoding: "utf8",
         });
-      expect(fill("gitlab.com", "acme/direct.git")).toContain(
-        "password=direct-token",
-      );
+      expect(fill("gitlab.com", "acme/direct.git")).toContain("password=direct-token");
       expect(fill("broker.example.test", "git/session/brokered.git")).toContain(
         "password=broker-bearer",
       );
-      expect(
-        existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token")),
-      ).toBe(false);
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
 
       const env = {
         HOME: home,
         GITLAB_TOKEN: "ambient-token-must-not-win",
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       };
-      expect(
-        execFileSync("glab", [], { cwd: directRepo, env, encoding: "utf8" }),
-      ).toBe("GL=unset\nOAUTH=direct-token\nOAUTH2=true\n");
+      expect(execFileSync("glab", [], { cwd: directRepo, env, encoding: "utf8" })).toBe(
+        "GL=unset\nOAUTH=direct-token\nOAUTH2=true\n",
+      );
       expect(() =>
         execFileSync("glab", [], {
           cwd: brokeredRepo,
@@ -1561,9 +1367,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
         GH_TOKEN: undefined,
       };
-      expect(
-        execFileSync("gh", [], { cwd: repoOne, env, encoding: "utf8" }),
-      ).toBe("GH=gh-one\n");
+      expect(execFileSync("gh", [], { cwd: repoOne, env, encoding: "utf8" })).toBe("GH=gh-one\n");
       expect(
         execFileSync("gh", [], {
           cwd: root,
@@ -1605,9 +1409,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         execFileSync("gh", [], { cwd: root, env, encoding: "utf8" });
         throw new Error("expected ambiguous GitHub binding selection to fail");
       } catch (error) {
-        expect(
-          String((error as { stderr?: string | Buffer }).stderr ?? error),
-        ).toContain(".opengeni/git-bindings.json");
+        expect(String((error as { stderr?: string | Buffer }).stderr ?? error)).toContain(
+          ".opengeni/git-bindings.json",
+        );
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1677,37 +1481,26 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ref: "main",
         provider: "gitlab" as const,
       };
-      const run = runScript(
-        cloneScriptWithTarget(target, `file://${origin}`, resource),
-        {
-          HOME: home,
-          OPENGENI_GIT_TOKEN_SEED: "github-fallback-token",
-          OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-custom-domain",
-        },
-      );
+      const run = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_SEED: "github-fallback-token",
+        OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-custom-domain",
+      });
       expect(run.status).toBe(0);
 
       const askpass = join(home, ".opengeni", "askpass");
       const askEnv = { HOME: home };
       expect(
-        execFileSync(
-          "sh",
-          [askpass, "Username for 'https://git.company.com':"],
-          {
-            env: askEnv,
-            encoding: "utf8",
-          },
-        ),
+        execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
       ).toBe("oauth2\n");
       expect(
-        execFileSync(
-          "sh",
-          [askpass, "Password for 'https://git.company.com':"],
-          {
-            env: askEnv,
-            encoding: "utf8",
-          },
-        ),
+        execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
       ).toBe("glpat-custom-domain");
 
       // Renewal must update only token files. Rebuilding askpass without the
@@ -1722,24 +1515,16 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ).status,
       ).toBe(0);
       expect(
-        execFileSync(
-          "sh",
-          [askpass, "Username for 'https://git.company.com':"],
-          {
-            env: askEnv,
-            encoding: "utf8",
-          },
-        ),
+        execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
       ).toBe("oauth2\n");
       expect(
-        execFileSync(
-          "sh",
-          [askpass, "Password for 'https://git.company.com':"],
-          {
-            env: askEnv,
-            encoding: "utf8",
-          },
-        ),
+        execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
       ).toBe("glpat-custom-refreshed");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1788,15 +1573,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         GITLAB_TOKEN: undefined,
         AZURE_DEVOPS_EXT_PAT: undefined,
       };
-      expect(
-        execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("GH=ghs-wrapper-1\n");
-      expect(
-        execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("GL=glpat-wrapper-1\n");
-      expect(
-        execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("AZ=azdo-wrapper-1\n");
+      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "GH=ghs-wrapper-1\n",
+      );
+      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "GL=glpat-wrapper-1\n",
+      );
+      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "AZ=azdo-wrapper-1\n",
+      );
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
       rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), {
@@ -1805,15 +1590,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), {
         force: true,
       });
-      expect(
-        execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("GH=unset\n");
-      expect(
-        execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("GL=unset\n");
-      expect(
-        execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" }),
-      ).toBe("AZ=unset\n");
+      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=unset\n");
+      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=unset\n");
+      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=unset\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1839,24 +1618,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const second = runScript(script, env);
       expect(second.status).toBe(0);
       expect(second.output).toContain("already present");
-      expect(readFileSync(join(target, "WORK.md"), "utf8")).toBe(
-        "agent work\n",
-      );
+      expect(readFileSync(join(target, "WORK.md"), "utf8")).toBe("agent work\n");
 
       // partial tree (interrupted materialization: files but no .git) -> rebuilt
       rmSync(join(target, ".git"), { recursive: true, force: true });
       const third = runScript(script, env);
       expect(third.status).toBe(0);
-      expect(third.output).toContain(
-        "Re-materializing partial repository resource",
-      );
+      expect(third.output).toContain("Re-materializing partial repository resource");
       expect(existsSync(join(target, ".git"))).toBe(true);
       expect(existsSync(join(target, "README.md"))).toBe(true);
       // no tmp clone leaked beside the target
       expect(
-        readdirSync(join(root, "ws", "repos", "acme")).filter((f) =>
-          f.includes(".tmp."),
-        ),
+        readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
       ).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1879,26 +1652,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         uri: "https://github.com/opengeni/test-fixture.git",
         ref: short,
       };
-      const missing = runScript(
-        cloneScriptWithTarget(target, `file://${origin}`, resource),
-        {
-          HOME: home,
-        },
-      );
+      const missing = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+      });
       expect(missing.status).not.toBe(0);
       expect(missing.output).toContain("couldn't find remote ref");
       expect(missing.output).toContain("full commit SHA");
       expect(existsSync(target)).toBe(false);
-      expect(
-        readdirSync(root).filter((entry) => entry.startsWith("checkout.tmp.")),
-      ).toEqual([]);
+      expect(readdirSync(root).filter((entry) => entry.startsWith("checkout.tmp."))).toEqual([]);
       execFileSync("git", ["-C", origin, "branch", short]);
-      const valid = runScript(
-        cloneScriptWithTarget(target, `file://${origin}`, resource),
-        {
-          HOME: home,
-        },
-      );
+      const valid = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+      });
       expect(valid.status).toBe(0);
       expect(readFileSync(join(target, "README.md"), "utf8")).toBe("hello\n");
     } finally {
@@ -1924,32 +1689,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         execFileSync("git", ["init", "--bare", "-b", "main", empty]);
         const uri = `file://${empty}`;
         const target = join(root, "ws", "repos", "acme", `empty-${index}`);
-        const script = cloneScriptWithTarget(
-          target,
-          uri,
-          undefined,
-          ref,
-          "",
-          source,
-        );
+        const script = cloneScriptWithTarget(target, uri, undefined, ref, "", source);
         const run = runScript(script, env);
         expect({ ref, status: run.status }).toEqual({ ref, status: 0 });
         expect(run.output).toContain(`starts on unborn branch ${branch}`);
         expect(run.output).toContain(`Repository resource ready at ${target}`);
         expect(run.output).not.toContain("couldn't find remote ref");
         expect(run.output).not.toContain("hint:");
-        expect(
-          execFileSync("git", ["-C", target, "symbolic-ref", "HEAD"]).trim(),
-        ).toBe(`refs/heads/${branch}`);
-        expect(
-          execFileSync("git", [
-            "-C",
-            target,
-            "remote",
-            "get-url",
-            "origin",
-          ]).trim(),
-        ).toBe(uri);
+        expect(execFileSync("git", ["-C", target, "symbolic-ref", "HEAD"]).trim()).toBe(
+          `refs/heads/${branch}`,
+        );
+        expect(execFileSync("git", ["-C", target, "remote", "get-url", "origin"]).trim()).toBe(uri);
 
         // Later turns keep the work tree, including uncommitted agent work,
         // without consulting the remote again.
@@ -1957,9 +1707,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         const again = runScript(script, env);
         expect(again.status).toBe(0);
         expect(again.output).toContain("already present");
-        expect(readFileSync(join(target, "README.md"), "utf8")).toBe(
-          "backup\n",
-        );
+        expect(readFileSync(join(target, "README.md"), "utf8")).toBe("backup\n");
 
         execFileSync("git", ["-C", target, "add", "README.md"]);
         execFileSync("git", [
@@ -1975,18 +1723,11 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         ]);
         // The branch tracks origin, so a plain `git push` publishes it.
         execFileSync("git", ["-C", target, "push"]);
+        expect(execFileSync("git", ["-C", empty, "rev-parse", `refs/heads/${branch}`]).trim()).toBe(
+          execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim(),
+        );
         expect(
-          execFileSync("git", [
-            "-C",
-            empty,
-            "rev-parse",
-            `refs/heads/${branch}`,
-          ]).trim(),
-        ).toBe(execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim());
-        expect(
-          readdirSync(join(root, "ws", "repos", "acme")).filter((f) =>
-            f.includes(".tmp."),
-          ),
+          readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
         ).toEqual([]);
       }
     } finally {
@@ -2005,9 +1746,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const untouched = join(root, "ws", "untouched");
       const worked = join(root, "ws", "worked");
       for (const target of [untouched, worked]) {
-        expect(
-          runScript(cloneScriptWithTarget(target, uri), { HOME: home }).status,
-        ).toBe(0);
+        expect(runScript(cloneScriptWithTarget(target, uri), { HOME: home }).status).toBe(0);
       }
       writeFileSync(join(worked, "NOTES.md"), "agent work\n");
 
@@ -2016,35 +1755,25 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // still absent on the remote, so re-fetching it would fail every turn.
       const origin = makeOrigin(root);
       execFileSync("git", ["-C", origin, "push", uri, "main:master"]);
-      const otherBranch = runScript(cloneScriptWithTarget(untouched, uri), {
-        HOME: home,
-      });
+      const otherBranch = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });
       expect(otherBranch.status).toBe(0);
       expect(otherBranch.output).toContain("already present");
-      expect(
-        execFileSync("git", ["-C", untouched, "symbolic-ref", "HEAD"]),
-      ).toBe("refs/heads/main\n");
+      expect(execFileSync("git", ["-C", untouched, "symbolic-ref", "HEAD"])).toBe(
+        "refs/heads/main\n",
+      );
 
       execFileSync("git", ["-C", origin, "push", uri, "main"]);
 
-      const refilled = runScript(cloneScriptWithTarget(untouched, uri), {
-        HOME: home,
-      });
+      const refilled = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });
       expect(refilled.status).toBe(0);
       expect(refilled.output).toContain("now has commits; rematerializing");
-      expect(readFileSync(join(untouched, "README.md"), "utf8")).toBe(
-        "hello\n",
-      );
+      expect(readFileSync(join(untouched, "README.md"), "utf8")).toBe("hello\n");
 
       // A mount with agent work is never replaced.
-      const kept = runScript(cloneScriptWithTarget(worked, uri), {
-        HOME: home,
-      });
+      const kept = runScript(cloneScriptWithTarget(worked, uri), { HOME: home });
       expect(kept.status).toBe(0);
       expect(kept.output).toContain("already present");
-      expect(readFileSync(join(worked, "NOTES.md"), "utf8")).toBe(
-        "agent work\n",
-      );
+      expect(readFileSync(join(worked, "NOTES.md"), "utf8")).toBe("agent work\n");
       expect(existsSync(join(worked, "README.md"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2062,45 +1791,19 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const uri = "https://github.com/opengeni/empty.git";
       const cases = [
         {
-          resource: {
-            kind: "repository" as const,
-            uri,
-            ref: "main",
-            expectedCommitSha: sha,
-          },
+          resource: { kind: "repository" as const, uri, ref: "main", expectedCommitSha: sha },
           subpath: "",
         },
-        {
-          resource: { kind: "repository" as const, uri, ref: sha },
-          subpath: "",
-        },
-        {
-          resource: { kind: "repository" as const, uri, ref: "abc1234" },
-          subpath: "",
-        },
-        {
-          resource: { kind: "repository" as const, uri, ref: "pull/1/head" },
-          subpath: "",
-        },
-        {
-          resource: { kind: "repository" as const, uri, ref: "refs/tags/v1" },
-          subpath: "",
-        },
-        {
-          resource: { kind: "repository" as const, uri, ref: "main" },
-          subpath: "packages/api",
-        },
+        { resource: { kind: "repository" as const, uri, ref: sha }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "abc1234" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "pull/1/head" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "refs/tags/v1" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "main" }, subpath: "packages/api" },
       ];
       for (const [index, { resource, subpath }] of cases.entries()) {
         const target = join(root, "ws", `repo-${index}`);
         const run = runScript(
-          cloneScriptWithTarget(
-            target,
-            `file://${empty}`,
-            resource,
-            resource.ref,
-            subpath,
-          ),
+          cloneScriptWithTarget(target, `file://${empty}`, resource, resource.ref, subpath),
           { HOME: home },
         );
         expect({ ref: resource.ref, subpath, status: run.status }).toEqual({
@@ -2108,14 +1811,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           subpath,
           status: 1,
         });
-        expect(run.output).toContain(
-          `Repository resource fetch failed for ${target}`,
-        );
+        expect(run.output).toContain(`Repository resource fetch failed for ${target}`);
         expect(run.output).toContain("The remote repository is empty");
         expect(existsSync(target)).toBe(false);
-        expect(
-          readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp.")),
-        ).toEqual([]);
+        expect(readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp."))).toEqual([]);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2130,28 +1829,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       mkdirSync(home, { recursive: true });
       const target = join(root, "ws", "repo");
       const run = runScript(
-        cloneScriptWithTarget(
-          target,
-          `file://${origin}`,
-          undefined,
-          "does-not-exist",
-        ),
+        cloneScriptWithTarget(target, `file://${origin}`, undefined, "does-not-exist"),
         { HOME: home },
       );
       expect(run.status).toBe(1);
       expect(run.output).toContain("couldn't find remote ref does-not-exist");
-      expect(run.output).toContain(
-        `Repository resource fetch failed for ${target}`,
-      );
-      expect(run.output).toContain(
-        "Check repository access and the requested ref",
-      );
+      expect(run.output).toContain(`Repository resource fetch failed for ${target}`);
+      expect(run.output).toContain("Check repository access and the requested ref");
       expect(run.output).not.toContain("empty");
       expect(run.output).not.toContain("hint:");
       expect(existsSync(target)).toBe(false);
-      expect(
-        readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp.")),
-      ).toEqual([]);
+      expect(readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp."))).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2163,20 +1851,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const home = join(root, "home");
       mkdirSync(home, { recursive: true });
       const target = join(root, "ws", "repos", "acme", "private");
-      const run = runScript(
-        cloneScriptWithTarget(target, `file://${join(root, "nonexistent")}`),
-        {
-          HOME: home,
-        },
-      );
+      const run = runScript(cloneScriptWithTarget(target, `file://${join(root, "nonexistent")}`), {
+        HOME: home,
+      });
       expect(run.status).not.toBe(0);
       expect(existsSync(target)).toBe(false);
       expect(existsSync(`${target}.tmp.`)).toBe(false);
       const parent = join(root, "ws", "repos", "acme");
       expect(
-        existsSync(parent)
-          ? readdirSync(parent).filter((f) => f.includes(".tmp."))
-          : [],
+        existsSync(parent) ? readdirSync(parent).filter((f) => f.includes(".tmp.")) : [],
       ).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2202,9 +1885,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ),
     );
     const setHeadIndex = lines.findIndex((line) =>
-      line.includes(
-        'git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
-      ),
+      line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
     );
     const checkoutIndex = lines.findIndex((line) =>
       line.includes('! repository_git -C "$tmp" checkout --detach FETCH_HEAD'),
@@ -2223,9 +1904,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     expect(lines[setHeadIndex]).not.toContain("exit 1");
     expect(
       lines.filter((line) =>
-        line.includes(
-          'echo "Repository resource fetch failed for $target" >&2',
-        ),
+        line.includes('echo "Repository resource fetch failed for $target" >&2'),
       ),
     ).toHaveLength(2);
   });
@@ -2238,13 +1917,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         encoding: "utf8",
       }).trim();
       // GitHub-style PR ref outside refs/heads/: fetchable, never remote-tracked.
-      execFileSync("git", [
-        "-C",
-        origin,
-        "update-ref",
-        "refs/pull/1/head",
-        sha,
-      ]);
+      execFileSync("git", ["-C", origin, "update-ref", "refs/pull/1/head", sha]);
       // Lightweight tag: fetched by short name, never under refs/remotes/origin/.
       execFileSync("git", ["-C", origin, "tag", "v1.0", sha]);
       const home = join(root, "home");
@@ -2265,42 +1938,26 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         expect({ ref, status: run.status, output: run.output }).toEqual({
           ref,
           status: 0,
-          output: expect.stringContaining(
-            `Repository resource ready at ${target}`,
-          ),
+          output: expect.stringContaining(`Repository resource ready at ${target}`),
         });
         expect(existsSync(join(target, "README.md"))).toBe(true);
         expect(
-          execFileSync("git", ["-C", target, "rev-parse", "HEAD"], {
-            encoding: "utf8",
-          }).trim(),
+          execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         ).toBe(sha);
         const originHead = (() => {
           try {
             return execFileSync(
               "git",
-              [
-                "-C",
-                target,
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "refs/remotes/origin/HEAD",
-              ],
+              ["-C", target, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"],
               { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
             ).trim();
           } catch {
             return null;
           }
         })();
-        expect({ ref, originHead }).toEqual({
-          ref,
-          originHead: expectOriginHead ? sha : null,
-        });
+        expect({ ref, originHead }).toEqual({ ref, originHead: expectOriginHead ? sha : null });
         expect(
-          readdirSync(join(root, "ws", "repos", "acme")).filter((f) =>
-            f.includes(".tmp."),
-          ),
+          readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
         ).toEqual([]);
       }
     } finally {
