@@ -255,6 +255,38 @@ describe("SessionTenancyControl", () => {
     container.remove();
   });
 
+  test("names the read-only access mark with a role screen readers accept", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          client={{} as OpenGeniBrowserClient}
+          managedSession={false}
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+          session={baseSession}
+        />,
+      );
+    });
+    // Without a managed session there is nothing to change or fork: a focusable mark only.
+    expect(container.querySelector('button[aria-label*="session access"]')).toBeNull();
+    const mark = container.querySelector<HTMLElement>('[aria-label^="Workspace session access."]');
+    expect(mark).not.toBeNull();
+    expect(mark!.tabIndex).toBe(0);
+    // ARIA prohibits aria-label on a role-less span, so assistive technology may skip it.
+    expect(mark!.getAttribute("role")).toBe("img");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("retains one key across a blocker retry and reconciles the replay", async () => {
     const keys: string[] = [];
     let updateCalls = 0;

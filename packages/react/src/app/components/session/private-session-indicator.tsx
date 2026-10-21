@@ -19,6 +19,7 @@ export function PrivateSessionIndicator() {
       <Tooltip>
         <TooltipTrigger asChild>
           <span
+            role="img"
             tabIndex={0}
             aria-label={`Private. ${PRIVATE_SESSION_EXPLANATION}`}
             className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted focus-visible:outline-2 focus-visible:outline-ring/55"
