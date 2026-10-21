@@ -1,5 +1,107 @@
 # @opengeni/react
 
+## 4.3.1
+
+### Minor Changes
+
+- bb438b0: An open chat now jumps to its newest messages after the connection drops, for example when a laptop wakes from sleep, the network comes back or the stream times out, instead of streaming every event it missed. A gap of 16 events or fewer still replays over the live stream; a longer one catches up the conversation and re-reads the working turn's newest steps, or loads the newest window, and the live stream continues from there. The chat also notices a sleep or a returned network right away instead of waiting for the stream's heartbeat timeout. `streamSessionEvents` and `client.streamEvents` accept an optional `beforeReconnect(cursor)` that may move a reconnect's cursor forward; callers that don't pass it keep exactly-once replay.
+- 03947ed: Keep idle session sidebars quiet using authorized commit-level invalidations on
+  the existing workspace live stream. Web and desktop refresh dirty loaded scopes
+  within the existing 15-second cadence and reconcile on reconnect/focus. Private
+  session IDs are filtered with the same RLS and membership fence as list reads.
+
+  Database hosts using a transaction pooler may configure a separate direct/session
+  notification URL. Older servers, external host ACLs, injected database handles
+  without a listener, and finite HTTP/1 streams keep their polling fallback. The new
+  SDK workspace event is transient and does not advance either durable stream cursor.
+
+- 2963eca: App-shots in the desktop app. When turned on in Settings → Machines, a shortcut (both Command keys on macOS by default) attaches the window you are looking at in another app to the chat you are using: a screenshot plus the window's app, title and the text it shows, including text scrolled out of view. Nothing is sent until you send it, and the attachment can be removed first. The agent receives the window's text as untrusted data inside that message only, so earlier turns stay unchanged. When your computer is connected to the workspace, the agent also learns which machine and window it was, so it can keep working in that window with computer tools; for a browser window it also gets the page address and the browser profile connected through the Opengeni extension, so it can continue in that tab with browser tools. Uploads accept an optional `appShot` description for image files (`uploadFile` in the SDK), and `useFileAttachments` gains `addAppShot`. macOS only for now; Windows and Linux plug into the same capture boundary.
+- 1b57d74: Eleven Realtime now listens and replies in the person's language instead of guessing. The voice conversation follows the app language (or the browser's) by default, and the voice model menu has a Language page to pick another one. Realtime controllers accept `getLanguage`, the WebSocket connect request takes an optional BCP 47 `language`, catalog entries for models that need a fixed conversation language list their `languages`, and `@opengeni/react` exports `useRealtimeLanguagePreference`, `realtimeConversationLanguage` and `realtimeAppLanguage`.
+- 277c99c: Add Eleven Realtime voice models (v1 max and v1 mini) on the shared WebSocket voice path. Workspaces connect their own ElevenLabs API key under Settings > Models > Voice, and the voice model hands work to the Opengeni session through the same delegation tool as the other voices. The SDK exports `SESSION_REALTIME_MODELS` and `isSessionRealtimeModel`, and the WebSocket answer may set `transcriptAudioTags` so clients strip expressive audio tags from transcripts.
+- c236847: Live voice connects and answers faster. The microphone is requested alongside the begin request, WebSocket voices prepare capture while the provider session is minted, and microphone audio leaves the browser in 20 ms AudioWorklet frames instead of ~170 ms blocks. `prestartSessionRealtime` lets a host start voice for a session it has just created while it navigates; the session view's `useSessionRealtime` adopts that call. A delegated turn's spoken result is fetched as soon as the session reports the turn's outcome rather than on the next one-second sync.
+- 4fadd37: Realtime voice settings are configurable. Each voice model offers what its provider supports: Eleven Realtime takes its built-in voices or any voice in the ElevenLabs account's My Voices by voice ID, a conversation language and turn eagerness; AI Gateway and SuperGrok models take their built-in voices. A workspace saves settings per model in the new `realtimeVoice` workspace setting (Settings > Models > Voice, or `updateWorkspaceSettings`), and an embedding app can set them per session with `voiceSettings` on the stock voice control, `useSessionRealtime` and `prestartSessionRealtime`, or `getVoiceSettings` on SDK realtime controllers. The realtime model catalog lists each model's `voices`, `customVoice`, `turnEagerness` and `voiceDefaults` and the workspace's saved `workspaceVoiceSettings`, the WebSocket connect request takes `voiceSettings`, and the SDK exports `RealtimeVoiceSettings` and `RealtimeTurnEagerness`. Nothing changes until a setting is chosen.
+- 83a467d: Opening a turn's steps now reads large tool outputs as bounded previews instead of whole payloads, so a long turn's steps load in a fraction of the bytes. A row reads its full output once, when it is expanded or when its renderer needs the exact result (screenshots, images, receipts, search results, and custom renderers). Until then its body says the full output is loading, and if that read fails it says the body is a preview and offers Retry. Presented results such as images, published files and Skill or Knowledge writes are still read in full. `listEventPage` and `listEvents` accept `toolOutputs: "preview"`; servers that predate it return exact outputs. `ToolCallItem.outputPreview` and the `ToolOutputPreview` type are new and additive.
+
+  `useSessionEvents().events` now carries those previews for opened turns until a row's exact output is read. A previewed `agent.toolCall.output` payload is marked with `outputPreview` (`truncated: true`, `shape`, `originalBytes`, `previewBytes`); with `shape: "text"` its `output` is the head and tail of the output's text rather than the original value. Code that reads tool outputs from `events` should treat a payload with `outputPreview` as partial, and read the exact event with `listEventPage` when it needs it.
+
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- 49f2177: Agents can record a browser flow as a video. The new `browser_record` tool starts a recording of a managed or attached browser tab and stops it into an MP4 in the chat's workspace, with a log of when each action happened beside it, and publishes the MP4 so it plays in the chat. Frames are captured only when the page changes, so recording costs almost nothing while a page is still, and the video is encoded on the server, so browser hosts need no video encoder. The SDK adds `startBrowserRecording`, `getBrowserRecording` and `saveBrowserRecording`.
+- 579239a: The desktop workspace dock drops its separate header row: the machine status and the maximize and hide controls sit under the panel tabs. Site previews can hide their frame toolbar and take reload and full-screen control from the host.
+- 6dd3785: A finished work row that compacted the conversation first now stays folded. The expected "Compacting conversation first" wait no longer counts as an interruption that opens the row.
+- bf39d5e: Show ambiguous Connected Machine command outcomes as uncertain instead of successful, including when command details are hidden. Preserve the existing warning to inspect effects before retrying; command execution and retry behavior are unchanged.
+- ee83178: Editable documents and presentations now have a Download action, exporting DOCX and PPTX like spreadsheets export XLSX. `EditableArtifactView` accepts `downloadArtifact` for all modalities; `downloadSpreadsheet` remains supported.
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- 23fed2a: Chat history no longer depends on the server and `@opengeni/react` being released in a particular order. The events API now says when it applies the conversation filter (`X-OpenGeni-Conversation-Filter: 2`, read as `SessionEventPage.conversationFilter`). When a server does not say so, the React history reads keep tool calls in and drop the ones that are not presented in the browser, so an older server that ignores `presentedToolCalls` no longer makes images, published files or Skill cards vanish from history.
+
+  A long turn's model bookkeeping also stops filling the history window: each model call's `agent.model.request` and `agent.model.usage` rows load with the turn's steps. The server keeps the request rows up to a turn's first model response, which draw its startup phase, and every bookkeeping row of a turn that has no other steps, so what the conversation shows is unchanged. `createEmbeddedSessionClient` now keeps `listEventPage` when the base client has it.
+
+- eeab39f: Keep accepted turns recovering while required first-party MCP setup cannot reach the internal API, instead of failing after five attempts during a deployment outage.
+- e4915c1: Expose lightweight defaults, workspace-control event, and durable-fanout entry points without changing the existing root exports. Index timeline tool-call lookups by ID to avoid repeated scans while preserving event ordering and fallback behavior.
+- 7ed4d2b: Keep Models settings reads across navigation, expose their freshness with an explicit refresh action, and reserve account-detail space while data loads. The client-scoped cache now supports internal mounted-read activity observation without changing the public React API.
+- 6f150d1: Organizations can set up realtime voice once for every workspace. An organization ElevenLabs key (`elevenlabs` organization provider connection) is used by every workspace without its own key, and organization model defaults gain `realtimeVoice`: per-model voice, language and turn-taking defaults that a workspace uses for a model until it saves its own. The realtime model catalog reports the inherited settings as `organizationVoiceSettings`. Organization custom models stay limited to the model-catalog provider kinds (`OrganizationModelCatalogProviderKind`).
+- 427f2a5: Leave existing standalone agents untouched when the desktop app opens. Explicit
+  signed-in setup reuses their service and signed installation, preserving macOS
+  privacy grants. Service-backed pause/resume persists across logins; quitting the
+  desktop does not stop the service. Permission guidance uses the running agent's
+  reported grants rather than probing the desktop app. Existing agents require
+  the matching native release with structured service inspection before management.
+- 6b08cbe: A message that waited in the queue behind running work no longer shows that waiting time as "Worked for". When several queued messages were steered in quickly one after another, each turn showed minutes of work even though it ran for about a second. A turn's queue phase now starts when the work ahead of it ended, not when the message was queued.
+- b45d380: Claim compatible waiting Steer messages together, preserving each message while avoiding empty replacement attempts and response rows.
+- c6a3493: Each provider row in the realtime model picker has its own `data-testid` (`realtime-model-provider-opengeni`, `-codex`, `-supergrok`, `-gateway`, `-elevenlabs`). The rows were keyed by billing class, so the AI Gateway and ElevenLabs rows, which both bill to the workspace's own key, shared one id.
+- 9508318: Live voice models reached over a WebSocket (AI Gateway voices and SuperGrok) now share one path. `POST …/realtime/websocket` and `client.negotiateRealtimeWebsocket` return the provider socket URL, its subprotocols, the wire dialect and the complete provider session configuration, and `createRealtimeWebsocketTransportStarter` opens any of them; the browser no longer carries per-provider configuration. `sessionRealtimeTransportKind` now returns `websocket` for every such model; `gateway` and `xai-subscription` stay in `SessionRealtimeTransportKind` as deprecated names that are no longer returned. `negotiateGatewayRealtime`, `negotiateXaiSubscriptionRealtime` and the two older transport starters keep working and are deprecated.
+- a1265ca: A browser or desktop whose sandbox instance is gone no longer keeps the sandbox warm. When a sandbox lost, drained or replaced the instance a browser or desktop controller ran in, the resource stayed `active` forever and its holder kept every later box of that sandbox warm on every provider, so it never idle-drained. The interaction reaper now marks such a resource `lost` (`placement_instance_lost`), settles its pending operations and releases its holder, and the sandbox drains normally. Resources on the current instance are untouched.
+- f2ec8b4: Opening a conversation reads the session once again. Since the sandbox terminal started reading its own history, `useSessionEvents` reads the session's head to join the live stream there, a second read of the detail `useSession` already reads fresh. The head read now joins that detail read when one started since the stream began loading, and reads the session itself only otherwise.
+- fe99ea2: A sidebar group no longer keeps a row another device archived or changed when that change arrives while an explicit "Show more" has failed or is still loading. The background refresh still leaves Retry and the loaded rows alone, but the group is now reread once the explicit read succeeds. Before, the stale row stayed until some later unrelated change reached the same group.
+- 5f5fe8d: Steering several queued messages one after another no longer leaves a stack of empty "Worked for" rows after the messages. A turn that handed over to the next Steer before doing anything but start up did no work of its own, so it now shows no work row; the turn that does the work still shows its own.
+- b603f10: Tool review details now list a Gmail selection by subject and sender instead of bare message IDs. `ToolReviewDetailsPage` items gain an optional `detail` line, which `ToolActionReviewDetails` renders under each row.
+- Updated dependencies [49f2177]
+- Updated dependencies [bb438b0]
+- Updated dependencies [03947ed]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [d81c315]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [fda625e]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [c236847]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [16781e5]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [724b529]
+- Updated dependencies [2058cd3]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [83a467d]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/connect@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes
