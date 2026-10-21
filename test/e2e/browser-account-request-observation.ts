@@ -86,6 +86,25 @@ export class DocumentRequestLedger {
   }
 }
 
+/**
+ * Whether a navigation replacing its document took down `request`, which the
+ * browser reported as cancelled. WebKit (always) and Firefox (usually) report
+ * that cancellation before Playwright delivers the replacing navigation's
+ * document request, both for a superseded document request and for the
+ * outgoing document's in-flight reads. One protocol round trip delivers that
+ * navigation; without one, the cancellation stays unexplained.
+ */
+export async function cancelledWithReplacedDocument(
+  ledger: DocumentRequestLedger,
+  request: object,
+  replacedOrReplacingBeforeFailure: boolean,
+  nextProtocolRoundTrip: () => Promise<unknown>,
+): Promise<boolean> {
+  if (replacedOrReplacingBeforeFailure || ledger.replaced(request)) return true;
+  await nextProtocolRoundTrip().catch(() => undefined);
+  return ledger.replaced(request) || ledger.replacing(request);
+}
+
 /** A browser's own cancellation of a request, as opposed to a transport or server failure. */
 export function isBrowserCancellation(failure: string): boolean {
   return /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT|Load request cancelled|(?:request (?:was )?)?(?:cancelled|canceled))$/iu.test(
