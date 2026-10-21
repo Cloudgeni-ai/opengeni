@@ -181,6 +181,43 @@ test("protected receipt captures preserved workspace after exact container disap
   expect(nativeCalls.some((x) => ["run", "exec", "network", "rm"].includes(x[0]!))).toBe(false);
 });
 
+test("ownership of a container live across an image upgrade is proved against its own image", async () => {
+  // Like the SDK, the reuse check falls back to the client's configured image
+  // and ports, which the upgrade changed.
+  const proofs: unknown[] = [];
+  const upgraded = {
+    async canReusePreservedOwnedSession(
+      candidate: { image: string; configuredExposedPorts?: number[] },
+      options?: { clientOptions?: { image?: string; exposedPorts?: number[] } },
+    ) {
+      proofs.push(options?.clientOptions);
+      return (
+        (options?.clientOptions?.image ?? "upgraded-image") === candidate.image &&
+        JSON.stringify(options?.clientOptions?.exposedPorts ?? [8080]) ===
+          JSON.stringify(candidate.configuredExposedPorts ?? [])
+      );
+    },
+  };
+  const live = state();
+  rememberOwnedDockerSdkState(live as never);
+  expect(await serializeDockerOwnership(upgraded as never, live as never, probe)).toHaveProperty(
+    "opengeniDockerWorkspaceOwnership",
+  );
+  const legacy = state();
+  const handle = await attachDockerWorkspaceForDrain(
+    upgraded as never,
+    legacy as never,
+    captureFence,
+    probe,
+  );
+  expect(handle.state.workspaceRootPath).toBe(root);
+  expect(proofs).toEqual([
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+  ]);
+});
+
 test.each(["daemon", "foreign", "inode", "mode", "symlink"])(
   "protected receipt rejects %s drift before content capture",
   async (kind) => {
