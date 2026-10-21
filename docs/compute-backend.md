@@ -343,6 +343,24 @@ set but something else is missing, the gateway logs
 `compute_gateway_misconfigured` and stays off. Compute also needs the relay
 and NATS like Connected Machines.
 
+## Switching new chats between backends
+
+A deployment can keep compute and another managed backend, such as Modal,
+configured side by side and move new chats between them with one setting:
+
+- `OPENGENI_SANDBOX_BACKEND` picks the backend of new chats that do not name
+  one. Change it and roll the API and workers to switch; change it back the
+  same way.
+- Each chat stores the backend it was created on and keeps it. After a
+  switch, existing chats keep working on theirs, and child sessions inherit
+  their parent's. A schedule that starts a new chat on each run follows the
+  setting as it is at that run, unless the schedule names a backend.
+- An API client can still pick a backend for one chat with `sandboxBackend`
+  on session create.
+
+Keep both backends' settings in place for as long as chats on either exist:
+removing compute's or Modal's settings stops those chats, not only new ones.
+
 ## Run as another user
 
 The agent runs as root in the guest, so the descriptor sets `supportsRunAs`.
