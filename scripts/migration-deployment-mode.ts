@@ -14,6 +14,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitStatements, stripComments, stripRoutineBodies } from "./migration-rls-backfills";
+import { isPostReleaseEligible } from "../packages/db/src/migrate";
+import { RELEASE_DIRECTIVE, migrationReleaseDirectives } from "../packages/db/src/migration-phases";
 
 export { MIGRATIONS_DIR } from "./migration-rls-backfills";
 
@@ -43,7 +45,9 @@ export type DeploymentModeFindingKind =
   | "missing-justification"
   | "weak-justification"
   | "unannotated-contract"
-  | "weak-contract-step";
+  | "weak-contract-step"
+  | "ineligible-post-release"
+  | "conflicting-release-directives";
 
 export type DeploymentModeFinding = {
   file: string;
@@ -112,13 +116,16 @@ export function headerValue(sql: string, key: string): { first: string; full: st
 }
 
 /**
- * The runner reads `-- opengeni:` directives only from line 2; anywhere else
- * they are silently ignored and, for a batched backfill, the statement runs
- * once as an ordinary migration.
+ * Execution directives stay on line 2. Release scheduling markers may follow
+ * them in the leading comment block; they never change execution semantics.
  */
 export function misplacedDirectiveLines(sql: string): number[] {
   return leadingCommentBlock(sql)
-    .map((line, index) => (index !== 1 && DIRECTIVE.test(line) ? index + 1 : 0))
+    .map((line, index) =>
+      index !== 1 && DIRECTIVE.test(line) && !(index > 1 && RELEASE_DIRECTIVE.test(line))
+        ? index + 1
+        : 0,
+    )
     .filter((lineNumber) => lineNumber > 0);
 }
 
@@ -310,12 +317,27 @@ export function analyzeMigrationDeploymentMode(
     ];
   }
   const findings: DeploymentModeFinding[] = [];
+  const releaseMarkers = migrationReleaseDirectives(text);
+  if (releaseMarkers.has("pre-release") && releaseMarkers.has("post-release")) {
+    findings.push({
+      file,
+      kind: "conflicting-release-directives",
+      detail: "`-- opengeni:pre-release` and `-- opengeni:post-release` cannot appear together",
+    });
+  } else if (releaseMarkers.has("post-release") && !isPostReleaseEligible(file, text)) {
+    findings.push({
+      file,
+      kind: "ineligible-post-release",
+      detail:
+        "`-- opengeni:post-release` requires a rolling concurrent-index or batched-backfill migration accepted by the runner; ordinary DDL and maintenance migrations cannot be deferred",
+    });
+  }
   const misplaced = misplacedDirectiveLines(text);
   if (misplaced.length > 0) {
     findings.push({
       file,
       kind: "misplaced-directive",
-      detail: `\`-- opengeni:\` directives are read only from line 2, directly below the deployment-mode header; line ${misplaced.join(", ")} would be ignored and the file would run as an ordinary migration`,
+      detail: `execution \`-- opengeni:\` directives are read only from line 2, directly below the deployment-mode header; line ${misplaced.join(", ")} would be ignored and the file would run as an ordinary migration; release markers belong below the execution directive`,
     });
   }
   const lineTwo = leadingCommentBlock(text)[1] ?? "";

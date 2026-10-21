@@ -55,6 +55,8 @@ describe("migration plan", () => {
     await recordApplied("plan_rolling", [ROLLING]);
     const plan = await planMigrations(blank.databaseUrl, "plan_rolling");
     expect(plan).toEqual({
+      phaseProtocol: 1,
+      phases: { pre: [ROLLING], maintenance: [], post: [] },
       pending: [{ name: ROLLING, deploymentMode: "rolling" }],
       requiresDrain: false,
     });
@@ -64,6 +66,8 @@ describe("migration plan", () => {
     await recordApplied("plan_maintenance", [MAINTENANCE, ROLLING]);
     const plan = await planMigrations(blank.databaseUrl, "plan_maintenance");
     expect(plan).toEqual({
+      phaseProtocol: 1,
+      phases: { pre: [], maintenance: [MAINTENANCE, ROLLING], post: [] },
       pending: [
         { name: MAINTENANCE, deploymentMode: "maintenance" },
         { name: ROLLING, deploymentMode: "rolling" },
@@ -75,6 +79,8 @@ describe("migration plan", () => {
   test("an up-to-date database has nothing pending", async () => {
     await recordApplied("plan_current", []);
     expect(await planMigrations(blank.databaseUrl, "plan_current")).toEqual({
+      phaseProtocol: 1,
+      phases: { pre: [], maintenance: [], post: [] },
       pending: [],
       requiresDrain: false,
     });

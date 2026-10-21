@@ -31,17 +31,89 @@ transaction boundaries remain unchanged; failure rolls back the local setting.
 
 ## Why rolling is the default
 
-The deploy applies every pending migration in the pre-upgrade hook, before it
-replaces application pods, so for the whole rollout the previous release's API,
-control workers and turn workers run against the new schema.
-`bun run db:migrate-plan` reports `requiresDrain: true` as soon as one pending
-migration is maintenance, and then every API, control and turn worker is
-stopped for the entire release, however many rolling migrations ride along. On
-2026-10-15 one release carried 135 migrations as a single maintenance batch and
-production was down for 1 h 47 min.
+Rolling migrations can run while the previous release's API, control workers
+and turn workers serve traffic. The legacy deployment runs all pending work in
+one job, parking the fleet if any migration needs maintenance. On 2026-10-15
+one release carried 135 migrations as a single maintenance batch and production
+was down for 1 h 47 min. Phase-aware orchestration can instead keep only the
+necessary middle span parked (the runner itself never parks or restores pods).
 
 A rolling migration therefore has one rule: **every binary from the previous
 release must keep reading, writing and passing readiness after it commits.**
+
+## Release phases
+
+Most authors need no new annotations: rolling migrations run before parking,
+and non-unique concurrent indexes run after traffic returns, subject to file
+order. The runner never skips dependencies by moving files across each other.
+From the database's currently pending files, in file order, it partitions:
+
+1. **post**: the maximal suffix of post-release-eligible migrations.
+2. **pre**: the longest prefix of the rest that is rolling or historical,
+   stopping at the first maintenance or unclassified file.
+3. **maintenance**: everything between them, including any intervening rolling
+   work. It is empty for an all-rolling release.
+
+Only rolling migrations accepted by the concurrent-index or batched-backfill
+parser can be eligible. Non-unique concurrent indexes are eligible automatically.
+A unique concurrent index or batched backfill needs `-- opengeni:post-release`;
+add it **only when the new code tolerates the index being absent or the backfill
+being incomplete**. Never mark ordinary DDL, tables, columns, grants, functions,
+maintenance or unclassified migrations. Use `-- opengeni:pre-release` to keep an
+automatically eligible index out of post (it still follows file order and may
+therefore land in the maintenance span). Never combine both markers.
+
+Keep the execution directive on line 2 and the release marker immediately below
+it, before SQL. For example:
+
+```sql
+-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+-- opengeni:post-release
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS widgets_external_id ON widgets (external_id);
+```
+
+The same marker placement works with `-- opengeni:batched-backfill ...`.
+Do not edit shipped migrations to add markers; their hashes remain immutable.
+
+From `packages/db`, the ops contract is:
+
+| Command | Work applied |
+| --- | --- |
+| `bun src/migrate.ts --phase=pre` | pre only, before parking |
+| `bun src/migrate.ts --phase=maintenance` | pre + maintenance, while parked if necessary |
+| `bun src/migrate.ts --phase=post` | all remaining work, after restoring traffic |
+| `bun src/migrate.ts` | all remaining work, unchanged default |
+
+`--phase pre` also works. `OPENGENI_MIGRATION_PHASE` selects the CLI phase when
+no flag is present; a flag wins, and invalid values fail before connecting.
+Programmatic `migrate`/`runMigrations` callers may pass `phase` in runtime
+options; without it they continue applying everything, independent of the CLI
+phase environment variable. Every invocation recomputes from committed receipts
+under the existing advisory lock, preserves depth-policy reconciliation, and is
+safe to retry after partial progress. A later phase catches up earlier work.
+
+`--plan` / `planMigrations` retain `pending` and `requiresDrain` unchanged and
+add `phaseProtocol: 1` and `phases: {pre: string[], maintenance: string[], post:
+string[]}`. Planning remains read-only; its snapshot is not execution authority.
+Ops must fall back to the legacy single job when `phaseProtocol` is absent.
+
+Every successful CLI phase prints the exact legacy success line:
+
+```text
+Applied Drizzle SQL migrations.
+```
+
+It also prints one compact JSON line (other existing runner logs remain):
+
+```json
+{"schemaVersion":"opengeni/migration-phase/v1","phase":"pre","applied":["0900_example.sql"],"remaining":["0901_example.sql"]}
+```
+
+Names are full SQL filenames in file order. `applied` means newly applied by
+this invocation, not the cumulative ledger; `remaining` is pending after it.
+No-phase runs report `"phase":"post"`. Failed runs do not print a success
+receipt; already committed migration receipts are used on retry.
 
 ## The sequence
 
@@ -203,7 +275,7 @@ because it is already shipped and its behavior is wrong. "It is more work" or
 "it is a small table" is not a justification.
 
 Put the justification in the leading comment block: the comment lines before
-the first SQL statement or `/* */` comment. An `-- opengeni:` directive must
+the first SQL statement or `/* */` comment. An execution `-- opengeni:` directive must
 stay on line 2, so the justification goes below it. Wrap long text onto
 continuation lines indented as `--   `; the value ends at a blank line or an
 unindented comment:
@@ -216,7 +288,7 @@ unindented comment:
 
 It needs at least 40 characters and six words, and placeholders such as `TODO`,
 `TBD`, `n/a` or `<...>` fail. A `-- opengeni:concurrent-index` migration cannot
-carry other comment lines and is always rolling. Also document the operator
+carry other comment lines except the release markers and is always rolling. Also document the operator
 steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 `docs/maintenance-migrations/`.
 
@@ -277,8 +349,10 @@ it fails when:
 
 - line 1 is not exactly `-- deployment-mode: rolling` or
   `-- deployment-mode: maintenance`;
-- an `-- opengeni:` directive sits anywhere but line 2, or a concurrent-index
+- an execution `-- opengeni:` directive sits anywhere but line 2, or a concurrent-index
   migration is declared maintenance;
+- `post-release` marks anything other than a valid rolling concurrent-index or
+  batched-backfill migration, or both release markers appear together;
 - a maintenance migration has no meaningful `-- maintenance-justification:`;
 - a rolling migration runs `DROP COLUMN`, `DROP TABLE`, `RENAME COLUMN`,
   `RENAME TO`, `ALTER COLUMN ... TYPE` or `SET NOT NULL` on a table it did not

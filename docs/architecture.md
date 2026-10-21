@@ -2670,6 +2670,10 @@ objects; named-object ACL, RLS and capability contracts remain exact. Unknown
 callable SECURITY DEFINER routines require a prior explicit binary contract.
 The pinned previous-binary inspector/evaluator CI and its release bootstrap are
 documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
+The migration runner partitions the live pending ledger into a rolling prefix,
+maintenance span and eligible post-release suffix. Phase execution is cumulative
+and serialized by the existing advisory lock; default execution still applies
+everything. See [the phase contract](migrations-expand-contract.md#release-phases).
 The migration ledger keys receipts by full SQL filename, not ordinal. Published
 SQL names and bytes remain immutable, including historical duplicate ordinals.
 The source guard permits a duplicate group already present together on one
