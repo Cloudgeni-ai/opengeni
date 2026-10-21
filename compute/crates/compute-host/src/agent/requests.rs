@@ -25,7 +25,7 @@ use crate::store::{OwnerEpoch, Store};
 use super::disk::{AfterReading, Room};
 use super::holds::{Write, hold_id};
 use super::observe::{By, Why};
-use super::steps::unmake;
+use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
 /// How long a new sandbox's first wake stays booked if it is not woken:

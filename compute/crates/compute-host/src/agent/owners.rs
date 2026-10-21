@@ -37,8 +37,8 @@ use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
 use super::disk::{AfterReading, Room};
+use super::remove::unmake;
 use super::requests::first_wake_by_ms;
-use super::steps::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 

@@ -51,6 +51,7 @@ mod observe;
 mod owners;
 mod ready;
 mod recover;
+mod remove;
 mod requests;
 mod sample;
 mod steps;
@@ -378,7 +379,7 @@ enum Event<V> {
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
         /// Why a create or adopt that failed could not delete all it had
-        /// made (see [`steps::unmake`]): its id stays blocked, and its
+        /// made (see [`remove::unmake`]): its id stays blocked, and its
         /// ordinal taken, until removing it again deletes the rest.
         left: Option<String>,
     },
