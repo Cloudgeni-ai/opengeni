@@ -221,6 +221,9 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     "allowance_membership_insert",
     "allowance_membership_update",
     "normalize_legacy_member_connection_read_0516",
+    // 0888 commit-only session list hints.
+    "workspace_memberships_list_change",
+    "workspace_memberships_list_update",
   ]);
 
   const read = () =>
