@@ -3,7 +3,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
@@ -15,8 +15,8 @@ import {
   notifyModelConnectionsChanged,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
-} from "@/lib/shared-query";
-import { ModelSettingsPlaceholder } from "@/components/models/model-settings-placeholder";
+} from "@opengeni/react/app/lib/shared-query";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 import {
   apiErrorAdvice,
   apiErrorDetails,

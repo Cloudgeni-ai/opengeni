@@ -686,7 +686,7 @@ Background facts:
 - `useCodexAccounts` (`hooks/use-codex-accounts.ts:145`): workspace or session-scoped Codex accounts, pin, live usage refresh; refetches on `isCodexAccountEvent` (`:19`, Codex events + generic turn/status events). Codex-only.
 - `useSuperGrokAccounts` (`hooks/use-supergrok-accounts.ts:43`): polls workspace list only; no session scope, no pin.
 - No Claude hook in the package.
-- Model policy / picker: `model-policy.ts` billing labels per provider (`:31-33`, `:186-241`); `groupPickerRowsByBillingClass` with `codexOnly` (`:399`, `:510`) and `applyCodexOnly` (`model-picker-model.ts:133`) disable non-Codex rows for `remote_v2` sessions (web passes it at `apps/web/src/routes/session.tsx:2571`, `:3465`).
+- Model policy / picker: `model-policy.ts` billing labels per provider (`:31-33`, `:186-241`); `groupPickerRowsByBillingClass` with `codexOnly` (`:399`, `:510`) and `applyCodexOnly` (`model-picker-model.ts:133`) disable non-Codex rows for `remote_v2` sessions (web passes it at `packages/react/src/app/routes/session.tsx:2571`, `:3465`).
 - Timeline: `codex.capacity.waiting` renders a "waiting" notice (`timeline/projection.ts:1088`); `turn.capacity_waiting` (Claude/SuperGrok) is only treated as execution evidence (`:2491`) and gets **no notice**. Fleet decision rows are Codex-only (`timeline/fleet-decision-row.tsx`).
 - Status label: generic "Waiting for capacity" for `waiting_capacity` (`session-status-model.ts:14`), no provider shown.
 
@@ -699,7 +699,7 @@ Background facts:
 - Portable vs remote_v2 Codex chats: `CodexProviderSwitchRow` (`models/codex-provider-switch-row.tsx:22`), workspace setting `codexCompactionDefault`.
 
 ##### EP-S29 — Web: session account indicator / switcher
-- `CodexAccountIndicator` (`apps/web/src/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
+- `CodexAccountIndicator` (`packages/react/src/app/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
 - **Codex-only.** No indicator, switcher or waiting account display for Claude or SuperGrok sessions.
 
 ##### EP-S30 — Web: organization connection access ("Available in")

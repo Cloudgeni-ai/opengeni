@@ -2,7 +2,7 @@ import type {
   ConnectionMetadata,
   GoogleDriveConnectionMetadata,
   GoogleDriveDisconnectRequest,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 const GOOGLE_DRIVE_FULL_SCOPE = "https://www.googleapis.com/auth/drive";

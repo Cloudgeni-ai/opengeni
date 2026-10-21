@@ -2,11 +2,11 @@ import type { VideoGenerationFundingSource, WorkspaceVideoGenerationSettings } f
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { RowSelect } from "@/components/settings/row-select";
+import { RowSelect } from "@opengeni/react/app/components/settings/row-select";
 import type { SelectOption } from "@opengeni/react/ui/select-menu";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";

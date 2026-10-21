@@ -2,15 +2,15 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import { ListRow } from "@opengeni/react/ui/list-row";
-import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
-import { useAppContext } from "@/context";
-import { formatMoneyMicros } from "@/lib/format";
-import { modelUsesCredits } from "@/lib/model-policy";
-import { hasAccountPermission } from "@/lib/permissions";
-import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
-import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
-import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
-import type { ClientConfig } from "@/types";
+import { OpenGeniCreditsTile } from "@opengeni/react/app/components/models/provider-mark";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import { modelUsesCredits } from "@opengeni/react/app/lib/model-policy";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
+import { CREDIT_BALANCE_CHANGED } from "@opengeni/react/app/lib/credit-balance-events";
+import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Opengeni credits in Settings > Models: on a deployment that bills credits,

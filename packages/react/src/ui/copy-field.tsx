@@ -5,6 +5,9 @@ import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { Button } from "./button";
 import { useFieldControlProps } from "./field";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const TooltipContainedPortal = containedPortal(TooltipPrimitive.Portal);
 
 /* ----------------------------------------------------------------------------
    CopyField - a quiet mono value with a copy button, for workspace and
@@ -325,7 +328,7 @@ export function CopyField({
               )}
             </Button>
           </TooltipPrimitive.Trigger>
-          <TooltipPrimitive.Portal>
+          <TooltipContainedPortal>
             <TooltipPrimitive.Content
               data-slot="copy-field-tooltip"
               side="top"
@@ -336,7 +339,7 @@ export function CopyField({
               Couldn't copy. Press {shortcut} to copy it.
               <TooltipPrimitive.Arrow width={10} height={5} className="fill-fg" />
             </TooltipPrimitive.Content>
-          </TooltipPrimitive.Portal>
+          </TooltipContainedPortal>
         </TooltipPrimitive.Root>
       </TooltipPrimitive.Provider>
       {status}

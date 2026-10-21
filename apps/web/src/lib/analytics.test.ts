@@ -1,6 +1,6 @@
-import { beginAnalyticsRequest as observeRequest } from "./analytics-observer";
-import { noteSuccessfulLogin } from "./analytics-login";
-import { observeSessionTurnEvents } from "./analytics-observer";
+import { beginAnalyticsRequest as observeRequest } from "@opengeni/react/app/lib/analytics-observer";
+import { noteSuccessfulLogin } from "@opengeni/react/app/lib/analytics-login";
+import { observeSessionTurnEvents } from "@opengeni/react/app/lib/analytics-observer";
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./signup-attribution";
 import { describe, expect, mock, test } from "bun:test";
 
@@ -18,7 +18,7 @@ import {
   persistAnalyticsConsent,
   storedAnalyticsConsent,
   takePendingAnalyticsPreferencesOpen,
-} from "./analytics-consent";
+} from "@opengeni/react/app/lib/analytics-consent";
 
 describe("analytics consent", () => {
   test("recognizes only configured provider adapters", () => {

@@ -12,7 +12,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
-import { parseAppearance, useAppearance } from "@/lib/appearance";
+import { parseAppearance, useAppearance } from "@opengeni/react/app/lib/appearance";
 
 const options = [
   { value: "light", label: "Light", icon: SunIcon },

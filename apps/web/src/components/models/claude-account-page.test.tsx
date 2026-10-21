@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { invalidateModelSettingsQueries } from "@/lib/shared-query";
+import { invalidateModelSettingsQueries } from "@opengeni/react/app/lib/shared-query";
 let createRoot: typeof import("react-dom/client").createRoot;
 let useClaude: typeof import("./use-claude-subscriptions").useClaudeSubscriptions;
 let ClaudeAccountPage: typeof import("./claude-subscription-models").ClaudeAccountPage;

@@ -5,7 +5,7 @@
 // organization and keeps the same kind of page. Workspace, organization and
 // personal settings all draw this same rail, so a page never moves to another
 // rail and the scope of every page is visible.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
@@ -30,21 +30,24 @@ import {
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { lastSessionMemoryId, readLastSessionId } from "@/lib/last-session-memory";
-import { orgLabel } from "@/lib/org";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import {
+  lastSessionMemoryId,
+  readLastSessionId,
+} from "@opengeni/react/app/lib/last-session-memory";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
 import type {
   WorkspaceManagementLocation,
   WorkspaceSettingsSection,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 
 /** Where in settings the person is: a workspace page, an organization page, or their account. */
 export type SettingsLocation = WorkspaceManagementLocation | { kind: "account" };

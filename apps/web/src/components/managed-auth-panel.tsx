@@ -16,8 +16,8 @@ import {
   validateManagedAuthInput,
   type ManagedAuthField,
   type ManagedAuthFormErrors,
-  type ManagedAuthMode,
 } from "@/lib/managed-auth-form";
+import type { ManagedAuthMode } from "@opengeni/react/app/lib/managed-auth-transition";
 import {
   clearVerificationLinkErrorFromLocation,
   managedAuthModeFromSearch,

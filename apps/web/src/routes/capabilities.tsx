@@ -30,9 +30,9 @@ import {
   mergeConnectionServices,
   partitionConnectionServices,
 } from "@/components/capabilities/connection-services";
-import { capabilityStateChip } from "@/lib/capabilities";
+import { capabilityStateChip } from "@opengeni/react/app/lib/capabilities";
 import { CatalogHeader, CatalogActionContext } from "@/components/capabilities/catalog-header";
-import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
+import { performCapabilityAction } from "@opengeni/react/app/components/capabilities/perform-capability-action";
 import {
   beginIntegrationConnect,
   integrationClassFromDomain,
@@ -40,7 +40,7 @@ import {
   useIntegrationConnectJourney,
   type IntegrationClass,
   type IntegrationConnectTracker,
-} from "@/lib/integration-connect-analytics";
+} from "@opengeni/react/app/lib/integration-connect-analytics";
 
 // Capabilities has one overview and dedicated Connections, Skills, and Plugins
 // tabs. Connections group provider accounts and use the normal connection
@@ -77,8 +77,8 @@ import {
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
-import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
-import { type ConnectAction } from "@/components/capabilities/capability-detail-sheet";
+import { capabilityLogoSource } from "@opengeni/react/app/components/capabilities/capability-logo-source";
+import { type ConnectAction } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import {
   customApiAuthenticationMayBeRequired,
   customApiConnectionRequest,
@@ -98,8 +98,8 @@ import {
   nativeIntegrationModel,
   nativeIntegrationVisible,
   nativeProviderAvailable,
-} from "@/components/capabilities/native-connect-readiness";
-import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
+} from "@opengeni/react/app/components/capabilities/native-connect-readiness";
+import { useCapabilitiesCatalog } from "@opengeni/react/app/components/capabilities/use-capabilities-catalog";
 import { useCatalogConnectionAccounts } from "@/components/capabilities/use-catalog-connection-accounts";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
@@ -116,7 +116,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -124,7 +124,7 @@ import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   capabilityConnectPlan,
   capabilityErrorToast,
@@ -143,19 +143,19 @@ import {
   type CapabilityFormState,
   type ConnectionHealth,
   type SheetSelection,
-} from "@/lib/capabilities";
+} from "@opengeni/react/app/lib/capabilities";
 import {
   mcpOAuthCallbackFailureMessage,
   oauthCallbackFailureMessage,
   oauthCallbackReasonMessage,
-} from "@/lib/oauth-callback-messages";
+} from "@opengeni/react/app/lib/oauth-callback-messages";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { request } from "@/api";
-import { LoadErrorState } from "@/components/common";
+import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 // Custom API creation is a fundamentally different "define a new connector
@@ -172,7 +172,7 @@ import {
   connectionAccessChip,
   connectionAccessModel,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 import type {
   AccessContext,
@@ -181,7 +181,7 @@ import type {
   ConnectionMetadata,
   ConnectionOwnership,
   SkillUninstallPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 // Served from this chunk so `/integrations` adds no route chunk of its own.
 export { IntegrationsReturnRoute } from "@/routes/capabilities-legacy-redirect";

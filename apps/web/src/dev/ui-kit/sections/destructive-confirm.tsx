@@ -9,7 +9,7 @@ import {
   showUndoToast,
   type ConfirmDependency,
   type DestructiveConfirmContentProps,
-} from "@/components/ui/destructive-confirm";
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";

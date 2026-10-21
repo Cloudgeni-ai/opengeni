@@ -1,5 +1,5 @@
 import type { ChoiceCardsVariant } from "@opengeni/react/ui/choice-cards";
-import type { DestructiveConfirmVariant } from "@/components/ui/destructive-confirm";
+import type { DestructiveConfirmVariant } from "@opengeni/react/app/components/ui/destructive-confirm";
 import type { DisclosureVariant } from "@opengeni/react/ui/disclosure";
 import type { LineTabsVariant } from "@opengeni/react/ui/line-tabs";
 import type { RowListVariant } from "@opengeni/react/ui/list-row";

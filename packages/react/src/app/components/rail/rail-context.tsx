@@ -1,0 +1,368 @@
+// Shared state for the left rail: collapsed (icon-only) persistence, the mobile
+// overlay-drawer toggle, and the workspace-scoped navigation helpers every rail
+// section reuses (open a workspace, start a new session, switch org/workspace).
+import { useNavigate, useRouter } from "../../lib/navigation";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+  type ReactNode,
+  type RefObject,
+} from "react";
+
+import { useAppContext } from "../../app-context";
+import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
+import { desktopBridge, desktopCapability } from "../../lib/desktop";
+import { OPEN_SESSION_SEARCH_EVENT, requestSessionSearch } from "../../lib/session-search-route";
+import { workspaceManagementLocation } from "../../lib/workspace-management-location";
+import { useUiEventTarget } from "../../lib/ui-events";
+
+const SessionSearchDialog = lazy(() => import("../session/session-search-dialog"));
+
+const RAIL_COLLAPSED_KEY = "opengeni.rail.collapsed";
+const RAIL_WIDTH_KEY = "opengeni.rail.width";
+/** Below this viewport width the rail is an overlay drawer, not a fixed column. */
+export const RAIL_DRAWER_BREAKPOINT = 1024;
+/**
+ * A desktop app window is never a phone: it keeps the rail as a column down to
+ * its minimum width, where the person can still collapse it.
+ */
+const DESKTOP_RAIL_DRAWER_BREAKPOINT = 640;
+const railDrawerBreakpoint = desktopBridge
+  ? DESKTOP_RAIL_DRAWER_BREAKPOINT
+  : RAIL_DRAWER_BREAKPOINT;
+/** Resize bounds for the expanded desktop rail (px). */
+export const RAIL_MIN_WIDTH = 220;
+export const RAIL_MAX_WIDTH = 480;
+/**
+ * A desktop app window is wider than most browser windows next to other tabs
+ * and the sidebar is its main way around, so it starts wide enough for real
+ * session titles beside each row's status and time.
+ */
+export const RAIL_DEFAULT_WIDTH = desktopBridge ? 288 : 244;
+
+function clampRailWidth(width: number): number {
+  if (!Number.isFinite(width)) {
+    return RAIL_DEFAULT_WIDTH;
+  }
+  return Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(width)));
+}
+
+export type RailContextValue = {
+  workspaceId: string;
+  /** Icon-only rail (desktop). Ignored while the mobile drawer is in play. */
+  collapsed: boolean;
+  setCollapsed: (collapsed: boolean) => void;
+  toggleCollapsed: () => void;
+  /** User-chosen expanded-rail width (px), clamped to [RAIL_MIN, RAIL_MAX]. */
+  width: number;
+  /** Set the expanded-rail width; persisted to localStorage (clamped). */
+  setWidth: (width: number) => void;
+  /** Whether the viewport is narrow enough to use the overlay drawer. */
+  isMobile: boolean;
+  /** Mobile overlay-drawer open state. */
+  drawerOpen: boolean;
+  setDrawerOpen: (open: boolean) => void;
+  /** Persistent opener outside the mobile drawer, also used after search. */
+  drawerTriggerRef: RefObject<HTMLButtonElement | null>;
+  /** Retiring drawers must not take focus from an open search dialog. */
+  restoreDrawerFocus: () => void;
+  /** Navigate to a workspace's sessions index (used by the switchers). */
+  openWorkspace: (workspaceId: string) => void;
+  /** Switch organization: navigate to the first workspace in the target org. */
+  openOrg: (accountId: string) => void;
+  /** Open a specific session in the current workspace. */
+  openSession: (sessionId: string) => void;
+  /** Start a new session (the sessions index composer). */
+  startNewSession: () => void;
+};
+
+const RailContext = createContext<RailContextValue | null>(null);
+
+export function useRail(): RailContextValue {
+  const value = useContext(RailContext);
+  if (!value) {
+    throw new Error("Rail context is not ready");
+  }
+  return value;
+}
+
+function readStoredCollapsed(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(RAIL_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function readStoredWidth(): number {
+  if (typeof window === "undefined") {
+    return RAIL_DEFAULT_WIDTH;
+  }
+  try {
+    const raw = window.localStorage.getItem(RAIL_WIDTH_KEY);
+    return raw ? clampRailWidth(Number.parseInt(raw, 10)) : RAIL_DEFAULT_WIDTH;
+  } catch {
+    return RAIL_DEFAULT_WIDTH;
+  }
+}
+
+export function RailProvider({
+  workspaceId,
+  children,
+}: {
+  workspaceId: string;
+  children: ReactNode;
+}) {
+  const windowEvents = useUiEventTarget("window");
+  const navigate = useNavigate();
+  const router = useRouter();
+  const appContext = useAppContext();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchMounted, setSearchMounted] = useState(false);
+  const searchReturnFocus = useRef<HTMLElement | null>(null);
+  const searchOpenRef = useRef(searchOpen);
+  searchOpenRef.current = searchOpen;
+  const drawerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const suppressDrawerRestore = useRef(false);
+  const [drawerOpen, setDrawerOpenState] = useState(false);
+  const setDrawerOpen = useCallback((next: boolean) => {
+    if (next) suppressDrawerRestore.current = false;
+    setDrawerOpenState(next);
+  }, []);
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.innerWidth < railDrawerBreakpoint : false,
+  );
+  const restoreDrawerFocus = useCallback(() => {
+    // Search owns this close even if a result navigates before the drawer's
+    // exit animation finishes. Do not let that retiring scope reclaim focus.
+    if (suppressDrawerRestore.current) {
+      suppressDrawerRestore.current = false;
+      return;
+    }
+    if (!searchOpenRef.current) drawerTriggerRef.current?.focus({ preventScroll: true });
+  }, []);
+  const changeSearchOpen = useCallback((next: boolean) => {
+    searchOpenRef.current = next;
+    setSearchOpen(next);
+  }, []);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          workspaceId?: string | undefined;
+          returnFocus?: HTMLElement | undefined;
+        }>
+      ).detail;
+      if (detail?.workspaceId !== workspaceId) return;
+      if (!searchOpenRef.current) {
+        searchReturnFocus.current = isMobile
+          ? drawerTriggerRef.current
+          : detail.returnFocus instanceof HTMLElement
+            ? detail.returnFocus
+            : document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+      }
+      if (drawerOpen) suppressDrawerRestore.current = true;
+      setSearchMounted(true);
+      changeSearchOpen(true);
+      setDrawerOpen(false);
+    };
+    windowEvents.addEventListener(OPEN_SESSION_SEARCH_EVENT, open);
+    return () => windowEvents.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open);
+  }, [workspaceId, isMobile, drawerOpen, changeSearchOpen, setDrawerOpen, windowEvents]);
+  useEffect(() => {
+    searchReturnFocus.current = null;
+    changeSearchOpen(false);
+  }, [workspaceId, appContext.accessContext.subjectId, changeSearchOpen]);
+  const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
+  const [width, setWidthState] = useState<number>(() => readStoredWidth());
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const query = window.matchMedia(`(max-width: ${railDrawerBreakpoint - 1}px)`);
+    const apply = () => setIsMobile(query.matches);
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
+
+  const setCollapsed = useCallback((next: boolean) => {
+    setCollapsedState(next);
+    try {
+      window.localStorage.setItem(RAIL_COLLAPSED_KEY, String(next));
+    } catch {
+      // localStorage may be unavailable (private mode); keep the in-memory value.
+    }
+  }, []);
+
+  const toggleCollapsed = useCallback(() => setCollapsed(!collapsed), [collapsed, setCollapsed]);
+
+  const setWidth = useCallback((next: number) => {
+    const clamped = clampRailWidth(next);
+    setWidthState(clamped);
+    try {
+      window.localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
+    } catch {
+      // localStorage may be unavailable (private mode); keep the in-memory value.
+    }
+  }, []);
+
+  const openWorkspace = useCallback(
+    (nextWorkspaceId: string) => {
+      appContext.resetSessionView();
+      setDrawerOpen(false);
+      // In settings, switching workspace keeps the same settings page.
+      const current = router.state.location;
+      const settings = workspaceManagementLocation(
+        current.pathname,
+        workspaceId,
+        (current.search as { section?: unknown }).section,
+      );
+      if (settings?.kind === "settings") {
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
+      if (settings?.kind === "page") {
+        void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
+        return;
+      }
+      if (settings?.kind === "organization") {
+        void navigate({
+          to: "/workspaces/$workspaceId/organization",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: nextWorkspaceId },
+      });
+    },
+    [appContext, navigate, router, workspaceId, setDrawerOpen],
+  );
+
+  const openOrg = useCallback(
+    (accountId: string) => {
+      const target = appContext.workspaces.find((workspace) => workspace.accountId === accountId);
+      if (!target) {
+        return;
+      }
+      appContext.resetSessionView();
+      setDrawerOpen(false);
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: target.id },
+      });
+    },
+    [appContext, navigate, setDrawerOpen],
+  );
+
+  const openSession = useCallback(
+    (sessionId: string) => {
+      setDrawerOpen(false);
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      });
+    },
+    [navigate, workspaceId, setDrawerOpen],
+  );
+
+  const startNewSession = useCallback(() => {
+    appContext.resetSessionView();
+    setDrawerOpen(false);
+    void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } }).then(() => {
+      // Same-route: create composer stays mounted, so autoFocus will not re-run.
+      requestCreateComposerFocus(windowEvents);
+    });
+  }, [appContext, navigate, workspaceId, setDrawerOpen, windowEvents]);
+
+  // The desktop app's menu bar and shortcuts: New Session, Search Sessions,
+  // Toggle Sidebar and Inbox act on this workspace.
+  useEffect(() => {
+    const bridge = desktopCapability("commands");
+    if (!bridge) return;
+    return bridge.commands.onCommand((command) => {
+      if (command === "newSession") startNewSession();
+      else if (command === "searchSessions") requestSessionSearch(windowEvents, workspaceId);
+      else if (command === "toggleSidebar") toggleCollapsed();
+      else if (command === "openInbox") {
+        setDrawerOpen(false);
+        void navigate({ to: "/workspaces/$workspaceId/inbox", params: { workspaceId } });
+      }
+    });
+  }, [navigate, setDrawerOpen, startNewSession, toggleCollapsed, windowEvents, workspaceId]);
+
+  const value = useMemo<RailContextValue>(
+    () => ({
+      workspaceId,
+      // The drawer always renders expanded content; collapse only applies to the
+      // fixed desktop column.
+      collapsed: isMobile ? false : collapsed,
+      setCollapsed,
+      toggleCollapsed,
+      width,
+      setWidth,
+      isMobile,
+      drawerOpen,
+      setDrawerOpen,
+      drawerTriggerRef,
+      restoreDrawerFocus,
+      openWorkspace,
+      openOrg,
+      openSession,
+      startNewSession,
+    }),
+    [
+      workspaceId,
+      collapsed,
+      width,
+      setWidth,
+      isMobile,
+      drawerOpen,
+      setDrawerOpen,
+      restoreDrawerFocus,
+      setCollapsed,
+      toggleCollapsed,
+      openWorkspace,
+      openOrg,
+      openSession,
+      startNewSession,
+    ],
+  );
+
+  return (
+    <RailContext.Provider value={value}>
+      {children}
+      {searchMounted ? (
+        <Suspense fallback={null}>
+          <SessionSearchDialog
+            key={`${appContext.accessContext.subjectId}:${workspaceId}`}
+            workspaceId={workspaceId}
+            open={searchOpen}
+            onOpenChange={changeSearchOpen}
+            returnFocus={searchReturnFocus}
+          />
+        </Suspense>
+      ) : null}
+    </RailContext.Provider>
+  );
+}

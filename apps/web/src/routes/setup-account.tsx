@@ -16,7 +16,7 @@ import { Label } from "@opengeni/react/ui/label";
 import { Notice } from "@opengeni/react/ui/notice";
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
-import type { AuthSession, OrganizationInvitation } from "@/types";
+import type { AuthSession, OrganizationInvitation } from "@opengeni/react/app/types";
 
 export { setupAccountTokenFromUrl } from "@/setup-account-token";
 

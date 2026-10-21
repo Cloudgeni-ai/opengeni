@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatMoneyMicros, formatWaitingSince } from "./format";
+import { formatMoneyMicros, formatWaitingSince } from "@opengeni/react/app/lib/format";
 import { formatBudget } from "./usage-allowances";
 
 describe("dollar amounts", () => {

@@ -30,7 +30,7 @@ import type {
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FolderCrumb = { id: string; name: string };
 const ROOT_CRUMB: FolderCrumb = { id: "root", name: "My Drive" };

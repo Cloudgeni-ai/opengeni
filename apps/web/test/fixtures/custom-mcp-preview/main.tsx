@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import type { AuthNeededItem } from "@opengeni/react";
-import { SessionCapabilityCard } from "../../../src/components/capabilities/session-capability-card";
+import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import "../../../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);

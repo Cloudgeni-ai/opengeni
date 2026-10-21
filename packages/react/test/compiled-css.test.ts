@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { join } from "node:path";
 import { parse, type AtRule, type Declaration } from "postcss";
 import selectorParser, { type Selector } from "postcss-selector-parser";
 
@@ -8,7 +8,6 @@ import {
   assertScoped,
   buildCompiledCss,
   buildEffectiveTokensCss,
-  compiledCssInput,
   flattenLayers,
 } from "../scripts/build-compiled-css";
 
@@ -228,39 +227,22 @@ describe("compiled CSS contract", () => {
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
     // A tripwire for accidental bloat (unscoped sources, whole palettes, prose
     // words turned into utilities), not a feature budget. The builder already
-    // excludes non-class sources; real UI growth raises this deliberately.
-    expect(Buffer.byteLength(compiled)).toBeLessThan(272_000);
+    // excludes non-class sources; real UI growth raises this deliberately (the
+    // web app's UI primitives moved into src/ui: ~404 KB; the session app in
+    // src/app with its token bridge: ~475 KB; the plain connect, This computer
+    // and capability-card stylesheets its components import: ~573 KB).
+    expect(Buffer.byteLength(compiled)).toBeLessThan(600_000);
   });
 
-  test("leaves out first-party UI that no embeddable component renders", async () => {
-    // src/ui (and src/app, when the builder excludes it) are the web app's
-    // building blocks, compiled by the web app's own Tailwind. compiled.css
-    // serves embeds, so it scans them only once an embeddable component does.
-    const unshipped = ["ui", "app"].filter((directory) =>
-      compiledCssInput.includes(`@source not "../src/${directory}";`),
-    );
-    expect(unshipped).toContain("ui");
-    const sourceRoot = join(packageRoot, "src");
-    const importers: string[] = [];
-    for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync(sourceRoot)) {
-      if (/\.test\.tsx?$/u.test(file)) continue;
-      if (unshipped.some((directory) => file.startsWith(`${directory}/`))) continue;
-      const source = await readFile(join(sourceRoot, file), "utf8");
-      for (const [, specifier] of source.matchAll(
-        /(?:\bfrom|\bimport)\s*\(?\s*["']([^"']+)["']/gu,
-      )) {
-        if (!specifier) continue;
-        const target = specifier.startsWith(".")
-          ? relative(sourceRoot, resolve(sourceRoot, dirname(file), specifier))
-          : specifier.replace(/^@opengeni\/react\//u, "");
-        if (unshipped.some((dir) => target === dir || target.startsWith(`${dir}/`))) {
-          importers.push(`${file} -> ${specifier}`);
-        }
-      }
-    }
-    // An embeddable component renders them now: drop the exclusion in
-    // scripts/build-compiled-css.ts, rebuild, and raise the budget deliberately.
-    expect(importers).toEqual([]);
+  test("never treats a root named inside :not() as scoping a host-page rule", () => {
+    expect(() => assertScoped("button:not(.og-root textarea) { outline: 0 }")).toThrow();
+    expect(() =>
+      assertScoped(":where(.og-root) button:not(.og-root textarea) { outline: 0 }"),
+    ).not.toThrow();
+    // The shipped focus ring names a root only inside :not(), so it is scoped
+    // like any host-page selector (root ancestor or root itself).
+    expect(compiled).toContain(":where(.og-root) :where(");
+    expect(() => assertScoped(compiled)).not.toThrow();
   });
 
   test("nests only leading-& selectors so host bundlers lower them without :is()", () => {

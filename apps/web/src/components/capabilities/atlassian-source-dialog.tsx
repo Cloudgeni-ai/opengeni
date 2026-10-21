@@ -23,7 +23,7 @@ import type {
   AtlassianSyncCadence,
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 /**
  * The Jira and Confluence source picker. Opened from the integration sheet's

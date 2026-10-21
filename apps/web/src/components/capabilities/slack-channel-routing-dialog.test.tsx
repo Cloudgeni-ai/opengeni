@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { AccessContext } from "@/types";
+import type { AccessContext } from "@opengeni/react/app/types";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
@@ -12,7 +12,9 @@ const PERSONAL_ID = "55555555-5555-4555-8555-555555555555";
 const CONNECTION_ID = "66666666-6666-4666-8666-666666666666";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({ useAppContext: () => mutableContext.current }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => mutableContext.current,
+}));
 
 // Radix portals do not mount under happy-dom; render the frame inline so the
 // real dialog body is exercised.

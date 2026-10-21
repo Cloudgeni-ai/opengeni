@@ -5,10 +5,10 @@
 // Members still see shares first ("38% left"), with the amount alongside.
 import type { UsageAmountFormat } from "@opengeni/react/usage";
 
-import { MICROS_PER_DOLLAR, parseDollars } from "@/lib/dollars";
-import { formatMoneyMicros } from "@/lib/format";
+import { MICROS_PER_DOLLAR, parseDollars } from "@opengeni/react/app/lib/dollars";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
 
-export { MAX_BUDGET_MICROS, parseDollars } from "@/lib/dollars";
+export { MAX_BUDGET_MICROS, parseDollars } from "@opengeni/react/app/lib/dollars";
 
 export function formatCredits(micros: number): string {
   return formatMoneyMicros(micros, "usd");
@@ -56,4 +56,7 @@ export function ordinalDay(day: number): string {
   return `${day}${suffix}`;
 }
 
-export { CONSOLE_ALLOWANCE_LABELS, CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "./allowance-labels";
+export {
+  CONSOLE_ALLOWANCE_LABELS,
+  CONSOLE_TIMELINE_ALLOWANCE_LABELS,
+} from "@opengeni/react/app/lib/allowance-labels";

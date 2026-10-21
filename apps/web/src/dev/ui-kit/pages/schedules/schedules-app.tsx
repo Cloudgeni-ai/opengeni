@@ -22,7 +22,10 @@ import { toast } from "sonner";
 
 import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirmPanel, showUndoToast } from "@/components/ui/destructive-confirm";
+import {
+  DestructiveConfirmPanel,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { FormFrame } from "@opengeni/react/ui/form-dialog";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
@@ -49,7 +52,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   KIT_NOW,

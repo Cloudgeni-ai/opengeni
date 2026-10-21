@@ -4,7 +4,11 @@ import { OpenGeniApiError, OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
-import { retainSharedQueries, useConsoleSharedQueries, useSharedQuery } from "@/lib/shared-query";
+import {
+  retainSharedQueries,
+  useConsoleSharedQueries,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
@@ -16,7 +20,8 @@ GlobalRegistrator.register();
 
 const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess, workspacesShort } =
   await import("./connection-access-settings");
-const { modelsScopeLabels, organizationReachLabel } = await import("./models/models-ui");
+const { modelsScopeLabels, organizationReachLabel } =
+  await import("@opengeni/react/app/components/models/models-ui");
 
 afterAll(() => {
   mock.restore();

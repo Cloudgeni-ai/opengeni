@@ -3,7 +3,7 @@
 // image, versioned and verified. This page lists
 // them and creates new ones (?view=new); each environment's own page owns
 // versions, changes and promotion.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { useOpenGeni } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import { ContainerIcon, PlusIcon } from "lucide-react";
@@ -33,11 +33,11 @@ import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { resourceScopeLabel, type ResourceScope } from "@/components/resource-scope-picker";
 import { userFacingError } from "@opengeni/react/ui/api-error";
 import { LoadFailure } from "@opengeni/react/ui/load-failure";
-import { useAppContext } from "@/context";
-import { orgLabel } from "@/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import type { CreateRigRequest, Rig } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import type { CreateRigRequest, Rig } from "@opengeni/react/app/types";
 
 export const SANDBOX_ENVIRONMENTS_DESCRIPTION =
   "Setup scripts and health checks for the sandboxes your agents work in.";

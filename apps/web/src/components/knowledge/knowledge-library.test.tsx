@@ -85,7 +85,7 @@ const context = {
   captureWorkspaceInvocation: () => ({}),
   ownsWorkspaceInvocation: () => true,
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 const { LibraryTab, initialLibraryView, knowledgeAddedSince } = await import("./knowledge-library");
 
 beforeAll(() => {

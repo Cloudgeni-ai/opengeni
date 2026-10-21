@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { BrandMark, Wordmark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
@@ -26,8 +26,8 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { desktopBridge, windowControlsInPage } from "@/lib/desktop";
-import { cn } from "@/lib/utils";
+import { desktopBridge, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
 

@@ -1,4 +1,7 @@
-import type { WorkspaceAccessLevel, WorkspaceAccessLevelDefinition } from "./permissions";
+import type {
+  WorkspaceAccessLevel,
+  WorkspaceAccessLevelDefinition,
+} from "@opengeni/react/app/lib/permissions";
 
 /** What a member's stored grant means: a named role, the workspace owner, or custom. */
 export function workspaceMemberAccessRole(

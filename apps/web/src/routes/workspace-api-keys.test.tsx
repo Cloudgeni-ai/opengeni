@@ -3,9 +3,9 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { ApiKey } from "@/types";
+import type { ApiKey } from "@opengeni/react/app/types";
 import { presetById, workspaceKeyPermissions } from "@/lib/api-key-presets";
-import { defaultApiKeyPermissions } from "@/lib/permissions";
+import { defaultApiKeyPermissions } from "@opengeni/react/app/lib/permissions";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const accountId = "44444444-4444-4444-8444-444444444444";
@@ -69,7 +69,7 @@ const context = {
   ownsWorkspaceInvocation: () => true,
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 GlobalRegistrator.register();

@@ -1,12 +1,15 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { expect, test } from "bun:test";
 import { act } from "react";
 import type { Session, SessionEvent, SessionQueueSnapshot, SessionTurn } from "@opengeni/sdk";
 import { buildTimeline, type ComposerState, type TimelineItem } from "@opengeni/react/session";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 import { registerDom, renderComponent, flush } from "../../../../packages/react/test/render-hook";
-import { SessionStartupProvider } from "./session-startup";
-import { sessionStartupTimeline, useSessionStartupTimeline } from "./session-startup-timeline";
+import { SessionStartupProvider } from "@opengeni/react/app/lib/session-startup";
+import {
+  sessionStartupTimeline,
+  useSessionStartupTimeline,
+} from "@opengeni/react/app/lib/session-startup-timeline";
 registerDom();
 const start = new Date(Date.now() - 35_000).toISOString();
 const session = {

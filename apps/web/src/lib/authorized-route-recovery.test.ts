@@ -4,7 +4,7 @@ import {
   resolveAuthorizedWorkspaceFallback,
   workspaceSessionIdFromPath,
 } from "./authorized-route-recovery";
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 const requestedWorkspaceId = "11111111-1111-4111-8111-111111111111";
 const fallbackWorkspaceId = "22222222-2222-4222-8222-222222222222";

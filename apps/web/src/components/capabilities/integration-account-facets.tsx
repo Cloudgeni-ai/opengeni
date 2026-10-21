@@ -2,7 +2,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { GoogleDriveKnowledgeSourceDialog } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
-import type { ApiIntegrationInstallationSummary } from "@/types";
+import type { ApiIntegrationInstallationSummary } from "@opengeni/react/app/types";
 
 /**
  * The per-account facets surface (Knowledge sources, Inbound triggers,

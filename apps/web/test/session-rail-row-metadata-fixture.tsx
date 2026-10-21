@@ -1,7 +1,10 @@
-import { SessionWaitStatus } from "../src/components/session/session-wait-status";
-import { SessionBrowseOrderControls } from "../src/components/rail/session-browse-order-controls";
-import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "../src/lib/sessions-group";
-import type { SessionBrowseStatus } from "../src/lib/session-browse-preferences";
+import { SessionWaitStatus } from "@opengeni/react/app/components/session/session-wait-status";
+import { SessionBrowseOrderControls } from "@opengeni/react/app/components/rail/session-browse-order-controls";
+import type {
+  SessionBrowseGroupBy,
+  SessionBrowseSortBy,
+} from "@opengeni/react/app/lib/sessions-group";
+import type { SessionBrowseStatus } from "@opengeni/react/app/lib/session-browse-preferences";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,14 +13,14 @@ import {
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { SessionHeader } from "../src/components/rail/session-header";
-import { sessionStateLabel } from "../src/lib/session-rail";
-import { RowQuickActions } from "../src/components/rail/session-list";
-import { SessionRowContent } from "../src/components/rail/session-row-content";
-import { SessionRowHoverDetails } from "../src/components/rail/session-row-hover-details";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
+import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
+import { RowQuickActions } from "@opengeni/react/app/components/rail/session-list";
+import { SessionRowContent } from "@opengeni/react/app/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "@opengeni/react/app/components/rail/session-row-hover-details";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@opengeni/react/ui/hover-card";
-import { cn } from "../src/lib/utils";
-import type { Session } from "../src/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;

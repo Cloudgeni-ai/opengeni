@@ -2,8 +2,8 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatComposer } from "@opengeni/react";
 import type { ReasoningEffort } from "@opengeni/sdk";
-import { ModelPicker } from "../../../src/components/pickers";
-import { BrandMark } from "../../../src/components/brand-mark";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { BrandMark } from "@opengeni/react/app/components/brand-mark";
 import { galleryModelRows, idleComposer } from "../../../src/dev/composer-chrome-fixtures";
 import "../../../src/styles.css";
 

@@ -18,7 +18,7 @@ import {
   capabilityFormError,
   emptyCapabilityForm,
   type CapabilityFormState,
-} from "@/lib/capabilities";
+} from "@opengeni/react/app/lib/capabilities";
 
 export const ADD_CUSTOM_CATALOG_KINDS = ["mcp"] as const;
 

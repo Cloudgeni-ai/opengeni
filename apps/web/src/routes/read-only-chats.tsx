@@ -18,7 +18,7 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Toolbar, ToolbarGroup, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 type SortBy = "updatedAt" | "createdAt" | "name";

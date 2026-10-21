@@ -1,10 +1,10 @@
 import { MessageTimeline, OpenGeniProvider, useLastStartedTurnPolicy } from "@opengeni/react";
 import type { SessionEvent } from "@opengeni/sdk";
 import { fakeClient, fakeTurn, WORKSPACE_ID } from "../../../../../packages/react/test/fake-client";
-import { SessionHeader } from "../../../src/components/rail/session-header";
-import { ModelAccountIndicator } from "../../../src/components/session/model-account-indicator";
-import { isIntelligenceEffort } from "../../../src/lib/session-tools";
-import type { Session } from "../../../src/types";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
+import { ModelAccountIndicator } from "@opengeni/react/app/components/session/model-account-indicator";
+import { isIntelligenceEffort } from "@opengeni/react/app/lib/session-tools";
+import type { Session } from "@opengeni/react/app/types";
 
 const turn = fakeTurn({ model: "codex/gpt-6-astra", reasoningEffort: "high" });
 const session = {

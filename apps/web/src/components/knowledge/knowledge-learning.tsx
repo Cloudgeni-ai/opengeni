@@ -18,15 +18,15 @@ import {
   SettingRowGroup,
   SettingRowSkeleton,
 } from "@opengeni/react/ui/setting-row";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   AGENT_LEARNING_TITLE,
   IDENTITY_POLICY_MODE,
   IDENTITY_POLICY_VALUE,
   LEARNING_MODE_LABEL,
-} from "@/lib/agent-learning-vocabulary";
+} from "@opengeni/react/app/lib/agent-learning-vocabulary";
 import { isPermissionDenied } from "@opengeni/react/ui/api-error";
-import type { CompanyProfileAgentPolicy } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 import { errorText } from "./knowledge-data";
 

@@ -21,9 +21,9 @@ import {
 } from "@opengeni/react/ui/line-tabs";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { PageHeader } from "@opengeni/react/ui/page-header";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";

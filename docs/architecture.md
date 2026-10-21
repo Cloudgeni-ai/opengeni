@@ -736,7 +736,7 @@ Model display: outside Models settings a model is its clean name plus its maker'
 logo, never a routing prefix, connection id or organization/workspace scope.
 `packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported
 by `@opengeni/sdk/model-display`) and `@opengeni/react`'s `ModelName`/`ModelMark` are
-the one source; the console's `apps/web/src/components/model-identity.tsx` adds the
+the one source; the console's `packages/react/src/app/components/model-identity.tsx` adds the
 logo tile and payer hint. The picker merges org- and workspace-connected copies.
 
 Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
@@ -1223,9 +1223,9 @@ contracts → sdk → react → apps/web
 Server-free clients: `apps/web` consumes SDK/React, never owning session/authorization
 semantics. Embedded API/core/worker hosts preserve these boundaries.
 
-Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+Console appearance: `packages/react/src/app/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
+Workspace management: `packages/react/src/app/lib/workspace-management-location.tsx`; lazy settings
 shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
 destinations.
 Excel add-in pane: `apps/web/office/` (its own Vite entry), served with its manifest by the
@@ -1676,7 +1676,7 @@ home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
 chat's override in the session dock's Agent tab beside its identity and
-capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
@@ -1954,8 +1954,8 @@ serves stock HTTP and in-process embedding hosts, owning validation, draft rotat
 event append, turn routing, receipt/replay behavior, and the response contract.
 Web Send rebases drafts (including unavailable files), aligns
 file-only text with create, freezes edits, preserves late voice transcripts
-(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
-`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
+(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/app/lib/use-new-session-draft.tsx`,
+`packages/react/src/app/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -2843,7 +2843,7 @@ Topics: [`README.md`](README.md).
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/`, `packages/runtime/src/provider-quota.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
+| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `packages/react/src/app/components/session/model-context-inspector.tsx`, `packages/react/src/app/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
@@ -2915,7 +2915,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
-| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
+| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
 | Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |

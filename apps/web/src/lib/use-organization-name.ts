@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-import { useAppContext } from "@/context";
-import { orgName } from "@/lib/org";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgName } from "@opengeni/react/app/lib/org";
 
 /**
  * The organization's real name. Access grants usually carry none, so an

@@ -7,7 +7,7 @@ import {
   CapabilityPage,
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
-import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { humanizeName } from "@/components/capabilities/skill-copy";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";

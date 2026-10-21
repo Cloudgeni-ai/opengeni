@@ -5,7 +5,7 @@ import type {
   ConnectionMetadata,
   ConnectionOwnership,
   CreateConnectionRequest,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type CustomApiProtocol = "auto" | "openapi" | "graphql";
 export type CustomApiAuthMethod = "bearer" | "basic" | "api_key";

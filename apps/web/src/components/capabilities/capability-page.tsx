@@ -11,7 +11,7 @@ import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detai
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    The one detail anatomy behind every Capabilities row (DESIGN.md section 8):

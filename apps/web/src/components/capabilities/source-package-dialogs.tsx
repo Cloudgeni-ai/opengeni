@@ -12,7 +12,7 @@ import { SourceImportDialog } from "@/components/capabilities/source-import-dial
 import type { SourceImportState } from "@/components/capabilities/source-import-flow";
 import type { SourceRemoveTarget } from "@/components/capabilities/use-source-packages";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 export function SourcePackageDialogs({
   sourceImport,

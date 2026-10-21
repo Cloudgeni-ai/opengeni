@@ -6,7 +6,11 @@ import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
-import { VAULT_GROUP_TITLE, vaultErrorText, vaultGroup } from "./vault-model";
+import {
+  VAULT_GROUP_TITLE,
+  vaultErrorText,
+  vaultGroup,
+} from "@opengeni/react/app/components/secrets/vault-model";
 
 /**
  * Move or copy one item to another vault (a small prompt, so a dialog). Copy

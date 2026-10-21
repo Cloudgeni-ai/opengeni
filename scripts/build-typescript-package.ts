@@ -66,7 +66,9 @@ await writeFile(
         paths: {},
       },
       include: ["../src/**/*.ts", "../src/**/*.tsx"],
-      exclude: [],
+      // Tests and their DOM fixtures sit beside the code they cover; they are
+      // not part of a package's published types.
+      exclude: ["../src/**/*.test.ts", "../src/**/*.test.tsx", "../src/**/*.dom-fixture.tsx"],
     },
     null,
     2,
@@ -100,7 +102,11 @@ try {
  */
 async function rewriteDeclarationModuleSpecifiers(directory: string): Promise<void> {
   for (const path of await declarationFiles(directory)) {
-    const source = await readFile(path, "utf8");
+    // A stylesheet a component imports for its side effect is the bundle's
+    // concern, not a type: consumers without CSS module declarations could not
+    // resolve it.
+    const original = await readFile(path, "utf8");
+    const source = original.replace(/^import\s+["'][^"']+\.css["'];\n/gmu, "");
     const rewritten = source.replace(
       /(["'])(\.\.?(?:\/[^"'?#]+)?)\1/gu,
       (literal, quote: string, specifier: string, offset: number) => {
@@ -116,7 +122,7 @@ async function rewriteDeclarationModuleSpecifiers(directory: string): Promise<vo
         return literal;
       },
     );
-    if (rewritten !== source) await writeFile(path, rewritten, "utf8");
+    if (rewritten !== original) await writeFile(path, rewritten, "utf8");
   }
 }
 

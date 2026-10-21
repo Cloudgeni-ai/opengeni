@@ -41,7 +41,7 @@ import {
   DetailPageBody,
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
-import { DestructiveConfirmPanel } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirmPanel } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
 import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";

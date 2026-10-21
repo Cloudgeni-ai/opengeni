@@ -1,8 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import { createElement } from "react";
 
-import { ManualRepositoryEditor } from "@/components/manual-repository-editor";
-import { RepositoryRefInput } from "@/components/repository-ref-input";
+import { ManualRepositoryEditor } from "@opengeni/react/app/components/manual-repository-editor";
+import { RepositoryRefInput } from "@opengeni/react/app/components/repository-ref-input";
 import {
   actRun,
   flush,

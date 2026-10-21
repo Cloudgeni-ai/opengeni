@@ -4,8 +4,8 @@ import type {
   KnowledgeEntrySummary,
   KnowledgeEntryRecord,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
-import { managedSelfContextIdentity } from "../src/lib/managed-self-context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
 
 export const workspaceId = "22222222-2222-4222-8222-222222222222";
 const accountId = "11111111-1111-4111-8111-111111111111";

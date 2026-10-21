@@ -5,8 +5,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
-import type { OrganizationAdminIdentity } from "@/lib/organization-admin";
-import type { OrganizationPrivacySettings } from "@/types";
+import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
+import type { OrganizationPrivacySettings } from "@opengeni/react/app/types";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =

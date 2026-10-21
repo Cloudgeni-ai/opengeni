@@ -1,7 +1,11 @@
 import { AuthApiError } from "@/api";
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
-export type ManagedAuthMode = "signin" | "signup";
+import {
+  ManagedAuthSessionUnavailableError,
+  type ManagedAuthMode,
+} from "@opengeni/react/app/lib/managed-auth-transition";
+
 export type ManagedAuthField = "name" | "email" | "password";
 
 export type ManagedAuthFormErrors = Partial<Record<ManagedAuthField, string>>;
@@ -12,17 +16,6 @@ export type ManagedAuthFailure = {
   switchTo: ManagedAuthMode | null;
   canResendVerification: boolean;
 };
-
-export class ManagedAuthSessionUnavailableError extends Error {
-  constructor(readonly mode: ManagedAuthMode) {
-    super(
-      mode === "signup"
-        ? "Account created without an active browser session"
-        : "Sign-in completed without an active browser session",
-    );
-    this.name = "ManagedAuthSessionUnavailableError";
-  }
-}
 
 export function validManagedAuthEmail(value: string): boolean {
   const email = value.trim();

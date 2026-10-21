@@ -1,6 +1,6 @@
 import { expect, mock, test } from "bun:test";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 const { uploadToKnowledge } = await import("./knowledge-upload");
 
 function client(status = "pending") {

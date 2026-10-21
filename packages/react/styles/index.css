@@ -105,6 +105,30 @@
   .og-root :where(h1, h2, h3, h4, h5, h6) {
     font-weight: inherit;
   }
+  /* The rest of Tailwind Preflight that the session app's markup assumes
+     (links styled by their classes, block icons and media). Only inside the
+     session app (and at no specificity, so utilities still win), so the other
+     embeddable components keep rendering as before. */
+  :where(.og-root.og-session-app) :where(a) {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  :where(.og-root.og-session-app) :where(b, strong) {
+    font-weight: bolder;
+  }
+  :where(.og-root.og-session-app) :where(img, svg, video, canvas, audio, iframe, embed, object) {
+    display: block;
+    vertical-align: middle;
+  }
+  :where(.og-root.og-session-app) :where(img, video) {
+    max-width: 100%;
+    height: auto;
+  }
+  :where(.og-root.og-session-app) :where(table) {
+    text-indent: 0;
+    border-color: inherit;
+    border-collapse: collapse;
+  }
   .og-root,
   .og-root :where(*, ::before, ::after) {
     box-sizing: border-box;

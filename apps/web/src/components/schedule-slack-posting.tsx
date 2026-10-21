@@ -2,14 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Field } from "@opengeni/react/ui/field";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import {
   activeOpenGeniSlackBotConnections,
   openGeniSlackBotConnectionOptions,
 } from "@/lib/slack-bot";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 type SlackChannelOption = { id: string; name: string | null; isPrivate: boolean };
 

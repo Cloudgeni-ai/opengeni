@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -7,14 +8,19 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { act, useState } from "react";
+import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { createRoot } from "react-dom/client";
 
-mock.module("@/routes/editable-artifact", () => ({
-  EditableArtifactRoute: ({ embedded }: { embedded?: boolean }) => (
-    <div data-native-preview>{embedded ? "Embedded native artifact" : "Full native artifact"}</div>
-  ),
-}));
-mock.module("@/routes/artifacts", () => ({
+configurePageAppHost({
+  surfaces: {
+    editableArtifact: ({ embedded }: { embedded?: boolean | undefined }) => (
+      <div data-native-preview>
+        {embedded ? "Embedded native artifact" : "Full native artifact"}
+      </div>
+    ),
+  },
+});
+mock.module("@opengeni/react/app/routes/artifacts", () => ({
   ArtifactDetailRoute: ({
     artifactId,
     embedded,
@@ -41,7 +47,7 @@ mock.module("@/routes/artifacts", () => ({
 // The viewer's grants; a test that needs Site management swaps them in.
 const appAccess: { accessContext: unknown } = { accessContext: null };
 // Library rows ask the app who the viewer is, to offer a file's owner its share action.
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     client: {},
     accessKeyVersion: 0,
@@ -51,7 +57,8 @@ mock.module("@/context", () => ({
   }),
 }));
 
-const { SessionEditableArtifactsWorkspace } = await import("./editable-artifacts-workspace");
+const { SessionEditableArtifactsWorkspace } =
+  await import("@opengeni/react/app/components/session/editable-artifacts-workspace");
 
 beforeAll(() => {
   GlobalRegistrator.register();

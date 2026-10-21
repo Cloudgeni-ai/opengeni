@@ -7,9 +7,9 @@ import {
 } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { request } from "@/api";
-import { ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { readIdentityLinkContinuation } from "@/lib/identity-link-continuation";
 
 const path = (workspaceId: string, linkId: string) =>

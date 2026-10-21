@@ -8,7 +8,7 @@ import type {
   ApiIntegrationInstallationSummary,
   IntegrationFacetBindingSummary,
   IntegrationInstanceFacetsResponse,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import type {
   GoogleDriveFacetMutation,

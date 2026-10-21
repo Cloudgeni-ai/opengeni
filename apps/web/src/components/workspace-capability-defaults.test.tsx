@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 const { WorkspaceCapabilityDefaultsView } = await import("./workspace-capability-defaults");
 beforeAll(() => {
   GlobalRegistrator.register();

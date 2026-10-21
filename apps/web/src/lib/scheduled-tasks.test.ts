@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import type { ScheduledTask, ScheduledTaskRun } from "@opengeni/react/app/types";
 import {
   agentConfigFromFormState,
   scheduledTaskAwaitingHumanText,

@@ -36,7 +36,7 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   CopyAction,
@@ -47,7 +47,11 @@ import {
   revealText,
 } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
-import { hostOf, ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
+import {
+  hostOf,
+  ITEM_TYPE_LABEL,
+  vaultErrorText,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import { ExpiryBadge, ItemTile } from "./vault-parts";
 import { removalLabel, sourceHome, vaultOperations, writesPausedReason } from "./vault-providers";
 

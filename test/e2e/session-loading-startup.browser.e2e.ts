@@ -58,7 +58,8 @@ beforeAll(async () => {
       "The public newest-message hook retains its optional production chunk",
     );
     questionAsset = questionEntry[1].file;
-    composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
+    composerMenuAsset =
+      manifest["../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
     const eager = new Set<string>();
     const visit = (key: string) => {
@@ -67,9 +68,9 @@ beforeAll(async () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     assert.equal(
-      eager.has("src/components/composer-mobile-plus-panel.tsx"),
+      eager.has("../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"),
       false,
       "Composer menu must remain outside the eager production graph",
     );

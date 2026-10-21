@@ -4,9 +4,12 @@ import { useConnectionAccess } from "@/components/connection-access-settings";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRowSkeleton } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
-import { NOT_IN_USE, organizationReachLabel } from "./models-ui";
+import {
+  NOT_IN_USE,
+  organizationReachLabel,
+} from "@opengeni/react/app/components/models/models-ui";
 import { reachesWorkspace } from "./organization-codex-models";
-import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
 import type { SubscriptionAccountPlaces } from "./subscription-account-detail";
 import {
   subscriptionAccountName,

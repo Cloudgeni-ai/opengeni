@@ -18,12 +18,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
-import { useAppContext } from "@/context";
-import { useRail } from "@/components/rail/rail-context";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import type { OrgOption } from "@/lib/org";
-import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
+import type { OrgOption } from "@opengeni/react/app/lib/org";
+import { canCreateAdditionalOrganization } from "@opengeni/react/app/lib/managed-self-context";
 
 const LazyCreateOrganizationDialog = lazy(() =>
   import("@/components/rail/create-organization-dialog").then((module) => ({

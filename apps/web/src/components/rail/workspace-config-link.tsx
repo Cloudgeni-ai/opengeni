@@ -19,7 +19,7 @@ import type {
   WorkspaceConfigIcon,
   WorkspaceConfigItem,
 } from "@/components/rail/workspace-nav-data";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_CONFIG_ICONS = {
   gauge: GaugeIcon,

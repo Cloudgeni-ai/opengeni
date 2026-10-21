@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useMemo } from "react";
 
-import type { OrganizationAdminSection } from "@/lib/organization-admin";
+import type { OrganizationAdminSection } from "@opengeni/react/app/lib/organization-admin";
 import type { OrganizationView } from "@/lib/organization-route";
 
 /** Moves between organization settings pages; every page has its own URL. */

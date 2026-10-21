@@ -22,7 +22,10 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
+import {
+  DestructiveConfirm,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   EmptyState,

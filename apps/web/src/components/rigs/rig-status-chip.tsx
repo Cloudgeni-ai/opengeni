@@ -2,7 +2,7 @@
 // tone dot + human label from lib/rig-status, so no rig surface hand-rolls a
 // status pill or shows a raw enum slug.
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type { RigStatusView } from "@/lib/rig-status";
 
 export function RigStatusChip({ view, className }: { view: RigStatusView; className?: string }) {

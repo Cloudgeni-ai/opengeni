@@ -6,10 +6,10 @@ import {
   useThisComputer,
 } from "@opengeni/react/this-computer";
 import type { AuthNeededItem } from "@opengeni/react";
-import { SessionMachineCapabilityCard } from "../../../src/components/capabilities/session-machine-card";
+import { SessionMachineCapabilityCard } from "@opengeni/react/app/components/capabilities/session-machine-card";
 import { DesktopContext, host, params } from "./host";
 import "../../../src/styles.css";
-import "../../../src/components/capabilities/session-capability-card.css";
+import "../../../../../packages/react/src/app/components/capabilities/session-capability-card.css";
 import "@opengeni/react/this-computer.css";
 
 const request = {

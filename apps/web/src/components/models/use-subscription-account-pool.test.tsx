@@ -7,7 +7,11 @@ import type {
   SubscriptionAccountPoolOperations,
   SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
-import { peekSharedQuery, retainSharedQueries, sharedQueryWriter } from "@/lib/shared-query";
+import {
+  peekSharedQuery,
+  retainSharedQueries,
+  sharedQueryWriter,
+} from "@opengeni/react/app/lib/shared-query";
 
 let createRoot: typeof import("react-dom/client").createRoot;
 let usePool: typeof import("./use-subscription-account-pool").useSubscriptionAccountPool;

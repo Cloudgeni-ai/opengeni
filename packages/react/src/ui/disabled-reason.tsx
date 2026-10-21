@@ -14,6 +14,9 @@ import {
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const TooltipContainedPortal = containedPortal(TooltipPrimitive.Portal);
 
 /* ----------------------------------------------------------------------------
    ReasonTooltip and DisabledReason (design brief 7, "Also build").
@@ -118,7 +121,7 @@ export function ReasonTooltip({
         >
           {children}
         </TooltipPrimitive.Trigger>
-        <TooltipPrimitive.Portal>
+        <TooltipContainedPortal>
           <TooltipPrimitive.Content
             data-slot="reason-tooltip"
             side={side}
@@ -133,7 +136,7 @@ export function ReasonTooltip({
             {reason}
             <TooltipPrimitive.Arrow width={10} height={5} className="fill-fg" />
           </TooltipPrimitive.Content>
-        </TooltipPrimitive.Portal>
+        </TooltipContainedPortal>
       </TooltipPrimitive.Root>
     </TooltipPrimitive.Provider>
   );

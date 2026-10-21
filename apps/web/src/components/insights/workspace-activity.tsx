@@ -21,9 +21,9 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { StatGroup, StatTile, type StatDelta } from "@opengeni/react/ui/stat-tile";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorAdvice } from "@opengeni/react/ui/api-error";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { modelDisplayName } from "./model-display";
 import { formatChange, priorLabel } from "./usage-format";

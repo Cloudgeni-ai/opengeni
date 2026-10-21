@@ -20,7 +20,7 @@ import {
 } from "@opengeni/contracts/client-error-report";
 import { rootRouteId } from "@tanstack/react-router";
 
-import { clientRevision, clientRoutePattern } from "./client-route-pattern";
+import { clientRevision, clientRoutePattern } from "@opengeni/react/app/lib/client-route-pattern";
 
 export {
   CLIENT_ERRORS_PATH,

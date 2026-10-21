@@ -23,14 +23,14 @@ import {
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
-import { creatorInitials } from "@/lib/creator-initials";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { creatorInitials } from "@opengeni/react/app/lib/creator-initials";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
 import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
 import { PausedChatRunBadge } from "./schedule-blocker-notice";
-import { cn } from "@/lib/utils";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ScheduledTask, ScheduledTaskRun } from "@opengeni/react/app/types";
 
 import {
   isKnowledgeSync,

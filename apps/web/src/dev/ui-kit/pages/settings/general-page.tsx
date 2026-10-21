@@ -5,7 +5,10 @@ import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm, type ConfirmDependency } from "@/components/ui/destructive-confirm";
+import {
+  DestructiveConfirm,
+  type ConfirmDependency,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
 import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
@@ -23,7 +26,7 @@ import {
 import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { Switch } from "@opengeni/react/ui/switch";
 import { TimeField } from "@opengeni/react/ui/cadence-picker";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   KIT_NOW,

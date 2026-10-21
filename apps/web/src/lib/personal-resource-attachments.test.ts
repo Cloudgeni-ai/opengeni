@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type Session, type UserResourceAuthoritySummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-import { managedSelfContextIdentity } from "./managed-self-context";
+import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
 import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
@@ -15,7 +15,7 @@ import {
   reconcileNewSessionFixedResources,
   recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
-} from "./personal-resource-attachments";
+} from "@opengeni/react/app/lib/personal-resource-attachments";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";

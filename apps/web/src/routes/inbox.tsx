@@ -62,11 +62,11 @@ import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { Switch } from "@opengeni/react/ui/switch";
 import { Toolbar } from "@opengeni/react/ui/toolbar";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
-import { secretSaveTargets } from "@/lib/secrets-ui";
-import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
-import { cn } from "@/lib/utils";
+import { secretSaveTargets } from "@opengeni/react/app/lib/secrets-ui";
+import { hasInbox, isNeedsYouKind, useInbox } from "@opengeni/react/app/lib/inbox";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
   question: "Question",

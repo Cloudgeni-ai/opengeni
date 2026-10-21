@@ -5,8 +5,8 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
 } from "@opengeni/contracts";
-import { formatTimestamp } from "@/lib/format";
-import type { ConnectionMetadata } from "@/types";
+import { formatTimestamp } from "@opengeni/react/app/lib/format";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 import {
   activeOpenGeniSlackBotConnections,
   openGeniSlackBotConnectionLabel,

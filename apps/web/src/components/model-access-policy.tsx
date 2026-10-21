@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -11,7 +11,7 @@ import {
   MODEL_LIST_SEARCH_AT,
   ModelSearchField,
 } from "@/components/models/model-list";
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
@@ -26,10 +26,10 @@ import {
 } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { modelUsesCredits, payerSummaryForModel } from "@/lib/model-policy";
-import { cn } from "@/lib/utils";
-import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
-import { useAppContext } from "@/context";
+import { modelUsesCredits, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 
 /* ----------------------------------------------------------------------------

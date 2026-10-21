@@ -4,7 +4,7 @@ import { useId } from "react";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------

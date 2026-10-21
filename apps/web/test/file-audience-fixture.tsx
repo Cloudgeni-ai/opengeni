@@ -8,9 +8,9 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { Toaster } from "sonner";
-import { ArtifactsRoute } from "../src/routes/artifacts";
-import { RetainedArtifactRoute } from "../src/routes/retained-artifact";
-import { artifactReturnSearch } from "../src/lib/routes";
+import { ArtifactsRoute } from "@opengeni/react/app/routes/artifacts";
+import { RetainedArtifactRoute } from "@opengeni/react/app/routes/retained-artifact";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 import { draftId, othersId, workspaceId } from "./file-audience-context";
 import "../src/styles.css";
 

@@ -11,8 +11,12 @@ import { LockIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
-import { invalidateSharedQueries, sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  invalidateSharedQueries,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
 import { ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
@@ -26,7 +30,7 @@ import {
 } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
 import { FallbackOrderControl } from "./model-account-policy-controls";
-import { ModelsFormPage } from "./models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 
 /* ----------------------------------------------------------------------------
    Sharing subscriptions: the default rules for the organization's model

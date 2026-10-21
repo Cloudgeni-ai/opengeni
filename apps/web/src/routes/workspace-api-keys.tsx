@@ -28,7 +28,7 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
@@ -49,7 +49,7 @@ import { SecretOnce } from "@/components/ui/secret-field";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   API_KEY_EXPIRY_CHOICES,
   DEFAULT_API_KEY_EXPIRY,
@@ -74,8 +74,11 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
-import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
-import type { ApiKey } from "@/types";
+import {
+  delegableApiKeyPermissions,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
+import type { ApiKey } from "@opengeni/react/app/types";
 import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 

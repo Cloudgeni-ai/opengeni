@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { parseSync } from "oxc-parser";
 
 describe("web contract runtime chunk boundary", () => {
@@ -12,7 +13,7 @@ describe("web contract runtime chunk boundary", () => {
     const settingsTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+        path.posix.join("/repo/apps/web/src", relative).replaceAll("/", separator);
       for (const relative of [
         "lib/api-key-presets.ts",
         "lib/api-key-status.ts",
@@ -24,7 +25,7 @@ describe("web contract runtime chunk boundary", () => {
       }
       for (const relative of [
         "context.tsx",
-        "lib/permissions.ts",
+        "../../../packages/react/src/app/lib/permissions.tsx",
         "routes/connect-agent.tsx",
         "components/organization-access/mcp-consent-page.tsx",
         "components/organization-access/connected-agents.tsx",
@@ -59,7 +60,7 @@ describe("web contract runtime chunk boundary", () => {
         "packages/contracts/src/index.ts",
         "packages/contracts/src/organization-access.ts",
         "packages/contracts/src/external-identities.ts",
-        "apps/web/src/lib/permissions.ts",
+        "packages/react/src/app/lib/permissions.tsx",
         "apps/web/src/routes/workspace-members-section.tsx",
       ]) {
         expect(runtimeTest.test(moduleId(relative))).toBe(false);

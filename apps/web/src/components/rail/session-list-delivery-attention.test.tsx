@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
-import { RailTrailingMetadata } from "@/components/rail/session-list";
-import type { RailAggregateStatus } from "@/lib/sessions-group";
+import { RailTrailingMetadata } from "@opengeni/react/app/components/rail/session-list";
+import type { RailAggregateStatus } from "@opengeni/react/app/lib/sessions-group";
 import { registerDom, renderComponent } from "../../../../../packages/react/test/render-hook";
 
 registerDom();

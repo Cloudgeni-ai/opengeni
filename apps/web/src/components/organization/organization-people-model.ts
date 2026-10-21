@@ -5,7 +5,7 @@ import type {
   OrganizationMember,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import type { WorkspaceRoleId } from "./organization-directory";
 

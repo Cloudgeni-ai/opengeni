@@ -11,7 +11,7 @@ import {
   DetailPage,
   DetailSection,
 } from "@opengeni/react/ui/detail-sheet";
-import type { ScheduledTaskAccountPlan } from "../src/types";
+import type { ScheduledTaskAccountPlan } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const pinned: ScheduledTaskAccountPlan = {

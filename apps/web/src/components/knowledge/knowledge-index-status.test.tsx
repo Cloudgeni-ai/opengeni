@@ -13,7 +13,7 @@ import type { KnowledgeIndexStatus } from "@opengeni/sdk";
 
 let canBuy = false;
 let workspaceSettings: Record<string, unknown> = {};
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     workspaces: [{ id: "workspace-a", accountId: "account-a", settings: workspaceSettings }],
     accessContext: {

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ScheduledTask } from "@/types";
+import type { ScheduledTask } from "@opengeni/react/app/types";
 import { formStateFromScheduledTask } from "@/lib/scheduled-tasks";
 import {
   selectedConnectionAccounts,
   type ConnectedAccountGroup,
-} from "@/components/capabilities/session-connection-accounts";
+} from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 
 import {
   SCHEDULE_FREQUENCIES,

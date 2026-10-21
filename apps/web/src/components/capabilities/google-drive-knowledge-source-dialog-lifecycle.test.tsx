@@ -8,7 +8,7 @@ import type {
   ApiIntegrationInstallationSummary,
   GoogleDriveBrowseResponse,
   IntegrationFacetDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const toastError = mock(() => undefined);
 const toastWarning = mock(() => undefined);

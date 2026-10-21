@@ -7,7 +7,7 @@ import { GITHUB_PAGE_FONT_FACES } from "./github-browser-fonts.gen";
 // scripts/generate-github-page-fonts.ts), the @opengeni/react token values
 // (packages/react/styles/tokens.css), the page glow and header of the signed-out
 // pages, the "teal wash" primary button and the Opengeni brand mark and wordmark
-// (apps/web/src/components/brand-mark.tsx). Every card opens with an Opengeni +
+// (packages/react/src/app/components/brand-mark.tsx). Every card opens with an Opengeni +
 // GitHub lockup so each step of the flow visibly belongs to GitHub.
 // Dark is the default like the app; light follows prefers-color-scheme.
 const pageStyle = `

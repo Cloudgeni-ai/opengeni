@@ -4,7 +4,7 @@ import { HelpTip } from "@opengeni/react/ui/inline-help";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu, type SelectMenuProps } from "@opengeni/react/ui/select-menu";
 import { useSettingRowField } from "@opengeni/react/ui/setting-row";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    Preview controls: the open product questions and the preview state, shown

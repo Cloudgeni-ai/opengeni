@@ -7,7 +7,7 @@ import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { Notice } from "@opengeni/react/ui/notice";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { untilLabel } from "./shared";
 

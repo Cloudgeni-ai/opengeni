@@ -39,7 +39,7 @@ import type {
   PluginInstallationSummary,
   PluginUninstallPreview,
   SkillUninstallPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type SourceRemoveTarget =
   | {

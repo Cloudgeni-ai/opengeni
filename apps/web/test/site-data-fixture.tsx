@@ -7,8 +7,8 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { ArtifactDetailRoute } from "../src/routes/artifacts";
-import { artifactReturnSearch } from "../src/lib/routes";
+import { ArtifactDetailRoute } from "@opengeni/react/app/routes/artifacts";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 import { siteId, workspaceId } from "./site-data-context";
 import "../src/styles.css";
 

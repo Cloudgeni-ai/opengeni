@@ -9,10 +9,13 @@ import {
 } from "@/components/models/workspace-models-page";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { organizationModelsSearch, type ModelsView } from "@/lib/models-route";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { organizationModelsSearch, type ModelsView } from "@opengeni/react/app/lib/models-route";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { useNavigate } from "@tanstack/react-router";
 
 /* ----------------------------------------------------------------------------
