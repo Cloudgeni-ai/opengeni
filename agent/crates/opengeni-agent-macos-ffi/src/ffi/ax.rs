@@ -1589,18 +1589,6 @@ pub(super) fn run_background_application(
                 || Instant::now() >= guard_until)
         {
             guarding_startup = false;
-            // A window opened without activation is still ordered in front of
-            // every other window. Raise the person's front window again so the
-            // browser lies behind it; that app is active, so nothing activates.
-            if first_window_seen_at.is_some()
-                && prior_frontmost.as_ref().is_some_and(|prior| {
-                    prior.isActive() && prior.processIdentifier() != process_id
-                })
-            {
-                if let Some(front) = focused_window_of_frontmost_application() {
-                    let _ = front.raise_if_supported();
-                }
-            }
         }
         thread::sleep(if guarding_startup {
             Duration::from_millis(20)
