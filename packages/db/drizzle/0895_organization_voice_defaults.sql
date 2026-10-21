@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: both tables hold a handful of provider connection rows per organization, so validating under the same lock finishes instantly
 -- Organization-wide voice: an organization ElevenLabs key every workspace in
 -- it can use, and default voice settings by realtime model id that a
 -- workspace follows until it saves its own.
