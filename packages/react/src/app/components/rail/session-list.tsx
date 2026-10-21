@@ -2407,8 +2407,18 @@ export function SessionList() {
         requestGeneration,
       );
       if (current.nextCursor === null && !refreshWindow) return;
-      // A quiet reconciliation must not consume an explicit pagination retry.
-      if (refreshWindow && current.failed) return;
+      // A quiet reconciliation must not consume an explicit pagination retry
+      // or race an explicit read. Leave its revision unread instead: the
+      // revision effect rereads this window once the explicit read settles.
+      if (
+        refreshWindow &&
+        (current.failed ||
+          (groupLoadingRef.current.get(group.key) === requestGeneration &&
+            !groupRefreshing.current.has(group.key)))
+      ) {
+        groupReadRevisions.current.delete(group.key);
+        return;
+      }
       if (
         groupLoadingRef.current.get(group.key) === requestGeneration &&
         (refreshWindow || !groupRefreshing.current.has(group.key))
