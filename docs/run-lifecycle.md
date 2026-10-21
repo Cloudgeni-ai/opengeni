@@ -3767,6 +3767,22 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
+**Browsers and desktops on a retired instance.** A browser or desktop
+controller runs inside one exact provider instance (`placement_instance_id`),
+and nothing rebinds it to a successor. When its lease no longer runs that
+instance (the provider reported it missing, a drain or rotation retired it, or
+a replacement box was created) the controller is gone: it can no longer
+heartbeat, act or end there. Before migration 0883 such a resource stayed
+`active` and its interaction holder kept every later box of the sandbox warm,
+on every provider. The interaction reaper (`reap_stale_interaction_transitions`)
+now closes a live browser or desktop bound to an instance its lease no longer
+runs: prepared operations fail, dispatched ones settle `outcome_unknown`, the
+resource becomes `lost` with failure code `placement_instance_lost`, and its
+controller binding is cleared. The orphan sweep in the same transaction
+deletes its holder, so the lease drains by the ordinary idle rule. A resource
+on the lease's current instance, or not yet bound to one, is untouched; age is
+never the criterion.
+
 **Full browser controllers.** One browser controller runs per workspace and
 placement (a Connected Machine or a box). Its browser limit defaults to half
 of the machine's memory (or the tightest memory limit on the controller's own
