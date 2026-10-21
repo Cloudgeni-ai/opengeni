@@ -10014,10 +10014,6 @@ export const sessionHistoryItems = pgTable(
       table.sessionId,
       table.position,
     ),
-    // Receipt proofs page newest-first within one turn, not the whole session.
-    turnPositionIdx: index("session_history_items_turn_position_idx")
-      .on(table.turnId, table.position)
-      .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );
 
