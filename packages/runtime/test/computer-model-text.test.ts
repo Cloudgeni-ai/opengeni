@@ -3,6 +3,7 @@ import {
   computerActionText,
   computerObservationText,
   computerOpenText,
+  computerTargetsText,
   type ComputerTextNode,
   type ComputerTextObservation,
 } from "../src/computer-model-text";
@@ -255,6 +256,20 @@ describe("computer session and action text", () => {
         'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
       ].join("\n"),
     );
+  });
+
+  test("marks a window that cannot be read off screen, with one fixed note", () => {
+    const offScreen = { ...target, id: "window:2", title: "Chrome", offScreen: true as const };
+    const text = computerTargetsText([target, offScreen]);
+    expect(text).toBe(
+      [
+        "2 targets:",
+        'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
+        'window window:2 "Chrome" pid 7 at 0,0 size 300x400 off screen',
+        "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.",
+      ].join("\n"),
+    );
+    expect(computerTargetsText([target])).not.toContain("off screen");
   });
 
   test("reports the action state, its error and the observation after it", () => {

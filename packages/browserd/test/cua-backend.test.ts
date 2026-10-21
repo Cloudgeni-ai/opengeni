@@ -1729,6 +1729,7 @@ describe("CUA desktop boundary", () => {
     const backend = await CuaComputerBackend.open(fixture);
     try {
       const target = (await backend.targets())[0]!;
+      expect(target).not.toHaveProperty("offScreen");
       // The window leaves the screen after it was listed.
       fixture.onScreen = false;
       for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)])
@@ -1742,6 +1743,8 @@ describe("CUA desktop boundary", () => {
       const before = reads();
       await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "unsupported" });
       expect(reads()).toBe(before);
+      // The listing marks it, so a caller need not try it to find out.
+      expect((await backend.targets())[0]).toMatchObject({ id: target.id, offScreen: true });
       // Back on screen, it is read again.
       fixture.onScreen = true;
       expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
@@ -1774,6 +1777,7 @@ describe("CUA desktop boundary", () => {
       const backend = await CuaComputerBackend.open(fixture, platform);
       try {
         const target = (await backend.targets())[0]!;
+        expect(target).not.toHaveProperty("offScreen");
         expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
       } finally {
         await backend.close();

@@ -3339,6 +3339,9 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       title: z.string().max(4_096),
       bounds: InteractionRect.nullable(),
       focused: z.boolean(),
+      /** Present on a window the platform cannot capture or read while it is
+       * off screen (macOS: minimized, hidden, or on another Space or display). */
+      offScreen: z.literal(true).optional(),
     })
     .strict(),
 );
