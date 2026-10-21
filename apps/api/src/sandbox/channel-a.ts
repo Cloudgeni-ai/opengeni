@@ -142,6 +142,7 @@ export type ChannelAOperation =
   | "browser.action"
   | "browser.control"
   | "browser.download.save"
+  | "browser.recording.save"
   | "browser.attach"
   | "computer.create"
   | "computer.end"

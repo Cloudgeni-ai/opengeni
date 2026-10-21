@@ -398,6 +398,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   browser_debug: "browser",
   browser_downloads: "browser",
   browser_download_save: "browser",
+  browser_record: "browser",
   browser_auth: "browser",
   interaction_request_human: "browser",
   browser_identity: "browser",

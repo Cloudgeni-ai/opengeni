@@ -3,7 +3,7 @@ import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
 } from "../browser-ephemeral";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
@@ -28,6 +28,10 @@ import {
   BrowserDownload,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserRecordingSaveRequest,
+  BrowserRecordingSaveResponse,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserDomReadResponse,
@@ -263,6 +267,8 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import { BrowserRecordingVideoError, encodeBrowserRecording } from "../browser-recording-video";
 import {
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
@@ -1204,6 +1210,230 @@ export function registerBrowserSessionRoutes(
         });
       } catch (error) {
         throw browserRouteError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const request = await parseJsonBody(context, BrowserRecordingStartRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient }) => await sessionClient.startRecording(request.targetId),
+      );
+      return context.json(BrowserRecordingSummary.parse(result), 201);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const recordingId = requireUuidParam(context, "recordingId");
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.recording(recordingId),
+      );
+      return context.json(BrowserRecordingSummary.parse(result));
+    },
+  );
+
+  /** Stops a recording and saves it in the source session's workspace as an
+   * MP4 plus its action log, then publishes the MP4 so it plays in the chat.
+   * The browser host only uploads its frame bundle; the video is encoded here,
+   * so no browser host needs a video encoder. */
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
+    async (context) => {
+      const workspaceId = context.req.param("workspaceId") ?? "";
+      const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
+      await requireAccessGrant(context, deps, workspaceId, "files:upload");
+      const browserSessionId = requireUuidParam(context, "browserSessionId");
+      const recordingId = requireUuidParam(context, "recordingId");
+      const request = await parseJsonBody(context, BrowserRecordingSaveRequest);
+      const objectStorage = deps.objectStorage;
+      if (!objectStorage) {
+        throw new HTTPException(503, { message: "object storage is not configured" });
+      }
+      const prefix = `workspaces/${workspaceId}/browser-recordings/${recordingId}/${request.operationId}`;
+      const bundleKey = `${prefix}/bundle`;
+      const temporaryKeys = [bundleKey];
+      try {
+        const { recording, sourceSessionId } = await withActiveBrowserController(
+          context,
+          grant,
+          workspaceId,
+          browserSessionId,
+          "session.control",
+          "browser.control",
+          async ({ sessionClient, record }) => {
+            const stopped = await sessionClient.stopRecording(recordingId);
+            if (!stopped.bundle) {
+              throw new InteractionResourceStateError("The recording has nothing to save");
+            }
+            if (stopped.bundle.sizeBytes > objectStorage.maxSinglePutSizeBytes) {
+              throw new HTTPException(413, {
+                message: `browser recording exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
+              });
+            }
+            const put = await objectStorage.createPutUrl({
+              key: bundleKey,
+              contentType: "application/octet-stream",
+              sha256: stopped.bundle.sha256,
+              expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+              audience: signedUrlAudienceForPlacement(record.session.placement),
+            });
+            const receipt = await sessionClient.exportRecording({
+              recordingId,
+              upload: {
+                url: put.url,
+                requiredHeaders: put.requiredHeaders,
+                expiresAt: put.expiresAt.toISOString(),
+              },
+            });
+            if (
+              receipt.sizeBytes !== stopped.bundle.sizeBytes ||
+              receipt.sha256 !== stopped.bundle.sha256
+            ) {
+              throw new BrowserControlProtocolError(
+                "browser controller returned another recording export",
+              );
+            }
+            return { recording: stopped, sourceSessionId: record.sourceSessionId };
+          },
+        );
+        await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
+        const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
+        const bundle = await retryWhileMissing(
+          async () => await objectStorage.getObjectBytes(bundleKey),
+        );
+        if (!bundle) {
+          throw new HTTPException(503, { message: "browser recording bundle is not available" });
+        }
+        const encoded = await encodeBrowserRecording({
+          bundle: bundle.bytes,
+          ffmpegPath: deps.settings.voiceInputFfmpegPath,
+          signal: context.req.raw.signal,
+        });
+        const videoPath =
+          request.destinationPath ?? defaultBrowserRecordingPath(recording.startedAt);
+        const actionLogPath = `${videoPath.replace(/\.[^./]*$/u, "")}.actions.json`;
+        const outputs = [
+          { path: videoPath, bytes: encoded.video, contentType: "video/mp4", name: "video.mp4" },
+          {
+            path: actionLogPath,
+            bytes: encoded.actionLog,
+            contentType: "application/json",
+            name: "actions.json",
+          },
+        ].map((output) => ({
+          ...output,
+          key: `${prefix}/${output.name}`,
+          sha256: createHash("sha256").update(output.bytes).digest("hex"),
+        }));
+        await requireLimit(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          action: "file:upload",
+          quantity: outputs.reduce((total, output) => total + output.bytes.byteLength, 0),
+        });
+        for (const output of outputs) {
+          temporaryKeys.push(output.key);
+          await objectStorage.putObject({
+            key: output.key,
+            contentType: output.contentType,
+            body: output.bytes,
+            sha256: output.sha256,
+          });
+        }
+        await withChannelA(
+          channelServices,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            session: sourceSession,
+            subjectId: grant.subjectId,
+            grant,
+            waitSignal: context.req.raw.signal,
+            operation: "browser.recording.save",
+          },
+          async ({ service, lease }) => {
+            for (const output of outputs) {
+              // A Connected Machine reaches storage on its public endpoint; a
+              // leased managed sandbox uses the sandbox-facing one.
+              const get = await objectStorage.createGetUrl({
+                key: output.key,
+                expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                audience: lease ? "sandbox" : "public",
+              });
+              const imported = await service.importWorkspaceFile({
+                operationId: derivedOperationId(request.operationId, output.name),
+                destinationPath: output.path,
+                overwrite: false,
+                mayReplaceExisting: false,
+                createParents: true,
+                sizeBytes: output.bytes.byteLength,
+                sha256: output.sha256,
+                source: { url: get.url, expiresAt: get.expiresAt.toISOString() },
+              });
+              if (imported.sha256 !== output.sha256) {
+                throw new InteractionResourceStateError(
+                  "Browser recording workspace import outcome is unknown",
+                );
+              }
+            }
+          },
+        );
+        const published = await publishSandboxFileArtifact(deps, {
+          grant,
+          session: sourceSession,
+          path: videoPath,
+          signal: context.req.raw.signal,
+        });
+        return context.json(
+          BrowserRecordingSaveResponse.parse({
+            recording,
+            video: {
+              path: videoPath,
+              artifactId: published.artifact.artifactId,
+              sizeBytes: encoded.video.byteLength,
+              durationMs: encoded.durationMs,
+              width: encoded.width,
+              height: encoded.height,
+              frameCount: encoded.frameCount,
+            },
+            actionLogPath,
+          }),
+          201,
+        );
+      } catch (error) {
+        if (error instanceof BrowserRecordingVideoError) {
+          throw new HTTPException(error.code === "encode_failed" ? 502 : 422, {
+            message: error.message,
+            cause: error,
+          });
+        }
+        throw browserRouteError(error);
+      } finally {
+        await Promise.allSettled(temporaryKeys.map((key) => objectStorage.deleteObject(key)));
       }
     },
   );
@@ -6634,4 +6864,22 @@ function browserRouteError(error: unknown): HTTPException {
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+/** Where a saved recording goes when the agent names no path. */
+function defaultBrowserRecordingPath(startedAt: string): string {
+  return `recordings/browser-${startedAt.replace(/\.\d+Z$/u, "Z").replace(/[:]/gu, "-")}.mp4`;
+}
+
+/** One stable operation id per file a recording save imports, so a retried
+ * save replays each import instead of writing it twice. */
+function derivedOperationId(operationId: string, name: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni-browser-recording-import-v1\0${operationId}\0${name}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

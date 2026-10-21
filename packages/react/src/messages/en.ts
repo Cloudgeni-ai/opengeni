@@ -3854,6 +3854,8 @@ export const englishMessages = {
   "timeline.toolStep.readPosts.running": "Reading posts",
   "timeline.toolStep.readSlack.done": "Read Slack",
   "timeline.toolStep.readSlack.running": "Reading Slack",
+  "timeline.toolStep.recordBrowser.done": "Recorded the browser",
+  "timeline.toolStep.recordBrowser.running": "Recording the browser",
   "timeline.toolStep.removeComputer.done": "Removed a computer",
   "timeline.toolStep.removeComputer.running": "Removing a computer",
   "timeline.toolStep.removeGuide.done": "Removed a guide",

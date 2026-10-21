@@ -3958,6 +3958,7 @@ export type FirstPartyMcpToolName =
   | "browser_debug"
   | "browser_downloads"
   | "browser_download_save"
+  | "browser_record"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"

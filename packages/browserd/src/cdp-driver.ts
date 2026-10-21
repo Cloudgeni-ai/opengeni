@@ -167,6 +167,11 @@ const TARGET_CLOSE_SETTLE_TIMEOUT_MS = 2_000;
 // Keep it interactive even when Page.startScreencast is unavailable or a
 // background target never produces screencast events.
 const FRAME_FALLBACK_INTERVAL_MS = 100;
+/** Recordings: at most about ten frames a second, at the live view's size. */
+const RECORDING_FRAME_ACK_DELAY_MS = 100;
+const RECORDING_FRAME_QUALITY = 70;
+const RECORDING_FRAME_MAX_WIDTH = 1_280;
+const RECORDING_FRAME_MAX_HEIGHT = 800;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 // Still captures share the target/input queue. Bound the whole read phase so
 // a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
@@ -1491,6 +1496,94 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           });
         }),
     );
+  }
+
+  /**
+   * Change-driven JPEG frames of one tab for a recording. Chromium sends a
+   * screencast frame only when the page repaints; acknowledging each frame
+   * after RECORDING_FRAME_ACK_DELAY_MS caps the rate without losing the
+   * page's latest state. Focus emulation keeps background tabs painting.
+   */
+  async recordFrames(
+    targetId: string,
+    onFrame: (jpeg: Uint8Array, capturedAtMs: number) => void,
+    onEnd: (error: Error | null) => void,
+  ): Promise<() => Promise<void>> {
+    if (this.engine === "lightpanda") {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine cannot record video",
+      );
+    }
+    const connection = await this.ensureConnection();
+    const sessionId = await this.withTarget(targetId, async (state) => state.sessionId);
+    let ended = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const end = (error: Error | null) => {
+      if (ended) return;
+      ended = true;
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      stopFrames();
+      stopDetach();
+      onEnd(error);
+    };
+    const stopFrames = connection.on(
+      "Page.screencastFrame",
+      (event) => {
+        const params = event.params as {
+          data?: unknown;
+          sessionId?: unknown;
+          metadata?: { timestamp?: unknown };
+        };
+        if (typeof params.data !== "string" || typeof params.sessionId !== "number") return;
+        const frameSession = params.sessionId;
+        const at =
+          typeof params.metadata?.timestamp === "number"
+            ? params.metadata.timestamp * 1_000
+            : Date.now();
+        try {
+          onFrame(Buffer.from(params.data, "base64"), at);
+        } finally {
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            if (ended) return;
+            void connection
+              .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
+              .catch(() => undefined);
+          }, RECORDING_FRAME_ACK_DELAY_MS);
+          timers.add(timer);
+        }
+      },
+      sessionId,
+    );
+    const stopDetach = connection.on("Target.detachedFromTarget", (event) => {
+      if ((event.params as { sessionId?: unknown }).sessionId === sessionId) {
+        end(new Error("the recorded tab closed"));
+      }
+    });
+    try {
+      await connection.send(
+        "Page.startScreencast",
+        {
+          format: "jpeg",
+          quality: RECORDING_FRAME_QUALITY,
+          maxWidth: RECORDING_FRAME_MAX_WIDTH,
+          maxHeight: RECORDING_FRAME_MAX_HEIGHT,
+        },
+        { sessionId, timeoutMs: 5_000 },
+      );
+    } catch (error) {
+      end(null);
+      throw error;
+    }
+    return async () => {
+      if (ended) return;
+      end(null);
+      await connection
+        .send("Page.stopScreencast", {}, { sessionId, timeoutMs: 2_000 })
+        .catch(() => undefined);
+    };
   }
 
   async subscribeFrames(

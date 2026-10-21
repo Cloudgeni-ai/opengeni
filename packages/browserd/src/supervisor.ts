@@ -53,6 +53,7 @@ import {
 } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
+import { BrowserRecording, type RecordingFrameSource, type RecordingSummary } from "./recording";
 import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
@@ -308,6 +309,12 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   /** Keeps the browser's windows presented until the returned release is
    * called (drivers that park idle windows). */
   acquirePresence?(): Promise<() => void>;
+  /** Change-driven JPEG frames of one tab, for recordings. */
+  recordFrames?(
+    targetId: string,
+    onFrame: (jpeg: Uint8Array, capturedAtMs: number) => void,
+    onEnd: (error: Error | null) => void,
+  ): Promise<() => Promise<void>>;
   /** Private state capture adjunct, never part of runtimeSnapshot/public JSON. */
   captureSessionCookies?(): Promise<HeadlessSessionCookies | null>;
   readonly requiresExplicitProfileRestore?: boolean;
@@ -420,6 +427,8 @@ type Runtime = {
   /** Outstanding uses that keep the browser's windows presented. Each is
    * bound to the current driver and moves to its replacement on recovery. */
   presence: Set<PresenceHold>;
+  /** The session's current or last recording; one at a time. */
+  recording: BrowserRecording | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
@@ -1089,6 +1098,9 @@ export class BrowserSupervisor {
       return await runtime.driver.openTarget(url);
     });
     this.rememberObservation(runtime, observation);
+    this.noteRecordingTarget(runtime, "open_tab", observation.target.id, {
+      url: observation.target.url,
+    });
     return observation;
   }
 
@@ -1120,6 +1132,9 @@ export class BrowserSupervisor {
       return await runtime.driver.selectTarget(targetId);
     });
     this.rememberObservation(runtime, observation);
+    this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
+      url: observation.target.url,
+    });
     return observation;
   }
 
@@ -1176,6 +1191,8 @@ export class BrowserSupervisor {
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
     });
+    // Logged as the agent sent it: secret references are not resolved here.
+    this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
     const receipt = await this.presented(
       runtime,
       async () => await runtime.controller.run(command),
@@ -1340,6 +1357,106 @@ export class BrowserSupervisor {
       );
     }
     return await store.export(request, this.uploadDownload);
+  }
+
+  /** Starts recording the session's tab; the recording follows the agent to
+   * other tabs it acts on, opens or selects. One recording at a time. */
+  async startRecording(
+    reference: BrowserSessionReference,
+    targetId: string,
+  ): Promise<RecordingSummary> {
+    const runtime = this.requireActive(reference);
+    if (runtime.recording?.isRecording) {
+      throw new InteractionControllerError(
+        "operation_conflict",
+        "this browser is already recording; stop that recording first",
+      );
+    }
+    const source = this.recordingSourceFor(runtime);
+    const previous = runtime.recording;
+    runtime.recording = null;
+    await previous?.discard();
+    const release = await this.acquirePresence(runtime);
+    runtime.recording = await BrowserRecording.start({
+      directory: join(runtime.sessionDirectory, "recordings"),
+      targetId,
+      source,
+      releasePresence: release,
+    });
+    return runtime.recording.summary();
+  }
+
+  async stopRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+  ): Promise<RecordingSummary> {
+    return await this.requireRecording(reference, recordingId).stop("requested");
+  }
+
+  recordingStatus(reference: BrowserSessionReference, recordingId: string): RecordingSummary {
+    return this.requireRecording(reference, recordingId).summary();
+  }
+
+  /** Uploads a stopped recording's bundle through a narrow object grant. */
+  async exportRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+    upload: BrowserDownloadExportRequestValue["upload"],
+  ): Promise<{ sizeBytes: number; sha256: string }> {
+    const bundle = this.requireRecording(reference, recordingId).exportable();
+    await this.uploadDownload(bundle.path, upload, {
+      sizeBytes: bundle.sizeBytes,
+      sha256: bundle.sha256,
+    });
+    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+  }
+
+  private requireRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+  ): BrowserRecording {
+    const recording = this.requireBound(reference).recording;
+    if (!recording || recording.recordingId !== recordingId) {
+      throw new InteractionControllerError("resource_not_found", "recording not found");
+    }
+    return recording;
+  }
+
+  private recordingSource(runtime: Runtime): RecordingFrameSource {
+    const driver = runtime.driver;
+    const record = driver.recordFrames;
+    if (!record) {
+      throw new InteractionControllerError("unsupported", "this browser cannot record video");
+    }
+    return async (targetId, onFrame, onEnd) => await record.call(driver, targetId, onFrame, onEnd);
+  }
+
+  /** Logs a tab the agent used and keeps the recording on the current
+   * browser after recovery replaced it. */
+  private noteRecordingTarget(
+    runtime: Runtime,
+    kind: "action" | "open_tab" | "select_tab",
+    targetId: string,
+    detail: { url?: string; action?: unknown } = {},
+  ): void {
+    const recording = runtime.recording;
+    if (!recording?.isRecording) return;
+    try {
+      recording.rebind(this.recordingSourceFor(runtime));
+    } catch {
+      /* The replacement browser cannot record; keep what was captured. */
+    }
+    recording.noteTarget(kind, targetId, detail);
+  }
+
+  private readonly recordingSources = new WeakMap<BrowserSupervisorDriver, RecordingFrameSource>();
+
+  private recordingSourceFor(runtime: Runtime): RecordingFrameSource {
+    const existing = this.recordingSources.get(runtime.driver);
+    if (existing) return existing;
+    const source = this.recordingSource(runtime);
+    this.recordingSources.set(runtime.driver, source);
+    return source;
   }
 
   captureState(inputValue: BrowserStateCaptureInput): Promise<BrowserStateCaptureReceipt> {
@@ -1907,6 +2024,7 @@ export class BrowserSupervisor {
         creationObservation: null,
         recovery: null,
         presence: new Set(),
+        recording: null,
       };
       runtime.controller = this.createController(runtime, driver);
       // Startup and tab restoration are a use of the browser: nothing may park
@@ -2888,6 +3006,9 @@ export class BrowserSupervisor {
     } catch (error) {
       failures.push(error);
     }
+    const recording = runtime.recording;
+    runtime.recording = null;
+    await recording?.discard();
     // Recovery inspects the exact daemon namespace for live owners. Preserve
     // that evidence for suspension; missing namespace state is not exit proof.
     if (driverClosed && runtime.workingReceipt?.intent !== "suspend") {
