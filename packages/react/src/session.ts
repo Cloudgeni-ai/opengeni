@@ -150,6 +150,7 @@ export type {
   TurnEndItem,
   TurnStepsItem,
   TurnStepsState,
+  TimelineAnnotationSourceDescriptor,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
