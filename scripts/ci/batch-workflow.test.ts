@@ -40,6 +40,21 @@ test("receipts never mix attempts and the gate runs even on failed code jobs", (
   expect(upload.if).toBe("${{ always() }}");
   expect(upload.with.name).toBe("batch-result-${{ github.run_attempt }}");
   expect(gate.env.PLAN_RESULT).toBe("${{ needs.plan.result }}");
+  expect(gate.steps.find((step: any) => step.uses?.startsWith("actions/checkout")).with.ref).toBe(
+    "${{ needs.plan.outputs.base_sha || github.event.repository.default_branch }}",
+  );
+});
+
+test("installation and database setup produce explicit receipts before candidate assertions", () => {
+  for (const job of [workflow.jobs.source, workflow.jobs.units]) {
+    const setup = job.steps.find((step: any) => step.run?.includes("batch-setup.ts install"));
+    expect(setup.run).toContain("batch-result.ts run --job");
+  }
+  expect(
+    workflow.jobs.units.steps.some((step: any) => step.run?.includes("batch-setup.ts postgres")),
+  ).toBe(true);
+  const plan = workflow.jobs.plan.steps.find((step: any) => step.id === "plan").run;
+  expect(plan).toContain("batch-result.ts run --job plan");
 });
 test("batch source preserves the complete existing fast contract inventory", () => {
   const source = readFileSync("scripts/ci/batch-source.ts", "utf8");

@@ -64,8 +64,26 @@ test("completed assertion failures are eligible for one controller retry, leaked
     { outcome: "code_failure", retryable: false },
   );
 });
-test.each([124, 126, 127, 137, -1])("exit %i cannot incriminate a PR", (code) => {
+test.each([75, 124, 126, 127, 137, -1])("exit %i cannot incriminate a PR", (code) => {
   expect(classifyBatchExit(code).outcome).toBe("infrastructure");
+});
+
+test("a complete code failure remains evidence even when a sibling runner disappears", () => {
+  expect(
+    aggregateBatchResult(
+      identity,
+      ["source", "unit-0", "unit-1"],
+      [receipt("source"), receipt("unit-0", 1)],
+      { ...jobs, units: "failure" },
+    ),
+  ).toMatchObject({ outcome: "code_failure", retryable: true });
+  expect(
+    aggregateBatchResult(identity, ["plan", "source"], [receipt("plan", 1)], {
+      plan: "failure",
+      source: "skipped",
+      units: "skipped",
+    }),
+  ).toMatchObject({ outcome: "code_failure", retryable: true });
 });
 test("provider cancellation wins over missing receipts and over an assertion failure", () => {
   expect(

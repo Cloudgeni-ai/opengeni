@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       batch_id: ${{ steps.plan.outputs.batch_id }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
       unit_shards: ${{ steps.plan.outputs.unit_shards }}
       unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
@@ -41,8 +42,10 @@ jobs:
           set -euo pipefail
           bun scripts/merge-batcher/main.ts inspect --tip "$GITHUB_SHA" --git-dir .git > "$RUNNER_TEMP/batch.json"
           base="$(jq -er '.baseSha' "$RUNNER_TEMP/batch.json")"
-          echo "batch_id=$(jq -er '.batchId' "$RUNNER_TEMP/batch.json")" >> "$GITHUB_OUTPUT"
-          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+          export BATCH_ID="$(jq -er '.batchId' "$RUNNER_TEMP/batch.json")"
+          echo "batch_id=$BATCH_ID" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
+          bun scripts/ci/batch-result.ts run --job plan --output "$RUNNER_TEMP/receipt-plan.json" -- bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
           count="$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")"
           shards="$(jq '.unitTests | length | ((. / 240) | ceil | if . > 16 then 16 else . end)' "$RUNNER_TEMP/impact-plan.json")"
           echo "unit_count=$count" >> "$GITHUB_OUTPUT"
@@ -55,6 +58,12 @@ jobs:
             ${{ runner.temp }}/impact-plan.json
             ${{ runner.temp }}/batch.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-receipt-${{ github.run_attempt }}-plan
+          path: ${{ runner.temp }}/receipt-plan.json
+          if-no-files-found: ignore
 
   source:
     name: Batch source contracts
@@ -75,7 +84,10 @@ jobs:
         with:
           path: ~/.bun/install/cache
           key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install --frozen-lockfile
+      - name: Install with deterministic lockfile failure evidence
+        run: >-
+          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" --
+          bun scripts/ci/batch-setup.ts install
       - uses: actions/download-artifact@v4
         with:
           name: batch-plan-${{ github.run_attempt }}
@@ -116,11 +128,18 @@ jobs:
         with:
           path: ~/.bun/install/cache
           key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install --frozen-lockfile
+      - name: Install with deterministic lockfile failure evidence
+        run: >-
+          bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json" --
+          bun scripts/ci/batch-setup.ts install
       - uses: actions/download-artifact@v4
         with:
           name: batch-plan-${{ github.run_attempt }}
           path: ${{ runner.temp }}/batch-plan
+      - name: Separate real database infrastructure setup from test assertions
+        run: >-
+          bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json" --
+          bun scripts/ci/batch-setup.ts postgres
       # No in-job retry: the controller owns the single unchanged-batch retry.
       - name: Run all selected unit files with the unchanged per-attempt deadline
         run: >-
@@ -151,8 +170,12 @@ jobs:
       SOURCE_RESULT: ${{ needs.source.result }}
       UNITS_RESULT: ${{ needs.units.result }}
     steps:
+      # The candidate must not choose the result verifier. Use its inspected
+      # base; the controller independently revalidates receipt identities and
+      # pins the workflow path. Control-plane changes require isolated review.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.plan.outputs.base_sha || github.event.repository.default_branch }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:

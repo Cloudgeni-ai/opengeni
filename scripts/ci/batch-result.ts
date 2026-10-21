@@ -24,7 +24,7 @@ export function classifyBatchExit(code: number): { outcome: BatchOutcome; retrya
   if (code === 130 || code === 143) return { outcome: "cancelled", retryable: false };
   // Deadline, OOM/signal, missing executable and failed execution are not an
   // assertion verdict. Exit70 is a process leak: code-red, but never retry it away.
-  if (code < 0 || code === 124 || code === 126 || code === 127 || code >= 128)
+  if (code < 0 || code === 75 || code === 124 || code === 126 || code === 127 || code >= 128)
     return { outcome: "infrastructure", retryable: false };
   return { outcome: "code_failure", retryable: code !== 70 };
 }
@@ -112,6 +112,14 @@ export function aggregateBatchResult(
   if (invalidReasons.length > 0) {
     outcome = "infrastructure";
     reason = invalidReasons.join("; ");
+  }
+  // A missing sibling does not erase a completed assertion on this exact tip.
+  // This never permits green with partial evidence. Cancellation still wins.
+  if (verified.some((row) => row.outcome === "code_failure")) {
+    outcome = "code_failure";
+    reason =
+      "Completed checks reported a code failure" +
+      (invalidReasons.length ? `; incomplete sibling evidence: ${invalidReasons.join("; ")}` : "");
   }
   // A provider cancellation wins even when interrupted tasks never wrote files.
   if (Object.values(jobs).includes("cancelled")) {
@@ -203,7 +211,7 @@ if (import.meta.main) {
     }
     const result = aggregateBatchResult(
       identity,
-      ["source", ...Array.from({ length: units }, (_, i) => `unit-${i}`)],
+      ["plan", "source", ...Array.from({ length: units }, (_, i) => `unit-${i}`)],
       receipts,
       {
         plan: process.env.PLAN_RESULT ?? "unknown",

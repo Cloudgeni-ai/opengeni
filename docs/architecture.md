@@ -2916,7 +2916,9 @@ Git objects and GitHub, builds one merge commit per admitted PR without checking
 out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
 run-attempt receipts distinguish assertion failures from infrastructure and
 cancellation. Landing requires the tested tip and unchanged base/head evidence;
-post-merge full CI remains independent. Shadow mode performs no remote writes.
+post-merge full CI remains independent. Read-only shadow performs no remote
+writes. The separately authorized CI-shadow stage pushes candidate refs only,
+with one hosted candidate in flight; it never updates main or PR readiness.
 Its portable container and deployment/rollback boundary are documented in
 [merge batcher](merge-batcher.md); the historical measurements and inactive
 native/vendor configurations remain in [merge queue](merge-queue.md).

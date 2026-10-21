@@ -806,6 +806,10 @@ released tip, with verified Version ancestry and matching image provenance.
 Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
 the controller owns the single unchanged-input flaky retry. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
+Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
+the plan and task receipts are deliberately bound to one run attempt. Changes to
+the batcher or its CI control files require an isolated batch and explicit
+independent review of those control-plane changes.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
 explicit in the PR and evidence comment, independently confirmed by the reviewer,
